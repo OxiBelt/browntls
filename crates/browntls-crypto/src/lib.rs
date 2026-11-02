@@ -11,7 +11,7 @@
 //! | AES / GHASH | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
-//! | P-256 / P-384 / P-521 | 64-bit Montgomery | 64-bit Montgomery | 64-bit Montgomery |
+//! | P-256 / P-384 / P-521 | 64-bit Montgomery, BMI2/ADX (P-256) | 64-bit Montgomery | 64-bit Montgomery |
 //! | RSA | 64-bit Montgomery | 64-bit Montgomery | 64-bit Montgomery |
 //! | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
 //!

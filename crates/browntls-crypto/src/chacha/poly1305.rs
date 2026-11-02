@@ -111,6 +111,8 @@ pub(super) fn blocks(state: &mut State, data: &[u8], backend: PolyBackend) {
     match backend {
         #[cfg(target_arch = "x86_64")]
         PolyBackend::Bmi2 => super::x86::poly1305_blocks_bmi2(state, data),
+        #[cfg(target_arch = "x86_64")]
+        PolyBackend::Avx2 => super::poly1305_avx2::blocks(state, data),
         _ => state.blocks(data, 1),
     }
 }
@@ -123,11 +125,14 @@ pub enum PolyBackend {
     Soft,
     /// x86-64 radix-2^64 code compiled with BMI2 (`MULX`) and ADX.
     Bmi2,
+    /// x86-64 AVX2, four blocks in parallel in radix 2^26 (inputs of at
+    /// least 1 KiB; shorter ones use the BMI2 scalar code).
+    Avx2,
 }
 
 impl PolyBackend {
     /// Every tier in increasing order of preference.
-    pub const ALL: [Self; 2] = [Self::Soft, Self::Bmi2];
+    pub const ALL: [Self; 3] = [Self::Soft, Self::Bmi2, Self::Avx2];
 
     /// Returns whether this tier can run on the current CPU.
     #[must_use]
@@ -136,13 +141,16 @@ impl PolyBackend {
         match self {
             Self::Soft => true,
             Self::Bmi2 => f.x86_bmi2() && f.x86_adx(),
+            Self::Avx2 => f.x86_v3(),
         }
     }
 
     /// The preferred available tier.
     #[must_use]
     pub fn best() -> Self {
-        if Self::Bmi2.is_available() {
+        if Self::Avx2.is_available() {
+            Self::Avx2
+        } else if Self::Bmi2.is_available() {
             Self::Bmi2
         } else {
             Self::Soft

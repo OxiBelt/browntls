@@ -393,6 +393,58 @@ fn poly1305_chunking() {
     }
 }
 
+/// Every Poly1305 backend against the portable one on long inputs with
+/// extreme limb values (maximal clamped r, all-ones blocks) and random data,
+/// at lengths around the vector path's 64-byte group and 1024-byte threshold.
+#[test]
+fn poly1305_backends_match_soft() {
+    let mut rng = Rng(1305);
+    let mut lens: Vec<usize> = (0..=1100).step_by(7).collect();
+    lens.extend([
+        255,
+        256,
+        257,
+        1023,
+        1024,
+        1025,
+        1087,
+        1088,
+        1089,
+        16384,
+        16384 + 13,
+        65536 + 15,
+    ]);
+    for (i, len) in lens.into_iter().enumerate() {
+        let key: [u8; 32] = match i % 4 {
+            0 => [0xff; 32],
+            1 => {
+                let mut k = [0xff; 32];
+                k[16..].fill(0);
+                k
+            }
+            _ => rng.bytes(32).try_into().unwrap(),
+        };
+        let msg = match i % 3 {
+            0 => vec![0xff; len],
+            _ => rng.bytes(len),
+        };
+        let mut s = Poly1305::with_backend(&key, PolyBackend::Soft);
+        s.update(&msg);
+        let want = s.finalize();
+        for b in poly_backends() {
+            let mut p = Poly1305::with_backend(&key, b);
+            p.update(&msg);
+            assert_eq!(p.finalize(), want, "{b:?} len {len}");
+            // Same data split so the vector path sees an unaligned start.
+            let mut p = Poly1305::with_backend(&key, b);
+            let cut = len.min(5);
+            p.update(&msg[..cut]);
+            p.update(&msg[cut..]);
+            assert_eq!(p.finalize(), want, "{b:?} len {len} split");
+        }
+    }
+}
+
 /// RFC 8439 2.8.2 and A.5.
 #[test]
 fn rfc8439_aead() {
@@ -666,55 +718,58 @@ fn tampering_is_detected_and_output_zeroed() {
     }
 }
 
+/// Best of five runs of `iters` calls to `f`, in MB/s for `size`-byte inputs.
+fn best_mbs(size: usize, mut f: impl FnMut()) -> f64 {
+    let iters = (16 << 20) / size;
+    let mut best = f64::MAX;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            f();
+        }
+        best = best.min(start.elapsed().as_secs_f64());
+    }
+    (iters * size) as f64 / best / 1e6
+}
+
 /// Run with `cargo test --release -p browntls-crypto --test chacha_poly1305
 /// -- --ignored --nocapture throughput`.
 #[test]
 #[ignore = "benchmark"]
 fn throughput() {
-    use std::time::Instant;
+    use std::hint::black_box;
     let key = [7u8; 32];
     let nonce = [1u8; 12];
     for size in [64usize, 1350, 16384] {
         let mut buf = vec![0u8; size];
-        let iters = (64 << 20) / size;
         for b in backends() {
-            let start = Instant::now();
-            for _ in 0..iters {
+            let mbs = best_mbs(size, || {
                 chacha20_xor_with(b, &key, 1, &nonce, &mut buf).unwrap();
-            }
-            let mbs = (iters * size) as f64 / start.elapsed().as_secs_f64() / 1e6;
+            });
             eprintln!("chacha20 {b:?} {size:>5} B: {mbs:8.0} MB/s");
         }
         for p in poly_backends() {
-            let start = Instant::now();
-            for _ in 0..iters {
+            let mbs = best_mbs(size, || {
                 let mut m = Poly1305::with_backend(&key, p);
                 m.update(&buf);
-                std::hint::black_box(m.finalize());
-            }
-            let mbs = (iters * size) as f64 / start.elapsed().as_secs_f64() / 1e6;
+                black_box(m.finalize());
+            });
             eprintln!("poly1305 {p:?} {size:>5} B: {mbs:8.0} MB/s");
         }
         for a in aeads(&key) {
-            let start = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(a.seal_in_place(&nonce, &[0; 13], &mut buf).unwrap());
-            }
-            let mbs = (iters * size) as f64 / start.elapsed().as_secs_f64() / 1e6;
+            let mbs = best_mbs(size, || {
+                black_box(a.seal_in_place(&nonce, &[0; 13], &mut buf).unwrap());
+            });
             eprintln!("aead {:?} {size:>5} B: {mbs:8.0} MB/s", a.backends());
         }
-        {
-            use chacha20poly1305::{AeadInOut, KeyInit};
-            let c = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&key).unwrap();
-            let start = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(
-                    c.encrypt_inout_detached(&nonce.into(), &[0; 13], buf.as_mut_slice().into())
-                        .unwrap(),
-                );
-            }
-            let mbs = (iters * size) as f64 / start.elapsed().as_secs_f64() / 1e6;
-            eprintln!("aead rustcrypto {size:>5} B: {mbs:8.0} MB/s");
-        }
+        use chacha20poly1305::{AeadInOut, KeyInit};
+        let c = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&key).unwrap();
+        let mbs = best_mbs(size, || {
+            black_box(
+                c.encrypt_inout_detached(&nonce.into(), &[0; 13], buf.as_mut_slice().into())
+                    .unwrap(),
+            );
+        });
+        eprintln!("aead rustcrypto {size:>5} B: {mbs:8.0} MB/s");
     }
 }

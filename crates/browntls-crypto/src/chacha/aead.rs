@@ -123,3 +123,26 @@ impl Aead for ChaCha20Poly1305 {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn length_limit() {
+        assert!(ChaCha20Poly1305::check_len(0).is_ok());
+        #[cfg(target_pointer_width = "64")]
+        {
+            let max = usize::try_from(MAX_LEN).unwrap();
+            assert!(ChaCha20Poly1305::check_len(max).is_ok());
+            assert_eq!(
+                ChaCha20Poly1305::check_len(max + 1),
+                Err(Error::InvalidLength)
+            );
+            assert_eq!(
+                ChaCha20Poly1305::check_len(usize::MAX),
+                Err(Error::InvalidLength)
+            );
+        }
+    }
+}

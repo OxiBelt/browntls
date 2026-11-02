@@ -10,8 +10,10 @@
 //! | [`Backend::Neon`] | 4 (1 for tails) | aarch64 Advanced SIMD |
 //! | [`Backend::Rvv`] | `VLEN / 32`, capped at 32 | RVV 1.0 (uses `vror` with Zvkb) |
 //!
-//! Poly1305 uses radix-2^64 scalar arithmetic on every architecture (see
-//! [`PolyBackend`]).
+//! Poly1305 ([`PolyBackend`]) uses radix-2^64 scalar arithmetic with
+//! 64x64->128-bit products on every architecture (built with BMI2/ADX on
+//! x86-64), plus a four-way radix-2^26 AVX2 path on x86-64 for inputs of at
+//! least 1 KiB (it is slower below that).
 //!
 //! The ChaCha20 block counter is 32 bits and wraps modulo 2^32 in
 //! [`chacha20_xor`]; [`ChaCha20Poly1305`] rejects messages that would wrap it.
@@ -53,6 +55,8 @@ mod soft;
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod poly1305_avx2;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 #[cfg(target_arch = "x86_64")]

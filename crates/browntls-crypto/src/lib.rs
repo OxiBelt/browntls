@@ -8,7 +8,7 @@
 //! |---|---|---|---|
 //! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
 //! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
-//! | AES / GHASH | AES-NI+PCLMULQDQ, VAES+VPCLMULQDQ | AES+PMULL | Zvkned+Zvkg/Zvbc |
+//! | AES / GHASH | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
 //! | P-256 / P-384 / P-521 | 64-bit Montgomery | 64-bit Montgomery | 64-bit Montgomery |

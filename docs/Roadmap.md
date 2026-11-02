@@ -14,13 +14,13 @@ intent.
 | CPU feature detection (x86-64, aarch64, riscv64) | done | `riscv_hwprobe` via the libc-free system-call trampoline |
 | OS entropy without libc (Linux) | done | `getrandom(2)` |
 | Portable SHA-2, SHA-3/SHAKE, HMAC, HKDF, TLS 1.2 PRF | done | Known-answer tests |
-| Accelerated SHA-2 / Keccak backends | in progress | |
-| AES-GCM (portable, AES-NI/VAES, Armv8, Zvkned/Zvkg) | in progress | |
-| ChaCha20-Poly1305 (portable, AVX2/AVX-512, NEON, RVV) | in progress | |
-| X25519 / Ed25519 | in progress | |
+| Accelerated SHA-2 / Keccak backends | done | SHA-NI, x86-64-v3, FEAT_SHA256/512, Zvknha/b, Zknh; four-way Keccak (AVX2, AVX-512VL, NEON/SHA3, RVV). No x86 SHA512 extension |
+| AES-GCM (portable, AES-NI/VAES, Armv8, Zvkned/Zvkg) | done | Bitsliced portable AES and constant-time GHASH; AES-NI+PCLMULQDQ, VAES (YMM), FEAT_AES+PMULL, Zvkned+Zvkg/Zvbc, Zkne+Zbc. No VPCLMULQDQ or AVX-512 (not executable here); CTR and GHASH are separate passes |
+| ChaCha20-Poly1305 (portable, AVX2/AVX-512, NEON, RVV) | done | Poly1305 scalar, BMI2 and four-way AVX2 |
+| X25519 / Ed25519 | done | BMI2/ADX ladder on x86-64; small-order Ed25519 public keys rejected |
 | P-256 / P-384 / P-521 ECDH and ECDSA | in progress | |
 | RSA PKCS #1 v1.5 / PSS | in progress | |
-| ML-KEM-512/768/1024 | in progress | |
+| ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | in progress | API defined; bodies are placeholders that reject |
 | TLS record layer and handshake (1.2, 1.3) | in progress | |

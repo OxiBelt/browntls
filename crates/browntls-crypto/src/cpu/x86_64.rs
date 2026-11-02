@@ -122,5 +122,11 @@ pub(super) fn detect() -> u64 {
     set(avx512, bit::X86_AVX512);
     set(avx512 && has(l7.ebx, 21), bit::X86_AVX512_IFMA);
     set(avx512 && has(l7.ecx, 1), bit::X86_AVX512_VBMI);
+    if !cfg!(target_feature = "sse2") {
+        // Soft-float targets (e.g. `x86_64-unknown-none`, kernels) must not
+        // touch vector state without explicit FPU context management; their
+        // vector backends are compiled out, so report only scalar extensions.
+        out &= bit::X86_BMI2 | bit::X86_ADX;
+    }
     out
 }

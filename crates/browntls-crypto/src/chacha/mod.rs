@@ -22,7 +22,10 @@
 /// vector lane holds the same word of a different block. The operations are
 /// passed as function names so the macro expands inside each backend's
 /// `#[target_feature]` function.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    target_arch = "aarch64"
+))]
 macro_rules! chacha_rounds {
     ($x:ident, $add:ident, $xor:ident, $r16:ident, $r12:ident, $r8:ident, $r7:ident) => {
         for _ in 0..10 {
@@ -55,11 +58,11 @@ mod soft;
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 mod aarch64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod poly1305_avx2;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
 pub use aead::ChaCha20Poly1305;
@@ -152,9 +155,9 @@ fn nonce_words(nonce: &[u8; NONCE_LEN]) -> [u32; 3] {
 /// Runs `backend` (which the caller verified is available).
 fn xor_words(backend: Backend, key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut [u8]) {
     match backend {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Backend::Avx512 => x86::xor_avx512(key, counter, nonce, data),
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Backend::Avx2 => x86::xor_avx2(key, counter, nonce, data),
         #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
         Backend::Neon => aarch64::xor_neon(key, counter, nonce, data),

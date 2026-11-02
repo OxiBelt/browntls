@@ -109,9 +109,9 @@ impl State {
 #[inline]
 pub(super) fn blocks(state: &mut State, data: &[u8], backend: PolyBackend) {
     match backend {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         PolyBackend::Bmi2 => super::x86::poly1305_blocks_bmi2(state, data),
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         PolyBackend::Avx2 => super::poly1305_avx2::blocks(state, data),
         _ => state.blocks(data, 1),
     }

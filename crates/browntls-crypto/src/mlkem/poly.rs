@@ -97,6 +97,10 @@ pub(crate) const fn qinv_table<const L: usize>(t: [i16; L]) -> [i16; L] {
 }
 
 /// `ZETAS[i] * q^-1 mod 2^16`.
+#[cfg_attr(
+    all(target_arch = "x86_64", not(target_feature = "sse2")),
+    allow(dead_code)
+)]
 pub(crate) const ZETAS_QINV: [i16; 128] = qinv_table(ZETAS);
 /// `GAMMAS[i] * q^-1 mod 2^16`.
 #[cfg_attr(

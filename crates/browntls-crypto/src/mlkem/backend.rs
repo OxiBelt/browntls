@@ -40,7 +40,9 @@ impl Backend {
         let f = crate::cpu::features();
         match self {
             Self::Portable => true,
-            Self::Avx2 => cfg!(target_arch = "x86_64") && f.x86_avx2(),
+            Self::Avx2 => {
+                cfg!(all(target_arch = "x86_64", target_feature = "sse2")) && f.x86_avx2()
+            }
             Self::Neon => {
                 cfg!(all(target_arch = "aarch64", target_feature = "neon")) && f.arm_neon()
             }
@@ -83,7 +85,7 @@ impl Engine {
     /// Forward NTT followed by Barrett reduction (`|a| < q` in).
     pub(crate) fn ntt(self, p: &mut Poly) {
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::ntt(p),
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Backend::Neon => super::aarch64::ntt(p),
@@ -96,7 +98,7 @@ impl Engine {
     /// Inverse NTT including the `2^16 / 128` scaling.
     pub(crate) fn invntt(self, p: &mut Poly) {
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::invntt(p),
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Backend::Neon => super::aarch64::invntt(p),
@@ -110,7 +112,7 @@ impl Engine {
     pub(crate) fn basemul_acc(self, r: &mut Poly, a: &[Poly], b: &[Poly]) {
         debug_assert!(a.len() == b.len() && a.len() <= 4);
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::basemul_acc(r, a, b),
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Backend::Neon => super::aarch64::basemul_acc(r, a, b),
@@ -123,7 +125,7 @@ impl Engine {
     /// Barrett-reduces every coefficient.
     pub(crate) fn reduce(self, p: &mut Poly) {
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::reduce(p),
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Backend::Neon => super::aarch64::reduce(p),
@@ -136,7 +138,7 @@ impl Engine {
     /// Multiplies every coefficient by `2^16` (Montgomery form).
     pub(crate) fn tomont(self, p: &mut Poly) {
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::tomont(p),
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
             Backend::Neon => super::aarch64::tomont(p),
@@ -149,7 +151,7 @@ impl Engine {
     /// Uniform rejection sampling (public data).
     pub(crate) fn rej_uniform(self, out: &mut [i16; N], ctr: usize, buf: &[u8]) -> usize {
         match self.0 {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Avx2 => super::x86::rej_uniform(out, ctr, buf),
             _ => poly::rej_uniform(out, ctr, buf),
         }

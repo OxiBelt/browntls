@@ -20,7 +20,7 @@
 mod aarch64;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
 use crate::cpu::{self, Features};
@@ -230,7 +230,7 @@ pub(crate) enum Backend {
     /// Portable unrolled code.
     Soft,
     /// x86-64 scalar code compiled with BMI1/BMI2 (`ANDN`, `RORX`).
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     X86Bmi,
     /// riscv64 scalar code compiled with Zbb (`ANDN`, `RORI`).
     #[cfg(target_arch = "riscv64")]
@@ -240,7 +240,7 @@ pub(crate) enum Backend {
 impl Backend {
     /// Every backend in order of preference.
     pub(crate) const ALL: &'static [Self] = &[
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Self::X86Bmi,
         #[cfg(target_arch = "riscv64")]
         Self::RvZbb,
@@ -250,13 +250,18 @@ impl Backend {
     /// Whether this backend can run with features `f`.
     // aarch64 has no single-state backend besides `Soft`.
     #[cfg_attr(
-        not(any(target_arch = "x86_64", target_arch = "riscv64")),
+        not(any(
+            all(target_arch = "x86_64", target_feature = "sse2"),
+            target_arch = "riscv64"
+        )),
         allow(unused_variables)
     )]
     pub(crate) fn is_available(self, f: Features) -> bool {
+        // `f` is unused when every accelerated backend is compiled out.
+        let _ = f;
         match self {
             Self::Soft => true,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::X86Bmi => x86::bmi_available(f),
             #[cfg(target_arch = "riscv64")]
             Self::RvZbb => riscv64::zbb_available(f),
@@ -277,7 +282,7 @@ impl Backend {
     pub(crate) fn permute(self, state: &mut [u64; 25]) {
         match self {
             Self::Soft => soft::keccak_f1600(state),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::X86Bmi => x86::keccak_f1600_bmi(state),
             #[cfg(target_arch = "riscv64")]
             Self::RvZbb => riscv64::keccak_f1600_zbb(state),
@@ -292,10 +297,10 @@ pub(crate) enum BackendX4 {
     Soft,
     /// AVX-512VL: four instances in one YMM register per lane, `VPROLQ` and
     /// `VPTERNLOGQ`.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Avx512,
     /// AVX2: four instances in one YMM register per lane.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Avx2,
     /// Armv8.2 SHA3 (`EOR3`, `RAX1`, `XAR`, `BCAX`): two instances per Q
     /// register, two passes.
@@ -315,9 +320,9 @@ pub(crate) enum BackendX4 {
 impl BackendX4 {
     /// Every backend in order of preference.
     pub(crate) const ALL: &'static [Self] = &[
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Self::Avx512,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Self::Avx2,
         #[cfg(target_arch = "aarch64")]
         Self::ArmSha3,
@@ -332,11 +337,13 @@ impl BackendX4 {
 
     /// Whether this backend can run with features `f`.
     pub(crate) fn is_available(self, f: Features) -> bool {
+        // `f` is unused when every accelerated backend is compiled out.
+        let _ = f;
         match self {
             Self::Soft => true,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Avx512 => x86::avx512_available(f),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Avx2 => x86::avx2_available(f),
             #[cfg(target_arch = "aarch64")]
             Self::ArmSha3 => aarch64::sha3_available(f),
@@ -363,9 +370,9 @@ impl BackendX4 {
     pub(crate) fn permute(self, s: &mut StateX4) {
         match self {
             Self::Soft => soft::keccak_f1600_x4(s),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Avx512 => x86::keccak_f1600_x4_avx512(s),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Avx2 => x86::keccak_f1600_x4_avx2(s),
             #[cfg(target_arch = "aarch64")]
             Self::ArmSha3 => aarch64::keccak_f1600_x4_sha3(s),

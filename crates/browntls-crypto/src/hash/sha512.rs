@@ -114,7 +114,7 @@ const H384: [u64; 8] = [
 mod aarch64;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
 /// A SHA-512 compression backend.
@@ -124,7 +124,7 @@ pub(crate) enum Backend {
     Soft,
     /// x86-64-v3: AVX2 message schedule (two blocks at a time) and BMI2
     /// scalar rounds.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     X86V3,
     /// Armv8.2 FEAT_SHA512 (`SHA512H`, `SHA512H2`, `SHA512SU0/1`).
     #[cfg(target_arch = "aarch64")]
@@ -142,7 +142,7 @@ pub(crate) enum Backend {
 impl Backend {
     /// Every backend in order of preference.
     pub(crate) const ALL: &'static [Self] = &[
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         Self::X86V3,
         #[cfg(target_arch = "aarch64")]
         Self::ArmSha512,
@@ -155,9 +155,11 @@ impl Backend {
 
     /// Whether this backend can run with features `f`.
     pub(crate) fn is_available(self, f: Features) -> bool {
+        // `f` is unused when every accelerated backend is compiled out.
+        let _ = f;
         match self {
             Self::Soft => true,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::X86V3 => x86::available(f),
             #[cfg(target_arch = "aarch64")]
             Self::ArmSha512 => aarch64::available(f),
@@ -182,7 +184,7 @@ impl Backend {
     pub(crate) fn compress(self, state: &mut [u64; 8], blocks: &[u8]) {
         match self {
             Self::Soft => soft::compress(state, blocks),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::X86V3 => x86::compress(state, blocks),
             #[cfg(target_arch = "aarch64")]
             Self::ArmSha512 => aarch64::compress(state, blocks),

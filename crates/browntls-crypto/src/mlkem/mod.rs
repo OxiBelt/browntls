@@ -37,7 +37,7 @@ mod poly;
 mod aarch64;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
 #[cfg(test)]

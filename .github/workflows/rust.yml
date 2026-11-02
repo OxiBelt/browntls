@@ -177,9 +177,13 @@ jobs:
         run: scripts/ci/install-rust.sh "${{ matrix.target }}"
 
       - name: Build browntls-crypto (no_std, no alloc)
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build -p browntls-crypto --no-default-features --target "${{ matrix.target }}" --locked
 
       - name: Build browntls-pki (no_std + alloc)
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build -p browntls-pki --no-default-features --target "${{ matrix.target }}" --locked
 
   dependencies:

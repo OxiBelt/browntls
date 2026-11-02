@@ -1,11 +1,16 @@
 //! End-entity certificate verification (path building, usage, names).
-//!
-//! STUB: signatures fixed by the architecture; implementation in progress.
 
+use alloc::vec::Vec;
+
+use crate::cert::{self, Cert};
 use crate::crl::RevocationOptions;
+use crate::der::{self, tag};
 use crate::error::Error;
+use crate::name;
+use crate::path::ChainOptions;
+use crate::signed_data::{self, Spki};
 use crate::{
-    CertificateDer, ServerName, SignatureVerificationAlgorithm, SubjectPublicKeyInfoDer,
+    CertificateDer, Der, ServerName, SignatureVerificationAlgorithm, SubjectPublicKeyInfoDer,
     TrustAnchor, UnixTime,
 };
 
@@ -15,15 +20,16 @@ pub type PathVerifier<'a> = &'a dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>;
 /// A parsed end-entity certificate.
 #[derive(Debug)]
 pub struct EndEntityCert<'a> {
-    der: &'a [u8],
+    pub(crate) inner: Cert<'a>,
 }
 
 impl<'a> TryFrom<&'a CertificateDer<'a>> for EndEntityCert<'a> {
     type Error = Error;
 
+    /// Parses a v3 certificate, rejecting malformed DER, duplicate extensions
+    /// and unknown critical extensions.
     fn try_from(cert: &'a CertificateDer<'a>) -> Result<Self, Error> {
-        let _ = cert.as_ref();
-        Err(Error::BadDer) // STUB
+        Cert::from_der(cert.as_ref()).map(|inner| Self { inner })
     }
 }
 
@@ -51,16 +57,16 @@ impl<'a> EndEntityCert<'a> {
         revocation: Option<RevocationOptions<'_>>,
         verify_path: Option<PathVerifier<'_>>,
     ) -> Result<VerifiedPath<'p>, Error> {
-        let _ = (
-            supported_sig_algs,
+        ChainOptions {
+            algs: supported_sig_algs,
             trust_anchors,
-            intermediate_certs,
+            intermediates: intermediate_certs,
             time,
             usage,
             revocation,
             verify_path,
-        );
-        Err(Error::UnknownIssuer) // STUB
+        }
+        .build(self)
     }
 
     /// Verifies that the certificate is valid for `name` (DNS SAN matching
@@ -71,8 +77,11 @@ impl<'a> EndEntityCert<'a> {
     ///
     /// Returns [`Error::CertNotValidForName`] if no SAN matches.
     pub fn verify_is_valid_for_subject_name(&self, name: &ServerName<'_>) -> Result<(), Error> {
-        let _ = name;
-        Err(Error::CertNotValidForName) // STUB
+        let san = self.inner.subject_alt_name;
+        match name {
+            ServerName::DnsName(dns) => name::verify_dns_name(dns, san),
+            ServerName::IpAddress(ip) => name::verify_ip_address(ip, san),
+        }
     }
 
     /// Verifies `signature` over `msg` with this certificate's public key
@@ -88,30 +97,56 @@ impl<'a> EndEntityCert<'a> {
         msg: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
-        let _ = (alg, msg, signature);
-        Err(Error::InvalidSignatureForPublicKey) // STUB
+        let spki = Spki::from_contents(self.inner.spki)?;
+        signed_data::verify_signature(alg, &spki, msg, signature)
     }
 
     /// The certificate's `SubjectPublicKeyInfo` (DER, with outer SEQUENCE).
     #[must_use]
     pub fn subject_public_key_info(&self) -> SubjectPublicKeyInfoDer<'a> {
-        SubjectPublicKeyInfoDer::from_slice(self.der) // STUB
+        SubjectPublicKeyInfoDer::from_slice(self.inner.spki_der)
+    }
+
+    /// The certificate's DER encoding.
+    #[must_use]
+    pub fn der(&self) -> CertificateDer<'a> {
+        CertificateDer::from_slice(self.inner.der)
+    }
+
+    /// The `serialNumber` contents: big-endian two's complement, as encoded.
+    #[must_use]
+    pub fn serial(&self) -> &'a [u8] {
+        self.inner.serial
+    }
+
+    /// The `issuer` `Name` contents (without the outer SEQUENCE).
+    #[must_use]
+    pub fn issuer(&self) -> &'a [u8] {
+        self.inner.issuer
+    }
+
+    /// The `subject` `Name` contents (without the outer SEQUENCE).
+    #[must_use]
+    pub fn subject(&self) -> &'a [u8] {
+        self.inner.subject
     }
 }
 
 /// Verifies a signature made by a raw public key (RFC 7250).
 #[derive(Debug)]
 pub struct RawPublicKeyEntity<'a> {
-    spki: &'a [u8],
+    spki: Spki<'a>,
 }
 
 impl<'a> TryFrom<&'a SubjectPublicKeyInfoDer<'a>> for RawPublicKeyEntity<'a> {
     type Error = Error;
 
+    /// Parses a complete `SubjectPublicKeyInfo` `SEQUENCE`.
     fn try_from(spki: &'a SubjectPublicKeyInfoDer<'a>) -> Result<Self, Error> {
+        let contents = der::read_all(spki.as_ref(), |r| r.expect(tag::SEQUENCE))?;
         Ok(Self {
-            spki: spki.as_ref(),
-        }) // STUB
+            spki: Spki::from_contents(contents)?,
+        })
     }
 }
 
@@ -127,8 +162,7 @@ impl RawPublicKeyEntity<'_> {
         msg: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
-        let _ = (self.spki, alg, msg, signature);
-        Err(Error::InvalidSignatureForPublicKey) // STUB
+        signed_data::verify_signature(alg, &self.spki, msg, signature)
     }
 }
 
@@ -136,11 +170,23 @@ impl RawPublicKeyEntity<'_> {
 #[derive(Debug)]
 pub struct VerifiedPath<'p> {
     end_entity: &'p EndEntityCert<'p>,
-    intermediates: alloc::vec::Vec<&'p CertificateDer<'p>>,
+    intermediates: Vec<&'p CertificateDer<'p>>,
     anchor: &'p TrustAnchor<'p>,
 }
 
 impl<'p> VerifiedPath<'p> {
+    pub(crate) fn new(
+        end_entity: &'p EndEntityCert<'p>,
+        intermediates: Vec<&'p CertificateDer<'p>>,
+        anchor: &'p TrustAnchor<'p>,
+    ) -> Self {
+        Self {
+            end_entity,
+            intermediates,
+            anchor,
+        }
+    }
+
     /// The end-entity certificate.
     #[must_use]
     pub fn end_entity(&self) -> &'p EndEntityCert<'p> {
@@ -160,6 +206,10 @@ impl<'p> VerifiedPath<'p> {
 }
 
 /// The extended key usage a path must permit (RFC 5280 §4.2.1.12).
+///
+/// The purpose is checked on every certificate in the path: a certificate
+/// without an EKU extension is acceptable only for "required if present"
+/// usages, and `anyExtendedKeyUsage` does not stand in for a purpose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyUsage {
     oid: &'static [u8],
@@ -214,12 +264,28 @@ impl KeyUsage {
 /// name constraints are extracted; validity, extensions other than name
 /// constraints, and the signature are not checked).
 ///
+/// Unknown critical extensions are ignored, and v1 certificates (which have
+/// no extensions) are accepted, since trust-store roots of both kinds exist.
+///
 /// # Errors
 ///
 /// Returns [`Error::BadDer`] for malformed certificates.
 pub fn anchor_from_trusted_cert<'a>(
     cert: &'a CertificateDer<'a>,
 ) -> Result<TrustAnchor<'a>, Error> {
-    let _ = cert;
-    Err(Error::BadDer) // STUB
+    match Cert::for_trust_anchor(cert.as_ref()) {
+        Ok(parsed) => Ok(TrustAnchor {
+            subject: Der::from_slice(parsed.subject),
+            subject_public_key_info: Der::from_slice(parsed.spki),
+            name_constraints: parsed.name_constraints.map(Der::from_slice),
+        }),
+        Err(Error::UnsupportedCertVersion) => cert::v1_anchor_fields(cert.as_ref())
+            .map(|(subject, spki)| TrustAnchor {
+                subject: Der::from_slice(subject),
+                subject_public_key_info: Der::from_slice(spki),
+                name_constraints: None,
+            })
+            .map_err(|_| Error::BadDer),
+        Err(e) => Err(e),
+    }
 }

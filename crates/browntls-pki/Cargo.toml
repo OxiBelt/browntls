@@ -17,6 +17,20 @@ alloc = []
 
 [dev-dependencies]
 hex = "0.4"
+# Certificate and CRL generation at test run time (no committed private keys).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+# Test-only `SignatureVerificationAlgorithm` implementations.
+p256 = "0.14"
+p384 = "0.14"
+ed25519-dalek = "3"
+rsa = "0.9"
+# `rsa` 0.9 uses the digest 0.10 generation of RustCrypto hashes.
+sha2 = { version = "0.10", features = ["oid"] }
+# Digest 0.11 generation, shared with `p256`/`p384`, for ECDSA with a non-default hash.
+sha2v11 = { package = "sha2", version = "0.11" }
+rustls-pki-types = "1"
+time = "0.3"
+rand = "0.8"
 
 [lints]
 workspace = true

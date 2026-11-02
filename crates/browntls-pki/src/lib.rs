@@ -6,9 +6,16 @@
 //!   CRLs and trust anchors; [`server_name`]: TLS server names; [`time`]:
 //!   validation time; [`pem`]: PEM decoding; [`alg_id`]: standard
 //!   `AlgorithmIdentifier`s.
+//! * [`EndEntityCert`]: certificate parsing, path building to a
+//!   [`TrustAnchor`] (RFC 5280 §6), server name matching (RFC 6125) and
+//!   handshake signature verification; [`crl`]: certificate revocation lists.
 //! * [`SignatureVerificationAlgorithm`]: the seam through which a
 //!   cryptography provider verifies signatures. This crate contains no
 //!   cryptographic primitives.
+//!
+//! All input is treated as untrusted: parsing is strict DER with eager
+//! validation, work is bounded by explicit budgets, and nothing here panics
+//! on malformed input.
 //!
 //! The crate forbids `unsafe` code and requires `alloc`.
 #![no_std]
@@ -20,18 +27,29 @@ extern crate alloc;
 extern crate std;
 
 pub mod alg_id;
+mod asn1_time;
+mod cert;
 pub mod crl;
+mod crl_der;
+mod der;
 mod error;
+mod extensions;
+mod name;
+mod path;
 pub mod pem;
+mod revocation;
 pub mod server_name;
+mod signed_data;
 pub mod time;
 pub mod types;
 mod verify;
 
 pub use alg_id::AlgorithmIdentifier;
 pub use crl::{
-    BorrowedCertRevocationList, CertRevocationList, ExpirationPolicy, OwnedCertRevocationList,
-    RevocationCheckDepth, RevocationOptions, RevocationOptionsBuilder, UnknownStatusPolicy,
+    BorrowedCertRevocationList, BorrowedRevokedCert, CertRevocationList, CrlsRequired,
+    ExpirationPolicy, OwnedCertRevocationList, OwnedRevokedCert, RevocationCheckDepth,
+    RevocationOptions, RevocationOptionsBuilder, RevocationReason, RevokedCerts,
+    UnknownStatusPolicy,
 };
 pub use error::Error;
 pub use server_name::{DnsName, InvalidDnsNameError, IpAddr, ServerName};

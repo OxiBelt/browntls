@@ -1,0 +1,214 @@
+name: Rust
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  lint:
+    name: Format, Clippy and docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (x86-64)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Clippy (aarch64)
+        run: cargo clippy --workspace --all-targets --all-features --locked --target aarch64-unknown-linux-gnu -- -D warnings
+
+      - name: Clippy (riscv64)
+        run: cargo clippy --workspace --all-targets --all-features --locked --target riscv64gc-unknown-linux-gnu -- -D warnings
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  test-x86_64:
+    name: Test x86-64 (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64-v3
+            rustflags: -C target-cpu=x86-64-v3
+          - name: generic dispatch
+            rustflags: ''
+          - name: portable only
+            rustflags: --cfg browntls_force_soft
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Report CPU
+        run: grep -m1 -E '^(model name|flags)' /proc/cpuinfo || true
+
+      - name: Test
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo test --workspace --all-features --locked
+
+  test-aarch64:
+    name: Test aarch64 (native)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Report CPU
+        run: grep -m1 -E '^Features' /proc/cpuinfo || true
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  test-riscv64:
+    name: Test riscv64 (native, RISE)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Report CPU
+        run: |
+          grep -m1 -E '^(isa|uarch|model name)' /proc/cpuinfo || true
+          cat /sys/firmware/devicetree/base/compatible 2>/dev/null | tr '\0' ' ' || true
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  test-qemu:
+    name: Test under QEMU (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - x86_64-max
+          - aarch64-max
+          - aarch64-a53
+          - riscv64-scalar
+          - riscv64-zk
+          - riscv64-rvv128
+          - riscv64-rvv256-zvk
+          - riscv64-rvv1024-zvk
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cross toolchains and QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-user-static gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu \
+            libc6-dev-arm64-cross libc6-dev-riscv64-cross
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Test cryptographic primitives
+        run: scripts/cross-test.sh "${{ matrix.profile }}" -p browntls-crypto --locked
+
+  no-std:
+    name: Build without std
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-none
+          - aarch64-unknown-none
+          - riscv64gc-unknown-none-elf
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh "${{ matrix.target }}"
+
+      - name: Build browntls-crypto (no_std, no alloc)
+        run: cargo build -p browntls-crypto --no-default-features --target "${{ matrix.target }}" --locked
+
+      - name: Build browntls-pki (no_std + alloc)
+        run: cargo build -p browntls-pki --no-default-features --target "${{ matrix.target }}" --locked
+
+  dependencies:
+    name: Dependency policy (cargo-deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Install verified cargo-deny
+        env:
+          CARGO_DENY_VERSION: '0.20.2'
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          tool_dir="$(mktemp -d "${RUNNER_TEMP}/cargo-deny.XXXXXX")"
+          archive="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --tlsv1.2 \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${archive}" \
+            --output "${tool_dir}/${archive}"
+          printf '%s  %s\n' "${CARGO_DENY_SHA256}" "${tool_dir}/${archive}" | sha256sum --check --strict
+          tar -xzf "${tool_dir}/${archive}" -C "${tool_dir}" --strip-components=1
+          echo "${tool_dir}" >> "${GITHUB_PATH}"
+
+      - name: Check advisories, licenses, bans and sources
+        run: cargo deny --locked --all-features check

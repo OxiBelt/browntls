@@ -1,9 +1,10 @@
 # Agent guidance
 
 browntls is an independent Rust TLS library project with intended kernel
-integration. No Rust implementation or architecture has been established yet.
-Do not infer a rustls dependency, a protocol implementation, or kernel mechanism
-from the project name.
+integration. Its architecture is described in [Architecture](docs/Architecture.md)
+and its status in [Roadmap](docs/Roadmap.md). browntls does not depend on rustls
+at run time (rustls is only an interoperability test oracle), and no kernel
+mechanism has been designed yet.
 
 ## Source of truth
 
@@ -16,7 +17,12 @@ and disclosure.
 Current layout:
 
 - Root Markdown files: project and contributor guidance.
+- `crates/browntls-crypto/`: primitives and architecture backends (the only
+  crate permitted to contain `unsafe`, confined to backend modules).
+- `crates/browntls-pki/`: PKI types and certificate path validation.
+- `crates/browntls/`: TLS protocol, provider mount point and providers.
 - `docs/`: technical and maintenance documentation.
+- `scripts/`: QEMU cross-testing and CI helpers.
 - `tests/scripts/`: portable repository checks and their regression tests.
 - `.github/`: workflows, contribution templates, and update automation.
 

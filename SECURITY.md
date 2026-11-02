@@ -3,10 +3,10 @@
 ## Scope and support
 
 browntls is an independent Rust TLS library project with intended kernel
-integration. It is in initial development: there is no TLS implementation,
-published release, or production-readiness claim. Protocol architecture,
-cryptographic providers, public APIs, platforms, and kernel mechanisms remain
-undecided. No cryptographic certification is claimed.
+integration. It is in initial development: the TLS implementation, primitives
+and PKI code are unreleased, unaudited and carry no production-readiness claim.
+Public APIs may change and kernel mechanisms remain undecided. No cryptographic
+certification is claimed.
 
 `main` is the supported development branch for triage and fixes; it is not a
 stable release. No released versions or backport commitments currently exist.

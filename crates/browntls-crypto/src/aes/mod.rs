@@ -12,7 +12,7 @@
 //! | [`Backend::AesNi`] | x86-64 with AES-NI | eight independent blocks per iteration |
 //! | [`Backend::Vaes`] | x86-64 with VAES + AVX2 | sixteen blocks per iteration on YMM registers |
 //! | [`Backend::ArmAes`] | aarch64 with FEAT_AES | eight independent blocks per iteration |
-//! | [`Backend::RvZvkned`] | riscv64 with RVV 1.0 + Zvkned | `LMUL=4`, VLEN-agnostic |
+//! | [`Backend::RvZvkned`] | riscv64 with RVV 1.0 + Zvkned + Zvkb | `LMUL=4`, VLEN-agnostic |
 //! | [`Backend::RvZkne`] | riscv64 with Zkne | scalar `aes64es`/`aes64esm`, four blocks interleaved |
 //!
 //! The key schedule is always computed by the portable code (its `SubWord`

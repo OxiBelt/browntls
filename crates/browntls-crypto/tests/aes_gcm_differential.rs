@@ -1,5 +1,6 @@
 //! Differential tests of every available AES / GHASH backend pair against
 //! the independent `aes-gcm` crate, plus tampering and throughput checks.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use aes_gcm::{AeadInOut, KeyInit};
 use browntls_crypto::Error;

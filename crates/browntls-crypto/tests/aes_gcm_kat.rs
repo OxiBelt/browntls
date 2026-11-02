@@ -1,6 +1,12 @@
 //! Known-answer tests for AES and AES-GCM on every backend available at run
 //! time: FIPS 197 block vectors, the McGrew–Viega / SP 800-38D GCM test
 //! cases and the Wycheproof `aes_gcm_test.json` suite.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_arguments
+)]
 
 use browntls_crypto::Error;
 use browntls_crypto::aead::Aead;

@@ -39,7 +39,7 @@ upstream layout:
 | `crl_distrib_point/` | certificates with unusual `cRLDistributionPoints` |
 | `client_auth_revocation/` | chains and CRLs with distribution point variants |
 | `ed25519/`, `wpt/`, `netflix/`, `sanofi/`, `cloudflare_dns/` | real or generated chains |
-| `signatures/` | key/signature vectors and certificates with unusual algorithm identifiers |
+| `signatures/` | key and signature vectors for ECDSA with non-default hashes, plus an RSA certificate |
 | `cert_v1.der`, `cert_with*_extensions.der` | version and extension-list edge cases |
 
 The public certificates under `netflix/`, `sanofi/` and `cloudflare_dns/`

@@ -258,8 +258,10 @@ impl<'a> IssuingDistributionPoint<'a> {
         };
         let mut reader = Reader::new(points);
         while !reader.at_end() {
+            // Each point is a SEQUENCE (checked when the certificate was
+            // parsed), so a malformed one is skipped as a whole.
             let Ok(point) = DistributionPoint::read(&mut reader) else {
-                return false;
+                continue;
             };
             if point.crl_issuer || point.reasons {
                 continue;

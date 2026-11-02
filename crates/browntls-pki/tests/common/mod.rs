@@ -2,7 +2,7 @@
 //! built on RustCrypto, and `rcgen` helpers that generate certificate chains
 //! at run time (no private keys are stored in the repository).
 
-#![allow(dead_code)]
+#![allow(dead_code, unreachable_pub, clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::OnceLock;
 
@@ -120,7 +120,7 @@ fn ed25519(key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 fn rsa_pkcs1<D>(key: &[u8], msg: &[u8], sig: &[u8]) -> bool
 where
-    D: sha2::Digest + rsa::pkcs1::AssociatedOid,
+    D: sha2::Digest + rsa::pkcs8::AssociatedOid,
 {
     let (Ok(pk), Ok(sig)) = (
         rsa::RsaPublicKey::from_pkcs1_der(key),

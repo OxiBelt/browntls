@@ -18,7 +18,7 @@ intent.
 | AES-GCM (portable, AES-NI/VAES, Armv8, Zvkned/Zvkg) | done | Bitsliced portable AES and constant-time GHASH; AES-NI+PCLMULQDQ, VAES (YMM), FEAT_AES+PMULL, Zvkned+Zvkg/Zvbc, Zkne+Zbc. No VPCLMULQDQ or AVX-512 (not executable here); CTR and GHASH are separate passes |
 | ChaCha20-Poly1305 (portable, AVX2/AVX-512, NEON, RVV) | done | Poly1305 scalar, BMI2 and four-way AVX2 |
 | X25519 / Ed25519 | done | BMI2/ADX ladder on x86-64; small-order Ed25519 public keys rejected |
-| P-256 / P-384 / P-521 ECDH and ECDSA | in progress | |
+| P-256 / P-384 / P-521 ECDH and ECDSA | done | RCB complete formulas, RFC 6979 with hedging, BMI2/ADX P-256 kernel; generic CIOS reduction and Fermat inversion (performance headroom) |
 | RSA PKCS #1 v1.5 / PSS | in progress | |
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | PKI types and PEM | done | |

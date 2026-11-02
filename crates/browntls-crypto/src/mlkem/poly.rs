@@ -308,9 +308,19 @@ pub(crate) fn rsub_assign(r: &mut Poly, a: &Poly) {
 // Centred binomial distribution (FIPS 203 Algorithm 8).
 // ---------------------------------------------------------------------------
 
+/// Samples from CBD_eta (`eta` in {2, 3}) using the first `64 eta` bytes of
+/// `buf` (FIPS 203 Algorithm 8).
+pub(crate) fn cbd(out: &mut Poly, eta: usize, buf: &[u8]) {
+    if eta == 2 {
+        cbd2(out, buf);
+    } else {
+        cbd3(out, buf);
+    }
+}
+
 /// Samples from CBD_2 using 128 bytes of PRF output.
-pub(crate) fn cbd2(out: &mut Poly, buf: &[u8; 128]) {
-    for (i, c) in buf.as_chunks::<4>().0.iter().enumerate() {
+fn cbd2(out: &mut Poly, buf: &[u8]) {
+    for (i, c) in buf.as_chunks::<4>().0.iter().take(N / 8).enumerate() {
         let t = u32::from_le_bytes(*c);
         let d = (t & 0x5555_5555) + ((t >> 1) & 0x5555_5555);
         for j in 0..8 {
@@ -322,8 +332,8 @@ pub(crate) fn cbd2(out: &mut Poly, buf: &[u8; 128]) {
 }
 
 /// Samples from CBD_3 using 192 bytes of PRF output.
-pub(crate) fn cbd3(out: &mut Poly, buf: &[u8; 192]) {
-    for (i, c) in buf.as_chunks::<3>().0.iter().enumerate() {
+fn cbd3(out: &mut Poly, buf: &[u8]) {
+    for (i, c) in buf.as_chunks::<3>().0.iter().take(N / 4).enumerate() {
         let t = u32::from(c[0]) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16);
         let d = (t & 0x0024_9249) + ((t >> 1) & 0x0024_9249) + ((t >> 2) & 0x0024_9249);
         for j in 0..4 {

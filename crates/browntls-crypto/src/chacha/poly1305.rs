@@ -215,8 +215,7 @@ impl Poly1305 {
             if self.buf_len < BLOCK {
                 return;
             }
-            let buf = self.buf;
-            self.state.blocks(&buf, 1);
+            self.state.blocks(&self.buf, 1);
             self.buf_len = 0;
         }
         let full = data.len() - data.len() % BLOCK;

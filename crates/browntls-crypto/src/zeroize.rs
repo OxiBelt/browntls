@@ -39,6 +39,28 @@ pub fn zeroize_u64(buf: &mut [u64]) {
     compiler_fence(Ordering::SeqCst);
 }
 
+/// Overwrites `buf` with zeros using volatile writes.
+#[inline(never)]
+pub fn zeroize_i16(buf: &mut [i16]) {
+    for w in buf.iter_mut() {
+        // SAFETY: `w` is a valid, aligned, exclusive reference to an `i16`.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+impl Zeroize for [i16] {
+    fn zeroize(&mut self) {
+        zeroize_i16(self);
+    }
+}
+
+impl<const N: usize> Zeroize for [i16; N] {
+    fn zeroize(&mut self) {
+        zeroize_i16(self);
+    }
+}
+
 impl Zeroize for [u8] {
     fn zeroize(&mut self) {
         zeroize_bytes(self);

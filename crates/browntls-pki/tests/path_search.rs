@@ -258,3 +258,40 @@ fn trust_anchor_without_subject_match_is_ignored() {
         Err(Error::UnknownIssuer)
     );
 }
+
+#[test]
+fn build_call_budget_with_alternating_decoys() {
+    // Two families of CA certificates issue each other: every "x" is
+    // issued by some "y" and vice versa, all with distinct keys, so loop
+    // prevention never fires and no trust anchor matches. The search
+    // explores 8^6 candidate paths before the depth limit stops each one,
+    // which exhausts the build-call budget without a single signature check.
+    let alg = &rcgen::PKCS_ED25519;
+    let x_issuer = rcgen::Issuer::new(ca_params("x"), key_for(alg));
+    let y_issuer = rcgen::Issuer::new(ca_params("y"), key_for(alg));
+    let mut intermediates: Vec<CertificateDer<'_>> = Vec::new();
+    for _ in 0..8 {
+        let x = ca_params("x").signed_by(&key_for(alg), &y_issuer).unwrap();
+        let y = ca_params("y").signed_by(&key_for(alg), &x_issuer).unwrap();
+        intermediates.push(x.der().to_vec().into());
+        intermediates.push(y.der().to_vec().into());
+    }
+    let ee = ee_params(&["example.com"])
+        .signed_by(&key_for(alg), &x_issuer)
+        .unwrap();
+    let unrelated = Chain::simple(alg, 0);
+    let roots = [unrelated.root_der()];
+    assert_eq!(
+        verify(
+            &ee.der().to_vec().into(),
+            &intermediates,
+            &anchors(&roots),
+            ALGS,
+            NOW,
+            KeyUsage::server_auth(),
+            None,
+            None,
+        ),
+        Err(Error::MaximumPathBuildCallsExceeded)
+    );
+}

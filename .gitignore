@@ -20,3 +20,6 @@ __pycache__/
 *.key
 *.p12
 *.pfx
+
+# Local agent worktrees
+/.claude/worktrees/

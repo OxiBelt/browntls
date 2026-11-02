@@ -3,12 +3,29 @@
 //! Each compression / permutation function dispatches at run time to the best
 //! available backend (see the crate-level table). The portable backends are
 //! the reference against which every accelerated backend is tested.
+//!
+//! | Primitive | x86-64 | aarch64 | riscv64 |
+//! |---|---|---|---|
+//! | SHA-256 compression | SHA-NI; AVX2 schedule + BMI2 rounds | FEAT_SHA256 | Zvknha+Zvkb; Zknh |
+//! | SHA-512 compression | AVX2 schedule + BMI2 rounds | FEAT_SHA512 | Zvknhb+Zvkb; Zknh |
+//! | Keccak-f\[1600\] | BMI1/BMI2 scalar | portable | Zbb scalar |
+//! | Keccak-f\[1600\] ×4 | AVX-512VL; AVX2 | FEAT_SHA3; NEON (2×2) | RVV+Zvkb; RVV |
+//!
+//! The batched permutation [`sha3::keccak_f1600_x4`] and the four-way
+//! XOFs [`Shake128x4`] / [`Shake256x4`] serve ML-KEM / ML-DSA style parallel
+//! sampling. All backends are constant time (no data-dependent branches or
+//! table lookups).
 
+mod keccak;
 mod sha256;
 pub mod sha3;
 mod sha512;
+#[cfg(test)]
+mod tests;
 
-pub use sha3::{Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256, ShakeReader};
+pub use sha3::{
+    Sha3_256, Sha3_384, Sha3_512, Shake128, Shake128x4, Shake256, Shake256x4, ShakeReader,
+};
 pub use sha256::{Sha224, Sha256};
 pub use sha512::{Sha384, Sha512};
 

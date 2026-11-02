@@ -1,6 +1,7 @@
 //! SHA-384 and SHA-512 (FIPS 180-4).
 
 use super::{BlockBuffer, HashFunction};
+use crate::cpu::{self, Features};
 
 const BLOCK: usize = 128;
 
@@ -109,12 +110,96 @@ const H384: [u64; 8] = [
     0x47b5481dbefa4fa4,
 ];
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
+#[cfg(target_arch = "x86_64")]
+mod x86;
+
+/// A SHA-512 compression backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Backend {
+    /// Portable code.
+    Soft,
+    /// x86-64-v3: AVX2 message schedule (two blocks at a time) and BMI2
+    /// scalar rounds.
+    #[cfg(target_arch = "x86_64")]
+    X86V3,
+    /// Armv8.2 FEAT_SHA512 (`SHA512H`, `SHA512H2`, `SHA512SU0/1`).
+    #[cfg(target_arch = "aarch64")]
+    ArmSha512,
+    /// RISC-V vector crypto Zvknhb (`vsha2ms`, `vsha2ch`, `vsha2cl` at
+    /// SEW=64) with Zvkb (`vrev8`).
+    #[cfg(target_arch = "riscv64")]
+    Zvknhb,
+    /// RISC-V scalar crypto Zknh, RV64 forms (`sha512sig0/1`,
+    /// `sha512sum0/1`).
+    #[cfg(target_arch = "riscv64")]
+    Zknh,
+}
+
+impl Backend {
+    /// Every backend in order of preference.
+    pub(crate) const ALL: &'static [Self] = &[
+        #[cfg(target_arch = "x86_64")]
+        Self::X86V3,
+        #[cfg(target_arch = "aarch64")]
+        Self::ArmSha512,
+        #[cfg(target_arch = "riscv64")]
+        Self::Zvknhb,
+        #[cfg(target_arch = "riscv64")]
+        Self::Zknh,
+        Self::Soft,
+    ];
+
+    /// Whether this backend can run with features `f`.
+    pub(crate) fn is_available(self, f: Features) -> bool {
+        match self {
+            Self::Soft => true,
+            #[cfg(target_arch = "x86_64")]
+            Self::X86V3 => x86::available(f),
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha512 => aarch64::available(f),
+            #[cfg(target_arch = "riscv64")]
+            Self::Zvknhb => riscv64::zvknhb_available(f),
+            #[cfg(target_arch = "riscv64")]
+            Self::Zknh => riscv64::zknh_available(f),
+        }
+    }
+
+    /// The preferred available backend.
+    pub(crate) fn select(f: Features) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|b| b.is_available(f))
+            .unwrap_or(Self::Soft)
+    }
+
+    /// Compresses `blocks` (a multiple of 128 bytes) into `state`. Falls
+    /// back to [`soft`] if the backend is not available on this CPU.
+    pub(crate) fn compress(self, state: &mut [u64; 8], blocks: &[u8]) {
+        match self {
+            Self::Soft => soft::compress(state, blocks),
+            #[cfg(target_arch = "x86_64")]
+            Self::X86V3 => x86::compress(state, blocks),
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha512 => aarch64::compress(state, blocks),
+            #[cfg(target_arch = "riscv64")]
+            Self::Zvknhb => riscv64::compress_zvknhb(state, blocks),
+            #[cfg(target_arch = "riscv64")]
+            Self::Zknh => riscv64::compress_zknh(state, blocks),
+        }
+    }
+}
+
 /// Compresses `blocks` (a multiple of 128 bytes) into `state`, selecting the
 /// best available backend.
 #[inline]
 pub(crate) fn compress(state: &mut [u64; 8], blocks: &[u8]) {
     debug_assert_eq!(blocks.len() % BLOCK, 0);
-    soft::compress(state, blocks);
+    Backend::select(cpu::features()).compress(state, blocks);
 }
 
 pub(crate) mod soft {
@@ -135,30 +220,36 @@ pub(crate) mod soft {
                     .wrapping_add(w[i - 7])
                     .wrapping_add(s1);
             }
-            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-            for i in 0..80 {
-                let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-                let ch = (e & f) ^ (!e & g);
-                let t1 = h
-                    .wrapping_add(s1)
-                    .wrapping_add(ch)
-                    .wrapping_add(K[i])
-                    .wrapping_add(w[i]);
-                let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-                let maj = (a & b) ^ (a & c) ^ (b & c);
-                let t2 = s0.wrapping_add(maj);
-                h = g;
-                g = f;
-                f = e;
-                e = d.wrapping_add(t1);
-                d = c;
-                c = b;
-                b = a;
-                a = t1.wrapping_add(t2);
+            for (wi, ki) in w.iter_mut().zip(K) {
+                *wi = wi.wrapping_add(ki);
             }
-            for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-                *s = s.wrapping_add(v);
-            }
+            rounds(state, &w);
+        }
+    }
+
+    /// The 80 rounds and feed-forward, given `W[i] + K[i]`. Inlined into
+    /// accelerated callers so it is compiled with their target features.
+    #[inline(always)]
+    pub(crate) fn rounds(state: &mut [u64; 8], wk: &[u64; 80]) {
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+        for &wki in wk {
+            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(wki);
+            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *s = s.wrapping_add(v);
         }
     }
 }

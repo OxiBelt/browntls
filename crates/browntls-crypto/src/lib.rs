@@ -6,8 +6,8 @@
 //!
 //! | Family | x86-64 (baseline x86-64-v3) | aarch64 | riscv64 |
 //! |---|---|---|---|
-//! | SHA-2 | SHA-NI, SHA512, AVX2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
-//! | SHA-3 / SHAKE | AVX2 multi-lane | SHA3 (EOR3/RAX1/XAR/BCAX), NEON | RVV, Zbb |
+//! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
+//! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
 //! | AES / GHASH | AES-NI+PCLMULQDQ, VAES+VPCLMULQDQ | AES+PMULL | Zvkned+Zvkg/Zvbc |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |

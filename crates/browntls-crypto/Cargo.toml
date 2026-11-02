@@ -1,0 +1,37 @@
+[package]
+name = "browntls-crypto"
+description = "In-house cryptographic primitives for browntls, with portable constant-time code and SIMD/hardware acceleration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["std"]
+# Enables runtime CPU feature detection on targets where it needs the standard library, and OS entropy.
+std = ["dep:getrandom"]
+
+[dependencies]
+getrandom = { version = "0.4", optional = true }
+
+[dev-dependencies]
+# Reference implementations used only for differential testing of in-house primitives.
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+hmac = "0.13"
+aes-gcm = "0.11"
+chacha20poly1305 = "0.11"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+ed25519-dalek = "3"
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+rsa = { version = "=0.10.0-rc.19", features = ["sha2"] }
+ml-kem = "0.3"
+rand_core = "0.10"
+
+[lints]
+workspace = true

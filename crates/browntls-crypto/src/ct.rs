@@ -22,7 +22,10 @@ impl Choice {
     #[inline]
     #[must_use]
     pub fn from_bit(bit: u64) -> Self {
-        Self((black_box(bit) & 1).wrapping_neg())
+        // The barrier must cover the mask itself: hiding only the input bit
+        // still lets the optimiser infer that the mask is 0 or !0 and lower
+        // masked selects into branches or conditional loads.
+        Self(black_box((bit & 1).wrapping_neg()))
     }
 
     /// Returns the all-zeros / all-ones mask.

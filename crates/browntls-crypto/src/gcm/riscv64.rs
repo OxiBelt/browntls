@@ -261,7 +261,9 @@ fn clmul64(a: u64, b: u64) -> (u64, u64) {
             ".option pop",
             a = in(reg) a,
             b = in(reg) b,
-            lo = lateout(reg) lo,
+            // `lo` is written before `clmulh` reads `a`/`b`, so it must not
+            // share their registers (`out`, not `lateout`).
+            lo = out(reg) lo,
             hi = lateout(reg) hi,
             options(pure, nomem, nostack, preserves_flags),
         );

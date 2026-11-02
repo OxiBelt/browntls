@@ -25,9 +25,9 @@ mod aarch64;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 mod soft;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86_vaes;
 
 use crate::Error;
@@ -39,11 +39,27 @@ pub const BLOCK_LEN: usize = 16;
 
 /// Round keys in FIPS 197 byte order (`rk[r]` is XORed into the state before
 /// round `r + 1`). Zeroised on drop.
+#[cfg_attr(
+    not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )),
+    allow(dead_code)
+)]
 pub(crate) struct RoundKeys {
     pub(crate) rk: [[u8; 16]; 15],
     pub(crate) rounds: usize,
 }
 
+#[cfg_attr(
+    not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )),
+    allow(dead_code)
+)]
 impl RoundKeys {
     fn new(words: &[u32; 60], rounds: usize) -> Self {
         let mut rk = [[0u8; 16]; 15];
@@ -132,9 +148,9 @@ impl Backend {
 #[allow(clippy::large_enum_variant)]
 enum Imp {
     Soft(soft::Key),
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     AesNi(x86::Key),
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Vaes(x86_vaes::Key),
     #[cfg(target_arch = "aarch64")]
     ArmAes(aarch64::Key),
@@ -165,9 +181,9 @@ impl Key {
         let (mut words, rounds) = soft::key_schedule(key);
         let imp = match backend {
             Backend::Soft => Imp::Soft(soft::Key::new(&words, rounds)),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::AesNi => Imp::AesNi(x86::Key::new(RoundKeys::new(&words, rounds))),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Vaes => Imp::Vaes(x86_vaes::Key::new(RoundKeys::new(&words, rounds))),
             #[cfg(target_arch = "aarch64")]
             Backend::ArmAes => Imp::ArmAes(aarch64::Key::new(RoundKeys::new(&words, rounds))),
@@ -188,9 +204,9 @@ impl Key {
     pub(crate) fn backend(&self) -> Backend {
         match &self.imp {
             Imp::Soft(_) => Backend::Soft,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::AesNi(_) => Backend::AesNi,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(_) => Backend::Vaes,
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(_) => Backend::ArmAes,
@@ -205,9 +221,9 @@ impl Key {
     pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; 16]]) {
         match &self.imp {
             Imp::Soft(k) => k.encrypt_blocks(blocks),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::AesNi(k) => k.encrypt_blocks(blocks),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(k) => k.encrypt_blocks(blocks),
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(k) => k.encrypt_blocks(blocks),
@@ -224,9 +240,9 @@ impl Key {
     pub(crate) fn ctr32_xor(&self, ctr: &[u8; 16], in_out: &mut [u8]) {
         match &self.imp {
             Imp::Soft(k) => ctr32_xor_generic(|b| k.encrypt_blocks(b), ctr, in_out),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::AesNi(k) => k.ctr32_xor(ctr, in_out),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(k) => k.ctr32_xor(ctr, in_out),
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(k) => k.ctr32_xor(ctr, in_out),

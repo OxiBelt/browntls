@@ -23,7 +23,7 @@ mod aarch64;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 mod soft;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
 use crate::Error;
@@ -105,7 +105,7 @@ impl GhashBackend {
 #[allow(clippy::large_enum_variant)]
 enum GhashKey {
     Soft(soft::Key),
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Clmul(x86::Key),
     #[cfg(target_arch = "aarch64")]
     Pmull(aarch64::Key),
@@ -124,7 +124,7 @@ impl GhashKey {
         }
         Ok(match backend {
             GhashBackend::Soft => Self::Soft(soft::Key::new(h)),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             GhashBackend::Clmul => Self::Clmul(x86::Key::new(h)),
             #[cfg(target_arch = "aarch64")]
             GhashBackend::Pmull => Self::Pmull(aarch64::Key::new(h)),
@@ -142,7 +142,7 @@ impl GhashKey {
     fn backend(&self) -> GhashBackend {
         match self {
             Self::Soft(_) => GhashBackend::Soft,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Clmul(_) => GhashBackend::Clmul,
             #[cfg(target_arch = "aarch64")]
             Self::Pmull(_) => GhashBackend::Pmull,
@@ -159,7 +159,7 @@ impl GhashKey {
     fn update(&self, y: &mut [u8; 16], blocks: &[u8]) {
         match self {
             Self::Soft(k) => k.update(y, blocks),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Clmul(k) => k.update(y, blocks),
             #[cfg(target_arch = "aarch64")]
             Self::Pmull(k) => k.update(y, blocks),

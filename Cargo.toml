@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/browntls-crypto",
+  "crates/browntls-pki",
+  "crates/browntls",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+repository = "https://github.com/OxiBelt/browntls"
+publish = false
+
+[workspace.dependencies]
+browntls-crypto = { path = "crates/browntls-crypto", version = "=0.1.0-dev", default-features = false }
+browntls-pki = { path = "crates/browntls-pki", version = "=0.1.0-dev", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(browntls_force_soft)',
+  'cfg(browntls_assume_riscv, values("v", "zvkned", "zvknha", "zvknhb", "zvkg", "zvbc", "zvbb", "zvkb", "zbb", "zbc", "zbkb", "zbkc", "zknh", "zkne", "zknd"))',
+] }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "warn"
+cast_lossless = "warn"
+manual_assert = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+opt-level = 2
+debug = "line-tables-only"
+debug-assertions = true
+overflow-checks = true
+
+[profile.bench]
+debug = true

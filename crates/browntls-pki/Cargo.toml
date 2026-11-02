@@ -1,0 +1,22 @@
+[package]
+name = "browntls-pki"
+description = "PKI types and X.509 certificate path validation for browntls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dependencies]
+
+[dev-dependencies]
+hex = "0.4"
+
+[lints]
+workspace = true

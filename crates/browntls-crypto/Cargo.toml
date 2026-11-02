@@ -1,0 +1,43 @@
+[package]
+name = "browntls-crypto"
+description = "Cryptographic primitives with portable, SIMD and hardware-accelerated backends for browntls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["std"]
+# Enables `std`-based runtime CPU feature detection on aarch64 and std error impls.
+std = ["alloc"]
+alloc = []
+# Operating-system entropy via the `getrandom` crate on targets without a
+# built-in raw-syscall entropy source (Linux x86-64/aarch64/riscv64 use the
+# `getrandom(2)` system call directly).
+getrandom = ["dep:getrandom"]
+
+[dependencies]
+getrandom = { version = "0.4", optional = true, default-features = false }
+
+[dev-dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Independent implementations used only as differential-test oracles.
+sha2 = "0.11"
+sha3 = "0.12"
+hmac = "0.13"
+hkdf = "0.13"
+aes-gcm = "0.11"
+chacha20poly1305 = "0.11"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+ed25519-dalek = "3"
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+ml-kem = "0.3"
+
+[lints]
+workspace = true

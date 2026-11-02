@@ -9,18 +9,61 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["std", "native", "tls12", "logging"]
+default = ["std", "native", "tls12", "logging", "prefer-post-quantum"]
 std = ["alloc", "browntls-pki/std", "browntls-crypto?/std"]
 alloc = []
 tls12 = []
 logging = ["dep:log"]
+# Orders X25519MLKEM768 first in the default key-exchange group list.
+prefer-post-quantum = []
 # The built-in provider backed by `browntls-crypto`.
 native = ["dep:browntls-crypto"]
+# A provider backed by the RustCrypto crates (used by the test-suite).
+rustcrypto = [
+  "dep:aes-gcm",
+  "dep:chacha20poly1305",
+  "dep:sha2",
+  "dep:hmac",
+  "dep:x25519-dalek",
+  "dep:p256",
+  "dep:p384",
+  "dep:p521",
+  "dep:ed25519-dalek",
+  "dep:ml-kem",
+  "dep:rsa",
+  "dep:getrandom",
+  "dep:signature",
+  "dep:zeroize",
+]
 
 [dependencies]
 browntls-pki = { workspace = true, features = ["alloc"] }
 browntls-crypto = { workspace = true, optional = true }
 log = { version = "0.4", optional = true }
+
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"], optional = true }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
+hmac = { version = "0.13", default-features = false, optional = true }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"], optional = true }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"], optional = true }
+p521 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"], optional = true }
+ed25519-dalek = { version = "3", default-features = false, features = ["pkcs8", "zeroize", "alloc"], optional = true }
+ml-kem = { version = "0.3", default-features = false, features = ["zeroize", "alloc"], optional = true }
+# Verification only: RUSTSEC-2023-0071 (Marvin) affects private-key operations
+# in every published `rsa` release, so the RustCrypto provider never signs with it.
+rsa = { version = "0.10.0-rc.19", default-features = false, features = ["encoding", "sha2"], optional = true }
+getrandom = { version = "0.4", default-features = false, optional = true }
+signature = { version = "3", default-features = false, optional = true }
+zeroize = { version = "1", default-features = false, features = ["alloc"], optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+rsa = { version = "0.10.0-rc.19", default-features = false, features = ["std", "encoding", "sha2", "getrandom"] }
 
 [lints]
 workspace = true

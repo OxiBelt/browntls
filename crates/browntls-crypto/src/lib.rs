@@ -28,9 +28,12 @@ pub mod cpu;
 pub mod ct;
 pub mod rand;
 
+pub mod aead;
+
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;
+pub mod sha3;
 
 pub mod aes;
 pub mod aes_gcm;

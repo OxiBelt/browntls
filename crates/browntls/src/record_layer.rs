@@ -73,7 +73,10 @@ impl RecordLayer {
 
     /// Decrypts `encr` in place. Returns `Ok(None)` when a record was dropped
     /// as part of trial decryption.
-    pub(crate) fn decrypt_incoming<'a>(&mut self, encr: InboundOpaqueMessage<'a>) -> Result<Option<Decrypted<'a>>, Error> {
+    pub(crate) fn decrypt_incoming<'a>(
+        &mut self,
+        encr: InboundOpaqueMessage<'a>,
+    ) -> Result<Option<Decrypted<'a>>, Error> {
         if self.decrypt_state != DirectionState::Active {
             return Ok(Some(Decrypted {
                 want_close_before_decrypt: false,
@@ -103,7 +106,10 @@ impl RecordLayer {
     }
 
     /// Encrypts `plain` with the current write key and sequence number.
-    pub(crate) fn encrypt_outgoing(&mut self, plain: OutboundPlainMessage<'_>) -> Result<OutboundOpaqueMessage, Error> {
+    pub(crate) fn encrypt_outgoing(
+        &mut self,
+        plain: OutboundPlainMessage<'_>,
+    ) -> Result<OutboundOpaqueMessage, Error> {
         if self.encrypt_state != DirectionState::Active {
             return Err(Error::EncryptError);
         }
@@ -116,7 +122,11 @@ impl RecordLayer {
     }
 
     /// Installs a new encrypter and resets the write sequence number.
-    pub(crate) fn set_message_encrypter(&mut self, cipher: Box<dyn MessageEncrypter>, confidentiality_limit: u64) {
+    pub(crate) fn set_message_encrypter(
+        &mut self,
+        cipher: Box<dyn MessageEncrypter>,
+        confidentiality_limit: u64,
+    ) {
         self.prepare_message_encrypter(cipher, confidentiality_limit);
         self.start_encrypting();
     }
@@ -130,7 +140,11 @@ impl RecordLayer {
 
     /// Like `set_message_decrypter`, but up to `max_length` bytes of records
     /// that fail to decrypt are dropped silently.
-    pub(crate) fn set_message_decrypter_with_trial_decryption(&mut self, cipher: Box<dyn MessageDecrypter>, max_length: usize) {
+    pub(crate) fn set_message_decrypter_with_trial_decryption(
+        &mut self,
+        cipher: Box<dyn MessageDecrypter>,
+        max_length: usize,
+    ) {
         self.prepare_message_decrypter(cipher);
         self.start_decrypting();
         self.trial_decryption_len = Some(max_length);
@@ -141,7 +155,11 @@ impl RecordLayer {
     }
 
     /// Stores an encrypter for later activation by `start_encrypting`.
-    pub(crate) fn prepare_message_encrypter(&mut self, cipher: Box<dyn MessageEncrypter>, confidentiality_limit: u64) {
+    pub(crate) fn prepare_message_encrypter(
+        &mut self,
+        cipher: Box<dyn MessageEncrypter>,
+        confidentiality_limit: u64,
+    ) {
         self.message_encrypter = cipher;
         self.write_seq = 0;
         self.encrypt_state = DirectionState::Prepared;
@@ -200,7 +218,10 @@ impl RecordLayer {
     }
 
     fn doing_trial_decryption(&mut self, requested: usize) -> bool {
-        match self.trial_decryption_len.and_then(|value| value.checked_sub(requested)) {
+        match self
+            .trial_decryption_len
+            .and_then(|value| value.checked_sub(requested))
+        {
             Some(remaining) => {
                 self.trial_decryption_len = Some(remaining);
                 true
@@ -231,7 +252,11 @@ mod tests {
     fn plaintext_passes_through_when_inactive() {
         let mut rl = RecordLayer::new();
         let mut payload = [1u8, 2, 3];
-        let msg = InboundOpaqueMessage::new(ContentType::Handshake, ProtocolVersion::TLSv1_2, &mut payload);
+        let msg = InboundOpaqueMessage::new(
+            ContentType::Handshake,
+            ProtocolVersion::TLSv1_2,
+            &mut payload,
+        );
         let out = rl.decrypt_incoming(msg).unwrap().unwrap();
         assert_eq!(out.plaintext.payload, [1, 2, 3]);
         assert!(!rl.is_decrypting());

@@ -43,7 +43,7 @@ log = { version = "0.4", optional = true }
 
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
-sha2 = { version = "0.11", default-features = false, optional = true }
+sha2 = { version = "0.11", default-features = false, features = ["oid"], optional = true }
 hmac = { version = "0.13", default-features = false, optional = true }
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"], optional = true }
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "pkcs8", "alloc"], optional = true }

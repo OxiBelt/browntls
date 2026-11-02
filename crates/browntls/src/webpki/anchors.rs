@@ -111,6 +111,9 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
         assert_eq!(store.subjects()[0].as_ref(), [0x30, 2, 0x31, 0]);
-        assert_eq!(alloc::format!("{store:?}"), "RootCertStore { roots: (1 anchors) }");
+        assert_eq!(
+            alloc::format!("{store:?}"),
+            "RootCertStore { roots: (1 anchors) }"
+        );
     }
 }

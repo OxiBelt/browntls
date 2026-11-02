@@ -62,8 +62,8 @@ pub use crate::enums::{
     HandshakeType, ProtocolVersion, SignatureAlgorithm, SignatureScheme,
 };
 pub use crate::error::{
-    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage,
-    OtherError, PeerIncompatible, PeerMisbehaved,
+    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage, OtherError,
+    PeerIncompatible, PeerMisbehaved,
 };
 pub use crate::key_log::{KeyLog, NoKeyLog};
 pub use crate::msgs::enums::NamedGroup;

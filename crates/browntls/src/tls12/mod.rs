@@ -108,16 +108,27 @@ impl ConnectionSecrets {
         };
         let (label, seed): (&[u8], Vec<u8>) = match ems_seed {
             Some(seed) => (b"extended master secret", seed.as_ref().to_vec()),
-            None => (b"master secret", join_randoms(&ret.randoms.client, &ret.randoms.server)),
+            None => (
+                b"master secret",
+                join_randoms(&ret.randoms.client, &ret.randoms.server),
+            ),
         };
-        ret.suite
-            .prf_provider
-            .for_key_exchange(&mut ret.master_secret, kx, peer_pub_key, label, &seed)?;
+        ret.suite.prf_provider.for_key_exchange(
+            &mut ret.master_secret,
+            kx,
+            peer_pub_key,
+            label,
+            &seed,
+        )?;
         Ok(ret)
     }
 
     /// Reinstates a resumed session's master secret.
-    pub(crate) fn new_resume(randoms: ConnectionRandoms, suite: &'static Tls12CipherSuite, master_secret: &[u8]) -> Self {
+    pub(crate) fn new_resume(
+        randoms: ConnectionRandoms,
+        suite: &'static Tls12CipherSuite,
+        master_secret: &[u8],
+    ) -> Self {
         let mut ret = Self {
             randoms,
             suite,
@@ -148,7 +159,10 @@ impl ConnectionSecrets {
                 .suite
                 .aead_alg
                 .encrypter(AeadKey::new(write_key), write_iv, write_extra),
-            dec: self.suite.aead_alg.decrypter(AeadKey::new(read_key), read_iv),
+            dec: self
+                .suite
+                .aead_alg
+                .decrypter(AeadKey::new(read_key), read_iv),
         };
         let mut key_block = key_block;
         crate::crypto::zeroize_vec(&mut key_block);
@@ -176,9 +190,12 @@ impl ConnectionSecrets {
 
     fn make_verify_data(&self, handshake_hash: &hash::Output, label: &[u8]) -> Vec<u8> {
         let mut out = alloc::vec![0u8; 12];
-        self.suite
-            .prf_provider
-            .for_secret(&mut out, &self.master_secret, label, handshake_hash.as_ref());
+        self.suite.prf_provider.for_secret(
+            &mut out,
+            &self.master_secret,
+            label,
+            handshake_hash.as_ref(),
+        );
         out
     }
 
@@ -191,7 +208,12 @@ impl ConnectionSecrets {
     }
 
     /// RFC 5705 keying material export.
-    pub(crate) fn export_keying_material(&self, output: &mut [u8], label: &[u8], context: Option<&[u8]>) {
+    pub(crate) fn export_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) {
         let mut seed = join_randoms(&self.randoms.client, &self.randoms.server);
         if let Some(context) = context {
             // Context lengths are bounded by callers at u16::MAX.
@@ -212,14 +234,14 @@ impl ConnectionSecrets {
         let (server_iv, rest) = rest.split_at(shape.fixed_iv_len);
         let (client_extra, rest) = rest.split_at(shape.explicit_nonce_len);
         let (server_extra, _) = rest.split_at(shape.explicit_nonce_len);
-        let client = self
-            .suite
-            .aead_alg
-            .extract_keys(AeadKey::new(client_key), client_iv, client_extra)?;
-        let server = self
-            .suite
-            .aead_alg
-            .extract_keys(AeadKey::new(server_key), server_iv, server_extra)?;
+        let client =
+            self.suite
+                .aead_alg
+                .extract_keys(AeadKey::new(client_key), client_iv, client_extra)?;
+        let server =
+            self.suite
+                .aead_alg
+                .extract_keys(AeadKey::new(server_key), server_iv, server_extra)?;
         let mut key_block = key_block;
         crate::crypto::zeroize_vec(&mut key_block);
         Ok(match side {

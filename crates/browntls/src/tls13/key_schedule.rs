@@ -133,12 +133,17 @@ impl KeySchedule {
             .extract_from_zero_ikm(Some(salt.as_ref()));
     }
 
-    fn input_kx_secret(&mut self, kx: Box<dyn ActiveKeyExchange>, peer_pub_key: &[u8]) -> Result<(), Error> {
+    fn input_kx_secret(
+        &mut self,
+        kx: Box<dyn ActiveKeyExchange>,
+        peer_pub_key: &[u8],
+    ) -> Result<(), Error> {
         let salt = self.derive_for_empty_hash();
-        self.current = self
-            .suite
-            .hkdf_provider
-            .extract_from_kx_shared_secret(Some(salt.as_ref()), kx, peer_pub_key)?;
+        self.current = self.suite.hkdf_provider.extract_from_kx_shared_secret(
+            Some(salt.as_ref()),
+            kx,
+            peer_pub_key,
+        )?;
         Ok(())
     }
 
@@ -156,9 +161,10 @@ impl KeySchedule {
     fn set_encrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
-        common
-            .record_layer
-            .set_message_encrypter(self.suite.aead_alg.encrypter(key, iv), self.suite.common.confidentiality_limit);
+        common.record_layer.set_message_encrypter(
+            self.suite.aead_alg.encrypter(key, iv),
+            self.suite.common.confidentiality_limit,
+        );
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
@@ -190,7 +196,12 @@ impl KeySchedule {
 ///
 /// The `HkdfLabel` structure is `u16 length; opaque label<7..255> = "tls13 " + label;
 /// opaque context<0..255>`.
-pub(crate) fn hkdf_expand_label(expander: &dyn HkdfExpander, label: &[u8], context: &[u8], output: &mut [u8]) {
+pub(crate) fn hkdf_expand_label(
+    expander: &dyn HkdfExpander,
+    label: &[u8],
+    context: &[u8],
+    output: &mut [u8],
+) {
     const LABEL_PREFIX: &[u8] = b"tls13 ";
     // Output lengths are bounded by callers; labels and contexts are at most 255 bytes.
     let output_len = (output.len() as u16).to_be_bytes();
@@ -209,7 +220,11 @@ pub(crate) fn hkdf_expand_label(expander: &dyn HkdfExpander, label: &[u8], conte
 }
 
 /// `HKDF-Expand-Label` producing one hash-length block.
-pub(crate) fn hkdf_expand_label_block(expander: &dyn HkdfExpander, label: &[u8], context: &[u8]) -> OkmBlock {
+pub(crate) fn hkdf_expand_label_block(
+    expander: &dyn HkdfExpander,
+    label: &[u8],
+    context: &[u8],
+) -> OkmBlock {
     const LABEL_PREFIX: &[u8] = b"tls13 ";
     let output_len = (expander.hash_len() as u16).to_be_bytes();
     let label_len = [(LABEL_PREFIX.len() + label.len()) as u8];
@@ -226,7 +241,10 @@ pub(crate) fn hkdf_expand_label_block(expander: &dyn HkdfExpander, label: &[u8],
 }
 
 /// Derives the traffic key and IV from a traffic secret's expander.
-pub(crate) fn derive_traffic_key_iv(expander: &dyn HkdfExpander, aead_key_len: usize) -> (AeadKey, Iv) {
+pub(crate) fn derive_traffic_key_iv(
+    expander: &dyn HkdfExpander,
+    aead_key_len: usize,
+) -> (AeadKey, Iv) {
     let mut key = [0u8; AeadKey::MAX_LEN];
     hkdf_expand_label(expander, b"key", &[], &mut key[..aead_key_len]);
     let aead_key = AeadKey::new(&key[..aead_key_len]);
@@ -270,9 +288,14 @@ impl KeyScheduleEarly {
     }
 
     /// `HMAC(binder_key, hs_hash)` for the `pre_shared_key` binder.
-    pub(crate) fn resumption_psk_binder_key_and_sign_verify_data(&self, hs_hash: &[u8]) -> hmac::Tag {
+    pub(crate) fn resumption_psk_binder_key_and_sign_verify_data(
+        &self,
+        hs_hash: &[u8],
+    ) -> hmac::Tag {
         let empty_hash = self.ks.suite.common.hash_provider.hash(&[]);
-        let binder_key = self.ks.derive(SecretKind::ResumptionPskBinderKey, empty_hash.as_ref());
+        let binder_key = self
+            .ks
+            .derive(SecretKind::ResumptionPskBinderKey, empty_hash.as_ref());
         self.ks.sign_finish(&binder_key, hs_hash)
     }
 
@@ -294,13 +317,20 @@ impl KeySchedulePreHandshake {
     }
 
     /// Mixes in the (EC)DHE shared secret.
-    pub(crate) fn into_handshake(mut self, kx: Box<dyn ActiveKeyExchange>, peer_pub_key: &[u8]) -> Result<KeyScheduleHandshakeStart, Error> {
+    pub(crate) fn into_handshake(
+        mut self,
+        kx: Box<dyn ActiveKeyExchange>,
+        peer_pub_key: &[u8],
+    ) -> Result<KeyScheduleHandshakeStart, Error> {
         self.ks.input_kx_secret(kx, peer_pub_key)?;
         Ok(KeyScheduleHandshakeStart { ks: self.ks })
     }
 
     /// Mixes in an already-computed shared secret.
-    pub(crate) fn into_handshake_with_shared_secret(mut self, secret: &SharedSecret) -> KeyScheduleHandshakeStart {
+    pub(crate) fn into_handshake_with_shared_secret(
+        mut self,
+        secret: &SharedSecret,
+    ) -> KeyScheduleHandshakeStart {
         self.ks.input_shared_secret(secret);
         KeyScheduleHandshakeStart { ks: self.ks }
     }
@@ -350,7 +380,12 @@ impl KeyScheduleHandshakeStart {
         }
     }
 
-    fn derive(&self, hs_hash: &[u8], key_log: &dyn KeyLog, client_random: &[u8; 32]) -> (OkmBlock, OkmBlock) {
+    fn derive(
+        &self,
+        hs_hash: &[u8],
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+    ) -> (OkmBlock, OkmBlock) {
         let client = self.ks.derive_logged_secret(
             SecretKind::ClientHandshakeTrafficSecret,
             hs_hash,
@@ -378,11 +413,18 @@ impl KeyScheduleHandshake {
     /// Installs the client handshake key in the pending direction (used after
     /// early data finishes).
     pub(crate) fn set_handshake_encrypter(&self, common: &mut CommonState) {
-        self.ks.set_encrypter(&self.client_handshake_traffic_secret, common);
+        self.ks
+            .set_encrypter(&self.client_handshake_traffic_secret, common);
     }
 
-    pub(crate) fn set_handshake_decrypter(&self, skip_requested: Option<usize>, common: &mut CommonState) {
-        let decrypter = self.ks.derive_decrypter(&self.client_handshake_traffic_secret);
+    pub(crate) fn set_handshake_decrypter(
+        &self,
+        skip_requested: Option<usize>,
+        common: &mut CommonState,
+    ) {
+        let decrypter = self
+            .ks
+            .derive_decrypter(&self.client_handshake_traffic_secret);
         match skip_requested {
             Some(max_early_data) => common
                 .record_layer
@@ -392,11 +434,13 @@ impl KeyScheduleHandshake {
     }
 
     pub(crate) fn sign_server_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
-        self.ks.sign_finish(&self.server_handshake_traffic_secret, hs_hash)
+        self.ks
+            .sign_finish(&self.server_handshake_traffic_secret, hs_hash)
     }
 
     pub(crate) fn sign_client_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
-        self.ks.sign_finish(&self.client_handshake_traffic_secret, hs_hash)
+        self.ks
+            .sign_finish(&self.client_handshake_traffic_secret, hs_hash)
     }
 
     /// Mixes in the empty master-secret input and derives the application
@@ -412,7 +456,9 @@ impl KeyScheduleHandshake {
         self.ks.input_empty();
         let traffic = KeyScheduleTraffic::new(self.ks, hs_hash, key_log, client_random);
         if common.side == Side::Server {
-            traffic.ks.set_encrypter(&traffic.current_server_traffic_secret, common);
+            traffic
+                .ks
+                .set_encrypter(&traffic.current_server_traffic_secret, common);
         }
         KeyScheduleTrafficWithClientFinishedPending {
             handshake_client_traffic_secret: self.client_handshake_traffic_secret,
@@ -468,7 +514,12 @@ pub(crate) struct KeyScheduleTraffic {
 }
 
 impl KeyScheduleTraffic {
-    fn new(ks: KeySchedule, hs_hash: &[u8], key_log: &dyn KeyLog, client_random: &[u8; 32]) -> Self {
+    fn new(
+        ks: KeySchedule,
+        hs_hash: &[u8],
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+    ) -> Self {
         let current_client_traffic_secret = ks.derive_logged_secret(
             SecretKind::ClientApplicationTrafficSecret,
             hs_hash,
@@ -481,8 +532,12 @@ impl KeyScheduleTraffic {
             key_log,
             client_random,
         );
-        let current_exporter_secret =
-            ks.derive_logged_secret(SecretKind::ExporterMasterSecret, hs_hash, key_log, client_random);
+        let current_exporter_secret = ks.derive_logged_secret(
+            SecretKind::ExporterMasterSecret,
+            hs_hash,
+            key_log,
+            client_random,
+        );
         Self {
             ks,
             current_client_traffic_secret,
@@ -515,7 +570,11 @@ impl KeyScheduleTraffic {
 
     /// `HKDF-Expand-Label(Derive-Secret(resumption_master_secret, "res master",
     /// hs_hash), "resumption", nonce, Hash.length)`.
-    pub(crate) fn resumption_master_secret_and_derive_ticket_psk(&self, hs_hash: &[u8], nonce: &[u8]) -> Vec<u8> {
+    pub(crate) fn resumption_master_secret_and_derive_ticket_psk(
+        &self,
+        hs_hash: &[u8],
+        nonce: &[u8],
+    ) -> Vec<u8> {
         let rms = self.ks.derive(SecretKind::ResumptionMasterSecret, hs_hash);
         let expander = self.ks.suite.hkdf_provider.expander_for_okm(&rms);
         let mut out = alloc::vec![0u8; self.ks.hash_len()];
@@ -524,13 +583,22 @@ impl KeyScheduleTraffic {
     }
 
     /// RFC 8446 §7.5 and RFC 5705 exporter.
-    pub(crate) fn export_keying_material(&self, out: &mut [u8], label: &[u8], context: Option<&[u8]>) -> Result<(), Error> {
+    pub(crate) fn export_keying_material(
+        &self,
+        out: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), Error> {
         if out.len() > 255 * self.ks.hash_len() {
             return Err(Error::general("exporter output too long"));
         }
         let hash = self.ks.suite.common.hash_provider;
         let empty_hash = hash.hash(&[]);
-        let expander = self.ks.suite.hkdf_provider.expander_for_okm(&self.current_exporter_secret);
+        let expander = self
+            .ks
+            .suite
+            .hkdf_provider
+            .expander_for_okm(&self.current_exporter_secret);
         let secret = hkdf_expand_label_block(&*expander, label, empty_hash.as_ref());
         let context_hash = hash.hash(context.unwrap_or(&[]));
         let expander = self.ks.suite.hkdf_provider.expander_for_okm(&secret);
@@ -563,4 +631,3 @@ impl KeyScheduleTraffic {
         self.ks.suite
     }
 }
-

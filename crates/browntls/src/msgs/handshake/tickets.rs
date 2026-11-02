@@ -126,12 +126,20 @@ mod tests {
     #[test]
     fn tls12_ticket() {
         let t = NewSessionTicketPayload::new(300, alloc::vec![1, 2]);
-        assert_eq!(NewSessionTicketPayload::read_bytes(&t.get_encoding()).unwrap(), t);
+        assert_eq!(
+            NewSessionTicketPayload::read_bytes(&t.get_encoding()).unwrap(),
+            t
+        );
     }
 
     #[test]
     fn tls13_ticket() {
-        let mut t = NewSessionTicketPayloadTls13::new(7200, 0xdead_beef, alloc::vec![0], alloc::vec![9; 40]);
+        let mut t = NewSessionTicketPayloadTls13::new(
+            7200,
+            0xdead_beef,
+            alloc::vec![0],
+            alloc::vec![9; 40],
+        );
         t.exts.max_early_data_size = Some(1024);
         let enc = t.get_encoding();
         assert_eq!(NewSessionTicketPayloadTls13::read_bytes(&enc).unwrap(), t);

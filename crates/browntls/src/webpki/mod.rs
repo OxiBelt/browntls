@@ -50,7 +50,9 @@ pub(crate) fn pki_error(error: browntls_pki::Error) -> Error {
         CertNotValidYet { time, not_before } => {
             CertificateError::NotValidYetContext { time, not_before }.into()
         }
-        CertExpired { time, not_after } => CertificateError::ExpiredContext { time, not_after }.into(),
+        CertExpired { time, not_after } => {
+            CertificateError::ExpiredContext { time, not_after }.into()
+        }
         InvalidCertValidity => CertificateError::Expired.into(),
         UnknownIssuer => CertificateError::UnknownIssuer.into(),
         CertNotValidForName => CertificateError::NotValidForName.into(),

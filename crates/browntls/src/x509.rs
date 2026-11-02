@@ -22,7 +22,10 @@ fn encode_length(len: usize, out: &mut Vec<u8>) {
         return;
     }
     let bytes = len.to_be_bytes();
-    let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len() - 1);
+    let first = bytes
+        .iter()
+        .position(|b| *b != 0)
+        .unwrap_or(bytes.len() - 1);
     let significant = &bytes[first..];
     // At most 8 significant bytes on any platform, so this fits.
     out.push(0x80 | significant.len() as u8);
@@ -100,7 +103,11 @@ impl<'a> Der<'a> {
     }
 
     fn done(&self) -> Result<(), ()> {
-        if self.input.is_empty() { Ok(()) } else { Err(()) }
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 }
 

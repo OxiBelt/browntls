@@ -14,7 +14,9 @@ use crate::msgs::base::Payload;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
 use crate::msgs::handshake::CertificateChain;
-use crate::msgs::message::{Message, MessagePayload, OutboundChunks, OutboundPlainMessage, PlainMessage};
+use crate::msgs::message::{
+    Message, MessagePayload, OutboundChunks, OutboundPlainMessage, PlainMessage,
+};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
 use crate::vecbuf::ChunkVecBuffer;
@@ -281,13 +283,19 @@ impl CommonState {
 
     /// Fragments and encrypts application data, honouring the confidentiality
     /// limit. Returns how much of `payload` was taken.
-    pub(crate) fn send_appdata_encrypt(&mut self, payload: OutboundChunks<'_>, limit: Limit) -> usize {
+    pub(crate) fn send_appdata_encrypt(
+        &mut self,
+        payload: OutboundChunks<'_>,
+        limit: Limit,
+    ) -> usize {
         let len = match limit {
             Limit::Yes => self.sendable_tls.apply_limit(payload.len()),
             Limit::No => payload.len(),
         };
         let payload = payload.split_at(len).0;
-        let fragments = len.div_ceil(self.message_fragmenter.max_fragment_len()).max(1);
+        let fragments = len
+            .div_ceil(self.message_fragmenter.max_fragment_len())
+            .max(1);
 
         match self.record_layer.pre_encrypt_action(fragments as u64) {
             PreEncryptAction::Nothing => {}
@@ -332,7 +340,11 @@ impl CommonState {
     }
 
     /// Sends a fatal alert (once) and returns `err` for the caller to surface.
-    pub(crate) fn send_fatal_alert(&mut self, desc: AlertDescription, err: impl Into<Error>) -> Error {
+    pub(crate) fn send_fatal_alert(
+        &mut self,
+        desc: AlertDescription,
+        err: impl Into<Error>,
+    ) -> Error {
         if !self.sent_fatal_alert {
             debug!("Sending fatal alert {:?}", desc);
             self.send_alert(AlertLevel::Fatal, desc);
@@ -377,7 +389,8 @@ impl CommonState {
             return Ok(());
         }
 
-        if alert.level == AlertLevel::Warning && alert.description == AlertDescription::UserCanceled {
+        if alert.level == AlertLevel::Warning && alert.description == AlertDescription::UserCanceled
+        {
             // RFC 8446 §6.1: user_canceled is informational and followed by close_notify.
             return Ok(());
         }
@@ -406,7 +419,11 @@ impl CommonState {
     /// TLS 1.2: installs the record ciphers derived from `secrets`. Encryption
     /// starts when we send ChangeCipherSpec; decryption when we receive it.
     #[cfg(feature = "tls12")]
-    pub(crate) fn start_encryption_tls12(&mut self, secrets: &crate::tls12::ConnectionSecrets, side: Side) {
+    pub(crate) fn start_encryption_tls12(
+        &mut self,
+        secrets: &crate::tls12::ConnectionSecrets,
+        side: Side,
+    ) {
         let pair = secrets.make_cipher_pair(side);
         self.record_layer
             .prepare_message_encrypter(pair.enc, secrets.suite().common.confidentiality_limit);
@@ -448,7 +465,8 @@ impl CommonState {
 
     /// Buffers application data for after the handshake.
     pub(crate) fn buffer_plaintext(&mut self, payload: OutboundChunks<'_>) -> usize {
-        self.sendable_plaintext.append_limited_copy(&payload.to_vec())
+        self.sendable_plaintext
+            .append_limited_copy(&payload.to_vec())
     }
 
     /// Sends application data now, or buffers it until the handshake finishes.

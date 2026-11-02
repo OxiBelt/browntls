@@ -143,13 +143,18 @@ impl Codec<'_> for ServerKeyExchangePayload {
 
 impl ServerKeyExchangePayload {
     /// Decodes the opaque payload now that the key exchange algorithm is known.
-    pub(crate) fn unwrap_given_kxa(&self, kxa: KeyExchangeAlgorithm) -> Result<ServerKeyExchange, InvalidMessage> {
+    pub(crate) fn unwrap_given_kxa(
+        &self,
+        kxa: KeyExchangeAlgorithm,
+    ) -> Result<ServerKeyExchange, InvalidMessage> {
         match self {
             Self::Known(x) => Ok(x.clone()),
             Self::Unknown(unk) => {
                 let mut r = Reader::init(unk.bytes());
                 let params = match kxa {
-                    KeyExchangeAlgorithm::ECDHE => ServerKeyExchangeParams::Ecdh(ServerEcdhParams::read(&mut r)?),
+                    KeyExchangeAlgorithm::ECDHE => {
+                        ServerKeyExchangeParams::Ecdh(ServerEcdhParams::read(&mut r)?)
+                    }
                     other => return Err(InvalidMessage::UnsupportedKeyExchangeAlgorithm(other)),
                 };
                 let dss = DigitallySignedStruct::read(&mut r)?;
@@ -168,20 +173,33 @@ mod tests {
     #[test]
     fn ecdhe_server_kx_roundtrip() {
         let skx = ServerKeyExchange {
-            params: ServerKeyExchangeParams::Ecdh(ServerEcdhParams::new(NamedGroup::X25519, &[1; 32])),
+            params: ServerKeyExchangeParams::Ecdh(ServerEcdhParams::new(
+                NamedGroup::X25519,
+                &[1; 32],
+            )),
             dss: DigitallySignedStruct::new(SignatureScheme::ED25519, alloc::vec![2; 64]),
         };
         let mut enc = Vec::new();
         skx.encode(&mut enc);
         let opaque = ServerKeyExchangePayload::read_bytes(&enc).unwrap();
-        assert_eq!(opaque.unwrap_given_kxa(KeyExchangeAlgorithm::ECDHE).unwrap(), skx);
+        assert_eq!(
+            opaque
+                .unwrap_given_kxa(KeyExchangeAlgorithm::ECDHE)
+                .unwrap(),
+            skx
+        );
         assert_eq!(
             opaque.unwrap_given_kxa(KeyExchangeAlgorithm::DHE),
-            Err(InvalidMessage::UnsupportedKeyExchangeAlgorithm(KeyExchangeAlgorithm::DHE))
+            Err(InvalidMessage::UnsupportedKeyExchangeAlgorithm(
+                KeyExchangeAlgorithm::DHE
+            ))
         );
         // explicit curve type is refused
         let bad = [1, 0, 0x1d, 1, 1];
-        assert_eq!(ServerEcdhParams::read_bytes(&bad), Err(InvalidMessage::UnsupportedCurveType));
+        assert_eq!(
+            ServerEcdhParams::read_bytes(&bad),
+            Err(InvalidMessage::UnsupportedCurveType)
+        );
         // empty point refused
         assert_eq!(
             ClientEcdhParams::read_bytes(&[0]),

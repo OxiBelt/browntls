@@ -140,10 +140,12 @@ pub(crate) fn compatible_sigscheme_for_suites(
     sigscheme: SignatureScheme,
     common_suites: &[SupportedCipherSuite],
 ) -> bool {
-    common_suites.iter().any(|&suite| match sigscheme.algorithm() {
-        Some(sigalg) => suite.usable_for_signature_algorithm(sigalg),
-        None => suite.tls13().is_some(),
-    })
+    common_suites
+        .iter()
+        .any(|&suite| match sigscheme.algorithm() {
+            Some(sigalg) => suite.usable_for_signature_algorithm(sigalg),
+            None => suite.tls13().is_some(),
+        })
 }
 
 /// Traffic secrets extracted from a connection, with their next sequence numbers.

@@ -40,7 +40,12 @@ impl Prf for PrfUsingHmac<'_> {
         seed: &[u8],
     ) -> Result<(), Error> {
         let secret = kx.complete_for_tls_version(peer_pub_key, &TLS12)?;
-        prf(output, &*self.0.with_key(secret.secret_bytes()), label, seed);
+        prf(
+            output,
+            &*self.0.with_key(secret.secret_bytes()),
+            label,
+            seed,
+        );
         Ok(())
     }
 

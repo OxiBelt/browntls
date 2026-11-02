@@ -197,7 +197,10 @@ mod tests {
         let p24 = PayloadU24(Payload::Borrowed(&[1, 2, 3]));
         assert_eq!(p24.get_encoding(), [0, 0, 3, 1, 2, 3]);
         assert_eq!(
-            PayloadU24::read_bytes(&[0, 0, 3, 1, 2, 3]).unwrap().0.bytes(),
+            PayloadU24::read_bytes(&[0, 0, 3, 1, 2, 3])
+                .unwrap()
+                .0
+                .bytes(),
             [1, 2, 3]
         );
 

@@ -25,7 +25,11 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 
     /// Converts the traffic key and IV into a form usable outside the library
     /// (kernel TLS offload).
-    fn extract_keys(&self, key: AeadKey, iv: Iv) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError>;
+    fn extract_keys(
+        &self,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError>;
 
     /// Whether the implementation is FIPS validated.
     fn fips(&self) -> bool {
@@ -101,7 +105,11 @@ pub trait MessageDecrypter: Send + Sync {
 /// Encrypts records.
 pub trait MessageEncrypter: Send + Sync {
     /// Encrypts `msg`; `seq` is the record sequence number.
-    fn encrypt(&mut self, msg: OutboundPlainMessage<'_>, seq: u64) -> Result<OutboundOpaqueMessage, Error>;
+    fn encrypt(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<OutboundOpaqueMessage, Error>;
 
     /// The ciphertext length (excluding the record header) for a plaintext of `payload_len`.
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
@@ -205,7 +213,12 @@ pub fn make_tls13_aad(payload_len: usize) -> [u8; 5] {
 
 /// The TLS 1.2 additional data (RFC 5246 §6.2.3.3).
 #[inline]
-pub fn make_tls12_aad(seq: u64, typ: ContentType, vers: ProtocolVersion, len: usize) -> [u8; TLS12_AAD_SIZE] {
+pub fn make_tls12_aad(
+    seq: u64,
+    typ: ContentType,
+    vers: ProtocolVersion,
+    len: usize,
+) -> [u8; TLS12_AAD_SIZE] {
     let mut out = [0u8; TLS12_AAD_SIZE];
     put_u64(seq, &mut out[..8]);
     out[8] = typ.into();
@@ -278,7 +291,11 @@ impl fmt::Debug for AeadKey {
 struct InvalidMessageEncrypter;
 
 impl MessageEncrypter for InvalidMessageEncrypter {
-    fn encrypt(&mut self, _m: OutboundPlainMessage<'_>, _seq: u64) -> Result<OutboundOpaqueMessage, Error> {
+    fn encrypt(
+        &mut self,
+        _m: OutboundPlainMessage<'_>,
+        _seq: u64,
+    ) -> Result<OutboundOpaqueMessage, Error> {
         Err(Error::EncryptError)
     }
 
@@ -307,7 +324,12 @@ mod tests {
     fn nonce_xors_sequence() {
         let iv = Iv::new([0xff; 12]);
         let n = Nonce::new(&iv, 1);
-        assert_eq!(n.0, [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe]);
+        assert_eq!(
+            n.0,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe
+            ]
+        );
     }
 
     #[test]
@@ -323,6 +345,9 @@ mod tests {
     fn key_truncation() {
         let key = AeadKey::from([7u8; 32]).with_length(16);
         assert_eq!(key.as_ref(), [7u8; 16]);
-        assert_eq!(Iv::copy(&[1, 2]).as_ref(), [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            Iv::copy(&[1, 2]).as_ref(),
+            [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
     }
 }

@@ -45,7 +45,9 @@ pub mod rustcrypto;
 pub use crate::msgs::handshake::KeyExchangeAlgorithm;
 pub use crate::rand::GetRandomFailed;
 pub use crate::suites::CipherSuiteCommon;
-pub use crate::webpki::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
+pub use crate::webpki::{
+    WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+};
 
 /// Everything the protocol needs from a cryptography library.
 #[derive(Debug, Clone)]
@@ -261,11 +263,7 @@ impl SharedSecret {
     }
 
     fn strip_leading_zeros(&mut self) {
-        let zeros = self
-            .secret_bytes()
-            .iter()
-            .take_while(|b| **b == 0)
-            .count();
+        let zeros = self.secret_bytes().iter().take_while(|b| **b == 0).count();
         self.offset += zeros;
     }
 }

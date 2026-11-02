@@ -24,7 +24,8 @@ impl Tls13CipherSuite {
     /// Whether a session created under `prev` can be resumed with this suite:
     /// the hashes must match (RFC 8446 §4.2.11).
     pub fn can_resume_from(&self, prev: &'static Self) -> Option<&'static Self> {
-        (prev.common.hash_provider.algorithm() == self.common.hash_provider.algorithm()).then_some(prev)
+        (prev.common.hash_provider.algorithm() == self.common.hash_provider.algorithm())
+            .then_some(prev)
     }
 
     /// Whether every component claims FIPS validation.

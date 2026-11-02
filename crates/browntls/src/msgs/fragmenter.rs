@@ -1,6 +1,8 @@
 //! Splitting outgoing messages into records no larger than the fragment limit.
 
-use super::message::{HEADER_SIZE, MAX_PLAINTEXT_LEN, OutboundChunks, OutboundPlainMessage, PlainMessage};
+use super::message::{
+    HEADER_SIZE, MAX_PLAINTEXT_LEN, OutboundChunks, OutboundPlainMessage, PlainMessage,
+};
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
 
@@ -129,7 +131,10 @@ mod tests {
     #[test]
     fn custom_limit() {
         let mut f = MessageFragmenter::default();
-        assert_eq!(f.set_max_fragment_size(Some(31)), Err(Error::BadMaxFragmentSize));
+        assert_eq!(
+            f.set_max_fragment_size(Some(31)),
+            Err(Error::BadMaxFragmentSize)
+        );
         assert_eq!(
             f.set_max_fragment_size(Some(MAX_PLAINTEXT_LEN + HEADER_SIZE + 1)),
             Err(Error::BadMaxFragmentSize)

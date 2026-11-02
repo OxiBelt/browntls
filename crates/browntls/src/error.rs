@@ -650,10 +650,7 @@ mod tests {
 
     #[test]
     fn conversions() {
-        assert_eq!(
-            Error::from(GetRandomFailed),
-            Error::FailedToGetRandomBytes
-        );
+        assert_eq!(Error::from(GetRandomFailed), Error::FailedToGetRandomBytes);
         assert_eq!(
             Error::from(InconsistentKeys::KeyMismatch),
             Error::InconsistentKeys(InconsistentKeys::KeyMismatch)

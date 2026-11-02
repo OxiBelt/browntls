@@ -524,7 +524,11 @@ impl<'a> MessagePayload<'a> {
     ///
     /// Handshake payloads must contain exactly one message; the deframer
     /// reassembles fragments before calling this.
-    pub fn new(typ: ContentType, vers: ProtocolVersion, payload: &'a [u8]) -> Result<Self, InvalidMessage> {
+    pub fn new(
+        typ: ContentType,
+        vers: ProtocolVersion,
+        payload: &'a [u8],
+    ) -> Result<Self, InvalidMessage> {
         let mut r = Reader::init(payload);
         match typ {
             ContentType::ApplicationData => Ok(Self::ApplicationData(Payload::Borrowed(payload))),
@@ -600,7 +604,9 @@ impl Message<'_> {
     pub fn build_key_update(request: KeyUpdateRequest) -> Self {
         Self {
             version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::KeyUpdate(request))),
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::KeyUpdate(request),
+            )),
         }
     }
 
@@ -680,7 +686,10 @@ mod tests {
 
     #[test]
     fn header_validation() {
-        assert_eq!(RecordHeader::read(&[0x16, 3]).unwrap_err(), MessageError::TooShortForHeader);
+        assert_eq!(
+            RecordHeader::read(&[0x16, 3]).unwrap_err(),
+            MessageError::TooShortForHeader
+        );
         assert_eq!(
             RecordHeader::read(&[0x99, 3, 3, 0, 1]).unwrap_err(),
             MessageError::InvalidContentType
@@ -704,26 +713,46 @@ mod tests {
     #[test]
     fn tls13_unpadding() {
         let mut body = [1u8, 2, 3, 0x16, 0, 0];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut body);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut body,
+        );
         let plain = m.into_tls13_unpadded_message().unwrap();
         assert_eq!(plain.typ, ContentType::Handshake);
         assert_eq!(plain.payload, [1, 2, 3]);
 
         let mut all_zero = [0u8; 4];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut all_zero);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut all_zero,
+        );
         assert!(m.into_tls13_unpadded_message().is_err());
 
         let mut empty_handshake = [0x16u8];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut empty_handshake);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut empty_handshake,
+        );
         assert!(m.into_tls13_unpadded_message().is_err());
 
         let mut empty_app = [0x17u8, 0, 0];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut empty_app);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut empty_app,
+        );
         let plain = m.into_tls13_unpadded_message().unwrap();
         assert!(plain.payload.is_empty());
 
         let mut unknown = [1u8, 0x99];
-        let m = InboundOpaqueMessage::new(ContentType::ApplicationData, ProtocolVersion::TLSv1_2, &mut unknown);
+        let m = InboundOpaqueMessage::new(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &mut unknown,
+        );
         assert_eq!(
             m.into_tls13_unpadded_message().unwrap_err(),
             Error::InvalidMessage(InvalidMessage::InvalidContentType)
@@ -732,10 +761,13 @@ mod tests {
 
     #[test]
     fn message_payload_parsing() {
-        let alert = MessagePayload::new(ContentType::Alert, ProtocolVersion::TLSv1_2, &[2, 40]).unwrap();
+        let alert =
+            MessagePayload::new(ContentType::Alert, ProtocolVersion::TLSv1_2, &[2, 40]).unwrap();
         assert_eq!(alert.content_type(), ContentType::Alert);
         assert!(MessagePayload::new(ContentType::Alert, ProtocolVersion::TLSv1_2, &[2]).is_err());
-        assert!(MessagePayload::new(ContentType::Heartbeat, ProtocolVersion::TLSv1_2, &[1]).is_err());
+        assert!(
+            MessagePayload::new(ContentType::Heartbeat, ProtocolVersion::TLSv1_2, &[1]).is_err()
+        );
         // two handshake messages in one payload are not a single message
         let hs = [0x0e, 0, 0, 0, 0x0e, 0, 0, 0];
         assert_eq!(

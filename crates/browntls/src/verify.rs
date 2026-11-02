@@ -237,7 +237,10 @@ mod tests {
     fn dss_roundtrip() {
         let dss = DigitallySignedStruct::new(SignatureScheme::ED25519, alloc::vec![1, 2, 3]);
         assert_eq!(dss.get_encoding(), [0x08, 0x07, 0, 3, 1, 2, 3]);
-        assert_eq!(DigitallySignedStruct::read_bytes(&dss.get_encoding()).unwrap(), dss);
+        assert_eq!(
+            DigitallySignedStruct::read_bytes(&dss.get_encoding()).unwrap(),
+            dss
+        );
         assert_eq!(
             DigitallySignedStruct::read_bytes(&[0x08, 0x07, 0, 0]),
             Err(InvalidMessage::IllegalEmptyValue)
@@ -247,8 +250,14 @@ mod tests {
 
     #[test]
     fn assertions_are_debug() {
-        assert_eq!(alloc::format!("{:?}", ClientCertVerified::assertion()), "ClientCertVerified(())");
-        assert_eq!(alloc::format!("{:?}", ServerCertVerified::assertion()), "ServerCertVerified(())");
+        assert_eq!(
+            alloc::format!("{:?}", ClientCertVerified::assertion()),
+            "ClientCertVerified(())"
+        );
+        assert_eq!(
+            alloc::format!("{:?}", ServerCertVerified::assertion()),
+            "ServerCertVerified(())"
+        );
         assert_eq!(
             alloc::format!("{:?}", HandshakeSignatureValid::assertion()),
             "HandshakeSignatureValid(())"

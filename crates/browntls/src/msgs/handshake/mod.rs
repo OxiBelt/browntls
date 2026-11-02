@@ -24,8 +24,12 @@ pub(crate) use hello::{
     ClientExtensions, HelloRetryRequest, HelloRetryRequestExtensions, ServerHelloPayload,
 };
 pub use hello::{ClientHelloPayload, HandshakeMessagePayload};
-pub(crate) use kx::{ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangePayload};
-pub(crate) use tickets::{NewSessionTicketExtensions, NewSessionTicketPayload, NewSessionTicketPayloadTls13};
+pub(crate) use kx::{
+    ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangePayload,
+};
+pub(crate) use tickets::{
+    NewSessionTicketExtensions, NewSessionTicketPayload, NewSessionTicketPayloadTls13,
+};
 
 use super::base::{Payload, PayloadU8, PayloadU16};
 use super::codec::{Codec, Reader, u24};
@@ -63,7 +67,9 @@ pub(crate) static ALL_KEY_EXCHANGE_ALGORITHMS: &[KeyExchangeAlgorithm] =
 pub(crate) struct Random(pub(crate) [u8; 32]);
 
 impl Random {
-    pub(crate) fn new(rng: &dyn crate::crypto::SecureRandom) -> Result<Self, crate::rand::GetRandomFailed> {
+    pub(crate) fn new(
+        rng: &dyn crate::crypto::SecureRandom,
+    ) -> Result<Self, crate::rand::GetRandomFailed> {
         let mut bytes = [0u8; 32];
         rng.fill(&mut bytes)?;
         Ok(Self(bytes))
@@ -98,10 +104,12 @@ impl fmt::Debug for Random {
 }
 
 /// The downgrade sentinel for TLS 1.2 (RFC 8446 §4.1.3).
-pub(crate) static DOWNGRADE_SENTINEL_TLS12: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01];
+pub(crate) static DOWNGRADE_SENTINEL_TLS12: [u8; 8] =
+    [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01];
 
 /// The downgrade sentinel for TLS 1.1 and below.
-pub(crate) static DOWNGRADE_SENTINEL_TLS11: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00];
+pub(crate) static DOWNGRADE_SENTINEL_TLS11: [u8; 8] =
+    [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00];
 
 /// The `legacy_session_id` field: 0..=32 opaque bytes.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -144,7 +152,9 @@ impl Codec<'_> for SessionId {
 }
 
 impl SessionId {
-    pub(crate) fn random(rng: &dyn crate::crypto::SecureRandom) -> Result<Self, crate::rand::GetRandomFailed> {
+    pub(crate) fn random(
+        rng: &dyn crate::crypto::SecureRandom,
+    ) -> Result<Self, crate::rand::GetRandomFailed> {
         let mut data = [0u8; 32];
         rng.fill(&mut data)?;
         Ok(Self { data, len: 32 })
@@ -364,9 +374,7 @@ pub(crate) fn read_payload<'a>(
         HandshakeType::CompressedCertificate => {
             CompressedCertificate(CompressedCertificatePayload::read(sub)?)
         }
-        HandshakeType::ServerKeyExchange => {
-            ServerKeyExchange(ServerKeyExchangePayload::read(sub)?)
-        }
+        HandshakeType::ServerKeyExchange => ServerKeyExchange(ServerKeyExchangePayload::read(sub)?),
         HandshakeType::ServerHelloDone if sub.left() == 0 => ServerHelloDone,
         HandshakeType::ClientKeyExchange => ClientKeyExchange(Payload::read(sub)),
         HandshakeType::CertificateRequest if vers == ProtocolVersion::TLSv1_3 => {
@@ -434,7 +442,10 @@ mod tests {
     fn certificate_der_codec() {
         let cert = CertificateDer::from_slice(&[1, 2, 3]);
         assert_eq!(cert.get_encoding(), [0, 0, 3, 1, 2, 3]);
-        assert_eq!(CertificateDer::read_bytes(&[0, 0, 3, 1, 2, 3]).unwrap(), cert);
+        assert_eq!(
+            CertificateDer::read_bytes(&[0, 0, 3, 1, 2, 3]).unwrap(),
+            cert
+        );
         assert_eq!(
             CertificateDer::read_bytes(&[0, 0, 0]),
             Err(InvalidMessage::IllegalEmptyValue)
@@ -449,7 +460,10 @@ mod tests {
     fn distinguished_name_codec() {
         let dn = DistinguishedName::in_sequence(&[1, 2]);
         assert_eq!(dn.as_ref(), [0x30, 2, 1, 2]);
-        assert_eq!(DistinguishedName::read_bytes(&dn.get_encoding()).unwrap(), dn);
+        assert_eq!(
+            DistinguishedName::read_bytes(&dn.get_encoding()).unwrap(),
+            dn
+        );
         assert_eq!(
             DistinguishedName::read_bytes(&[0, 0]),
             Err(InvalidMessage::IllegalEmptyValue)

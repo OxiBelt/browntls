@@ -140,10 +140,7 @@ impl u24 {
     pub(crate) const MAX: u32 = 0xff_ffff;
 
     pub(crate) fn from_usize(v: usize) -> Option<Self> {
-        u32::try_from(v)
-            .ok()
-            .filter(|v| *v <= Self::MAX)
-            .map(Self)
+        u32::try_from(v).ok().filter(|v| *v <= Self::MAX).map(Self)
     }
 }
 
@@ -404,10 +401,22 @@ mod tests {
 
     #[test]
     fn short_input_is_missing_data() {
-        assert_eq!(u16::read_bytes(&[1]), Err(InvalidMessage::MissingData("u16")));
-        assert_eq!(u24::read_bytes(&[1, 2]), Err(InvalidMessage::MissingData("u24")));
-        assert_eq!(u32::read_bytes(&[1, 2, 3]), Err(InvalidMessage::MissingData("u32")));
-        assert_eq!(u64::read_bytes(&[0; 7]), Err(InvalidMessage::MissingData("u64")));
+        assert_eq!(
+            u16::read_bytes(&[1]),
+            Err(InvalidMessage::MissingData("u16"))
+        );
+        assert_eq!(
+            u24::read_bytes(&[1, 2]),
+            Err(InvalidMessage::MissingData("u24"))
+        );
+        assert_eq!(
+            u32::read_bytes(&[1, 2, 3]),
+            Err(InvalidMessage::MissingData("u32"))
+        );
+        assert_eq!(
+            u64::read_bytes(&[0; 7]),
+            Err(InvalidMessage::MissingData("u64"))
+        );
     }
 
     #[test]
@@ -436,11 +445,19 @@ mod tests {
         let mut bytes = Vec::new();
         encode_vec_u24(&mut bytes, &items);
         assert_eq!(bytes, [0, 0, 6, 0, 1, 0, 2, 0, 3]);
-        let back: Vec<u16> =
-            read_vec_u24(&mut Reader::init(&bytes), 6, InvalidMessage::MessageTooLarge).unwrap();
+        let back: Vec<u16> = read_vec_u24(
+            &mut Reader::init(&bytes),
+            6,
+            InvalidMessage::MessageTooLarge,
+        )
+        .unwrap();
         assert_eq!(back, items);
         assert_eq!(
-            read_vec_u24::<u16>(&mut Reader::init(&bytes), 5, InvalidMessage::MessageTooLarge),
+            read_vec_u24::<u16>(
+                &mut Reader::init(&bytes),
+                5,
+                InvalidMessage::MessageTooLarge
+            ),
             Err(InvalidMessage::MessageTooLarge)
         );
 

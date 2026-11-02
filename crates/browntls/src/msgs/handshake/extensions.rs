@@ -93,8 +93,10 @@ impl ServerNamePayload<'_> {
                         // RFC 6066 §3: at most one name of each type.
                         return Err(InvalidMessage::InvalidServerName);
                     }
-                    let s = core::str::from_utf8(&value.0).map_err(|_| InvalidMessage::InvalidServerName)?;
-                    let dns = DnsName::try_from(s).map_err(|_| InvalidMessage::InvalidServerName)?;
+                    let s = core::str::from_utf8(&value.0)
+                        .map_err(|_| InvalidMessage::InvalidServerName)?;
+                    let dns =
+                        DnsName::try_from(s).map_err(|_| InvalidMessage::InvalidServerName)?;
                     name = Some(dns.to_owned());
                 }
                 _ => {
@@ -260,7 +262,11 @@ impl PresharedKeyOffer {
     /// The length of the encoded binders list, which the binder computation
     /// excludes from the transcript (RFC 8446 §4.2.11.2).
     pub(crate) fn binders_encoded_len(&self) -> usize {
-        2 + self.binders.iter().map(|b| 1 + b.as_ref().len()).sum::<usize>()
+        2 + self
+            .binders
+            .iter()
+            .map(|b| 1 + b.as_ref().len())
+            .sum::<usize>()
     }
 }
 
@@ -323,18 +329,33 @@ impl ServerExtensions {
         };
         add(self.server_name_ack.is_some(), ExtensionType::ServerName);
         add(self.alpn.is_some(), ExtensionType::ALProtocolNegotiation);
-        add(self.ec_point_formats.is_some(), ExtensionType::ECPointFormats);
+        add(
+            self.ec_point_formats.is_some(),
+            ExtensionType::ECPointFormats,
+        );
         add(
             self.extended_master_secret.is_some(),
             ExtensionType::ExtendedMasterSecret,
         );
-        add(self.session_ticket_ack.is_some(), ExtensionType::SessionTicket);
-        add(self.status_request_ack.is_some(), ExtensionType::StatusRequest);
+        add(
+            self.session_ticket_ack.is_some(),
+            ExtensionType::SessionTicket,
+        );
+        add(
+            self.status_request_ack.is_some(),
+            ExtensionType::StatusRequest,
+        );
         add(self.sct_list.is_some(), ExtensionType::SCT);
-        add(self.renegotiation_info.is_some(), ExtensionType::RenegotiationInfo);
+        add(
+            self.renegotiation_info.is_some(),
+            ExtensionType::RenegotiationInfo,
+        );
         add(self.key_share.is_some(), ExtensionType::KeyShare);
         add(self.pre_shared_key.is_some(), ExtensionType::PreSharedKey);
-        add(self.supported_versions.is_some(), ExtensionType::SupportedVersions);
+        add(
+            self.supported_versions.is_some(),
+            ExtensionType::SupportedVersions,
+        );
         add(self.early_data.is_some(), ExtensionType::EarlyData);
         add(
             self.transport_parameters.is_some(),
@@ -370,7 +391,9 @@ impl Codec<'_> for ServerExtensions {
             });
         }
         if let Some(formats) = &self.ec_point_formats {
-            encode_extension(ExtensionType::ECPointFormats, out, |b| encode_vec_u8(b, formats));
+            encode_extension(ExtensionType::ECPointFormats, out, |b| {
+                encode_vec_u8(b, formats)
+            });
         }
         if self.extended_master_secret.is_some() {
             encode_extension(ExtensionType::ExtendedMasterSecret, out, |_| {});
@@ -486,7 +509,9 @@ mod tests {
         name.encode(&mut bytes);
         assert_eq!(
             bytes,
-            [0, 14, 0, 0, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm']
+            [
+                0, 14, 0, 0, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm'
+            ]
         );
         let back = ServerNamePayload::read_client(&mut Reader::init(&bytes)).unwrap();
         assert_eq!(back, name);
@@ -553,8 +578,14 @@ mod tests {
             PresharedKeyBinder::read_bytes(&[2, 1, 2]),
             Err(InvalidMessage::IllegalEmptyValue)
         );
-        let offer = PresharedKeyOffer::new(PresharedKeyIdentity::new(alloc::vec![1], 5), alloc::vec![0; 32]);
+        let offer = PresharedKeyOffer::new(
+            PresharedKeyIdentity::new(alloc::vec![1], 5),
+            alloc::vec![0; 32],
+        );
         assert_eq!(offer.binders_encoded_len(), 2 + 33);
-        assert_eq!(PresharedKeyOffer::read_bytes(&offer.get_encoding()).unwrap(), offer);
+        assert_eq!(
+            PresharedKeyOffer::read_bytes(&offer.get_encoding()).unwrap(),
+            offer
+        );
     }
 }

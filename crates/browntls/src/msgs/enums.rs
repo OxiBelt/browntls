@@ -228,12 +228,18 @@ pub(crate) mod tests {
             ECPointFormat::ANSIX962CompressedChar2,
         );
         test_enum8::<ECCurveType>(ECCurveType::ExplicitPrime, ECCurveType::NamedCurve);
-        test_enum8::<PskKeyExchangeMode>(PskKeyExchangeMode::PSK_KE, PskKeyExchangeMode::PSK_DHE_KE);
+        test_enum8::<PskKeyExchangeMode>(
+            PskKeyExchangeMode::PSK_KE,
+            PskKeyExchangeMode::PSK_DHE_KE,
+        );
         test_enum8::<KeyUpdateRequest>(
             KeyUpdateRequest::UpdateNotRequested,
             KeyUpdateRequest::UpdateRequested,
         );
-        test_enum8::<CertificateStatusType>(CertificateStatusType::OCSP, CertificateStatusType::OCSP);
+        test_enum8::<CertificateStatusType>(
+            CertificateStatusType::OCSP,
+            CertificateStatusType::OCSP,
+        );
         assert_eq!(
             NamedGroup::FFDHE2048.key_exchange_algorithm(),
             KeyExchangeAlgorithm::DHE

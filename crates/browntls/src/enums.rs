@@ -179,7 +179,10 @@ impl SignatureScheme {
     pub(crate) fn supported_in_tls13(&self) -> bool {
         let [hash, sign] = self.to_array();
         match HashAlgorithm::from(hash) {
-            HashAlgorithm::NONE | HashAlgorithm::MD5 | HashAlgorithm::SHA1 | HashAlgorithm::SHA224 => {
+            HashAlgorithm::NONE
+            | HashAlgorithm::MD5
+            | HashAlgorithm::SHA1
+            | HashAlgorithm::SHA224 => {
                 return false;
             }
             _ => {}

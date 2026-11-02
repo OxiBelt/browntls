@@ -18,7 +18,9 @@ use crate::msgs::codec::{
     Codec, LengthPrefixedBuffer, ListLength, Reader, encode_vec_u8, encode_vec_u16,
     read_nonempty_vec_u8, read_nonempty_vec_u16, u24,
 };
-use crate::msgs::enums::{Compression, ECPointFormat, ExtensionType, NamedGroup, PskKeyExchangeMode};
+use crate::msgs::enums::{
+    Compression, ECPointFormat, ExtensionType, NamedGroup, PskKeyExchangeMode,
+};
 
 /// The special `Random` value that marks a HelloRetryRequest (RFC 8446 §4.1.3).
 pub(crate) static HELLO_RETRY_REQUEST_RANDOM: Random = Random([
@@ -67,13 +69,22 @@ impl ClientExtensions {
         };
         add(self.server_name.is_some(), ExtensionType::ServerName);
         add(self.named_groups.is_some(), ExtensionType::EllipticCurves);
-        add(self.ec_point_formats.is_some(), ExtensionType::ECPointFormats);
-        add(self.signature_schemes.is_some(), ExtensionType::SignatureAlgorithms);
+        add(
+            self.ec_point_formats.is_some(),
+            ExtensionType::ECPointFormats,
+        );
+        add(
+            self.signature_schemes.is_some(),
+            ExtensionType::SignatureAlgorithms,
+        );
         add(
             self.signature_schemes_cert.is_some(),
             ExtensionType::SignatureAlgorithmsCert,
         );
-        add(self.protocols.is_some(), ExtensionType::ALProtocolNegotiation);
+        add(
+            self.protocols.is_some(),
+            ExtensionType::ALProtocolNegotiation,
+        );
         add(
             self.certificate_status_request.is_some(),
             ExtensionType::StatusRequest,
@@ -84,12 +95,18 @@ impl ClientExtensions {
             ExtensionType::ExtendedMasterSecret,
         );
         add(self.session_ticket.is_some(), ExtensionType::SessionTicket);
-        add(self.supported_versions.is_some(), ExtensionType::SupportedVersions);
+        add(
+            self.supported_versions.is_some(),
+            ExtensionType::SupportedVersions,
+        );
         add(self.key_shares.is_some(), ExtensionType::KeyShare);
         add(self.psk_modes.is_some(), ExtensionType::PSKKeyExchangeModes);
         add(self.early_data.is_some(), ExtensionType::EarlyData);
         add(self.cookie.is_some(), ExtensionType::Cookie);
-        add(self.renegotiation_info.is_some(), ExtensionType::RenegotiationInfo);
+        add(
+            self.renegotiation_info.is_some(),
+            ExtensionType::RenegotiationInfo,
+        );
         add(
             self.certificate_authorities.is_some(),
             ExtensionType::CertificateAuthorities,
@@ -130,10 +147,14 @@ impl Codec<'_> for ClientExtensions {
             encode_extension(ExtensionType::ServerName, out, |b| sn.encode(b));
         }
         if let Some(groups) = &self.named_groups {
-            encode_extension(ExtensionType::EllipticCurves, out, |b| encode_vec_u16(b, groups));
+            encode_extension(ExtensionType::EllipticCurves, out, |b| {
+                encode_vec_u16(b, groups)
+            });
         }
         if let Some(formats) = &self.ec_point_formats {
-            encode_extension(ExtensionType::ECPointFormats, out, |b| encode_vec_u8(b, formats));
+            encode_extension(ExtensionType::ECPointFormats, out, |b| {
+                encode_vec_u8(b, formats)
+            });
         }
         if let Some(schemes) = &self.signature_schemes {
             encode_extension(ExtensionType::SignatureAlgorithms, out, |b| {
@@ -174,7 +195,9 @@ impl Codec<'_> for ClientExtensions {
             encode_extension(ExtensionType::KeyShare, out, |b| encode_vec_u16(b, shares));
         }
         if let Some(modes) = &self.psk_modes {
-            encode_extension(ExtensionType::PSKKeyExchangeModes, out, |b| encode_vec_u8(b, modes));
+            encode_extension(ExtensionType::PSKKeyExchangeModes, out, |b| {
+                encode_vec_u8(b, modes)
+            });
         }
         if self.early_data.is_some() {
             encode_extension(ExtensionType::EarlyData, out, |_| {});
@@ -191,7 +214,9 @@ impl Codec<'_> for ClientExtensions {
             });
         }
         if let Some(algs) = &self.certificate_compression {
-            encode_extension(ExtensionType::CompressCertificate, out, |b| encode_vec_u8(b, algs));
+            encode_extension(ExtensionType::CompressCertificate, out, |b| {
+                encode_vec_u8(b, algs)
+            });
         }
         if let Some(types) = &self.client_certificate_types {
             encode_extension(ExtensionType::ClientCertificateType, out, |b| {
@@ -271,8 +296,10 @@ impl Codec<'_> for ClientExtensions {
                         Some(read_nonempty_vec_u16(body, "CertificateAuthorities")?);
                 }
                 ExtensionType::CompressCertificate => {
-                    out.certificate_compression =
-                        Some(read_nonempty_vec_u8(body, "CertificateCompressionAlgorithms")?);
+                    out.certificate_compression = Some(read_nonempty_vec_u8(
+                        body,
+                        "CertificateCompressionAlgorithms",
+                    )?);
                 }
                 ExtensionType::ClientCertificateType => {
                     out.client_certificate_types =
@@ -642,13 +669,18 @@ mod tests {
             compression_methods: alloc::vec![Compression::Null],
             extensions: ClientExtensions {
                 server_name: Some(ServerNamePayload::SingleDnsName(
-                    browntls_pki::DnsName::try_from("example.com").unwrap().to_owned(),
+                    browntls_pki::DnsName::try_from("example.com")
+                        .unwrap()
+                        .to_owned(),
                 )),
                 named_groups: Some(alloc::vec![NamedGroup::X25519]),
                 signature_schemes: Some(alloc::vec![SignatureScheme::ED25519]),
                 protocols: Some(alloc::vec![ProtocolName::from(b"h2".to_vec())]),
                 supported_versions: Some(alloc::vec![ProtocolVersion::TLSv1_3]),
-                key_shares: Some(alloc::vec![KeyShareEntry::new(NamedGroup::X25519, &[9; 32])]),
+                key_shares: Some(alloc::vec![KeyShareEntry::new(
+                    NamedGroup::X25519,
+                    &[9; 32]
+                )]),
                 psk_modes: Some(alloc::vec![PskKeyExchangeMode::PSK_DHE_KE]),
                 preshared_key: Some(PresharedKeyOffer::new(
                     super::super::PresharedKeyIdentity::new(alloc::vec![1, 2, 3], 7),
@@ -665,8 +697,11 @@ mod tests {
         let msg = HandshakeMessagePayload(HandshakePayload::ClientHello(ch.clone()));
         let enc = msg.get_encoding();
         assert_eq!(enc[0], 1);
-        let back = HandshakeMessagePayload::read_version(&mut Reader::init(&enc), ProtocolVersion::TLSv1_3)
-            .unwrap();
+        let back = HandshakeMessagePayload::read_version(
+            &mut Reader::init(&enc),
+            ProtocolVersion::TLSv1_3,
+        )
+        .unwrap();
         match back.0 {
             HandshakePayload::ClientHello(parsed) => assert_eq!(parsed, ch),
             other => panic!("wrong payload {other:?}"),

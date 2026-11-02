@@ -10,7 +10,9 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::message::{HEADER_SIZE, InboundOpaqueMessage, MAX_WIRE_SIZE, MessageError, RecordHeader};
+use super::message::{
+    HEADER_SIZE, InboundOpaqueMessage, MAX_WIRE_SIZE, MessageError, RecordHeader,
+};
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::codec::{Codec, Reader, u24};
@@ -159,7 +161,10 @@ impl HandshakeJoiner {
 pub(crate) enum Deframed {
     /// A complete handshake message occupies the first `len` bytes of the
     /// joiner; `version` is the record version it arrived under.
-    Handshake { len: usize, version: ProtocolVersion },
+    Handshake {
+        len: usize,
+        version: ProtocolVersion,
+    },
     /// A non-handshake record, decrypted in place within the buffer.
     Record {
         typ: ContentType,
@@ -214,7 +219,9 @@ impl MessageDeframer {
 
             let header = match RecordHeader::read(buffer.filled()) {
                 Ok(h) => h,
-                Err(MessageError::TooShortForHeader | MessageError::TooShortForLength) => return Ok(None),
+                Err(MessageError::TooShortForHeader | MessageError::TooShortForLength) => {
+                    return Ok(None);
+                }
                 Err(MessageError::MessageTooLarge) => return Err(Error::PeerSentOversizedRecord),
                 Err(MessageError::InvalidContentType) => {
                     return Err(InvalidMessage::InvalidContentType.into());
@@ -328,7 +335,13 @@ pub fn fuzz_deframer(data: &[u8]) {
                     );
                     d.joiner.consume(len);
                 }
-                Ok(Some(Deframed::Record { typ, version, plaintext, consumed, .. })) => {
+                Ok(Some(Deframed::Record {
+                    typ,
+                    version,
+                    plaintext,
+                    consumed,
+                    ..
+                })) => {
                     let payload = &buffer.filled()[plaintext];
                     let _ = super::message::MessagePayload::new(typ, version, payload);
                     buffer.discard(consumed);
@@ -358,7 +371,11 @@ mod tests {
                     Some(Deframed::Handshake { len, version }) => {
                         let bytes = &d.joiner.buffered()[..len];
                         assert!(
-                            HandshakeMessagePayload::read_version(&mut Reader::init(bytes), version).is_ok()
+                            HandshakeMessagePayload::read_version(
+                                &mut Reader::init(bytes),
+                                version
+                            )
+                            .is_ok()
                         );
                         out.push(Deframed::Handshake { len, version });
                         d.joiner.consume(len);
@@ -474,7 +491,11 @@ mod tests {
     #[test]
     fn buffer_limit() {
         let mut buffer = DeframerVecBuffer::default();
-        assert!(buffer.extend_from_slice(&alloc::vec![0u8; MAX_BUFFER]).is_ok());
+        assert!(
+            buffer
+                .extend_from_slice(&alloc::vec![0u8; MAX_BUFFER])
+                .is_ok()
+        );
         assert!(buffer.extend_from_slice(&[0]).is_err());
         buffer.discard(MAX_BUFFER);
         assert!(!buffer.has_pending());

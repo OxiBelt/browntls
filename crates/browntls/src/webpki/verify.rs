@@ -3,7 +3,10 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{CertificateDer, EndEntityCert, ServerName, SignatureVerificationAlgorithm, TrustAnchor, UnixTime};
+use browntls_pki::{
+    CertificateDer, EndEntityCert, ServerName, SignatureVerificationAlgorithm, TrustAnchor,
+    UnixTime,
+};
 
 use super::pki_error;
 use crate::enums::SignatureScheme;
@@ -20,7 +23,10 @@ pub struct WebPkiSupportedAlgorithms {
     /// For each TLS scheme, the algorithms that verify it (several when one
     /// scheme covers several key sizes, e.g. ECDSA P-256 and P-384 with
     /// SHA-256).
-    pub mapping: &'static [(SignatureScheme, &'static [&'static dyn SignatureVerificationAlgorithm])],
+    pub mapping: &'static [(
+        SignatureScheme,
+        &'static [&'static dyn SignatureVerificationAlgorithm],
+    )],
 }
 
 impl WebPkiSupportedAlgorithms {
@@ -30,7 +36,10 @@ impl WebPkiSupportedAlgorithms {
     }
 
     /// The algorithms for `scheme`.
-    fn convert_scheme(&self, scheme: SignatureScheme) -> Result<&[&'static dyn SignatureVerificationAlgorithm], Error> {
+    fn convert_scheme(
+        &self,
+        scheme: SignatureScheme,
+    ) -> Result<&[&'static dyn SignatureVerificationAlgorithm], Error> {
         self.mapping
             .iter()
             .find(|(s, _)| *s == scheme)
@@ -77,7 +86,10 @@ impl ParsedCertificate<'_> {
 }
 
 /// Verifies that `cert` is valid for `server_name`.
-pub fn verify_server_name(cert: &ParsedCertificate<'_>, server_name: &ServerName<'_>) -> Result<(), Error> {
+pub fn verify_server_name(
+    cert: &ParsedCertificate<'_>,
+    server_name: &ServerName<'_>,
+) -> Result<(), Error> {
     cert.0
         .verify_is_valid_for_subject_name(server_name)
         .map_err(pki_error)
@@ -113,7 +125,15 @@ pub(crate) fn verify_cert_for_usage(
     revocation: Option<browntls_pki::RevocationOptions<'_>>,
 ) -> Result<(), Error> {
     cert.0
-        .verify_for_usage(supported_algs, roots, intermediates, now, usage, revocation, None)
+        .verify_for_usage(
+            supported_algs,
+            roots,
+            intermediates,
+            now,
+            usage,
+            revocation,
+            None,
+        )
         .map(|_| ())
         .map_err(pki_error)
 }
@@ -198,7 +218,12 @@ mod tests {
     struct Dummy;
 
     impl SignatureVerificationAlgorithm for Dummy {
-        fn verify_signature(&self, _: &[u8], _: &[u8], _: &[u8]) -> Result<(), browntls_pki::InvalidSignature> {
+        fn verify_signature(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<(), browntls_pki::InvalidSignature> {
             Err(browntls_pki::InvalidSignature)
         }
         fn public_key_alg_id(&self) -> browntls_pki::AlgorithmIdentifier {
@@ -220,7 +245,8 @@ mod tests {
         assert_eq!(ALGS.supported_schemes(), [SignatureScheme::ED25519]);
         assert!(ALGS.convert_scheme(SignatureScheme::ED25519).is_ok());
         assert_eq!(
-            ALGS.convert_scheme(SignatureScheme::RSA_PSS_SHA256).unwrap_err(),
+            ALGS.convert_scheme(SignatureScheme::RSA_PSS_SHA256)
+                .unwrap_err(),
             Error::PeerMisbehaved(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme)
         );
         assert!(!ALGS.fips());

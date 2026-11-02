@@ -10,8 +10,8 @@ use crate::enums::{CertificateCompressionAlgorithm, SignatureScheme};
 use crate::error::InvalidMessage;
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
 use crate::msgs::codec::{
-    Codec, LengthPrefixedBuffer, ListLength, Reader, encode_vec_u8, encode_vec_u16,
-    encode_vec_u24, read_nonempty_vec_u16, read_vec_u8, read_vec_u16, read_vec_u24, u24,
+    Codec, LengthPrefixedBuffer, ListLength, Reader, encode_vec_u8, encode_vec_u16, encode_vec_u24,
+    read_nonempty_vec_u16, read_vec_u8, read_vec_u16, read_vec_u24, u24,
 };
 use crate::msgs::enums::{CertificateStatusType, ClientCertificateType, ExtensionType};
 
@@ -199,7 +199,10 @@ pub(crate) struct CertificatePayloadTls13<'a> {
 }
 
 impl<'a> CertificatePayloadTls13<'a> {
-    pub(crate) fn new(certs: impl Iterator<Item = &'a CertificateDer<'a>>, ocsp: Option<&'a [u8]>) -> Self {
+    pub(crate) fn new(
+        certs: impl Iterator<Item = &'a CertificateDer<'a>>,
+        ocsp: Option<&'a [u8]>,
+    ) -> Self {
         let mut entries: Vec<CertificateEntry<'a>> = certs
             .map(|c| CertificateEntry::new(CertificateDer::from_slice(c.as_ref())))
             .collect();
@@ -217,7 +220,11 @@ impl<'a> CertificatePayloadTls13<'a> {
     pub(crate) fn into_owned(self) -> CertificatePayloadTls13<'static> {
         CertificatePayloadTls13 {
             context: self.context,
-            entries: self.entries.into_iter().map(CertificateEntry::into_owned).collect(),
+            entries: self
+                .entries
+                .into_iter()
+                .map(CertificateEntry::into_owned)
+                .collect(),
         }
     }
 
@@ -349,7 +356,9 @@ impl Codec<'_> for CertificateRequestExtensions {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
         if let Some(s) = &self.signature_algorithms {
-            encode_extension(ExtensionType::SignatureAlgorithms, out, |b| encode_vec_u16(b, s));
+            encode_extension(ExtensionType::SignatureAlgorithms, out, |b| {
+                encode_vec_u16(b, s)
+            });
         }
         if let Some(s) = &self.signature_algorithms_cert {
             encode_extension(ExtensionType::SignatureAlgorithmsCert, out, |b| {
@@ -362,7 +371,9 @@ impl Codec<'_> for CertificateRequestExtensions {
             });
         }
         if let Some(algs) = &self.certificate_compression {
-            encode_extension(ExtensionType::CompressCertificate, out, |b| encode_vec_u8(b, algs));
+            encode_extension(ExtensionType::CompressCertificate, out, |b| {
+                encode_vec_u8(b, algs)
+            });
         }
     }
 
@@ -371,7 +382,8 @@ impl Codec<'_> for CertificateRequestExtensions {
         read_extensions(r, |typ, body| {
             match typ {
                 ExtensionType::SignatureAlgorithms => {
-                    out.signature_algorithms = Some(read_nonempty_vec_u16(body, "SignatureSchemes")?);
+                    out.signature_algorithms =
+                        Some(read_nonempty_vec_u16(body, "SignatureSchemes")?);
                 }
                 ExtensionType::SignatureAlgorithmsCert => {
                     out.signature_algorithms_cert =
@@ -381,9 +393,10 @@ impl Codec<'_> for CertificateRequestExtensions {
                     out.authorities = Some(read_nonempty_vec_u16(body, "CertificateAuthorities")?);
                 }
                 ExtensionType::CompressCertificate => {
-                    out.certificate_compression = Some(
-                        crate::msgs::codec::read_nonempty_vec_u8(body, "CertificateCompressionAlgorithms")?,
-                    );
+                    out.certificate_compression = Some(crate::msgs::codec::read_nonempty_vec_u8(
+                        body,
+                        "CertificateCompressionAlgorithms",
+                    )?);
                 }
                 other => {
                     out.unknown.push(other);
@@ -455,20 +468,29 @@ mod tests {
             Err(InvalidMessage::CertificatePayloadTooLarge)
         );
         let chain = CertificateChain(alloc::vec![CertificateDer::from_slice(&[1])]);
-        assert_eq!(CertificateChain::read_bytes(&chain.get_encoding()).unwrap(), chain);
+        assert_eq!(
+            CertificateChain::read_bytes(&chain.get_encoding()).unwrap(),
+            chain
+        );
     }
 
     #[test]
     fn certificate_status() {
         let cs = CertificateStatus::new(&[1, 2, 3]);
         assert_eq!(cs.get_encoding(), [1, 0, 0, 3, 1, 2, 3]);
-        assert_eq!(CertificateStatus::read_bytes(&[1, 0, 0, 3, 1, 2, 3]).unwrap(), cs);
+        assert_eq!(
+            CertificateStatus::read_bytes(&[1, 0, 0, 3, 1, 2, 3]).unwrap(),
+            cs
+        );
         assert_eq!(
             CertificateStatus::read_bytes(&[2, 0, 0, 0]),
             Err(InvalidMessage::InvalidCertificateStatusType)
         );
         let req = CertificateStatusRequest::build_ocsp();
-        assert_eq!(CertificateStatusRequest::read_bytes(&req.get_encoding()).unwrap(), req);
+        assert_eq!(
+            CertificateStatusRequest::read_bytes(&req.get_encoding()).unwrap(),
+            req
+        );
     }
 
     #[test]
@@ -478,7 +500,10 @@ mod tests {
             sigschemes: alloc::vec![SignatureScheme::ECDSA_NISTP256_SHA256],
             canames: alloc::vec![DistinguishedName::in_sequence(&[1])],
         };
-        assert_eq!(CertificateRequestPayload::read_bytes(&cr.get_encoding()).unwrap(), cr);
+        assert_eq!(
+            CertificateRequestPayload::read_bytes(&cr.get_encoding()).unwrap(),
+            cr
+        );
         let empty_schemes = [1, 0x40, 0, 0, 0, 0];
         assert_eq!(
             CertificateRequestPayload::read_bytes(&empty_schemes),
@@ -506,7 +531,10 @@ mod tests {
             uncompressed_len: 10,
             compressed: PayloadU24(Payload::Borrowed(&[1, 2])),
         };
-        assert_eq!(CompressedCertificatePayload::read_bytes(&cc.get_encoding()).unwrap(), cc);
+        assert_eq!(
+            CompressedCertificatePayload::read_bytes(&cc.get_encoding()).unwrap(),
+            cc
+        );
         let too_big = [0, 1, 0x01, 0, 1, 0, 0, 1, 0];
         assert_eq!(
             CompressedCertificatePayload::read_bytes(&too_big),

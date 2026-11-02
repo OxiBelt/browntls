@@ -34,6 +34,24 @@ These are excluded deliberately and will not be added:
 - TLS 1.3 post-handshake client authentication, DTLS, and arbitrary
   application-defined extensions.
 
+## Platforms
+
+| Architecture | Supported floor | Accelerated backends (runtime-detected) |
+| --- | --- | --- |
+| x86_64 | x86-64-v3 (AVX2, BMI2) | AES-NI, PCLMULQDQ, SHA-NI, VAES, VPCLMULQDQ, AVX-512 |
+| AArch64 | ARMv8-A with Advanced SIMD (NEON) | AES, PMULL, SHA2, SHA512/SHA3 |
+| RISC-V 64 | RV64GC | V 1.0, Zvkned, Zvknha/Zvknhb, Zvkg, Zvbc, Zvkb, Zbc, Zbkb |
+
+Portable code paths are kept on every architecture: they are the reference
+for differential tests and the fallback when an extension is missing. On
+RISC-V, runtime detection reads the kernel's ISA string because the standard
+library detection macro is not yet stable; vector code is emitted with
+`asm!` because Rust has no stable RVV intrinsics.
+
+AArch64 and RISC-V are tested under QEMU user-mode emulation with
+[`tests/scripts/cross_test.sh`](../tests/scripts/cross_test.sh) and on native
+runners in CI where available.
+
 ## Crate layout
 
 | Crate | Purpose | `unsafe` |

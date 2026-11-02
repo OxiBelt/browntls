@@ -1,0 +1,5 @@
+# Runner labels provided outside GitHub-hosted runners.
+self-hosted-runner:
+  labels:
+    # RISE RISC-V runners (https://riscv-runners.riseproject.dev/).
+    - ubuntu-24.04-riscv

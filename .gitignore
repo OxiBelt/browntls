@@ -1,0 +1,22 @@
+# Local agent/session state
+/.agents/
+/.codex/
+/.aws/
+
+# Build and interpreter artifacts
+target/
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+
+# Disposable test output and local credentials
+.tmp/
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

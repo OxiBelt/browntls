@@ -1,0 +1,51 @@
+name: Repository checks
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  repository-checks:
+    name: Documentation and workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test Markdown checker
+        run: python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
+
+      - name: Check Markdown links and anchors
+        run: python3 -B tests/scripts/check_markdown_links.py --repo-root .
+
+      - name: Check whitespace
+        run: git show --format= --check HEAD
+
+      - name: Install verified actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tool_dir="$(mktemp -d "${RUNNER_TEMP}/actionlint.XXXXXX")"
+          trap 'rm -rf "${tool_dir}"' EXIT
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --tlsv1.2 \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}" \
+            --output "${tool_dir}/${archive}"
+          printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${tool_dir}/${archive}" | sha256sum --check --strict
+          tar -xzf "${tool_dir}/${archive}" -C "${tool_dir}" actionlint
+          "${tool_dir}/actionlint" -shellcheck= -pyflakes=

@@ -22,7 +22,7 @@ intent.
 | RSA PKCS #1 v1.5 / PSS | in progress | |
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | PKI types and PEM | done | |
-| X.509 path validation, name checks, CRLs | in progress | API defined; bodies are placeholders that reject |
+| X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
 | TLS record layer and handshake (1.2, 1.3) | in progress | |
 | Crypto provider mount point, RustCrypto provider | in progress | |
 | Native provider (`browntls-crypto`) | planned | After primitives land |
@@ -44,6 +44,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
 - Fuzzing of DER, PEM, X.509 and TLS message parsers and of protocol state.
 - Named, non-author review of `unsafe` code, constant-time properties and
   cryptographic correctness, with Miri or sanitizer evidence where applicable.
+- `deny.toml` ignores RUSTSEC-2023-0071 (`rsa` 0.9, Marvin) for public-key
+  verification uses until 2027-01-31; it needs a named owner and tracking
+  issue, and should be removed once tests verify RSA through
+  `browntls-crypto`.
 - Accelerated backends for extensions without available hardware or emulation
   (for example x86 SHA512 and AVX-512 VAES) remain unimplemented until they can
   be executed in tests.

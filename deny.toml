@@ -7,7 +7,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  # Marvin attack: timing side channel in `rsa` 0.9 private-key operations;
+  # no patched release exists. `rsa` is used only for public-key signature
+  # verification: as a dev-dependency test oracle in `browntls-pki`, and for
+  # verification in the optional `rustcrypto` provider. Expires 2027-01-31,
+  # or earlier once the tests verify through `browntls-crypto` RSA.
+  { id = "RUSTSEC-2023-0071", reason = "rsa is used only for public-key verification; expires 2027-01-31" },
+]
 
 [licenses]
 version = 2

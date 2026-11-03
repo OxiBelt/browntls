@@ -375,6 +375,14 @@ fn emit_client_hello_for_retry(
         _ => None,
     };
     if let Some(resuming) = &tls13_session {
+        // RFC 8446 §4.2.10: offer 0-RTT when the ticket and configuration
+        // allow it, but never in the second ClientHello of a retry.
+        let max_early_data_size = resuming.max_early_data_size();
+        if config.enable_early_data && max_early_data_size > 0 && retryreq.is_none() {
+            cx.data.early_data.enable(max_early_data_size as usize);
+            exts.early_data = Some(());
+        }
+
         let obfuscated_ticket_age = resuming.obfuscated_ticket_age();
         let binder_len = resuming.suite().common.hash_provider.output_len();
         exts.preshared_key = Some(PresharedKeyOffer::new(
@@ -406,6 +414,9 @@ fn emit_client_hello_for_retry(
     };
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 
+    let resuming_hash_provider = tls13_session
+        .as_ref()
+        .map(|resuming| resuming.suite().common.hash_provider);
     let early_key_schedule = tls13_session
         .map(|resuming| tls13::fill_in_psk_binder(&resuming, &transcript_buffer, &mut hmp));
 
@@ -423,6 +434,22 @@ fn emit_client_hello_for_retry(
     trace!("Sending ClientHello {:#?}", ch);
     transcript_buffer.add_message(&ch);
     cx.common.send_msg(ch, false);
+
+    // With 0-RTT offered, the early traffic key derives from the ClientHello
+    // alone, so early data can go out right behind it.
+    if let (Some(schedule), Some(hash_provider)) = (&early_key_schedule, resuming_hash_provider)
+        && cx.data.early_data.is_enabled()
+    {
+        tls13::derive_early_traffic_secret(
+            &*config.key_log,
+            cx,
+            hash_provider,
+            schedule,
+            &mut input.sent_tls13_fake_ccs,
+            &transcript_buffer,
+            &input.random.0,
+        );
+    }
 
     let next = ExpectServerHello {
         input,
@@ -526,6 +553,18 @@ impl State<ClientConnectionData> for ExpectServerHello {
                 }
             },
         };
+
+        // RFC 8446 §4.2.10: a server that answers a 0-RTT offer with TLS 1.2
+        // cannot have read the early data; fail rather than fall back.
+        if version == ProtocolVersion::TLSv1_2
+            && cx.data.early_data.is_enabled()
+            && cx.common.early_traffic
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::OfferedEarlyDataWithOldProtocolVersion,
+            ));
+        }
 
         if version == ProtocolVersion::TLSv1_3
             && server_hello.legacy_version != ProtocolVersion::TLSv1_2
@@ -766,6 +805,12 @@ impl ExpectServerHelloOrHelloRetryRequest {
             .start_hash(suite.hash_provider());
         let mut transcript_buffer = transcript.into_hrr_buffer();
         transcript_buffer.add_message(&m);
+
+        // RFC 8446 §4.2.10: early data is not possible after a HelloRetryRequest.
+        if cx.data.early_data.is_enabled() {
+            cx.data.early_data.rejected();
+        }
+        cx.common.early_traffic = false;
 
         // The retry must repeat the PSK offer (with a new binder) or drop it;
         // our session is still held in `input.resuming` for that.

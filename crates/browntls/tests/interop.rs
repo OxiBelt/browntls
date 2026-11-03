@@ -1042,3 +1042,105 @@ fn exporter_matches_rustls() {
         assert_eq!(c, s, "{version:#06x} (no context)");
     }
 }
+
+// ------------------------------------------------------------------ 0-RTT
+
+#[test]
+fn early_data_browntls_client_rustls_server() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut cc = b_client(&chain, 0x0304, None, None);
+    cc.enable_early_data = true;
+    let client_config = Arc::new(cc);
+    let mut sc = r_server(&chain, 0x0304, None, None);
+    sc.max_early_data_size = 1024;
+    let server_config = Arc::new(sc);
+
+    let mut client = browntls::ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = rustls::ServerConnection::new(server_config.clone()).unwrap();
+    handshake_ok(&mut client, &mut server);
+    transfer(&mut server, &mut client);
+    client.process().unwrap();
+
+    // accepted
+    let mut client = browntls::ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = rustls::ServerConnection::new(server_config).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"early to rustls")
+        .unwrap();
+    handshake_ok(&mut client, &mut server);
+    assert!(client.is_early_data_accepted());
+    let mut got = Vec::new();
+    server.early_data().unwrap().read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"early to rustls");
+    round_trip(&mut client, &mut server);
+
+    // rejected: the rustls server no longer allows early data
+    let mut client = browntls::ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server =
+        rustls::ServerConnection::new(Arc::new(r_server(&chain, 0x0304, None, None))).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"discarded")
+        .unwrap();
+    handshake_ok(&mut client, &mut server);
+    assert!(!client.is_early_data_accepted());
+    assert!(server.early_data().is_none());
+    round_trip(&mut client, &mut server);
+}
+
+#[test]
+fn early_data_rustls_client_browntls_server() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut cc = r_client(&chain, 0x0304, None, None);
+    cc.enable_early_data = true;
+    let client_config = Arc::new(cc);
+    let mut sc = b_server(&chain, 0x0304, None, None);
+    sc.max_early_data_size = 1024;
+    let cache = sc.session_storage.clone();
+    let server_config = Arc::new(sc);
+
+    let mut client = r_connect_client_from(client_config.clone());
+    let mut server = browntls::ServerConnection::new(server_config.clone()).unwrap();
+    handshake_ok(&mut client, &mut server);
+    transfer(&mut server, &mut client);
+    client.process().unwrap();
+
+    // accepted
+    let mut client = r_connect_client_from(client_config.clone());
+    let mut server = browntls::ServerConnection::new(server_config).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"early to browntls")
+        .unwrap();
+    handshake_ok(&mut client, &mut server);
+    assert!(client.is_early_data_accepted());
+    let mut got = Vec::new();
+    server.early_data().unwrap().read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"early to browntls");
+    round_trip(&mut client, &mut server);
+
+    // rejected: same sessions, early data switched off
+    let mut sc = b_server(&chain, 0x0304, None, None);
+    sc.session_storage = cache;
+    let mut client = r_connect_client_from(client_config);
+    let mut server = browntls::ServerConnection::new(Arc::new(sc)).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"discarded")
+        .unwrap();
+    handshake_ok(&mut client, &mut server);
+    assert!(!client.is_early_data_accepted());
+    assert!(server.early_data().is_none());
+    assert_eq!(
+        server.handshake_kind(),
+        Some(browntls::HandshakeKind::Resumed)
+    );
+    round_trip(&mut client, &mut server);
+}

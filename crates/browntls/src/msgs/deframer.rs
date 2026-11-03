@@ -244,6 +244,13 @@ impl MessageDeframer {
             } else {
                 match record_layer.decrypt_incoming(msg)? {
                     Some(d) => d,
+                    // Rejected early data may not be interleaved with a
+                    // partially received handshake message.
+                    None if !self.joiner.is_empty() => {
+                        return Err(
+                            PeerMisbehaved::RejectedEarlyDataInterleavedWithHandshakeMessage.into(),
+                        );
+                    }
                     None => {
                         // Dropped during trial decryption of rejected early data.
                         buffer.discard(record_len);

@@ -130,12 +130,12 @@ pub mod client {
     pub(crate) mod tls13;
 
     pub use builder::WantsClientCert;
-    #[cfg(feature = "std")]
-    pub use client_conn::ClientConnection;
     pub use client_conn::{
         ClientConfig, ClientConnectionData, ClientSessionStore, ResolvesClientCert, Resumption,
         Tls12Resumption,
     };
+    #[cfg(feature = "std")]
+    pub use client_conn::{ClientConnection, WriteEarlyData};
     #[cfg(feature = "std")]
     pub use handy::ClientSessionMemoryCache;
     pub use handy::NoClientSessionStorage;
@@ -176,7 +176,7 @@ pub mod server {
     #[cfg(feature = "std")]
     pub use handy::{ResolvesServerCertUsingSni, ServerSessionMemoryCache};
     #[cfg(feature = "std")]
-    pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ServerConnection};
+    pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
         ClientHello, ProducesTickets, ResolvesServerCert, ServerConfig, ServerConnectionData,
         StoresServerSessions,

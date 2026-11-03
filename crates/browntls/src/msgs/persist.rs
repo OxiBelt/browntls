@@ -336,7 +336,6 @@ impl ServerSessionValue {
     }
 
     /// Whether the ticket's age matched the server's clock (0-RTT gate).
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn is_fresh(&self) -> bool {
         self.freshness.unwrap_or_default()
     }

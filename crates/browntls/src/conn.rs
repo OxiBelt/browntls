@@ -228,18 +228,9 @@ impl<Data> ConnectionCore<Data> {
                 common.process_middlebox_ccs()?;
                 return Ok(state);
             }
-            MessagePayload::ApplicationData(_)
-                if !common.may_receive_application_data && !common.early_traffic =>
-            {
-                // Application data before the handshake is complete.
-                return Err(common.send_fatal_alert(
-                    AlertDescription::UnexpectedMessage,
-                    Error::InappropriateMessage {
-                        expect_types: alloc::vec![ContentType::Handshake],
-                        got_type: ContentType::ApplicationData,
-                    },
-                ));
-            }
+            // Application data during the handshake is for the state machine
+            // to judge: a server may be skipping or reading 0-RTT data, and
+            // every other state refuses it with unexpected_message.
             _ => {}
         }
 

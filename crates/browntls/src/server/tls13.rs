@@ -16,7 +16,7 @@ use crate::enums::{
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
-use crate::log::{debug, trace};
+use crate::log::{debug, trace, warning};
 use crate::msgs::base::{Payload, PayloadU8, PayloadU24};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
@@ -122,6 +122,15 @@ impl CompleteClientHelloHandling {
             ));
         }
 
+        // RFC 8446 §4.2.10: early_data may only appear in the first ClientHello.
+        let early_data_requested = client_hello.early_data_offered();
+        if self.done_retry && early_data_requested {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::EarlyDataAttemptedInSecondClientHello,
+            ));
+        }
+
         let Some(chosen_share) = shares_ext
             .iter()
             .find(|share| share.group == selected_kxg.name())
@@ -144,13 +153,24 @@ impl CompleteClientHelloHandling {
             );
             emit_fake_ccs(cx.common);
             cx.common.handshake_kind = Some(HandshakeKind::FullWithHelloRetryRequest);
-            return Ok(Box::new(hs::ExpectClientHello {
+            let skip_data_left = max_early_data_size(self.config.max_early_data_size);
+            let next = Box::new(hs::ExpectClientHello {
                 config: self.config,
                 transcript: HandshakeHashOrBuffer::Hash(self.transcript),
                 session_id: SessionId::empty(),
                 done_retry: true,
                 send_tickets: self.send_tickets,
-            }));
+            });
+            // Early data sent behind that first ClientHello is unreadable
+            // (no PSK was taken); skip it up to the announced limit.
+            return Ok(if early_data_requested {
+                Box::new(ExpectAndSkipRejectedEarlyData {
+                    skip_data_left,
+                    next,
+                })
+            } else {
+                next
+            });
         };
 
         // PSK resumption (RFC 8446 §4.2.11).
@@ -225,9 +245,27 @@ impl CompleteClientHelloHandling {
             })?;
         cx.common.kx_state.complete();
 
+        let early_data = decide_if_early_data_allowed(
+            cx,
+            early_data_requested,
+            chosen_psk_index.zip(resumedata.as_ref()),
+            self.suite,
+            &self.config,
+        );
+
+        let client_hello_hash = self.transcript.current_hash();
         let key_schedule_pre = match &resumedata {
             Some(resume) => {
-                KeyScheduleEarly::new(self.suite, &resume.master_secret.0).into_pre_handshake()
+                let early = KeyScheduleEarly::new(self.suite, &resume.master_secret.0);
+                // Start reading under the early traffic key: it carries any
+                // 0-RTT data, and is replaced below when we do not accept it.
+                early.client_early_traffic_secret(
+                    client_hello_hash.as_ref(),
+                    &*self.config.key_log,
+                    &self.randoms.client,
+                    cx.common,
+                );
+                early.into_pre_handshake()
             }
             None => KeySchedulePreHandshake::new(self.suite),
         };
@@ -248,14 +286,42 @@ impl CompleteClientHelloHandling {
 
         let hash_at_server_hello = self.transcript.current_hash();
         let key_schedule = key_schedule.derive_client_handshake_secrets(
-            false,
+            true,
             hash_at_server_hello.as_ref(),
             &*self.config.key_log,
             &self.randoms.client,
             cx.common,
         );
 
-        emit_encrypted_extensions(&mut self.transcript, cx, client_hello);
+        // Which key the client's next records are read under.
+        match early_data {
+            EarlyDataDecision::Disabled => {
+                key_schedule.set_handshake_decrypter(None, cx.common);
+                cx.data.early_data.reject();
+            }
+            EarlyDataDecision::RequestedButRejected => {
+                // RFC 8446 §4.2.10: skip the client's early data records (we
+                // cannot read them) until its handshake-key records appear.
+                debug!("Client requested early_data, but not accepted: trial decryption");
+                key_schedule.set_handshake_decrypter(
+                    Some(max_early_data_size(self.config.max_early_data_size)),
+                    cx.common,
+                );
+                cx.data.early_data.reject();
+            }
+            EarlyDataDecision::Accepted => {
+                cx.data
+                    .early_data
+                    .accept(self.config.max_early_data_size as usize);
+            }
+        }
+
+        emit_encrypted_extensions(
+            &mut self.transcript,
+            cx,
+            client_hello,
+            early_data == EarlyDataDecision::Accepted,
+        );
 
         let doing_client_auth = if resumedata.is_none() {
             let client_auth =
@@ -307,6 +373,14 @@ impl CompleteClientHelloHandling {
                 send_tickets: self.send_tickets,
                 offered_sigschemes,
             }))
+        } else if early_data == EarlyDataDecision::Accepted {
+            Ok(Box::new(ExpectEarlyData {
+                config: self.config,
+                transcript: self.transcript,
+                suite: self.suite,
+                key_schedule,
+                send_tickets: self.send_tickets,
+            }))
         } else {
             Ok(Box::new(ExpectFinished {
                 config: self.config,
@@ -315,6 +389,131 @@ impl CompleteClientHelloHandling {
                 key_schedule,
                 send_tickets: self.send_tickets,
             }))
+        }
+    }
+}
+
+/// The outcome of the client's `early_data` request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EarlyDataDecision {
+    /// Not requested.
+    Disabled,
+    /// Requested, but we will not read it.
+    RequestedButRejected,
+    /// Requested and accepted.
+    Accepted,
+}
+
+/// How much rejected early data to skip: the configured limit, or one
+/// maximum-sized record when early data is off (a client may hold a ticket
+/// from when it was on).
+fn max_early_data_size(configured: u32) -> usize {
+    if configured != 0 {
+        configured as usize
+    } else {
+        16384
+    }
+}
+
+/// RFC 8446 §4.2.10: early data is accepted only with a fresh, first-listed
+/// PSK that reproduces the version, suite and ALPN protocol it was issued
+/// under, and only with stateful resumption (RFC 8446 §8.1 anti-replay).
+fn decide_if_early_data_allowed(
+    cx: &mut ServerContext<'_>,
+    early_data_requested: bool,
+    resuming: Option<(usize, &ServerSessionValue)>,
+    suite: &'static Tls13CipherSuite,
+    config: &ServerConfig,
+) -> EarlyDataDecision {
+    let rejected_or_disabled = if early_data_requested {
+        EarlyDataDecision::RequestedButRejected
+    } else {
+        EarlyDataDecision::Disabled
+    };
+
+    let Some((psk_index, resume)) = resuming else {
+        return rejected_or_disabled;
+    };
+
+    let early_data_configured = config.max_early_data_size > 0 && !config.ticketer.enabled();
+    let early_data_possible = early_data_requested
+        && psk_index == 0
+        && resume.is_fresh()
+        && Some(resume.version) == cx.common.negotiated_version
+        && resume.cipher_suite == suite.common.suite
+        && resume.alpn.as_ref().map(|p| p.0.as_slice()) == cx.common.alpn_protocol.as_deref();
+
+    if early_data_configured && early_data_possible && !cx.data.early_data.was_rejected() {
+        EarlyDataDecision::Accepted
+    } else {
+        rejected_or_disabled
+    }
+}
+
+/// Discards a client's early data records (unreadable because its PSK was
+/// not taken) up to a limit, then hands everything else to `next`.
+struct ExpectAndSkipRejectedEarlyData {
+    skip_data_left: usize,
+    next: Box<hs::ExpectClientHello>,
+}
+
+impl State<ServerConnectionData> for ExpectAndSkipRejectedEarlyData {
+    fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 8446 §4.2.10: "skipping all records with an external content
+        // type of application_data ... up to the configured max_early_data_size".
+        if let MessagePayload::ApplicationData(skip_data) = &m.payload
+            && skip_data.bytes().len() <= self.skip_data_left
+        {
+            self.skip_data_left -= skip_data.bytes().len();
+            return Ok(self);
+        }
+        self.next.handle(cx, m)
+    }
+}
+
+/// Reads accepted early data until EndOfEarlyData.
+struct ExpectEarlyData {
+    config: Arc<ServerConfig>,
+    transcript: HandshakeHash,
+    suite: &'static Tls13CipherSuite,
+    key_schedule: KeyScheduleTrafficWithClientFinishedPending,
+    send_tickets: usize,
+}
+
+impl State<ServerConnectionData> for ExpectEarlyData {
+    fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        match &m.payload {
+            MessagePayload::ApplicationData(payload) => {
+                if cx.data.early_data.take_received_plaintext(payload.bytes()) {
+                    Ok(self)
+                } else {
+                    Err(cx.common.send_fatal_alert(
+                        AlertDescription::UnexpectedMessage,
+                        PeerMisbehaved::TooMuchEarlyDataReceived,
+                    ))
+                }
+            }
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::EndOfEarlyData),
+                ..
+            } => {
+                let mut st = *self;
+                // RFC 8446 §4.5: the client's next records use its handshake key.
+                st.key_schedule.update_decrypter(cx.common);
+                st.transcript.add_message(&m);
+                Ok(Box::new(ExpectFinished {
+                    config: st.config,
+                    transcript: st.transcript,
+                    suite: st.suite,
+                    key_schedule: st.key_schedule,
+                    send_tickets: st.send_tickets,
+                }))
+            }
+            payload => Err(crate::check::inappropriate_handshake_message(
+                payload,
+                &[ContentType::ApplicationData, ContentType::Handshake],
+                &[HandshakeType::EndOfEarlyData],
+            )),
         }
     }
 }
@@ -394,6 +593,7 @@ fn emit_encrypted_extensions(
     transcript: &mut HandshakeHash,
     cx: &mut ServerContext<'_>,
     client_hello: &ClientHelloPayload,
+    early_data_accepted: bool,
 ) {
     let exts = ServerExtensions {
         alpn: cx
@@ -402,6 +602,7 @@ fn emit_encrypted_extensions(
             .clone()
             .map(crate::msgs::handshake::ProtocolName::from),
         server_name_ack: client_hello.sni().map(|_| ()),
+        early_data: early_data_accepted.then_some(()),
         ..Default::default()
     };
     let m = Message {
@@ -759,8 +960,17 @@ fn emit_ticket(
         return Ok(());
     };
 
-    let payload =
+    let mut payload =
         NewSessionTicketPayloadTls13::new(config.ticketer.lifetime(), age_add, nonce, ticket);
+    if config.max_early_data_size > 0 {
+        if config.ticketer.enabled() {
+            // RFC 8446 §8.1: without a server-side session record there is no
+            // single-use guarantee, so 0-RTT is never offered on such tickets.
+            warning!("early_data with stateless resumption is not allowed");
+        } else {
+            payload.exts.max_early_data_size = Some(config.max_early_data_size);
+        }
+    }
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(

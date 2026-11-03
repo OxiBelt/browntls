@@ -497,6 +497,16 @@ impl CommonState {
         self.send_appdata_encrypt(payload, limit)
     }
 
+    /// Encrypts and sends 0-RTT data under the early traffic key.
+    pub(crate) fn send_early_plaintext(&mut self, data: &[u8]) -> usize {
+        debug_assert!(self.early_traffic);
+        debug_assert!(self.record_layer.is_encrypting());
+        if data.is_empty() {
+            return 0;
+        }
+        self.send_appdata_encrypt(data.into(), Limit::Yes)
+    }
+
     /// Queues a TLS 1.3 KeyUpdate message to be encrypted under the *current*
     /// key before the caller rotates to the next one.
     pub(crate) fn send_key_update(&mut self, request: KeyUpdateRequest) {

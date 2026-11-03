@@ -26,7 +26,6 @@ use crate::tls13::Tls13CipherSuite;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecretKind {
     ResumptionPskBinderKey,
-    #[allow(dead_code)] // used once 0-RTT lands
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
@@ -249,7 +248,6 @@ impl KeyScheduleEarly {
     }
 
     /// Derives and installs the `client_early_traffic_secret` for 0-RTT.
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn client_early_traffic_secret(
         &self,
         hs_hash: &[u8],
@@ -384,13 +382,11 @@ pub(crate) struct KeyScheduleHandshake {
 impl KeyScheduleHandshake {
     /// Installs the client handshake key in the pending direction (used after
     /// early data finishes).
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_handshake_encrypter(&self, common: &mut CommonState) {
         self.ks
             .set_encrypter(&self.client_handshake_traffic_secret, common);
     }
 
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_handshake_decrypter(
         &self,
         skip_requested: Option<usize>,
@@ -410,12 +406,6 @@ impl KeyScheduleHandshake {
     pub(crate) fn sign_server_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
         self.ks
             .sign_finish(&self.server_handshake_traffic_secret, hs_hash)
-    }
-
-    #[allow(dead_code)] // used once 0-RTT lands
-    pub(crate) fn sign_client_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
-        self.ks
-            .sign_finish(&self.client_handshake_traffic_secret, hs_hash)
     }
 
     /// Mixes in the empty master-secret input and derives the application
@@ -469,6 +459,14 @@ impl KeyScheduleTrafficWithClientFinishedPending {
                 .set_decrypter(&self.traffic.current_client_traffic_secret, common),
         }
         self.traffic
+    }
+
+    /// Switches the server's decrypter from the early traffic key to the
+    /// client handshake key, once EndOfEarlyData arrives.
+    pub(crate) fn update_decrypter(&self, common: &mut CommonState) {
+        self.traffic
+            .ks
+            .set_decrypter(&self.handshake_client_traffic_secret, common);
     }
 
     /// Installs the server application decrypter on the client, which may

@@ -21,6 +21,7 @@ use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
+use crate::vecbuf::ChunkVecBuffer;
 use crate::verify::ClientCertVerifier;
 use crate::versions::EnabledVersions;
 
@@ -274,12 +275,85 @@ impl TimeProvider for NoTime {
     }
 }
 
+/// Where 0-RTT stands on a server connection.
+#[derive(Default)]
+pub(super) enum EarlyDataState {
+    /// No decision yet.
+    #[default]
+    New,
+    /// Accepted: `received` holds the data, `left` what may still arrive.
+    Accepted {
+        received: ChunkVecBuffer,
+        left: usize,
+    },
+    /// Declined (by configuration, policy, or the application).
+    Rejected,
+}
+
+impl EarlyDataState {
+    pub(super) fn reject(&mut self) {
+        *self = Self::Rejected;
+    }
+
+    pub(super) fn accept(&mut self, max_size: usize) {
+        *self = Self::Accepted {
+            received: ChunkVecBuffer::new(Some(max_size)),
+            left: max_size,
+        };
+    }
+
+    pub(super) fn was_accepted(&self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    pub(super) fn was_rejected(&self) -> bool {
+        matches!(self, Self::Rejected)
+    }
+
+    /// Stores early data; `false` if it exceeds what was announced.
+    pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
+        let Self::Accepted { received, left } = self else {
+            return false;
+        };
+        let available = bytes.len();
+        if received.apply_limit(available) != available || available > *left {
+            return false;
+        }
+        received.append(bytes.to_vec());
+        *left -= available;
+        true
+    }
+
+    #[cfg(feature = "std")]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Accepted { received, .. } => Ok(received.read(buf)),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        }
+    }
+}
+
+impl fmt::Debug for EarlyDataState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::New => f.write_str("EarlyDataState::New"),
+            Self::Accepted { received, left } => f
+                .debug_struct("EarlyDataState::Accepted")
+                .field("received", &received.len())
+                .field("left", left)
+                .finish(),
+            Self::Rejected => f.write_str("EarlyDataState::Rejected"),
+        }
+    }
+}
+
 /// Per-connection server data.
 #[derive(Debug, Default)]
 pub struct ServerConnectionData {
     pub(super) sni: Option<DnsName<'static>>,
     pub(super) received_resumption_data: Option<Vec<u8>>,
     pub(super) resumption_data: Vec<u8>,
+    pub(super) early_data: EarlyDataState,
 }
 
 impl SideData for ServerConnectionData {}
@@ -295,6 +369,28 @@ impl ConnectionCore<ServerConnectionData> {
             ServerConnectionData::default(),
             common,
         ))
+    }
+}
+
+/// An [`std::io::Read`] for accepted early data; see [`ServerConnection::early_data`].
+#[cfg(feature = "std")]
+pub struct ReadEarlyData<'a> {
+    early_data: &'a mut EarlyDataState,
+}
+
+#[cfg(feature = "std")]
+impl fmt::Debug for ReadEarlyData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadEarlyData")
+            .field("state", self.early_data)
+            .finish()
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::io::Read for ReadEarlyData<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.early_data.read(buf)
     }
 }
 
@@ -328,6 +424,38 @@ impl ServerConnection {
     /// Call before the handshake completes; it is written into the tickets.
     pub fn set_resumption_data(&mut self, data: &[u8]) {
         self.inner.core.data.resumption_data = data.to_vec();
+    }
+
+    /// Refuses any 0-RTT data on this connection.
+    ///
+    /// Must be called before the handshake has processed the ClientHello
+    /// (right after [`Self::new`], or from a certificate resolver); a later
+    /// call has no effect on data already accepted.
+    pub fn reject_early_data(&mut self) {
+        debug_assert!(
+            self.inner.core.common_state.is_handshaking(),
+            "cannot retroactively reject early data"
+        );
+        self.inner.core.data.early_data.reject();
+    }
+
+    /// A reader for the client's 0-RTT ("early") data, if any was accepted.
+    ///
+    /// Early data is enabled by a non-zero [`ServerConfig::max_early_data_size`]
+    /// with stateful (non-ticket) resumption. It is **replayable** by an
+    /// attacker: the application must only act on it when a replay is
+    /// harmless, and the library offers no anti-replay store. Returns `None`
+    /// until the ClientHello has been processed, or if early data was not
+    /// offered or not accepted.
+    pub fn early_data(&mut self) -> Option<ReadEarlyData<'_>> {
+        let data = &mut self.inner.core.data;
+        if data.early_data.was_accepted() {
+            Some(ReadEarlyData {
+                early_data: &mut data.early_data,
+            })
+        } else {
+            None
+        }
     }
 
     /// Whether the connection only uses FIPS-validated components.
@@ -454,12 +582,12 @@ impl fmt::Debug for Acceptor {
 
 /// The alert an [`Acceptor`] or [`Accepted`] wants to send after a failure.
 #[cfg(feature = "std")]
-pub struct AcceptedAlert(crate::vecbuf::ChunkVecBuffer);
+pub struct AcceptedAlert(ChunkVecBuffer);
 
 #[cfg(feature = "std")]
 impl AcceptedAlert {
     fn empty() -> Self {
-        Self(crate::vecbuf::ChunkVecBuffer::new(None))
+        Self(ChunkVecBuffer::new(None))
     }
 
     /// Writes as much of the alert as `wr` accepts.

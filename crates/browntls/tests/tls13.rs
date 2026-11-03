@@ -574,3 +574,257 @@ fn unexpected_message_during_handshake() {
         PeerMisbehaved::IncorrectBinder,
     );
 }
+
+// ------------------------------------------------------------- 0-RTT
+
+/// A server that allows `max` bytes of early data, sharing `cache` across
+/// configurations so a session issued by one is found by another.
+fn early_data_server(
+    chain: &Chain,
+    max: u32,
+    cache: &Arc<dyn browntls::server::StoresServerSessions>,
+) -> Arc<ServerConfig> {
+    let mut config = server_config(chain);
+    config.max_early_data_size = max;
+    config.session_storage = cache.clone();
+    Arc::new(config)
+}
+
+fn early_data_client(chain: &Chain) -> Arc<ClientConfig> {
+    let mut config = tls13_only_client(chain, None, None);
+    config.enable_early_data = true;
+    Arc::new(config)
+}
+
+/// Runs one handshake so the client holds a ticket from `server_config`.
+fn prime_ticket(client_config: &Arc<ClientConfig>, server_config: &Arc<ServerConfig>) {
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert!(client.tls13_tickets_received() > 0);
+}
+
+#[test]
+fn early_data_is_accepted_and_readable() {
+    use std::io::{Read, Write};
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let server_config = early_data_server(&chain, 1024, &cache);
+    let client_config = early_data_client(&chain);
+
+    // No ticket yet: early data is not available on the first connection.
+    let mut first = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    assert!(first.early_data().is_none());
+    drop(first);
+    prime_ticket(&client_config, &server_config);
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    {
+        let mut early = client.early_data().expect("ticket allows early data");
+        assert_eq!(early.bytes_left(), 1024);
+        early.write_all(b"GET /idempotent").unwrap();
+        assert_eq!(early.bytes_left(), 1024 - b"GET /idempotent".len());
+    }
+    assert!(
+        server.early_data().is_none(),
+        "nothing before the ClientHello"
+    );
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(client.is_early_data_accepted());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+
+    let mut got = Vec::new();
+    server
+        .early_data()
+        .expect("server accepted early data")
+        .read_to_end(&mut got)
+        .unwrap();
+    assert_eq!(got, b"GET /idempotent");
+
+    // early data is closed once the handshake is done
+    assert!(client.early_data().is_none());
+    assert_eq!(
+        send_and_receive(&mut client, &mut server, b"1-RTT request"),
+        b"1-RTT request"
+    );
+    assert_eq!(
+        send_and_receive(&mut server, &mut client, b"response"),
+        b"response"
+    );
+}
+
+#[test]
+fn early_data_respects_the_ticket_limit() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let server_config = early_data_server(&chain, 100, &cache);
+    let client_config = early_data_client(&chain);
+    prime_ticket(&client_config, &server_config);
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    {
+        let mut early = client.early_data().unwrap();
+        assert_eq!(early.write(&[7u8; 150]).unwrap(), 100);
+        assert_eq!(early.write(&[7u8; 1]).unwrap(), 0);
+        assert_eq!(early.bytes_left(), 0);
+    }
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(client.is_early_data_accepted());
+    let mut got = Vec::new();
+    std::io::Read::read_to_end(&mut server.early_data().unwrap(), &mut got).unwrap();
+    assert_eq!(got, [7u8; 100]);
+}
+
+#[test]
+fn early_data_is_rejected_when_the_server_no_longer_allows_it() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let client_config = early_data_client(&chain);
+    prime_ticket(&client_config, &early_data_server(&chain, 1024, &cache));
+
+    // Same session store, but early data is now off: the server must skip
+    // the undecryptable records and continue a normal resumption.
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(early_data_server(&chain, 0, &cache)).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"replayable")
+        .unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(!client.is_early_data_accepted());
+    assert!(client.early_data().is_none());
+    assert!(server.early_data().is_none());
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(
+        send_and_receive(&mut client, &mut server, b"replayable, resent"),
+        b"replayable, resent"
+    );
+}
+
+#[test]
+fn early_data_is_rejected_by_the_application() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let server_config = early_data_server(&chain, 1024, &cache);
+    let client_config = early_data_client(&chain);
+    prime_ticket(&client_config, &server_config);
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    server.reject_early_data();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"no thanks")
+        .unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(!client.is_early_data_accepted());
+    assert!(server.early_data().is_none());
+    assert_eq!(
+        send_and_receive(&mut server, &mut client, b"still fine"),
+        b"still fine"
+    );
+}
+
+#[test]
+fn early_data_is_rejected_after_hello_retry_request() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let server_config = early_data_server(&chain, 1024, &cache);
+    let mut client_config = tls13_only_client(
+        &chain,
+        None,
+        Some(&[
+            rustcrypto::kx_group::X25519,
+            rustcrypto::kx_group::SECP384R1,
+        ]),
+    );
+    client_config.enable_early_data = true;
+    let client_config = Arc::new(client_config);
+    prime_ticket(&client_config, &server_config);
+
+    // The second server only takes P-384, forcing a HelloRetryRequest; the
+    // early data behind the first ClientHello must be skipped.
+    let mut provider = rustcrypto::default_provider();
+    provider.kx_groups = vec![rustcrypto::kx_group::SECP384R1];
+    let mut retry_config = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    retry_config.max_early_data_size = 1024;
+    retry_config.session_storage = cache;
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(retry_config)).unwrap();
+    client
+        .early_data()
+        .unwrap()
+        .write_all(b"too early")
+        .unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(!client.is_early_data_accepted());
+    assert!(server.early_data().is_none());
+    // The retried ClientHello still carries the PSK, so the session is
+    // resumed (as in rustls, resumption outranks the retry in the kind).
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(
+        send_and_receive(&mut client, &mut server, b"after retry"),
+        b"after retry"
+    );
+}
+
+#[test]
+fn early_data_is_not_offered_with_stateless_tickets() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut server_config = server_config(&chain);
+    server_config.max_early_data_size = 1024;
+    server_config.ticketer = rustcrypto::Ticketer::new().unwrap();
+    server_config.session_storage = Arc::new(browntls::server::NoServerSessionStorage {});
+    let server_config = Arc::new(server_config);
+    let client_config = early_data_client(&chain);
+    prime_ticket(&client_config, &server_config);
+
+    // RFC 8446 §8.1: no single-use guarantee without server state.
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    assert!(client.early_data().is_none());
+    let mut server = ServerConnection::new(server_config).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+}
+
+#[test]
+fn early_data_disabled_in_client_config_is_not_sent() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let server_config = early_data_server(&chain, 1024, &cache);
+    let client_config = Arc::new(tls13_only_client(&chain, None, None));
+    prime_ticket(&client_config, &server_config);
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    assert!(client.early_data().is_none());
+    assert!(!client.is_early_data_accepted());
+}

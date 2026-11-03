@@ -92,6 +92,9 @@ impl RecordLayer {
                 if !self.has_decrypted {
                     self.has_decrypted = true;
                 }
+                // The first record under the new key ends any skipped early
+                // data: later failures are genuine.
+                self.finish_trial_decryption();
                 Ok(Some(Decrypted {
                     want_close_before_decrypt,
                     plaintext,
@@ -140,7 +143,6 @@ impl RecordLayer {
 
     /// Like `set_message_decrypter`, but up to `max_length` bytes of records
     /// that fail to decrypt are dropped silently.
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_message_decrypter_with_trial_decryption(
         &mut self,
         cipher: Box<dyn MessageDecrypter>,
@@ -151,7 +153,6 @@ impl RecordLayer {
         self.trial_decryption_len = Some(max_length);
     }
 
-    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn finish_trial_decryption(&mut self) {
         self.trial_decryption_len = None;
     }
@@ -194,7 +195,7 @@ impl RecordLayer {
     }
 
     /// Whether at least one record has been decrypted under the current key.
-    #[allow(dead_code)] // used once 0-RTT lands
+    #[cfg(test)]
     pub(crate) fn has_decrypted(&self) -> bool {
         self.has_decrypted
     }

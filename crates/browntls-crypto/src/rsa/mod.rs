@@ -78,9 +78,25 @@ pub(crate) fn hardware_kernel_available() -> bool {
     }
 }
 
-/// RSA Montgomery kernels (for the acceleration policy).
+/// Whether the CPU offers the AVX-512 IFMA CRT exponentiation (which also
+/// relies on the BMI2/ADX kernel for its radix-2^64 steps).
+pub(crate) fn ifma_available() -> bool {
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    {
+        bigint::ifma::Ifma::detect().is_some() && hardware_kernel_available()
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
+    {
+        false
+    }
+}
+
+/// RSA arithmetic backends (for the acceleration policy).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RsaBackend {
+    /// AVX-512 IFMA dual CRT exponentiation for signing, BMI2/ADX
+    /// Montgomery kernel elsewhere (x86-64).
+    Ifma,
     /// BMI2 `mulx` + ADX `adcx`/`adox` (x86-64).
     MulxAdx,
     /// Portable u128 CIOS.
@@ -89,10 +105,11 @@ pub(crate) enum RsaBackend {
 
 impl crate::accel::Backends for RsaBackend {
     const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Rsa;
-    const PREFERENCE: &'static [Self] = &[Self::MulxAdx, Self::Soft];
+    const PREFERENCE: &'static [Self] = &[Self::Ifma, Self::MulxAdx, Self::Soft];
 
     fn available(self) -> bool {
         match self {
+            Self::Ifma => ifma_available(),
             Self::MulxAdx => hardware_kernel_available(),
             Self::Soft => true,
         }
@@ -100,6 +117,7 @@ impl crate::accel::Backends for RsaBackend {
 
     fn uses(self) -> crate::accel::Uses {
         match self {
+            Self::Ifma => crate::accel::Uses::BOTH,
             Self::MulxAdx => crate::accel::Uses::DEDICATED,
             Self::Soft => crate::accel::Uses::PORTABLE,
         }
@@ -107,6 +125,7 @@ impl crate::accel::Backends for RsaBackend {
 
     fn name(self) -> &'static str {
         match self {
+            Self::Ifma => "AVX-512 IFMA + BMI2/ADX",
             Self::MulxAdx => "BMI2/ADX",
             Self::Soft => "portable",
         }

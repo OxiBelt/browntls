@@ -35,8 +35,10 @@ impl Kernel {
     /// Picks the best kernel for this CPU.
     pub(crate) fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
-        if crate::accel::select::<crate::rsa::RsaBackend>() == crate::rsa::RsaBackend::MulxAdx
-            && let Some(token) = super::x86_64::MulxAdx::detect()
+        if matches!(
+            crate::accel::select::<crate::rsa::RsaBackend>(),
+            crate::rsa::RsaBackend::Ifma | crate::rsa::RsaBackend::MulxAdx
+        ) && let Some(token) = super::x86_64::MulxAdx::detect()
         {
             return Self::MulxAdx(token);
         }

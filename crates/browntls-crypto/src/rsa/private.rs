@@ -16,6 +16,7 @@
 //!
 //! Every step has a running time that depends only on the key size.
 
+use super::bigint::crt::CrtExp;
 use super::bigint::mont::Mont;
 use super::bigint::{self, HALF_LIMBS, MAX_LIMBS, inv};
 use super::{MAX_MODULUS_BYTES, OID_RSA_ENCRYPTION, RsaPublicKey, pkcs1, pss};
@@ -57,12 +58,15 @@ pub struct RsaPrivateKey {
     d: [u64; MAX_LIMBS],
     /// Limbs of each prime (`ceil(limbs(n) / 2)`).
     half: usize,
+    /// Backend for the two CRT exponentiations (chosen at creation).
+    crt: CrtExp,
 }
 
 impl core::fmt::Debug for RsaPrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RsaPrivateKey")
             .field("bits", &self.public.modulus_bits())
+            .field("crt", &self.crt)
             .finish_non_exhaustive()
     }
 }
@@ -362,10 +366,12 @@ impl RsaPrivateKey {
             return Err(Error::InvalidKey);
         }
 
+        let crt = CrtExp::new(&p_ctx, &q_ctx);
         let mut key = Self {
             public,
             p: p_ctx,
             q: q_ctx,
+            crt,
             dp: [0; HALF_LIMBS],
             dq: [0; HALF_LIMBS],
             qinv_mont: [0; HALF_LIMBS],
@@ -592,12 +598,20 @@ impl RsaPrivateKey {
         let mut sp = [0u64; HALF_LIMBS];
         let mut sq = [0u64; HALF_LIMBS];
         let mut base = [0u64; HALF_LIMBS];
+        let mut base_q = [0u64; HALF_LIMBS];
         reduce_to_mont(&self.p, &m_blind[..l], &mut base[..half]);
-        self.p
-            .exp_ct(&mut sp[..half], &base[..half], &self.dp[..half]);
-        reduce_to_mont(&self.q, &m_blind[..l], &mut base[..half]);
-        self.q
-            .exp_ct(&mut sq[..half], &base[..half], &self.dq[..half]);
+        reduce_to_mont(&self.q, &m_blind[..l], &mut base_q[..half]);
+        self.crt.exp(
+            &self.p,
+            &self.q,
+            &mut sp[..half],
+            &mut sq[..half],
+            &base[..half],
+            &base_q[..half],
+            &self.dp[..half],
+            &self.dq[..half],
+        );
+        base_q.zeroize();
 
         // Unblind each half: multiply by r^-1 mod prime (constant-time
         // safegcd inversion of r mod prime).

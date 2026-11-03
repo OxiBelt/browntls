@@ -25,15 +25,20 @@ extern crate std;
 /// Logging macros: forwarded to the `log` crate, or no-ops.
 #[cfg(feature = "logging")]
 mod log {
-    pub(crate) use ::log::{debug, trace, warn};
+    pub(crate) use ::log::{debug, trace};
+
+    // Named `warning` rather than `warn` because a `macro_rules!` item called
+    // `warn` collides with the built-in `#[warn]` attribute when imported.
+    macro_rules! warning ( ($($tt:tt)*) => { ::log::warn!($($tt)*) } );
+    pub(crate) use warning;
 }
 
 #[cfg(not(feature = "logging"))]
 mod log {
     macro_rules! trace ( ($($tt:tt)*) => {{}} );
     macro_rules! debug ( ($($tt:tt)*) => {{}} );
-    macro_rules! _warn ( ($($tt:tt)*) => {{}} );
-    pub(crate) use {_warn as warn, debug, trace};
+    macro_rules! warning ( ($($tt:tt)*) => {{}} );
+    pub(crate) use {debug, trace, warning};
 }
 
 pub(crate) mod sync {
@@ -111,6 +116,8 @@ pub mod client {
     mod common;
     pub(super) mod handy;
     mod hs;
+    #[cfg(feature = "tls12")]
+    mod tls12;
     pub(crate) mod tls13;
 
     pub use builder::WantsClientCert;
@@ -151,6 +158,8 @@ pub mod server {
     pub(crate) mod handy;
     mod hs;
     mod server_conn;
+    #[cfg(feature = "tls12")]
+    mod tls12;
     mod tls13;
 
     pub use builder::WantsServerCert;

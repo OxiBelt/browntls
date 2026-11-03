@@ -147,6 +147,8 @@ enum_builder! {
         secp256r1MLKEM768 => 0x11eb,
         /// Hybrid X25519 + ML-KEM-768 (draft-ietf-tls-ecdhe-mlkem).
         X25519MLKEM768 => 0x11ec,
+        /// Hybrid secp384r1 + ML-KEM-1024 (draft-ietf-tls-ecdhe-mlkem).
+        secp384r1MLKEM1024 => 0x11ed,
     }
 }
 

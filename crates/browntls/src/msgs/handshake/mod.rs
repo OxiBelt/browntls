@@ -25,7 +25,8 @@ pub(crate) use hello::{
 };
 pub use hello::{ClientHelloPayload, HandshakeMessagePayload};
 pub(crate) use kx::{
-    ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangePayload,
+    ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangeParams,
+    ServerKeyExchangePayload,
 };
 pub(crate) use tickets::{
     NewSessionTicketExtensions, NewSessionTicketPayload, NewSessionTicketPayloadTls13,

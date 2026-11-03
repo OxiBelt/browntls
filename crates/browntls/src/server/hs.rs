@@ -294,21 +294,24 @@ impl ExpectClientHello {
                         PeerIncompatible::ExtendedMasterSecretExtensionRequired,
                     ));
                 }
-                // TODO(tls12): dispatch to the TLS 1.2 server handshake.
-                let _ = (
+                super::tls12::CompleteClientHelloHandling {
+                    config: self.config,
+                    transcript,
+                    session_id: self.session_id,
                     suite,
                     using_ems,
-                    transcript,
                     randoms,
+                    send_ticket: self.send_tickets > 0,
+                }
+                .handle_client_hello(
+                    cx,
                     certkey,
-                    selected_kxg,
                     m,
+                    client_hello,
+                    selected_kxg,
+                    sig_schemes,
                     tls13_enabled,
-                );
-                Err(cx.common.send_fatal_alert(
-                    AlertDescription::InternalError,
-                    Error::general("TLS 1.2 server handshake not yet implemented"),
-                ))
+                )
             }
         }
     }

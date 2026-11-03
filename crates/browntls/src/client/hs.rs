@@ -9,6 +9,8 @@ use browntls_pki::ServerName;
 
 use super::client_conn::ClientConnectionData;
 use super::common::ClientHelloDetails;
+#[cfg(feature = "tls12")]
+use super::tls12;
 use super::{ClientConfig, tls13};
 use crate::common_state::ConnectionRandoms;
 use crate::common_state::{CommonState, HandshakeKind, KxState};
@@ -204,7 +206,7 @@ pub(super) fn start_handshake(
     }
 
     let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
-    let resuming = find_session(&server_name, &config, cx);
+    let mut resuming = find_session(&server_name, &config, cx);
 
     let key_share = if supports_tls13 {
         Some(initial_key_share(
@@ -229,6 +231,20 @@ pub(super) fn start_handshake(
         }
         _ => SessionId::empty(),
     };
+
+    // For TLS 1.2 ticket resumption the stored session has no ID of its own:
+    // remember the random one we send, so the server echoing it back tells us
+    // the ticket was accepted (RFC 5077 §3.4).
+    #[cfg(feature = "tls12")]
+    if let Some(Retrieved {
+        value: ClientSessionValue::Tls12(inner),
+        ..
+    }) = &mut resuming
+    {
+        if inner.session_id.is_empty() {
+            inner.session_id = session_id;
+        }
+    }
 
     let random = Random::new(config.provider.secure_random)?;
     let input = ClientHelloInput {
@@ -602,12 +618,22 @@ impl State<ClientConnectionData> for ExpectServerHello {
             }
             #[cfg(feature = "tls12")]
             SupportedCipherSuite::Tls12(suite) => {
-                // TODO(tls12): dispatch to the TLS 1.2 client handshake.
-                let _ = (suite, transcript, randoms);
-                Err(cx.common.send_fatal_alert(
-                    AlertDescription::InternalError,
-                    Error::general("TLS 1.2 client handshake not yet implemented"),
-                ))
+                let resuming = self.input.resuming.take().and_then(|r| match r.value {
+                    ClientSessionValue::Tls12(inner) => Some(inner),
+                    ClientSessionValue::Tls13(_) => None,
+                });
+                tls12::CompleteServerHelloHandling {
+                    config: self.input.config.clone(),
+                    resuming_session: resuming,
+                    server_name: self.input.server_name,
+                    randoms,
+                    using_ems: server_hello.extensions.extended_master_secret.is_some(),
+                    transcript,
+                    session_id: self.input.session_id,
+                    hello: self.input.hello,
+                    alpn_protocols: self.input.alpn_protocols,
+                }
+                .handle_server_hello(cx, suite, server_hello, tls13_supported)
             }
         }
     }

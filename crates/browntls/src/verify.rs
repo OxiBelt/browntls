@@ -200,7 +200,8 @@ pub struct DigitallySignedStruct {
 }
 
 impl DigitallySignedStruct {
-    pub(crate) fn new(scheme: SignatureScheme, sig: Vec<u8>) -> Self {
+    /// Builds a signature `sig` made with `scheme`.
+    pub fn new(scheme: SignatureScheme, sig: Vec<u8>) -> Self {
         Self {
             scheme,
             sig: PayloadU16::new(sig),

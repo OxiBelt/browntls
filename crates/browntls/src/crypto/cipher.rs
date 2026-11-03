@@ -247,8 +247,9 @@ impl AeadKey {
         key
     }
 
-    /// Truncates the key to `len` bytes.
-    pub(crate) fn with_length(self, len: usize) -> Self {
+    /// Truncates the key to `len` bytes (or leaves it unchanged if `len` is
+    /// larger).
+    pub fn with_length(self, len: usize) -> Self {
         let mut key = Self {
             buf: self.buf,
             used: len.min(self.used),

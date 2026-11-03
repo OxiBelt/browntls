@@ -8,7 +8,7 @@ use browntls_pki::CertificateDer;
 use crate::crypto::SupportedKxGroup;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
-use crate::log::{debug, trace, warn};
+use crate::log::{debug, trace, warning};
 use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
@@ -404,7 +404,7 @@ impl CommonState {
                     PeerMisbehaved::TooManyWarningAlertsReceived,
                 ));
             }
-            warn!("TLS alert warning received: {:?}", alert);
+            warning!("TLS alert warning received: {:?}", alert);
             return Ok(());
         }
 

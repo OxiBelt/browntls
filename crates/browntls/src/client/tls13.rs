@@ -16,7 +16,7 @@ use crate::ct::constant_time_eq;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-use crate::log::{debug, trace, warn};
+use crate::log::{debug, trace, warning};
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
@@ -932,5 +932,5 @@ impl State<ClientConnectionData> for ExpectTraffic {
 
 #[allow(dead_code)]
 fn unused(_: NextState) {
-    warn!("");
+    warning!("");
 }

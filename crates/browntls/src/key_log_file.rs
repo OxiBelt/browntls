@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::key_log::KeyLog;
-use crate::log::warn;
+use crate::log::warning;
 
 struct KeyLogFileInner {
     file: Option<File>,
@@ -30,7 +30,7 @@ impl KeyLogFileInner {
         let file = match open_private(path) {
             Ok(f) => Some(f),
             Err(e) => {
-                warn!("unable to create key log file {:?}: {}", path, e);
+                warning!("unable to create key log file {:?}: {}", path, e);
                 None
             }
         };
@@ -110,7 +110,7 @@ impl KeyLog for KeyLogFile {
             return;
         };
         if let Err(e) = inner.try_write(label, client_random, secret) {
-            warn!("error writing to key log file: {}", e);
+            warning!("error writing to key log file: {}", e);
         }
     }
 

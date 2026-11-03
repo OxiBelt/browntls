@@ -30,11 +30,11 @@
 #![allow(unsafe_code)]
 
 use core::arch::x86_64::{
-    __m512i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm512_add_epi64, _mm512_alignr_epi64,
-    _mm512_and_si512, _mm512_castsi512_si128, _mm512_cmpeq_epu64_mask, _mm512_cmpgt_epu64_mask,
-    _mm512_loadu_si512, _mm512_madd52hi_epu64, _mm512_madd52lo_epu64, _mm512_mask_add_epi64,
-    _mm512_or_si512, _mm512_set1_epi64, _mm512_setzero_si512, _mm512_srli_epi64,
-    _mm512_storeu_si512, _mm512_zextsi128_si512,
+    __m512i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm512_add_epi64,
+    _mm512_alignr_epi64, _mm512_and_si512, _mm512_castsi512_si128, _mm512_cmpeq_epu64_mask,
+    _mm512_cmpgt_epu64_mask, _mm512_loadu_si512, _mm512_madd52hi_epu64, _mm512_madd52lo_epu64,
+    _mm512_mask_add_epi64, _mm512_mask_mov_epi64, _mm512_or_si512, _mm512_set1_epi64,
+    _mm512_setzero_si512, _mm512_srli_epi64, _mm512_storeu_si512, _mm512_zextsi128_si512,
 };
 use core::hint::black_box;
 
@@ -226,7 +226,7 @@ impl CrtIfma {
         assert!(exp[0].len() == len && exp[1].len() == len);
         assert!(base[0].len() == len && base[1].len() == len);
         let rows = |x: &[[u64; 8]; VMAX]| -> Num<V> { core::array::from_fn(|i| x[i]) };
-        let ctx = Amm::<V> {
+        let ctx = Amm::<V, 2> {
             m: [rows(&self.primes[0].m), rows(&self.primes[1].m)],
             k0: [self.primes[0].k0, self.primes[1].k0],
             k,
@@ -317,17 +317,100 @@ fn store<const V: usize>(out: &mut Num<V>, x: &[__m512i; V]) {
     }
 }
 
-/// Two radix-2^52 almost-Montgomery contexts multiplied in lockstep.
-struct Amm<const V: usize> {
-    m: [Num<V>; 2],
-    k0: [u64; 2],
+/// `C` radix-2^52 almost-Montgomery contexts multiplied in lockstep.
+struct Amm<const V: usize, const C: usize> {
+    m: [Num<V>; C],
+    k0: [u64; C],
     /// Lanes in use (`R = 2^(52 k)`).
     k: usize,
 }
 
-impl<const V: usize> Amm<V> {
+impl<const V: usize, const C: usize> Amm<V, C> {
     /// `AMM(a_c, b_c) = a_c b_c / R mod m_c` (below `2 m_c` for inputs below
-    /// `2 m_c`), normalised to 52-bit lanes, for both contexts.
+    /// `2 m_c`), normalised to 52-bit lanes, for every context: picks
+    /// [`Self::mul_shadow`] where it is faster on the CPUs measured (up to
+    /// four vectors; it needs one spare lane above `k`), otherwise
+    /// [`Self::mul_shift`]. Both compute the same value; the choice depends
+    /// only on the (public) sizes.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn mul(&self, a: [&Num<V>; C], b: [&Num<V>; C]) -> [Num<V>; C] {
+        if V <= 4 && self.k < 8 * V {
+            self.mul_shadow(a, b)
+        } else {
+            self.mul_shift(a, b)
+        }
+    }
+
+    /// Word-serial AMM with the high halves added at the shifted-in
+    /// position through operands pre-shifted up by one lane (`a ↑`, `m ↑`)
+    /// and lane 0 tracked by a scalar shadow `s`, which takes the vector
+    /// extraction and the carry out of the critical path. Requires `k < 8 V`.
+    ///
+    /// Per lane `i < k`, with `x` the accumulator (lanes 1 and up exact,
+    /// lane 0 superseded by `s`):
+    /// `x += lo(a b_i) + hi(a↑ b_i)`, `t0 = s + lo(a_0 b_i)`,
+    /// `y = t0 k0 mod 2^52`, `x += lo(m y) + hi(m↑ y)`, then `x` shifts
+    /// down one lane and `s` becomes the new lane 0, computed in scalar as
+    /// `x_1 + lo(a_1 b_i) + hi(a_0 b_i) + lo(m_1 y) + hi(m_0 y) +
+    /// (t0 + lo(m_0 y)) / 2^52`. At the end `s` is written into lane 0.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn mul_shadow(&self, a: [&Num<V>; C], b: [&Num<V>; C]) -> [Num<V>; C] {
+        let zero = _mm512_setzero_si512();
+        let av: [[__m512i; V]; C] = core::array::from_fn(|c| load(a[c]));
+        let mv: [[__m512i; V]; C] = core::array::from_fn(|c| load(&self.m[c]));
+        let up = |x: &[__m512i; V]| -> [__m512i; V] {
+            core::array::from_fn(|v| {
+                _mm512_alignr_epi64::<7>(x[v], if v == 0 { zero } else { x[v - 1] })
+            })
+        };
+        let au: [[__m512i; V]; C] = core::array::from_fn(|c| up(&av[c]));
+        let mu: [[__m512i; V]; C] = core::array::from_fn(|c| up(&mv[c]));
+        let a0: [u64; C] = core::array::from_fn(|c| a[c][0][0]);
+        let a1: [u64; C] = core::array::from_fn(|c| a[c][0][1]);
+        let m0: [u64; C] = core::array::from_fn(|c| self.m[c][0][0]);
+        let m1: [u64; C] = core::array::from_fn(|c| self.m[c][0][1]);
+        let mut x = [[zero; V]; C];
+        let mut s = [0u64; C];
+        for i in 0..self.k {
+            for c in 0..C {
+                let bi = b[c][i / 8][i % 8];
+                let bv = _mm512_set1_epi64(bi as i64);
+                let x1 = _mm_extract_epi64::<1>(_mm512_castsi512_si128(x[c][0])) as u64;
+                for v in 0..V {
+                    x[c][v] = _mm512_madd52lo_epu64(x[c][v], av[c][v], bv);
+                    x[c][v] = _mm512_madd52hi_epu64(x[c][v], au[c][v], bv);
+                }
+                let t0 = s[c] + (a0[c].wrapping_mul(bi) & MASK52);
+                let y = t0.wrapping_mul(self.k0[c]) & MASK52;
+                let yv = _mm512_set1_epi64(y as i64);
+                for v in 0..V {
+                    x[c][v] = _mm512_madd52lo_epu64(x[c][v], mv[c][v], yv);
+                    x[c][v] = _mm512_madd52hi_epu64(x[c][v], mu[c][v], yv);
+                }
+                let carry = (t0 + (m0[c].wrapping_mul(y) & MASK52)) >> 52;
+                let hi = |p: u64, q: u64| ((u128::from(p) * u128::from(q)) >> 52) as u64;
+                s[c] = x1
+                    + (a1[c].wrapping_mul(bi) & MASK52)
+                    + hi(a0[c], bi)
+                    + (m1[c].wrapping_mul(y) & MASK52)
+                    + hi(m0[c], y)
+                    + carry;
+                for v in 0..V - 1 {
+                    x[c][v] = _mm512_alignr_epi64::<1>(x[c][v + 1], x[c][v]);
+                }
+                x[c][V - 1] = _mm512_alignr_epi64::<1>(zero, x[c][V - 1]);
+            }
+        }
+        let mut out = [[[0u64; 8]; V]; C];
+        for c in 0..C {
+            x[c][0] = _mm512_mask_mov_epi64(x[c][0], 1, _mm512_set1_epi64(s[c] as i64));
+            normalize(&mut x[c]);
+            store(&mut out[c], &x[c]);
+        }
+        out
+    }
+
+    /// Word-serial AMM with a shift after the low halves.
     ///
     /// For each lane `i < k`: `acc += a b_i` (low halves), `y = acc_0 k0 mod
     /// 2^52`, `acc += m y` (low halves; lane 0 becomes a multiple of 2^52),
@@ -335,23 +418,23 @@ impl<const V: usize> Amm<V> {
     /// halves of `a b_i` and `m y`, which belong one lane up. Lane values
     /// stay below `4 k 2^52 + 2^12 < 2^62`.
     #[target_feature(enable = "avx512f,avx512ifma")]
-    fn mul(&self, a: [&Num<V>; 2], b: [&Num<V>; 2]) -> [Num<V>; 2] {
-        let av = [load(a[0]), load(a[1])];
-        let mv = [load(&self.m[0]), load(&self.m[1])];
-        let m0 = [self.m[0][0][0], self.m[1][0][0]];
+    fn mul_shift(&self, a: [&Num<V>; C], b: [&Num<V>; C]) -> [Num<V>; C] {
+        let av: [[__m512i; V]; C] = core::array::from_fn(|c| load(a[c]));
+        let mv: [[__m512i; V]; C] = core::array::from_fn(|c| load(&self.m[c]));
+        let m0: [u64; C] = core::array::from_fn(|c| self.m[c][0][0]);
         let zero = _mm512_setzero_si512();
-        let mut acc = [[zero; V]; 2];
+        let mut acc = [[zero; V]; C];
         for i in 0..self.k {
-            let mut bv = [zero; 2];
-            let mut yv = [zero; 2];
-            let mut carry = [0u64; 2];
-            for c in 0..2 {
+            let mut bv = [zero; C];
+            let mut yv = [zero; C];
+            let mut carry = [0u64; C];
+            for c in 0..C {
                 bv[c] = _mm512_set1_epi64(b[c][i / 8][i % 8] as i64);
                 for v in 0..V {
                     acc[c][v] = _mm512_madd52lo_epu64(acc[c][v], av[c][v], bv[c]);
                 }
             }
-            for c in 0..2 {
+            for c in 0..C {
                 let t0 = _mm_cvtsi128_si64(_mm512_castsi512_si128(acc[c][0])) as u64;
                 let y = t0.wrapping_mul(self.k0[c]) & MASK52;
                 yv[c] = _mm512_set1_epi64(y as i64);
@@ -361,7 +444,7 @@ impl<const V: usize> Amm<V> {
                     acc[c][v] = _mm512_madd52lo_epu64(acc[c][v], mv[c][v], yv[c]);
                 }
             }
-            for c in 0..2 {
+            for c in 0..C {
                 for v in 0..V - 1 {
                     acc[c][v] = _mm512_alignr_epi64::<1>(acc[c][v + 1], acc[c][v]);
                 }
@@ -376,8 +459,8 @@ impl<const V: usize> Amm<V> {
                 }
             }
         }
-        let mut out = [[[0u64; 8]; V]; 2];
-        for c in 0..2 {
+        let mut out = [[[0u64; 8]; V]; C];
+        for c in 0..C {
             normalize(&mut acc[c]);
             store(&mut out[c], &acc[c]);
         }
@@ -415,6 +498,46 @@ fn normalize<const V: usize>(x: &mut [__m512i; V]) {
         let k = (cin >> (8 * v)) as u8;
         x[v] = _mm512_and_si512(_mm512_mask_add_epi64(x[v], k, x[v], one), mask);
     }
+}
+
+/// Times `C` interleaved multiplications (temporary benchmark hook).
+#[cfg(test)]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) fn bench_amm<const V: usize, const C: usize>(iters: usize) -> f64 {
+    let mut m = [[0u64; 8]; V];
+    for (i, l) in m.as_flattened_mut().iter_mut().enumerate() {
+        *l = (0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1)) & MASK52;
+    }
+    m[0][0] |= 1;
+    let k = 8 * V - 4;
+    for l in &mut m.as_flattened_mut()[k - 1..] {
+        *l = 0;
+    }
+    m.as_flattened_mut()[k - 2] |= 1 << 40;
+    let ctx = Amm::<V, C> {
+        m: [m; C],
+        k0: [0x1234_5678_9abc & MASK52; C],
+        k,
+    };
+    let mut x = [m; C];
+    let t = std::time::Instant::now();
+    for _ in 0..iters {
+        let r: [&Num<V>; C] = core::array::from_fn(|c| &x[c]);
+        x = ctx.mul_shift(r, r);
+    }
+    black_box(&x);
+    let t1 = t.elapsed().as_nanos() as f64 / iters as f64;
+    let mut x2 = [m; C];
+    let t = std::time::Instant::now();
+    for _ in 0..iters {
+        let r: [&Num<V>; C] = core::array::from_fn(|c| &x2[c]);
+        x2 = ctx.mul_shadow(r, r);
+    }
+    black_box(&x2);
+    let t2 = t.elapsed().as_nanos() as f64 / iters as f64;
+    assert_eq!(x, x2);
+    std::println!("V{V} C{C} k{k}: mul {t1:.0} ns, mul2 {t2:.0} ns");
+    t1
 }
 
 #[cfg(test)]
@@ -487,6 +610,101 @@ mod tests {
             // SAFETY: AVX-512F was detected above.
             let got = unsafe { normalize_for_test(&lanes) };
             assert_eq!(got, expect, "case {case}");
+        }
+    }
+
+    /// Both AMM variants against each other and against the definition
+    /// `out R = a b (mod m)`, `out < 2 m`, for inputs below `2 m`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn amm_variants_case<const V: usize>(seed: &mut u64, len: usize) {
+        let k = lanes(len);
+        assert!(k <= 8 * V);
+        let mut m = random_odd(seed, len, 1 << 63);
+        if *seed % 3 == 0 {
+            m.fill(u64::MAX);
+        }
+        let mut m52 = [[0u64; 8]; V];
+        to_radix52(&mut m52, &m);
+        let mut inv = m[0];
+        for _ in 0..5 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(m[0].wrapping_mul(inv)));
+        }
+        let ctx = Amm::<V, 1> {
+            m: [m52],
+            k0: [inv.wrapping_neg() & MASK52],
+            k,
+        };
+        // Inputs: random below m, m - 1, 2 m - 1, 0, 1.
+        let mut twice = vec![0u64; len + 1];
+        twice[..len].copy_from_slice(&m);
+        bigint::shl1(&mut twice);
+        bigint::sub_word(&mut twice, 1);
+        let mut mm1 = m.clone();
+        bigint::sub_word(&mut mm1, 1);
+        let mut one = vec![0u64; len];
+        one[0] = 1;
+        let inputs = [
+            below(seed, &m),
+            below(seed, &m),
+            mm1,
+            twice.clone(),
+            vec![0u64; len],
+            one,
+        ];
+        for x in &inputs {
+            for y in &inputs {
+                let (mut x52, mut y52) = ([[0u64; 8]; V], [[0u64; 8]; V]);
+                to_radix52(&mut x52, x);
+                to_radix52(&mut y52, y);
+                let r1 = ctx.mul_shift([&x52], [&y52]);
+                let r2 = if k < 8 * V {
+                    ctx.mul_shadow([&x52], [&y52])
+                } else {
+                    r1
+                };
+                assert_eq!(r1, r2, "len {len}");
+                // r R == x y (mod m) and r < 2 m.
+                let mut r = vec![0u64; len + 1];
+                from_radix52(&mut r, &r1[0]);
+                assert!(bigint::ct_lt(&r, &twice).declassify() || r == twice);
+                let shift = 52 * k;
+                let mut big = vec![0u64; len + 2 + shift / 64];
+                for (i, &l) in r.iter().enumerate() {
+                    big[i + shift / 64] |= l << (shift % 64);
+                    if shift % 64 != 0 {
+                        big[i + shift / 64 + 1] |= l >> (64 - shift % 64);
+                    }
+                }
+                let mut lhs = vec![0u64; len];
+                bigint::ct_mod(&mut lhs, &big, &m);
+                let mut xr = vec![0u64; len];
+                let mut yr = vec![0u64; len];
+                bigint::ct_mod(&mut xr, x, &m);
+                bigint::ct_mod(&mut yr, y, &m);
+                let mut prod = vec![0u64; 2 * len];
+                bigint::mul(&mut prod, &xr, &yr);
+                let mut rhs = vec![0u64; len];
+                bigint::ct_mod(&mut rhs, &prod, &m);
+                assert_eq!(lhs, rhs, "len {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn amm_variants_agree() {
+        let Some(_) = Ifma::detect() else { return };
+        let mut seed = 0x0123_4567_u64;
+        for _ in 0..2 {
+            // SAFETY: AVX-512F and IFMA were detected above.
+            unsafe {
+                amm_variants_case::<3>(&mut seed, 16);
+                amm_variants_case::<3>(&mut seed, 18);
+                amm_variants_case::<3>(&mut seed, 19);
+                amm_variants_case::<4>(&mut seed, 24);
+                amm_variants_case::<5>(&mut seed, 32);
+                amm_variants_case::<6>(&mut seed, 32);
+                amm_variants_case::<10>(&mut seed, 64);
+            }
         }
     }
 

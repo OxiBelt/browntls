@@ -72,10 +72,17 @@ fn in_scalar_range<C: Curve<N>, const N: usize>(v: &[u64; N]) -> bool {
 }
 
 /// RFC 6979 section 3.2 HMAC_DRBG over hash `H`. The state is derived from the
-/// private key and is zeroised on drop.
+/// private key; `k` and `v` are zeroised on drop.
+///
+/// The HMAC keyed with the current `K` is kept and cloned for each MAC under
+/// that key, and the state update after an output (step h.3) is deferred to
+/// the next request, which only happens when a candidate nonce is rejected.
+/// The output stream is that of RFC 6979.
 struct HmacDrbg<H: HashFunction> {
     k: H::Output,
     v: H::Output,
+    keyed: Hmac<H>,
+    stale: bool,
 }
 
 impl<H: HashFunction> Drop for HmacDrbg<H> {
@@ -88,9 +95,12 @@ impl<H: HashFunction> Drop for HmacDrbg<H> {
 impl<H: HashFunction> HmacDrbg<H> {
     /// Steps b–g: instantiate with `int2octets(x) || bits2octets(h1) || k'`.
     fn new(seed: &[&[u8]]) -> Self {
+        let k = H::Output::zeroed();
         let mut d = Self {
-            k: H::Output::zeroed(),
+            keyed: Hmac::<H>::new(k.as_ref()),
+            k,
             v: H::Output::zeroed(),
+            stale: false,
         };
         for b in d.v.as_mut() {
             *b = 0x01;
@@ -99,33 +109,45 @@ impl<H: HashFunction> HmacDrbg<H> {
         d
     }
 
+    /// `HMAC_K(V)` under the current key.
+    fn mac_v(&self) -> H::Output {
+        let mut m = self.keyed.clone();
+        m.update(self.v.as_ref());
+        m.finalize()
+    }
+
     /// `K = HMAC_K(V || 0x00 || seed); V = HMAC_K(V); K = HMAC_K(V || 0x01 || seed); V = HMAC_K(V)`.
     fn update(&mut self, seed: &[&[u8]]) {
         for sep in [0x00u8, 0x01] {
-            let mut m = Hmac::<H>::new(self.k.as_ref());
+            let mut m = self.keyed.clone();
             m.update(self.v.as_ref());
             m.update(&[sep]);
             for part in seed {
                 m.update(part);
             }
             self.k = m.finalize();
-            self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
+            self.keyed = Hmac::<H>::new(self.k.as_ref());
+            self.v = self.mac_v();
             if seed.is_empty() {
                 break;
             }
         }
     }
 
-    /// Step h: fills `out` with `V` blocks, then updates the state for a retry.
+    /// Step h: fills `out` with `V` blocks (after the deferred update of the
+    /// previous request, if any).
     fn generate(&mut self, out: &mut [u8]) {
+        if self.stale {
+            self.update(&[]);
+        }
         let mut filled = 0;
         while filled < out.len() {
-            self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
+            self.v = self.mac_v();
             let take = (out.len() - filled).min(H::OUTPUT_LEN);
             out[filled..filled + take].copy_from_slice(&self.v.as_ref()[..take]);
             filled += take;
         }
-        self.update(&[]);
+        self.stale = true;
     }
 }
 
@@ -346,6 +368,44 @@ mod tests {
         assert_eq!(e, expected);
         // A short digest is used as is.
         assert_eq!(digest_to_scalar::<P256, 4>(&[1, 2]), [0x0102, 0, 0, 0]);
+    }
+
+    /// The DRBG (cached key, deferred update) produces the stream of a
+    /// literal RFC 6979 section 3.2 implementation, retries included.
+    #[test]
+    fn drbg_matches_reference_stream() {
+        use crate::hash::Sha256;
+        fn mac(k: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+            let mut m = Hmac::<Sha256>::new(k);
+            for p in parts {
+                m.update(p);
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(m.finalize().as_ref());
+            out
+        }
+        let seed: [&[u8]; 3] = [&[0x11; 32], &[0x22; 32], &[0x33; 32]];
+        // Steps b-g.
+        let mut v = [1u8; 32];
+        let mut k = [0u8; 32];
+        k = mac(&k, &[&v, &[0], seed[0], seed[1], seed[2]]);
+        v = mac(&k, &[&v]);
+        k = mac(&k, &[&v, &[1], seed[0], seed[1], seed[2]]);
+        v = mac(&k, &[&v]);
+        let mut drbg = DynDrbg::new(HashAlgorithm::Sha256, &seed);
+        for len in [32usize, 48, 32, 64, 1] {
+            // Step h: T = V blocks, then K = HMAC_K(V || 0), V = HMAC_K(V).
+            let mut want = std::vec::Vec::new();
+            while want.len() < len {
+                v = mac(&k, &[&v]);
+                want.extend_from_slice(&v);
+            }
+            let mut got = std::vec![0u8; len];
+            drbg.generate(&mut got);
+            assert_eq!(got[..], want[..len]);
+            k = mac(&k, &[&v, &[0]]);
+            v = mac(&k, &[&v]);
+        }
     }
 
     #[test]

@@ -167,12 +167,6 @@ pub(crate) fn sub_mod<const N: usize>(a: &[u64; N], b: &[u64; N], m: &[u64; N]) 
     select(barrier(borrow.wrapping_neg()), &e, &d)
 }
 
-/// `-a mod m` for `a < m` (zero maps to zero).
-#[inline]
-pub(crate) fn neg_mod<const N: usize>(a: &[u64; N], m: &[u64; N]) -> [u64; N] {
-    sub_mod(&[0u64; N], a, m)
-}
-
 /// Word-by-word CIOS Montgomery multiplication without the final reduction:
 /// returns `t < 2m` as `N` limbs plus its top bit.
 #[inline(always)]

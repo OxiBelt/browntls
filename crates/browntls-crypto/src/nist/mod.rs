@@ -27,6 +27,7 @@ mod jacobian;
 mod ecdsa;
 mod keys;
 mod mont;
+mod p256_field;
 mod params;
 mod safegcd;
 mod scalar_mul;

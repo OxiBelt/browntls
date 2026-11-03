@@ -12,6 +12,7 @@
 #   riscv64-scalar     RV64GC without vector or scalar-crypto extensions
 #   riscv64-zk         scalar Zbb/Zbc/Zbkb/Zbkc/Zknh/Zkne/Zknd, no vector
 #   riscv64-rvv128     RVV 1.0, VLEN=128, no vector crypto
+#   riscv64-rvv128-zvk RVV 1.0, VLEN=128 (minimum) with vector crypto
 #   riscv64-rvv256-zvk RVV 1.0, VLEN=256, Zvkned/Zvknhb/Zvkg/Zvbc/Zvbb/Zvkb
 #   riscv64-rvv1024-zvk RVV 1.0, VLEN=1024 with vector crypto
 #
@@ -71,6 +72,13 @@ case "${profile}" in
     target=riscv64gc-unknown-linux-gnu
     runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true"
     linker=riscv64-linux-gnu-gcc
+    ;;
+  riscv64-rvv128-zvk)
+    target=riscv64gc-unknown-linux-gnu
+    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    linker=riscv64-linux-gnu-gcc
+    extra_rustflags=("${zvk_cfg[@]}")
+    variant=zvk
     ;;
   riscv64-rvv256-zvk)
     target=riscv64gc-unknown-linux-gnu

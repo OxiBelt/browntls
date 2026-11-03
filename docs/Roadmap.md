@@ -48,6 +48,12 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   verification uses until 2027-01-31; it needs a named owner and tracking
   issue, and should be removed once tests verify RSA through
   `browntls-crypto`.
+- RISC-V vector and scalar crypto backends assume data-independent
+  instruction latency; detection does not yet require Zkt/Zvkt. Several
+  internal accelerated entry points (`nist` P-256 BMI2/ADX, ML-KEM SIMD) rely
+  on a selection invariant rather than an unforgeable capability token.
+  Both were reported by the first independent `unsafe`/assembly review, which
+  found no memory-safety defects in the asm operand constraints.
 - Accelerated backends for extensions without available hardware or emulation
   (for example x86 SHA512 and AVX-512 VAES) remain unimplemented until they can
   be executed in tests.

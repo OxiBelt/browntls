@@ -3,9 +3,10 @@
 //!
 //! RVV intrinsics are not available on stable Rust, so the vector kernel is
 //! inline assembly assembled with `.option arch, +v`. Each instance's lane `i`
-//! is one e64 element; a single `vsetvli` with AVL = remaining instances gives
-//! `vl = min(4, VLEN/64)` (2 for VLEN = 128, 4 for VLEN >= 256), and the
-//! wrapper loops until all four instances are done.
+//! is one e64 element; each `vsetvli` with AVL = remaining instances grants
+//! some `vl` between 1 and `min(AVL, VLEN/64)` (RVV may grant fewer than AVL
+//! when AVL < 2 * VLMAX), and the wrapper loops until all four instances are
+//! done.
 //!
 //! Register allocation: lane `i` lives in `v{i}` (`v0`..`v24`), `v25`..`v31`
 //! are temporaries. One round (θ, ρ+π as a register cycle, χ row by row, ι)
@@ -51,7 +52,8 @@ macro_rules! rvv_kernel {
     ($name:ident, $arch:literal, [$($round:literal),* $(,)?]) => {
         /// Permutes instances `j..j + vl` of the lane-major state at `base`
         /// (`base` points at lane 0 of instance `j`; lanes are 32 bytes
-        /// apart) and returns `vl = min(avl, VLEN/64)`.
+        /// apart) and returns the `vl` granted by `vsetvli` for `avl`
+        /// (non-zero for non-zero `avl`, at most `min(avl, VLEN/64)`).
         ///
         /// # Safety
         ///

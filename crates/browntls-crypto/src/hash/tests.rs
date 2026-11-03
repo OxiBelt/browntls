@@ -555,3 +555,31 @@ fn throughput() {
     std::println!("sha3-256 (dispatched): {:.0} MiB/s", mib(1 << 20, secs));
     core::hint::black_box((s, s4));
 }
+
+/// Every SHA-2 backend must accept message blocks at any alignment: vector
+/// loads with EEW > 8 may trap on misaligned addresses on some RISC-V cores,
+/// and callers hash record payloads at arbitrary offsets.
+#[test]
+fn sha2_backends_accept_unaligned_blocks() {
+    let mut rng = Rng(0x5eed_a11e);
+    let buf = rng.bytes(4 * 128 + 16);
+    for offset in 0..16 {
+        let data = &buf[offset..offset + 4 * 128];
+        let iv256 = [0x6a09_e667u32, 1, 2, 3, 4, 5, 6, 7];
+        let mut want256 = iv256;
+        sha256::soft::compress(&mut want256, data);
+        for &b in &sha256_backends() {
+            let mut st = iv256;
+            b.compress(&mut st, data);
+            assert_eq!(st, want256, "sha256 {b:?} offset {offset}");
+        }
+        let iv512 = [0x6a09_e667_f3bc_c908u64, 1, 2, 3, 4, 5, 6, 7];
+        let mut want512 = iv512;
+        sha512::soft::compress(&mut want512, data);
+        for &b in &sha512_backends() {
+            let mut st = iv512;
+            b.compress(&mut st, data);
+            assert_eq!(st, want512, "sha512 {b:?} offset {offset}");
+        }
+    }
+}

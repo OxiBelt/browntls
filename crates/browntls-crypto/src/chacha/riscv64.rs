@@ -2,7 +2,9 @@
 //!
 //! The state is word-sliced across vector registers `v0..v15` (SEW=32,
 //! LMUL=1): element `j` of `v<i>` is word `i` of block `j`, so one pass of the
-//! kernel produces `vl = min(VLEN / 32, 32, remaining blocks)` blocks. The
+//! kernel produces the `vl` blocks granted by `vsetvli` for AVL =
+//! `min(32, remaining blocks)` (at most `VLEN / 32`; RVV may grant fewer than
+//! AVL when AVL < 2 * VLMAX, which the loop handles). The
 //! keystream is written block-major into an aligned stack buffer with two
 //! strided segment stores and XORed into the data with scalar code, so the
 //! vector unit never touches the (possibly misaligned) caller buffer.

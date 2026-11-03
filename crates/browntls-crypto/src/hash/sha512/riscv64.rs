@@ -78,7 +78,8 @@ pub(super) fn compress_zvknhb(state: &mut [u64; 8], blocks: &[u8]) {
     // SAFETY: RVV 1.0, Zvknhb and Zvkb were detected at run time. With
     // LMUL=2 a register group holds the 256-bit element group for any
     // VLEN >= 128. `st` is 64 readable/writable bytes; `blocks` holds
-    // `n * 128` readable bytes and the loop reads exactly that; each block
+    // `n * 128` readable bytes at any alignment (read with byte loads) and
+    // the loop reads exactly that; each block
     // reads all 640 bytes of `K` once. Every vector register is declared
     // clobbered.
     unsafe {
@@ -93,10 +94,17 @@ pub(super) fn compress_zvknhb(state: &mut [u64; 8], blocks: &[u8]) {
             "2:",
             "vmv.v.v v6, v2",
             "vmv.v.v v8, v4",
-            "vle64.v v10, ({p})", "addi {p}, {p}, 32",
-            "vle64.v v12, ({p})", "addi {p}, {p}, 32",
-            "vle64.v v14, ({p})", "addi {p}, {p}, 32",
-            "vle64.v v16, ({p})", "addi {p}, {p}, 32",
+            // The caller's buffer may be unaligned: load bytes (EEW=8 has no
+            // alignment requirement), then return to e64/m2; on little-endian
+            // RVV the register contents equal those of an e64 load.
+            // (`vsetivli` encodes AVL in 5 bits, so 32 needs a register.)
+            "li {t}, 32",
+            "vsetvli zero, {t}, e8, m2, ta, ma",
+            "vle8.v v10, ({p})", "addi {p}, {p}, 32",
+            "vle8.v v12, ({p})", "addi {p}, {p}, 32",
+            "vle8.v v14, ({p})", "addi {p}, {p}, 32",
+            "vle8.v v16, ({p})", "addi {p}, {p}, 32",
+            "vsetivli zero, 4, e64, m2, ta, ma",
             "vrev8.v v10, v10",
             "vrev8.v v12, v12",
             "vrev8.v v14, v14",

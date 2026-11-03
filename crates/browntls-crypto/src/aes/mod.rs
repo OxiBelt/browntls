@@ -120,7 +120,8 @@ impl Backend {
             Self::AesNi => f.x86_aes() && f.x86_sse41(),
             Self::Vaes => f.x86_vaes() && f.x86_avx2() && f.x86_aes() && f.x86_sse41(),
             Self::ArmAes => f.arm_aes(),
-            Self::RvZvkned => f.rv_v() && f.rv_zvkned(),
+            // The CTR path byte-swaps counters with Zvkb `vrev8.v`.
+            Self::RvZvkned => f.rv_v() && f.rv_zvkned() && f.rv_zvkb(),
             Self::RvZkne => f.rv_zkne(),
         }
     }

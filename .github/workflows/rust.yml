@@ -144,6 +144,7 @@ jobs:
           - riscv64-scalar
           - riscv64-zk
           - riscv64-rvv128
+          - riscv64-rvv128-zvk
           - riscv64-rvv256-zvk
           - riscv64-rvv1024-zvk
     steps:

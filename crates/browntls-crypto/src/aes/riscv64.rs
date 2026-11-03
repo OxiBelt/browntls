@@ -75,8 +75,8 @@ impl VectorKey {
         }
         // SAFETY: `VectorKey::new` verified RVV 1.0 + Zvkned + Zvkb. `blocks`
         // is an exclusive slice of `16 * n` bytes and the loop reads and
-        // writes exactly `4 * n` 32-bit elements (`4 * n * 1` bytes with
-        // `e8`) starting at its base; `rk` points to 60 aligned words of
+        // writes exactly `4 * n` 32-bit elements (`16 * n` bytes, accessed
+        // with `e8` loads and stores) starting at its base; `rk` points to 60 aligned words of
         // which the first 16 * (rounds + 1) are meaningful and all 60 are
         // readable; `vl` is capped at `VLMAX` so every `vsetvli` yields a
         // multiple of four elements as Zvkned requires. All 32 vector

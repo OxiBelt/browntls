@@ -138,6 +138,50 @@ fn round_trip(client: &mut ClientConnection, server: &mut ServerConnection) {
     assert_eq!(send_and_receive(server, client, b"pong"), b"pong");
 }
 
+// ------------------------------------------------------- default provider
+
+/// With `native` as the only provider feature (the default build), the
+/// default builders use it as the process default provider.
+#[cfg(not(feature = "rustcrypto"))]
+#[test]
+fn default_builders_use_the_native_provider() {
+    init_logging();
+    let chain = server_chain(KeyType::Rsa2048);
+    let client_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    let server_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    for config in [
+        client_config.crypto_provider(),
+        server_config.crypto_provider(),
+    ] {
+        assert_eq!(config.cipher_suites, prov::DEFAULT_CIPHER_SUITES);
+        assert_eq!(
+            config
+                .kx_groups
+                .iter()
+                .map(|g| g.name())
+                .collect::<Vec<_>>(),
+            prov::DEFAULT_KX_GROUPS
+                .iter()
+                .map(|g| g.name())
+                .collect::<Vec<_>>()
+        );
+    }
+    let (mut client, mut server) = connect(client_config, server_config);
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+    assert_eq!(
+        client.negotiated_key_exchange_group().unwrap().name(),
+        prov::DEFAULT_KX_GROUPS[0].name()
+    );
+    round_trip(&mut client, &mut server);
+}
+
 // ------------------------------------------------------- RSA authentication
 
 #[test]

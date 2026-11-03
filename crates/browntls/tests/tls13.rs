@@ -1,5 +1,8 @@
 //! In-memory TLS 1.3 handshakes between a browntls client and server.
 
+#![cfg(feature = "rustcrypto")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 mod common;
 
 use std::sync::Arc;

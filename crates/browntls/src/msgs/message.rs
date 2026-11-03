@@ -9,7 +9,7 @@ use super::ccs::ChangeCipherSpecPayload;
 use super::codec::{Codec, Reader};
 use super::enums::{AlertLevel, KeyUpdateRequest};
 use super::handshake::{HandshakeMessagePayload, HandshakePayload};
-use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
+use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
 
 /// The record header: content type, version, length.
@@ -164,14 +164,18 @@ impl PrefixedPayload {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
 
+impl AsRef<[u8]> for PrefixedPayload {
     /// The payload bytes.
-    pub fn as_ref(&self) -> &[u8] {
+    fn as_ref(&self) -> &[u8] {
         &self.0[HEADER_SIZE..]
     }
+}
 
+impl AsMut<[u8]> for PrefixedPayload {
     /// The payload bytes, mutably.
-    pub fn as_mut(&mut self) -> &mut [u8] {
+    fn as_mut(&mut self) -> &mut [u8] {
         &mut self.0[HEADER_SIZE..]
     }
 }
@@ -353,7 +357,6 @@ pub(crate) struct RecordHeader {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MessageError {
     TooShortForHeader,
-    TooShortForLength,
     InvalidEmptyPayload,
     MessageTooLarge,
     InvalidContentType,
@@ -396,17 +399,6 @@ pub struct InboundPlainMessage<'a> {
     pub version: ProtocolVersion,
     /// The body.
     pub payload: &'a [u8],
-}
-
-impl InboundPlainMessage<'_> {
-    /// Copies into an owned message.
-    pub(crate) fn into_owned(self) -> PlainMessage {
-        PlainMessage {
-            typ: self.typ,
-            version: self.version,
-            payload: Payload::Owned(self.payload.to_vec()),
-        }
-    }
 }
 
 /// An outgoing record before encryption.
@@ -485,6 +477,7 @@ impl PlainMessage {
 
 /// The parsed body of a plaintext record.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // handshake messages dominate; values are short-lived
 pub(crate) enum MessagePayload<'a> {
     /// An alert.
     Alert(AlertMessagePayload),
@@ -503,7 +496,7 @@ pub(crate) enum MessagePayload<'a> {
 
 impl<'a> MessagePayload<'a> {
     /// Appends the encoding to `bytes`.
-    pub fn encode(&self, bytes: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, bytes: &mut Vec<u8>) {
         match self {
             Self::Alert(x) => x.encode(bytes),
             Self::Handshake { encoded, .. } => bytes.extend(encoded.bytes()),
@@ -513,7 +506,7 @@ impl<'a> MessagePayload<'a> {
     }
 
     /// Wraps a handshake message, computing its encoding.
-    pub fn handshake(parsed: HandshakeMessagePayload<'a>) -> Self {
+    pub(crate) fn handshake(parsed: HandshakeMessagePayload<'a>) -> Self {
         Self::Handshake {
             encoded: Payload::new(parsed.get_encoding()),
             parsed,
@@ -524,7 +517,7 @@ impl<'a> MessagePayload<'a> {
     ///
     /// Handshake payloads must contain exactly one message; the deframer
     /// reassembles fragments before calling this.
-    pub fn new(
+    pub(crate) fn new(
         typ: ContentType,
         vers: ProtocolVersion,
         payload: &'a [u8],
@@ -549,7 +542,7 @@ impl<'a> MessagePayload<'a> {
     }
 
     /// The content type of this payload.
-    pub fn content_type(&self) -> ContentType {
+    pub(crate) fn content_type(&self) -> ContentType {
         match self {
             Self::Alert(_) => ContentType::Alert,
             Self::Handshake { .. } => ContentType::Handshake,
@@ -581,16 +574,8 @@ pub(crate) struct Message<'a> {
 }
 
 impl Message<'_> {
-    /// Whether this is a handshake message of type `hstyp`.
-    pub fn is_handshake_type(&self, hstyp: HandshakeType) -> bool {
-        match &self.payload {
-            MessagePayload::Handshake { parsed, .. } => parsed.typ() == hstyp,
-            _ => false,
-        }
-    }
-
     /// Builds an alert.
-    pub fn build_alert(level: AlertLevel, desc: AlertDescription) -> Self {
+    pub(crate) fn build_alert(level: AlertLevel, desc: AlertDescription) -> Self {
         Self {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::Alert(AlertMessagePayload {
@@ -601,7 +586,7 @@ impl Message<'_> {
     }
 
     /// Builds a TLS 1.3 KeyUpdate.
-    pub fn build_key_update(request: KeyUpdateRequest) -> Self {
+    pub(crate) fn build_key_update(request: KeyUpdateRequest) -> Self {
         Self {
             version: ProtocolVersion::TLSv1_3,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
@@ -778,6 +763,9 @@ mod tests {
         let plain = PlainMessage::from(m);
         assert_eq!(plain.payload(), [1, 0]);
         let ku = Message::build_key_update(KeyUpdateRequest::UpdateRequested);
-        assert!(ku.is_handshake_type(HandshakeType::KeyUpdate));
+        assert!(matches!(
+            &ku.payload,
+            MessagePayload::Handshake { parsed, .. } if parsed.typ() == crate::enums::HandshakeType::KeyUpdate
+        ));
     }
 }

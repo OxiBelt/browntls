@@ -87,21 +87,6 @@ impl EnabledVersions {
             _ => false,
         }
     }
-
-    pub(crate) fn tls13_enabled(&self) -> bool {
-        self.tls13.is_some()
-    }
-
-    pub(crate) fn tls12_enabled(&self) -> bool {
-        #[cfg(feature = "tls12")]
-        {
-            self.tls12.is_some()
-        }
-        #[cfg(not(feature = "tls12"))]
-        {
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -116,8 +101,6 @@ mod tests {
         assert!(!ev.contains(ProtocolVersion::TLSv1_1));
         assert_eq!(alloc::format!("{ev:?}"), "[TLSv1_3]");
         let all = EnabledVersions::new(ALL_VERSIONS);
-        assert!(all.tls13_enabled());
-        #[cfg(feature = "tls12")]
-        assert!(all.tls12_enabled());
+        assert!(all.contains(ProtocolVersion::TLSv1_3));
     }
 }

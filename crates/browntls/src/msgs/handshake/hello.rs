@@ -133,10 +133,6 @@ impl ClientExtensions {
         add(self.preshared_key.is_some(), ExtensionType::PreSharedKey);
         out
     }
-
-    pub(crate) fn contains(&self, typ: ExtensionType) -> bool {
-        self.present_types().contains(&typ)
-    }
 }
 
 impl Codec<'_> for ClientExtensions {

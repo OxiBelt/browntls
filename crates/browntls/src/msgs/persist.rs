@@ -3,11 +3,13 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{CertificateDer, DnsName, UnixTime};
+use browntls_pki::{DnsName, UnixTime};
 
 use super::base::{PayloadU8, PayloadU16};
 use super::codec::{Codec, Reader};
-use super::handshake::{CertificateChain, SessionId};
+use super::handshake::CertificateChain;
+#[cfg(feature = "tls12")]
+use super::handshake::SessionId;
 use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::InvalidMessage;
 use crate::sync::Arc;
@@ -75,6 +77,7 @@ pub struct Tls13ClientSessionValue {
 }
 
 impl Tls13ClientSessionValue {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         suite: &'static Tls13CipherSuite,
         ticket: Vec<u8>,
@@ -146,6 +149,7 @@ pub struct Tls12ClientSessionValue {
 
 #[cfg(feature = "tls12")]
 impl Tls12ClientSessionValue {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         suite: &'static Tls12CipherSuite,
         session_id: SessionId,
@@ -168,10 +172,6 @@ impl Tls12ClientSessionValue {
                 server_cert_chain,
             ),
         }
-    }
-
-    pub(crate) fn take_ticket(&mut self) -> Vec<u8> {
-        core::mem::take(&mut self.common.ticket)
     }
 
     pub(crate) fn extended_ms(&self) -> bool {
@@ -270,7 +270,7 @@ pub(crate) const MAX_TICKET_LIFETIME: u32 = 7 * 24 * 60 * 60;
 
 /// The server's record of a session, stored in the session cache or
 /// encrypted into a ticket.
-pub struct ServerSessionValue {
+pub(crate) struct ServerSessionValue {
     pub(crate) sni: Option<DnsName<'static>>,
     pub(crate) version: ProtocolVersion,
     pub(crate) cipher_suite: CipherSuite,
@@ -286,6 +286,7 @@ pub struct ServerSessionValue {
 }
 
 impl ServerSessionValue {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sni: Option<&DnsName<'_>>,
         version: ProtocolVersion,
@@ -334,12 +335,10 @@ impl ServerSessionValue {
         self
     }
 
+    /// Whether the ticket's age matched the server's clock (0-RTT gate).
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn is_fresh(&self) -> bool {
         self.freshness.unwrap_or_default()
-    }
-
-    pub(crate) fn client_cert_chain(&self) -> Option<&[CertificateDer<'static>]> {
-        self.client_cert_chain.as_ref().map(|c| c.0.as_slice())
     }
 }
 
@@ -452,6 +451,8 @@ impl Codec<'_> for ServerSessionValue {
 
 #[cfg(test)]
 mod tests {
+    use browntls_pki::CertificateDer;
+
     use super::*;
 
     fn sample() -> ServerSessionValue {
@@ -482,7 +483,7 @@ mod tests {
         assert_eq!(back.cipher_suite, v.cipher_suite);
         assert_eq!(back.master_secret, v.master_secret);
         assert!(back.extended_ms);
-        assert_eq!(back.client_cert_chain(), v.client_cert_chain());
+        assert_eq!(back.client_cert_chain, v.client_cert_chain);
         assert_eq!(back.alpn, v.alpn);
         assert_eq!(back.application_data, v.application_data);
         assert_eq!(back.creation_time_sec, 1000);
@@ -507,7 +508,7 @@ mod tests {
     #[test]
     fn client_value_age() {
         let chain = Arc::new(CertificateChain::default());
-        let suite = crate::tls13::Tls13CipherSuite {
+        let suite = Tls13CipherSuite {
             common: crate::suites::CipherSuiteCommon {
                 suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
                 hash_provider: &DummyHash,

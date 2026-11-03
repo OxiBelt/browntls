@@ -42,7 +42,6 @@ pub(super) struct CompleteServerHelloHandling {
     pub(super) randoms: ConnectionRandoms,
     pub(super) using_ems: bool,
     pub(super) transcript: HandshakeHash,
-    pub(super) session_id: SessionId,
     pub(super) hello: ClientHelloDetails,
     pub(super) alpn_protocols: Vec<Vec<u8>>,
 }

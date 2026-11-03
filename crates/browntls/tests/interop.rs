@@ -6,6 +6,9 @@
 //! rustls peer's certificate because path validation in `browntls-pki` is not
 //! implemented yet.
 
+#![cfg(feature = "rustcrypto")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 mod common;
 
 use std::io::{Read, Write};

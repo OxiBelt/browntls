@@ -30,6 +30,12 @@ pub trait Prf: Send + Sync {
 /// A [`Prf`] built from any [`hmac::Hmac`].
 pub struct PrfUsingHmac<'a>(pub &'a dyn hmac::Hmac);
 
+impl core::fmt::Debug for PrfUsingHmac<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PrfUsingHmac")
+    }
+}
+
 impl Prf for PrfUsingHmac<'_> {
     fn for_key_exchange(
         &self,

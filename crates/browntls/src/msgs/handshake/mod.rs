@@ -12,7 +12,7 @@ use core::fmt;
 use browntls_pki::CertificateDer;
 
 pub(crate) use certs::{
-    CertificateChain, CertificateEntry, CertificatePayloadTls13, CertificateRequestExtensions,
+    CertificateChain, CertificatePayloadTls13, CertificateRequestExtensions,
     CertificateRequestPayload, CertificateRequestPayloadTls13, CertificateStatus,
     CertificateStatusRequest, CompressedCertificatePayload,
 };
@@ -24,18 +24,17 @@ pub(crate) use hello::{
     ClientExtensions, HelloRetryRequest, HelloRetryRequestExtensions, ServerHelloPayload,
 };
 pub use hello::{ClientHelloPayload, HandshakeMessagePayload};
+pub(crate) use kx::ServerKeyExchangePayload;
+#[cfg(feature = "tls12")]
 pub(crate) use kx::{
     ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangeParams,
-    ServerKeyExchangePayload,
 };
-pub(crate) use tickets::{
-    NewSessionTicketExtensions, NewSessionTicketPayload, NewSessionTicketPayloadTls13,
-};
+pub(crate) use tickets::{NewSessionTicketPayload, NewSessionTicketPayloadTls13};
 
-use super::base::{Payload, PayloadU8, PayloadU16};
+use super::base::{Payload, PayloadU16};
 use super::codec::{Codec, Reader, u24};
 use super::enums::KeyUpdateRequest;
-use crate::enums::{CipherSuite, HandshakeType, ProtocolVersion};
+use crate::enums::{HandshakeType, ProtocolVersion};
 use crate::error::InvalidMessage;
 use crate::verify::DigitallySignedStruct;
 use crate::x509;
@@ -172,6 +171,7 @@ impl SessionId {
         self.len == 0
     }
 
+    #[cfg(test)]
     pub(crate) fn from_slice(bytes: &[u8]) -> Option<Self> {
         if bytes.len() > 32 {
             return None;
@@ -245,6 +245,7 @@ impl<'a> Codec<'a> for CertificateDer<'a> {
 
 /// The body of a handshake message, by type.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // ClientHello is large; messages are short-lived
 pub(crate) enum HandshakePayload<'a> {
     HelloRequest,
     ClientHello(ClientHelloPayload),
@@ -406,16 +407,6 @@ pub(crate) fn read_payload<'a>(
     };
     sub.expect_empty("HandshakeMessagePayload")?;
     Ok(payload)
-}
-
-/// Helper used by the suite-selection code: is `suite` offered by the peer?
-pub(crate) fn cipher_suite_offered(offered: &[CipherSuite], suite: CipherSuite) -> bool {
-    offered.contains(&suite)
-}
-
-/// Encodes a `u8`-prefixed payload for a client-facing protocol name list.
-pub(crate) fn payload_u8(bytes: &[u8]) -> PayloadU8 {
-    PayloadU8::new(bytes.to_vec())
 }
 
 #[cfg(test)]

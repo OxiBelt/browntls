@@ -46,10 +46,6 @@ impl<'a> Payload<'a> {
         Payload::Owned(bytes.into())
     }
 
-    pub(crate) fn empty() -> Payload<'static> {
-        Payload::Owned(Vec::new())
-    }
-
     pub(crate) fn read(r: &mut Reader<'a>) -> Self {
         Self::Borrowed(r.rest())
     }
@@ -72,10 +68,6 @@ impl PayloadU8 {
 
     pub(crate) fn empty() -> Self {
         Self(Vec::new())
-    }
-
-    pub(crate) fn into_inner(self) -> Vec<u8> {
-        self.0
     }
 }
 

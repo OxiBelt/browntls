@@ -372,10 +372,6 @@ impl ServerExtensions {
         out.extend(self.unknown.iter().copied());
         out
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.present_types().is_empty()
-    }
 }
 
 impl Codec<'_> for ServerExtensions {
@@ -558,7 +554,7 @@ mod tests {
                 ExtensionType::SupportedVersions
             ]
         );
-        assert!(ServerExtensions::default().is_empty());
+        assert!(ServerExtensions::default().present_types().is_empty());
         assert_eq!(alloc::format!("{:?}", exts.alpn.unwrap()), "\"h2\"");
     }
 

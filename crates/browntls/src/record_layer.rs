@@ -42,7 +42,7 @@ pub(crate) struct Decrypted<'a> {
 }
 
 /// Record protection state for both directions.
-pub struct RecordLayer {
+pub(crate) struct RecordLayer {
     message_encrypter: Box<dyn MessageEncrypter>,
     message_decrypter: Box<dyn MessageDecrypter>,
     write_seq: u64,
@@ -140,6 +140,7 @@ impl RecordLayer {
 
     /// Like `set_message_decrypter`, but up to `max_length` bytes of records
     /// that fail to decrypt are dropped silently.
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_message_decrypter_with_trial_decryption(
         &mut self,
         cipher: Box<dyn MessageDecrypter>,
@@ -150,6 +151,7 @@ impl RecordLayer {
         self.trial_decryption_len = Some(max_length);
     }
 
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn finish_trial_decryption(&mut self) {
         self.trial_decryption_len = None;
     }
@@ -192,6 +194,7 @@ impl RecordLayer {
     }
 
     /// Whether at least one record has been decrypted under the current key.
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn has_decrypted(&self) -> bool {
         self.has_decrypted
     }
@@ -202,10 +205,6 @@ impl RecordLayer {
 
     pub(crate) fn read_seq(&self) -> u64 {
         self.read_seq
-    }
-
-    pub(crate) fn encrypted_len(&self, payload_len: usize) -> usize {
-        self.message_encrypter.encrypted_payload_len(payload_len)
     }
 
     /// Decides whether sending `add` more records is allowed under the limits.

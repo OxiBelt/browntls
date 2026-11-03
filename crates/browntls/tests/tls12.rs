@@ -4,6 +4,9 @@
 //! the `ECDHE_RSA` suites are only exercised with an RSA-keyed rustls server
 //! in `interop.rs`; here the server always signs with ECDSA or Ed25519.
 
+#![cfg(feature = "rustcrypto")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 mod common;
 
 use std::sync::Arc;

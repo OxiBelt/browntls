@@ -49,22 +49,5 @@ macro_rules! require_handshake_msg(
     )
 );
 
-/// Like `require_handshake_msg!`, but moves the payload out of the message.
-macro_rules! require_handshake_msg_move(
-    ( $m:expr, $handshake_type:path, $payload_type:path ) => (
-        match $m.payload {
-            $crate::msgs::message::MessagePayload::Handshake {
-                parsed: $crate::msgs::handshake::HandshakeMessagePayload($payload_type(hm)),
-                ..
-            } => Ok(hm),
-            payload => Err($crate::check::inappropriate_handshake_message(
-                &payload,
-                &[$crate::enums::ContentType::Handshake],
-                &[$handshake_type],
-            )),
-        }
-    )
-);
-
 #[allow(dead_code)]
 fn keep_vec_import(_: Vec<u8>) {}

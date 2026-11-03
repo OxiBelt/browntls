@@ -83,13 +83,6 @@ impl DeframerVecBuffer {
         self.used += n;
         Ok(n)
     }
-
-    /// Takes every unconsumed byte, leaving the buffer empty.
-    pub(crate) fn take_all(&mut self) -> Vec<u8> {
-        let out = self.filled().to_vec();
-        self.used = 0;
-        out
-    }
 }
 
 /// Accumulates handshake fragments into whole messages.
@@ -133,11 +126,6 @@ impl HandshakeJoiner {
         let declared = u24::read(&mut Reader::init(&self.buf[1..4])).ok()?;
         let total = 4 + usize::from(declared);
         (self.buf.len() >= total).then_some(total)
-    }
-
-    /// Whether a partial message is buffered.
-    pub(crate) fn has_partial(&self) -> bool {
-        !self.buf.is_empty() && self.complete_message_len().is_none()
     }
 
     /// Whether anything at all is buffered.
@@ -197,9 +185,8 @@ impl MessageDeframer {
             return Err(err.clone());
         }
         self.pop_inner(record_layer, negotiated_version, buffer)
-            .map_err(|err| {
+            .inspect_err(|err| {
                 self.last_error = Some(err.clone());
-                err
             })
     }
 
@@ -219,7 +206,7 @@ impl MessageDeframer {
 
             let header = match RecordHeader::read(buffer.filled()) {
                 Ok(h) => h,
-                Err(MessageError::TooShortForHeader | MessageError::TooShortForLength) => {
+                Err(MessageError::TooShortForHeader) => {
                     return Ok(None);
                 }
                 Err(MessageError::MessageTooLarge) => return Err(Error::PeerSentOversizedRecord),
@@ -303,11 +290,6 @@ impl MessageDeframer {
                 want_close_before_decrypt,
             }));
         }
-    }
-
-    /// Whether a partial handshake message is buffered.
-    pub(crate) fn is_joining(&self) -> bool {
-        self.joiner.has_partial()
     }
 
     /// Whether any handshake bytes are buffered.
@@ -500,7 +482,7 @@ mod tests {
         buffer.discard(MAX_BUFFER);
         assert!(!buffer.has_pending());
         assert!(buffer.extend_from_slice(&[1, 2]).is_ok());
-        assert_eq!(buffer.take_all(), [1, 2]);
+        assert_eq!(buffer.filled(), [1, 2]);
     }
 
     #[test]

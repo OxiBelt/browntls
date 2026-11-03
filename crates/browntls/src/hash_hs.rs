@@ -32,10 +32,6 @@ impl HandshakeHashBuffer {
         }
     }
 
-    pub(crate) fn add_raw(&mut self, buf: &[u8]) {
-        self.buffer.extend_from_slice(buf);
-    }
-
     /// Hashes the buffer followed by `extra` with `provider`.
     pub(crate) fn hash_given(
         &self,

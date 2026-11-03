@@ -148,7 +148,6 @@ impl CompleteClientHelloHandling {
                 config: self.config,
                 transcript: HandshakeHashOrBuffer::Hash(self.transcript),
                 session_id: SessionId::empty(),
-                using_ems: false,
                 done_retry: true,
                 send_tickets: self.send_tickets,
             }));

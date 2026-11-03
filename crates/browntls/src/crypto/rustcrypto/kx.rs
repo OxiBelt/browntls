@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use ml_kem::{Decapsulate, Encapsulate as _, KeyExport, TryKeyInit as _};
+use ml_kem::{Decapsulate, KeyExport};
 
 use crate::crypto::{ActiveKeyExchange, CompletedKeyExchange, SharedSecret, SupportedKxGroup};
 use crate::enums::ProtocolVersion;

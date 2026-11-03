@@ -119,7 +119,7 @@ impl WebPkiServerVerifier {
     pub fn builder(roots: Arc<RootCertStore>) -> ServerCertVerifierBuilder {
         let algs = CryptoProvider::get_default()
             .map(|p| p.signature_verification_algorithms)
-            .or_else(|| Self::crate_default_algorithms())
+            .or_else(Self::crate_default_algorithms)
             .unwrap_or(EMPTY_ALGORITHMS);
         Self::builder_with_provider_algorithms(roots, algs)
     }

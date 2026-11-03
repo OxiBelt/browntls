@@ -78,6 +78,7 @@ impl Ticketer {
     const LIFETIME: u32 = 6 * 60 * 60;
 
     /// Makes a ticketer backed by [`crate::ticketer::TicketRotator`].
+    #[allow(clippy::new_ret_no_self)] // mirrors rustls: the rotator is the useful type
     pub fn new() -> Result<alloc::sync::Arc<dyn crate::server::ProducesTickets>, crate::Error> {
         Ok(alloc::sync::Arc::new(crate::ticketer::TicketRotator::new(
             Self::LIFETIME,

@@ -17,6 +17,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Without `std` the buffered connections are absent and nothing drives the
+// handshake state machines yet (the unbuffered API is not implemented), so
+// most of the protocol code is unreachable in that configuration.  Without
+// `tls12` the TLS 1.2 message types, which are compiled unconditionally to
+// keep the wire-format module uniform, have no users.  The all-features build
+// is the one that must be free of dead code.
+#![cfg_attr(not(all(feature = "std", feature = "tls12")), allow(dead_code))]
 
 extern crate alloc;
 #[cfg(any(feature = "std", test))]
@@ -35,9 +42,11 @@ mod log {
 
 #[cfg(not(feature = "logging"))]
 mod log {
-    macro_rules! trace ( ($($tt:tt)*) => {{}} );
-    macro_rules! debug ( ($($tt:tt)*) => {{}} );
-    macro_rules! warning ( ($($tt:tt)*) => {{}} );
+    // The arguments are still type-checked and "used", so a logging-off
+    // build raises the same warnings as a logging build.
+    macro_rules! trace ( ($($tt:tt)*) => {{ let _ = format_args!($($tt)*); }} );
+    macro_rules! debug ( ($($tt:tt)*) => {{ let _ = format_args!($($tt)*); }} );
+    macro_rules! warning ( ($($tt:tt)*) => {{ let _ = format_args!($($tt)*); }} );
     pub(crate) use {debug, trace, warning};
 }
 

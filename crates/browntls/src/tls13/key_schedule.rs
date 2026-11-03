@@ -14,9 +14,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::common_state::{CommonState, Side};
-use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter, MessageEncrypter};
+use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter};
 use crate::crypto::tls13::{HkdfExpander, OkmBlock};
-use crate::crypto::{ActiveKeyExchange, SharedSecret, hmac};
+use crate::crypto::{SharedSecret, hmac};
 use crate::error::Error;
 use crate::key_log::KeyLog;
 use crate::suites::PartiallyExtractedSecrets;
@@ -26,6 +26,7 @@ use crate::tls13::Tls13CipherSuite;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecretKind {
     ResumptionPskBinderKey,
+    #[allow(dead_code)] // used once 0-RTT lands
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
@@ -133,20 +134,6 @@ impl KeySchedule {
             .extract_from_zero_ikm(Some(salt.as_ref()));
     }
 
-    fn input_kx_secret(
-        &mut self,
-        kx: Box<dyn ActiveKeyExchange>,
-        peer_pub_key: &[u8],
-    ) -> Result<(), Error> {
-        let salt = self.derive_for_empty_hash();
-        self.current = self.suite.hkdf_provider.extract_from_kx_shared_secret(
-            Some(salt.as_ref()),
-            kx,
-            peer_pub_key,
-        )?;
-        Ok(())
-    }
-
     fn input_shared_secret(&mut self, secret: &SharedSecret) {
         self.input_secret(secret.secret_bytes());
     }
@@ -177,12 +164,6 @@ impl KeySchedule {
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
         self.suite.aead_alg.decrypter(key, iv)
-    }
-
-    fn derive_encrypter(&self, secret: &OkmBlock) -> Box<dyn MessageEncrypter> {
-        let expander = self.suite.hkdf_provider.expander_for_okm(secret);
-        let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
-        self.suite.aead_alg.encrypter(key, iv)
     }
 
     /// `HKDF-Expand-Label(secret, "traffic upd", "", Hash.length)` (RFC 8446 §7.2).
@@ -268,6 +249,7 @@ impl KeyScheduleEarly {
     }
 
     /// Derives and installs the `client_early_traffic_secret` for 0-RTT.
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn client_early_traffic_secret(
         &self,
         hs_hash: &[u8],
@@ -314,16 +296,6 @@ impl KeySchedulePreHandshake {
         Self {
             ks: KeySchedule::new_with_empty_secret(suite),
         }
-    }
-
-    /// Mixes in the (EC)DHE shared secret.
-    pub(crate) fn into_handshake(
-        mut self,
-        kx: Box<dyn ActiveKeyExchange>,
-        peer_pub_key: &[u8],
-    ) -> Result<KeyScheduleHandshakeStart, Error> {
-        self.ks.input_kx_secret(kx, peer_pub_key)?;
-        Ok(KeyScheduleHandshakeStart { ks: self.ks })
     }
 
     /// Mixes in an already-computed shared secret.
@@ -412,11 +384,13 @@ pub(crate) struct KeyScheduleHandshake {
 impl KeyScheduleHandshake {
     /// Installs the client handshake key in the pending direction (used after
     /// early data finishes).
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_handshake_encrypter(&self, common: &mut CommonState) {
         self.ks
             .set_encrypter(&self.client_handshake_traffic_secret, common);
     }
 
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn set_handshake_decrypter(
         &self,
         skip_requested: Option<usize>,
@@ -438,6 +412,7 @@ impl KeyScheduleHandshake {
             .sign_finish(&self.server_handshake_traffic_secret, hs_hash)
     }
 
+    #[allow(dead_code)] // used once 0-RTT lands
     pub(crate) fn sign_client_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
         self.ks
             .sign_finish(&self.client_handshake_traffic_secret, hs_hash)
@@ -625,9 +600,5 @@ impl KeyScheduleTraffic {
                 rx: client,
             },
         })
-    }
-
-    pub(crate) fn suite(&self) -> &'static Tls13CipherSuite {
-        self.ks.suite
     }
 }

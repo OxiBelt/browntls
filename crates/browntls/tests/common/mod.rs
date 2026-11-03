@@ -1,7 +1,13 @@
 //! Shared helpers for the integration tests: run-time generated certificate
 //! chains, a pinned-certificate verifier (path validation in `browntls-pki`
 //! is not implemented yet) and in-memory transport plumbing.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    unreachable_pub,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 
 use std::io;
 use std::sync::{Arc, OnceLock};
@@ -376,9 +382,10 @@ pub fn do_handshake(
         transfer(server, client);
         client.process_new_packets()?;
     }
-    if client.is_handshaking() || server.is_handshaking() {
-        panic!("handshake did not complete");
-    }
+    assert!(
+        !client.is_handshaking() && !server.is_handshaking(),
+        "handshake did not complete"
+    );
     Ok(())
 }
 
@@ -420,7 +427,7 @@ pub fn send_and_receive<A: SideData, B: SideData>(
     to: &mut ConnectionCommon<B>,
     data: &[u8],
 ) -> Vec<u8> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let mut out = Vec::new();
     let mut written = 0;
     while written < data.len() || from.wants_write() {

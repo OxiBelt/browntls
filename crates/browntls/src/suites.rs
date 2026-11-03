@@ -4,7 +4,7 @@ use core::fmt;
 
 use crate::crypto::cipher::{AeadKey, Iv};
 use crate::crypto::{self, KeyExchangeAlgorithm};
-use crate::enums::{CipherSuite, SignatureAlgorithm, SignatureScheme};
+use crate::enums::{CipherSuite, SignatureAlgorithm};
 use crate::msgs::handshake::ALL_KEY_EXCHANGE_ALGORITHMS;
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
@@ -89,6 +89,7 @@ impl SupportedCipherSuite {
     }
 
     /// Whether this suite can be used with certificates of `sig_alg`.
+    #[cfg_attr(not(feature = "tls12"), allow(unused_variables))]
     pub fn usable_for_signature_algorithm(&self, sig_alg: SignatureAlgorithm) -> bool {
         match self {
             Self::Tls13(_) => true,
@@ -133,19 +134,6 @@ impl fmt::Debug for SupportedCipherSuite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.suite().fmt(f)
     }
-}
-
-/// Whether `sigscheme` can be used with at least one of `common_suites`.
-pub(crate) fn compatible_sigscheme_for_suites(
-    sigscheme: SignatureScheme,
-    common_suites: &[SupportedCipherSuite],
-) -> bool {
-    common_suites
-        .iter()
-        .any(|&suite| match sigscheme.algorithm() {
-            Some(sigalg) => suite.usable_for_signature_algorithm(sigalg),
-            None => suite.tls13().is_some(),
-        })
 }
 
 /// Traffic secrets extracted from a connection, with their next sequence numbers.

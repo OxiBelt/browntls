@@ -6,7 +6,6 @@
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use core::marker::PhantomData;
 
 use crate::error::InvalidMessage;
 
@@ -346,10 +345,6 @@ pub(crate) fn read_vec_u24<'a, T: Codec<'a>>(
         0,
     )
 }
-
-/// Marker for a list that must contain at least one element.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NonEmpty<T>(PhantomData<T>);
 
 /// Reads a `u16`-prefixed list that must be non-empty.
 pub(crate) fn read_nonempty_vec_u16<'a, T: Codec<'a>>(

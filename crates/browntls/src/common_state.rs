@@ -6,7 +6,7 @@ use core::fmt;
 use browntls_pki::CertificateDer;
 
 use crate::crypto::SupportedKxGroup;
-use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
+use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
 use crate::log::{debug, trace, warning};
 use crate::msgs::alert::AlertMessagePayload;
@@ -14,9 +14,7 @@ use crate::msgs::base::Payload;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
 use crate::msgs::handshake::CertificateChain;
-use crate::msgs::message::{
-    Message, MessagePayload, OutboundChunks, OutboundPlainMessage, PlainMessage,
-};
+use crate::msgs::message::{Message, OutboundChunks, OutboundPlainMessage, PlainMessage};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
 use crate::vecbuf::ChunkVecBuffer;
@@ -138,7 +136,6 @@ pub struct CommonState {
     pub(crate) received_plaintext: ChunkVecBuffer,
     pub(crate) sendable_plaintext: ChunkVecBuffer,
     pub(crate) sendable_tls: ChunkVecBuffer,
-    pub(crate) queued_key_update_message: Option<Vec<u8>>,
     pub(crate) may_send_application_data: bool,
     pub(crate) may_receive_application_data: bool,
     pub(crate) early_traffic: bool,
@@ -170,7 +167,6 @@ impl CommonState {
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
             sendable_plaintext: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
             sendable_tls: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
-            queued_key_update_message: None,
             may_send_application_data: false,
             may_receive_application_data: false,
             early_traffic: false,
@@ -454,7 +450,9 @@ impl CommonState {
     pub(crate) fn send_change_cipher_spec(&mut self) {
         let m = Message {
             version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::ChangeCipherSpec(crate::msgs::ccs::ChangeCipherSpecPayload),
+            payload: crate::msgs::message::MessagePayload::ChangeCipherSpec(
+                crate::msgs::ccs::ChangeCipherSpecPayload,
+            ),
         };
         self.send_msg(m, false);
         self.record_layer.start_encrypting();
@@ -499,39 +497,6 @@ impl CommonState {
         self.send_appdata_encrypt(payload, limit)
     }
 
-    /// Checks an incoming message is one of `expected` content types; for
-    /// handshake messages checks the handshake type too.
-    pub(crate) fn check_message_types(
-        &mut self,
-        m: &Message<'_>,
-        content_types: &[ContentType],
-        handshake_types: &[HandshakeType],
-    ) -> Result<(), Error> {
-        let got_type = m.payload.content_type();
-        if !content_types.contains(&got_type) {
-            return Err(self.send_fatal_alert(
-                AlertDescription::UnexpectedMessage,
-                Error::InappropriateMessage {
-                    expect_types: content_types.to_vec(),
-                    got_type,
-                },
-            ));
-        }
-        if let MessagePayload::Handshake { parsed, .. } = &m.payload
-            && !handshake_types.is_empty()
-            && !handshake_types.contains(&parsed.typ())
-        {
-            return Err(self.send_fatal_alert(
-                AlertDescription::UnexpectedMessage,
-                Error::InappropriateHandshakeMessage {
-                    expect_types: handshake_types.to_vec(),
-                    got_type: parsed.typ(),
-                },
-            ));
-        }
-        Ok(())
-    }
-
     /// Queues a TLS 1.3 KeyUpdate message to be encrypted under the *current*
     /// key before the caller rotates to the next one.
     pub(crate) fn send_key_update(&mut self, request: KeyUpdateRequest) {
@@ -546,10 +511,6 @@ impl CommonState {
     /// Notes that the transport reached EOF.
     pub(crate) fn mark_eof(&mut self) {
         self.has_seen_eof = true;
-    }
-
-    pub(crate) fn sent_close_notify(&self) -> bool {
-        self.sent_close_notify
     }
 }
 

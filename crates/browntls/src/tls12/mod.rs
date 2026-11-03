@@ -270,6 +270,7 @@ pub(crate) struct MessageCipherPair {
 }
 
 /// The ECDSA/EdDSA schemes acceptable with an ECDHE_ECDSA suite.
+#[allow(dead_code)] // consumed by the crypto providers, which are optional
 pub(crate) static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ED25519,
     SignatureScheme::ECDSA_NISTP521_SHA512,
@@ -278,6 +279,7 @@ pub(crate) static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
 ];
 
 /// The RSA schemes acceptable with an ECDHE_RSA suite.
+#[allow(dead_code)] // consumed by the crypto providers, which are optional
 pub(crate) static TLS12_RSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PSS_SHA512,
     SignatureScheme::RSA_PSS_SHA384,

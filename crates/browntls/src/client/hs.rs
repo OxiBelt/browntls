@@ -214,6 +214,7 @@ pub(super) fn start_handshake(
     }
 
     let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
     let mut resuming = find_session(&server_name, &config, cx);
 
     let key_share = if supports_tls13 {
@@ -248,10 +249,9 @@ pub(super) fn start_handshake(
         value: ClientSessionValue::Tls12(inner),
         ..
     }) = &mut resuming
+        && inner.session_id.is_empty()
     {
-        if inner.session_id.is_empty() {
-            inner.session_id = session_id;
-        }
+        inner.session_id = session_id;
     }
 
     let random = Random::new(config.provider.secure_random)?;
@@ -467,7 +467,7 @@ pub(super) fn process_alpn_protocol(
         common
             .alpn_protocol
             .as_deref()
-            .map(crate::msgs::handshake::ProtocolName::from_bytes)
+            .map(ProtocolName::from_bytes)
     );
     Ok(())
 }
@@ -610,11 +610,10 @@ impl State<ClientConnectionData> for ExpectServerHello {
                         PeerMisbehaved::ServerEchoedCompatibilitySessionId,
                     ));
                 }
-                let resuming = self.input.resuming.take().and_then(|r| match r.value {
-                    ClientSessionValue::Tls13(inner) => Some(inner),
-                    #[cfg(feature = "tls12")]
+                let resuming = match self.input.resuming.take().map(|r| r.value) {
+                    Some(ClientSessionValue::Tls13(inner)) => Some(inner),
                     _ => None,
-                });
+                };
                 let our_key_share = self.offered_key_share.take().ok_or_else(|| {
                     cx.common.send_fatal_alert(
                         AlertDescription::IllegalParameter,
@@ -650,7 +649,6 @@ impl State<ClientConnectionData> for ExpectServerHello {
                     randoms,
                     using_ems: server_hello.extensions.extended_master_secret.is_some(),
                     transcript,
-                    session_id: self.input.session_id,
                     hello: self.input.hello,
                     alpn_protocols: self.input.alpn_protocols,
                 }

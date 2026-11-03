@@ -51,7 +51,6 @@ pub(super) struct ExpectClientHello {
     pub(super) config: Arc<ServerConfig>,
     pub(super) transcript: HandshakeHashOrBuffer,
     pub(super) session_id: SessionId,
-    pub(super) using_ems: bool,
     pub(super) done_retry: bool,
     pub(super) send_tickets: usize,
 }
@@ -66,7 +65,6 @@ impl ExpectClientHello {
             config,
             transcript: HandshakeHashOrBuffer::Buffer(transcript_buffer),
             session_id: SessionId::empty(),
-            using_ems: false,
             done_retry: false,
             send_tickets: 0,
         }

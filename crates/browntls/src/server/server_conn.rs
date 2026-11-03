@@ -9,6 +9,7 @@ use browntls_pki::{DnsName, UnixTime};
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
 use crate::common_state::{CommonState, Side};
+use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
@@ -22,7 +23,6 @@ use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
 use crate::verify::ClientCertVerifier;
 use crate::versions::EnabledVersions;
-use crate::{compress, versions};
 
 /// Stores server-side session state, keyed by session ID or ticket identifier.
 pub trait StoresServerSessions: fmt::Debug + Send + Sync {
@@ -184,7 +184,7 @@ impl ServerConfig {
     /// Starts a builder with the process-default provider and all versions.
     #[cfg(feature = "std")]
     pub fn builder() -> ConfigBuilder<Self, crate::WantsVerifier> {
-        Self::builder_with_protocol_versions(versions::DEFAULT_VERSIONS)
+        Self::builder_with_protocol_versions(crate::versions::DEFAULT_VERSIONS)
     }
 
     /// Starts a builder with the process-default provider and `versions`.
@@ -194,8 +194,9 @@ impl ServerConfig {
     /// Panics if no default provider is available; use
     /// [`Self::builder_with_provider`] to avoid that.
     #[cfg(feature = "std")]
+    #[allow(clippy::panic)] // documented: no fallible API exists for this constructor
     pub fn builder_with_protocol_versions(
-        versions: &[&'static versions::SupportedProtocolVersion],
+        versions: &[&'static crate::versions::SupportedProtocolVersion],
     ) -> ConfigBuilder<Self, crate::WantsVerifier> {
         let provider = CryptoProvider::get_default_or_install_from_crate_features()
             .unwrap_or_else(|err| panic!("{err}"));

@@ -10,6 +10,7 @@ use super::handy::NoClientSessionStorage;
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
 use crate::common_state::{CommonState, Side};
+use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
@@ -28,7 +29,6 @@ use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
 use crate::verify::ServerCertVerifier;
 use crate::versions::EnabledVersions;
-use crate::{compress, versions};
 
 /// Stores session state for resumption, keyed by server name.
 pub trait ClientSessionStore: fmt::Debug + Send + Sync {
@@ -131,7 +131,7 @@ impl ClientConfig {
     /// Starts a builder with the process-default provider and all versions.
     #[cfg(feature = "std")]
     pub fn builder() -> ConfigBuilder<Self, crate::WantsVerifier> {
-        Self::builder_with_protocol_versions(versions::DEFAULT_VERSIONS)
+        Self::builder_with_protocol_versions(crate::versions::DEFAULT_VERSIONS)
     }
 
     /// Starts a builder with the process-default provider and `versions`.
@@ -141,8 +141,9 @@ impl ClientConfig {
     /// Panics if no default provider is available; use
     /// [`Self::builder_with_provider`] to avoid that.
     #[cfg(feature = "std")]
+    #[allow(clippy::panic)] // documented: no fallible API exists for this constructor
     pub fn builder_with_protocol_versions(
-        versions: &[&'static versions::SupportedProtocolVersion],
+        versions: &[&'static crate::versions::SupportedProtocolVersion],
     ) -> ConfigBuilder<Self, crate::WantsVerifier> {
         let provider = CryptoProvider::get_default_or_install_from_crate_features()
             .unwrap_or_else(|err| panic!("{err}"));
@@ -304,7 +305,7 @@ pub enum Tls12Resumption {
 }
 
 /// Settings that weaken security.
-pub mod danger {
+pub(crate) mod danger {
     use super::ClientConfig;
     use crate::sync::Arc;
     use crate::verify::ServerCertVerifier;

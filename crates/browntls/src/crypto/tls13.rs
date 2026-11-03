@@ -115,6 +115,12 @@ pub struct OutputLengthError;
 /// An [`Hkdf`] built from any [`hmac::Hmac`].
 pub struct HkdfUsingHmac<'a>(pub &'a dyn hmac::Hmac);
 
+impl core::fmt::Debug for HkdfUsingHmac<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HkdfUsingHmac")
+    }
+}
+
 impl HkdfUsingHmac<'_> {
     fn extract(&self, salt: Option<&[u8]>, ikm: &[u8]) -> Box<dyn HkdfExpander> {
         let zeroes = [0u8; hmac::Tag::MAX_LEN];
@@ -145,6 +151,12 @@ impl Hkdf for HkdfUsingHmac<'_> {
 
 /// An [`HkdfExpander`] built from a keyed HMAC.
 pub struct HkdfExpanderUsingHmac(Box<dyn hmac::Key>);
+
+impl core::fmt::Debug for HkdfExpanderUsingHmac {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HkdfExpanderUsingHmac")
+    }
+}
 
 impl HkdfExpanderUsingHmac {
     fn expand_unchecked(&self, info: &[&[u8]], output: &mut [u8]) {

@@ -153,10 +153,6 @@ impl<'a> CertificateEntry<'a> {
             sct_list: self.sct_list.map(Payload::into_owned),
         }
     }
-
-    pub(crate) fn has_unknown_extension(&self) -> bool {
-        false
-    }
 }
 
 impl<'a> Codec<'a> for CertificateEntry<'a> {

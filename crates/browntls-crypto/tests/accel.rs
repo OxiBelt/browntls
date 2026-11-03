@@ -157,33 +157,44 @@ fn acceleration_policies_per_kind() {
     }
 
     // Whole-policy updates are atomic: concurrent readers never observe a
-    // mix of the old and new global policy.
+    // mix of the old and new global policy. The writer keeps going until
+    // every reader has started, so each one overlaps with updates however
+    // the threads are scheduled.
     {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        const READERS: usize = 3;
         accel::set_policy_all(Policy::PREFERRED).unwrap();
         let stop = AtomicBool::new(false);
+        let started = AtomicUsize::new(0);
         std::thread::scope(|scope| {
-            let readers: Vec<_> = (0..3)
+            let readers: Vec<_> = (0..READERS)
                 .map(|_| {
                     scope.spawn(|| {
                         let mut seen = 0u64;
-                        while !stop.load(Ordering::Relaxed) {
+                        loop {
                             let all = accel::status_all();
                             let first = all[0].policy;
                             assert!(all.iter().all(|s| s.policy == first), "torn read");
+                            if seen == 0 {
+                                started.fetch_add(1, Ordering::Relaxed);
+                            }
                             seen += 1;
+                            if stop.load(Ordering::Relaxed) {
+                                return seen;
+                            }
                         }
-                        seen
                     })
                 })
                 .collect();
-            for i in 0..20_000 {
-                let p = if i % 2 == 0 {
+            let mut i = 0u64;
+            while i < 20_000 || started.load(Ordering::Relaxed) < READERS {
+                let p = if i.is_multiple_of(2) {
                     Policy::NONE
                 } else {
                     Policy::PREFERRED
                 };
                 accel::set_policy_all(p).unwrap();
+                i += 1;
             }
             stop.store(true, Ordering::Relaxed);
             for r in readers {

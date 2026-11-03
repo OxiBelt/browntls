@@ -15,7 +15,7 @@ intent.
 | OS entropy without libc (Linux) | done | `getrandom(2)` |
 | Portable SHA-2, SHA-3/SHAKE, HMAC, HKDF, TLS 1.2 PRF | done | Known-answer tests |
 | Accelerated SHA-2 / Keccak backends | done | SHA-NI, x86-64-v3, FEAT_SHA256/512, Zvknha/b, Zknh; four-way Keccak (AVX2, AVX-512VL, NEON/SHA3, RVV). No x86 SHA512 extension |
-| AES-GCM (portable, AES-NI/VAES, Armv8, Zvkned/Zvkg) | done | Bitsliced portable AES and constant-time GHASH; AES-NI+PCLMULQDQ, VAES (YMM), FEAT_AES+PMULL, Zvkned+Zvkg/Zvbc, Zkne+Zbc. No VPCLMULQDQ or AVX-512 (not executable here); CTR and GHASH are separate passes |
+| AES-GCM (portable, AES-NI/VAES, Armv8, Zvkned/Zvkg) | done | Bitsliced portable AES and constant-time GHASH; AES-NI+PCLMULQDQ, VAES (YMM) with VPCLMULQDQ (YMM) GHASH, AVX-512 VAES+VPCLMULQDQ with a fused CTR+GHASH loop, FEAT_AES+PMULL, Zvkned+Zvkg/Zvbc, Zkne+Zbc. The ZMM and VPCLMULQDQ backends are tested only on native hardware (QEMU 8.2 cannot execute them); elsewhere CTR and GHASH are separate passes |
 | ChaCha20-Poly1305 (portable, AVX2/AVX-512, NEON, RVV) | done | Poly1305 scalar, BMI2 and four-way AVX2 |
 | X25519 / Ed25519 | done | BMI2/ADX ladder on x86-64; small-order Ed25519 public keys rejected |
 | P-256 / P-384 / P-521 ECDH and ECDSA | done | RCB complete formulas, RFC 6979 with hedging, BMI2/ADX P-256 kernel; generic CIOS reduction and Fermat inversion (performance headroom) |
@@ -57,5 +57,7 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   Both were reported by the first independent `unsafe`/assembly review, which
   found no memory-safety defects in the asm operand constraints.
 - Accelerated backends for extensions without available hardware or emulation
-  (for example x86 SHA512 and AVX-512 VAES) remain unimplemented until they can
-  be executed in tests.
+  (for example the x86 SHA512 extension) remain unimplemented until they can
+  be executed in tests. Backends that only native hardware can execute (the
+  AVX-512 AES-GCM path) are covered by the development machine and by CI
+  runners whose CPUs offer them, not by a fixed CI profile.

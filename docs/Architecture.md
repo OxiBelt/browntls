@@ -78,7 +78,7 @@ reference for testing, plus accelerated backends selected at run time.
 |---|---|---|---|
 | SHA-2 | SHA-NI | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
 | SHA-3 / SHAKE | AVX2 multi-lane | NEON, FEAT_SHA3 | RVV |
-| AES-GCM | AES-NI + PCLMULQDQ, VAES | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
+| AES-GCM | AES-NI + PCLMULQDQ, VAES + VPCLMULQDQ (YMM, and ZMM with a fused CTR+GHASH loop) | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
 | ChaCha20-Poly1305 | AVX2, AVX-512 | NEON | RVV |
 | X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
 | P-256 / P-384 / P-521 | BMI2 + ADX field arithmetic (P-256) | portable 64-bit | portable 64-bit |

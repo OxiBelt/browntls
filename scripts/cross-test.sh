@@ -4,7 +4,9 @@
 # Usage: scripts/cross-test.sh <profile> [cargo test arguments...]
 #
 # Profiles exercise distinct backend tiers:
-#   x86_64-max         QEMU "max" x86-64 CPU: SHA-NI, VAES, VPCLMULQDQ, GFNI
+#   x86_64-max         QEMU "max" x86-64 CPU: SHA-NI, VAES (YMM), GFNI; QEMU 8.2
+#                      reports no VPCLMULQDQ or AVX-512, so the ZMM AES-GCM and
+#                      VPCLMULQDQ GHASH backends run only on native hardware
 #   aarch64-max        all Armv8/v9 crypto extensions (AES, PMULL, SHA2, SHA3, SHA512)
 #   aarch64-a53        Cortex-A53 model (AES/PMULL/SHA2, no SHA3/SHA512)
 #   host-soft          native host build with --cfg browntls_force_soft

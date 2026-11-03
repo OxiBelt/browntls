@@ -10,9 +10,12 @@
 //! points of order two, so doubling has no exceptional case besides the
 //! identity, which it maps to itself.
 //!
-//! **Not constant time.** Never use these with secret scalars or points.
+//! The additions are **not constant time**: never use them with secret
+//! scalars or points. [`double`] and the coordinate conversions are
+//! branch-free and also serve the constant-time variable-base ladder, where
+//! they run between complete additions.
 
-use super::curve::{Affine, Curve, Fe};
+use super::curve::{Affine, Curve, Fe, Projective};
 use super::mont;
 
 /// A Jacobian point.
@@ -49,12 +52,40 @@ impl<const N: usize> Jacobian<N> {
     }
 }
 
+/// Converts homogeneous `(X : Y : Z)` to Jacobian `(X Z : Y Z^2 : Z)` in
+/// constant time. The identity (`Z = 0`) becomes `(1 : 1 : 0)`, a fixed point
+/// of [`double`].
+#[inline]
+pub(crate) fn from_projective_ct<C: Curve<N>, const N: usize>(p: &Projective<N>) -> Jacobian<N> {
+    let z2 = C::sqr(&p.z);
+    let x = C::mul(&p.x, &p.z);
+    let y = C::mul(&p.y, &z2);
+    let id = mont::barrier(mont::is_zero(&p.z));
+    Jacobian {
+        x: mont::select(id, &C::ONE, &x),
+        y: mont::select(id, &C::ONE, &y),
+        z: p.z,
+    }
+}
+
+/// Converts Jacobian `(X : Y : Z)` to homogeneous `(X Z : Y : Z^3)` (branch
+/// free; the identity `(1 : 1 : 0)` becomes `(0 : 1 : 0)`).
+#[inline]
+pub(crate) fn to_projective<C: Curve<N>, const N: usize>(p: &Jacobian<N>) -> Projective<N> {
+    Projective {
+        x: C::mul(&p.x, &p.z),
+        y: p.y,
+        z: C::mul(&C::sqr(&p.z), &p.z),
+    }
+}
+
 #[inline]
 fn is_zero<const N: usize>(a: &Fe<N>) -> bool {
     mont::is_zero(a) != 0
 }
 
-/// `2P` (`a = -3`).
+/// `2P` (`a = -3`), branch free. The identity `(X : Y : 0)` stays at `Z = 0`
+/// and `(1 : 1 : 0)` maps to itself.
 pub(crate) fn double<C: Curve<N>, const N: usize>(p: &Jacobian<N>) -> Jacobian<N> {
     let delta = C::sqr(&p.z);
     let gamma = C::sqr(&p.y);
@@ -220,6 +251,22 @@ mod tests {
         let jg_other = rescale::<C, N>(&g, &C::sqr(&z));
         assert_eq!(to_affine_jacobian::<C, N>(&add::<C, N>(&jg, &jg_other)), Some(g2));
         assert!(add::<C, N>(&jg_other, &jneg).is_identity());
+        // Conversions round-trip, the identity included, and doubling in
+        // Jacobian coordinates matches the complete projective doubling.
+        let p3 = curve::add_mixed::<C, N>(&curve::double::<C, N>(&gp), &g);
+        let j3 = from_projective_ct::<C, N>(&p3);
+        assert_eq!(to_affine_jacobian::<C, N>(&j3), Some(g3));
+        assert_eq!(to_affine::<C, N>(&to_projective::<C, N>(&j3)), Some(g3));
+        assert_eq!(
+            to_affine::<C, N>(&to_projective::<C, N>(&double::<C, N>(&j3))),
+            to_affine::<C, N>(&curve::double::<C, N>(&p3))
+        );
+        let jid = from_projective_ct::<C, N>(&Projective::identity::<C>());
+        assert_eq!((jid.x, jid.y, jid.z), (C::ONE, C::ONE, [0; N]));
+        let jid2 = double::<C, N>(&jid);
+        assert_eq!((jid2.x, jid2.y, jid2.z), (C::ONE, C::ONE, [0; N]));
+        let pid = to_projective::<C, N>(&jid2);
+        assert_eq!((pid.x, pid.y, pid.z), ([0; N], C::ONE, [0; N]));
         // x comparison.
         assert!(x_equals::<C, N>(&jg, &g.x));
         assert!(!x_equals::<C, N>(&jg, &g2.x));

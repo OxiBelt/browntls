@@ -83,9 +83,14 @@ pub(crate) fn mul<C: Curve<N>, const N: usize>(p: &Affine<N>, k: &[u64; N]) -> P
     let mut acc = Projective::identity::<C>();
     for i in (0..digits).rev() {
         if i + 1 != digits {
+            // The doublings run in Jacobian coordinates (cheaper, and
+            // exception-free on a prime-order curve); the additions stay
+            // complete.
+            let mut j = jacobian::from_projective_ct::<C, N>(&acc);
             for _ in 0..W {
-                acc = double::<C, N>(&acc);
+                j = jacobian::double::<C, N>(&j);
             }
+            acc = jacobian::to_projective::<C, N>(&j);
         }
         let (mag, neg) = booth(k, i, W);
         let mut t = lookup_projective(&table, mag);

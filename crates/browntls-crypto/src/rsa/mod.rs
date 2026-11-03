@@ -38,12 +38,22 @@
 //!
 //! Peak stack use, measured on x86-64 in a release build with a thread-size
 //! binary search (4 KiB granularity, thread start-up subtracted; see the
-//! `stack_usage_probe` test): about 16 KiB for verification, 24 KiB for
-//! signing (the fixed-window tables plus the CRT temporaries), 76 KiB for
-//! loading a private key (nested `Result<RsaPrivateKey>` returns plus the
-//! sign/verify self-test) and 80 KiB for key generation. Loading and
-//! generation are one-time operations; signing and verification are the
-//! per-handshake paths.
+//! `stack_usage_probe` test, which takes any key through
+//! `BROWNTLS_RSA_STACK_PROBE_KEY`) with the AVX-512 IFMA backend:
+//!
+//! | Operation | 2048-bit | 4096-bit | 8192-bit |
+//! |---|---:|---:|---:|
+//! | Signing | 24 KiB | 32 KiB | 52 KiB |
+//! | Verification | 16 KiB | 16 KiB | 24 KiB |
+//! | Loading a private key | 76 KiB | 80 KiB | 104 KiB |
+//! | Key generation | 80 KiB | — | — |
+//!
+//! Signing grows with the key on the IFMA backend because its window table
+//! and temporaries are sized per key; the BMI2/ADX and portable backends use
+//! fixed-capacity buffers. Loading includes nested `Result<RsaPrivateKey>`
+//! returns and the sign/verify self-test. Loading and generation are
+//! one-time operations; signing and verification are the per-handshake
+//! paths.
 //!
 //! # Blinding entropy
 //!

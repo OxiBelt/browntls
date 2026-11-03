@@ -156,6 +156,9 @@ fn mont_mul4(t: &mut [u64], a: &[u64], b: &[u64], m: &[u64], m0inv: u64) {
             "add r9, 8",
             "dec qword ptr [rsp + 8]",
             "jnz 2b",
+            // `m0inv` is derived from the (possibly secret) modulus: clear
+            // its slot before releasing it.
+            "mov qword ptr [rsp], 0",
             "add rsp, 24",
             "pop rbp",
             "pop rbx",

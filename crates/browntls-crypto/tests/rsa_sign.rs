@@ -198,10 +198,18 @@ fn rsa_backends() -> Vec<(Policy, &'static str)> {
 /// (CRT halves of 1024, 1536 and 2048 bits). The policy is process-wide;
 /// other tests in this binary may run under a different backend meanwhile,
 /// which does not change their results.
+/// Name of the AVX-512 IFMA RSA backend in status reports.
+const IFMA: &str = "AVX-512 IFMA + BMI2/ADX";
+
 #[test]
 fn backends_agree_on_signatures() {
     let backends = rsa_backends();
     println!("RSA backends: {backends:?}");
+    // Only the IFMA backend uses SIMD, so a CPU offering SIMD for RSA must
+    // have it exercised here.
+    if accel::status(Algorithm::Rsa).available.simd {
+        assert!(backends.iter().any(|&(_, b)| b == IFMA), "{backends:?}");
+    }
     let long: Vec<u8> = (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
     let msgs: [&[u8]; 3] = [b"", b"abc", &long];
     for bits in [2048usize, 3072, 4096] {
@@ -217,6 +225,13 @@ fn backends_agree_on_signatures() {
         for &(policy, backend) in &backends {
             accel::set_policy(Algorithm::Rsa, policy).unwrap();
             let loaded = RsaPrivateKey::from_pkcs1_der(&der).unwrap();
+            // The key uses the IFMA exponentiation exactly when the policy
+            // selected that backend.
+            assert_eq!(
+                format!("{loaded:?}").contains("avx512-ifma"),
+                backend == IFMA,
+                "{bits}-bit key loaded under {backend}: {loaded:?}"
+            );
             let public = RsaPublicKey::from_pkcs1_der(&pub_der).unwrap();
             let mut sigs = Vec::new();
             for msg in msgs {
@@ -652,11 +667,9 @@ fn stack_probe_child() {
     let (op, bytes) = spec.split_once(':').unwrap();
     let bytes: usize = bytes.parse().unwrap();
     let op = op.to_string();
-    let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
-    let mut der = vec![0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
-    let n = key.to_pkcs1_der(&mut der).unwrap();
-    der.truncate(n);
-    let mut sig = vec![0u8; 256];
+    let der = probe_key_der();
+    let key = RsaPrivateKey::from_pkcs1_der(&der).unwrap();
+    let mut sig = vec![0u8; key.modulus_len_bytes()];
     key.sign_pss(HashAlgorithm::Sha256, b"m", &OsRng, &mut sig)
         .unwrap();
     std::thread::Builder::new()
@@ -686,6 +699,20 @@ fn stack_probe_child() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+/// The key for the stack probe: the PKCS #1 DER file named by
+/// `BROWNTLS_RSA_STACK_PROBE_KEY` (any loadable size, e.g. an 8192-bit key
+/// made with another tool), or a fresh 2048-bit key.
+fn probe_key_der() -> Vec<u8> {
+    if let Ok(path) = std::env::var("BROWNTLS_RSA_STACK_PROBE_KEY") {
+        return std::fs::read(path).unwrap();
+    }
+    let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+    let mut der = vec![0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
+    let n = key.to_pkcs1_der(&mut der).unwrap();
+    der.truncate(n);
+    der
 }
 
 /// Smallest thread stack (4 KiB granularity) on which `op` completes,
@@ -719,6 +746,10 @@ fn min_stack_for(op: &str) -> usize {
 #[test]
 #[ignore = "stack usage probe; run with --release -- --ignored --nocapture"]
 fn stack_usage_probe() {
+    let bits = RsaPrivateKey::from_pkcs1_der(&probe_key_der())
+        .unwrap()
+        .modulus_bits();
+    println!("RSA backend: {}", accel::status(Algorithm::Rsa).backend);
     for op in [
         "noop",
         "sign_pkcs1",
@@ -727,8 +758,9 @@ fn stack_usage_probe() {
         "load",
         "generate",
     ] {
+        // `generate` always makes a 2048-bit key.
         println!(
-            "RSA-2048 {op}: minimum thread stack {} KiB",
+            "RSA-{bits} {op}: minimum thread stack {} KiB",
             min_stack_for(op) / 1024
         );
     }
@@ -737,18 +769,25 @@ fn stack_usage_probe() {
 #[test]
 fn signing_fits_in_a_small_stack() {
     // Signing, verification and key loading must stay within a modest stack
-    // budget: the measured peaks are ~24 KiB (sign), ~12 KiB (verify) and
-    // ~64 KiB (load) on top of a ~68 KiB thread start-up baseline, so 256 KiB
-    // leaves a wide margin on every supported target.
-    let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+    // budget at every generated size. Signing on the IFMA backend grows with
+    // the key (its window table is per size); the measured peaks, documented
+    // in the `rsa` module, stay well below 256 KiB on every supported target.
+    for bits in [2048usize, 4096] {
+        signing_fits_in_256_kib(bits);
+    }
+}
+
+fn signing_fits_in_256_kib(bits: usize) {
+    let key = RsaPrivateKey::generate(bits, &OsRng).unwrap();
     let mut der = vec![0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
     let n = key.to_pkcs1_der(&mut der).unwrap();
     der.truncate(n);
+    let k = key.modulus_len_bytes();
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(move || {
             let loaded = RsaPrivateKey::from_pkcs1_der(&der).unwrap();
-            let mut sig = [0u8; 256];
+            let mut sig = vec![0u8; k];
             loaded
                 .sign_pss(HashAlgorithm::Sha256, b"stack", &OsRng, &mut sig)
                 .unwrap();

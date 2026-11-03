@@ -246,13 +246,16 @@ impl Prime52 {
         to_radix52(&mut p.m, ctx.modulus());
         to_radix52(&mut p.enter, &u[..len]);
         to_radix52(&mut p.exit, ctx.one());
-        let m0 = ctx.modulus()[0];
-        let mut inv = m0;
+        let mut m0 = [ctx.modulus()[0]];
+        let mut inv = [m0[0]];
         for _ in 0..5 {
-            inv = inv.wrapping_mul(2u64.wrapping_sub(m0.wrapping_mul(inv)));
+            inv[0] = inv[0].wrapping_mul(2u64.wrapping_sub(m0[0].wrapping_mul(inv[0])));
         }
-        p.k0 = inv.wrapping_neg() & MASK52;
+        p.k0 = inv[0].wrapping_neg() & MASK52;
         u.zeroize();
+        // Both words are derived from the prime.
+        m0.zeroize();
+        inv.zeroize();
         p
     }
 }
@@ -389,6 +392,7 @@ impl CrtIfma {
         res.as_flattened_mut().as_flattened_mut().zeroize();
         wide.zeroize();
         m64.zeroize();
+        ctx.k0.zeroize();
         for v in [
             &mut b52, &mut x, &mut one, &mut enter, &mut exit, &mut ctx.m,
         ] {

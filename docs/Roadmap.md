@@ -59,5 +59,12 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
 - Accelerated backends for extensions without available hardware or emulation
   (for example the x86 SHA512 extension) remain unimplemented until they can
   be executed in tests. Backends that only native hardware can execute (the
-  AVX-512 AES-GCM path) are covered by the development machine and by CI
-  runners whose CPUs offer them, not by a fixed CI profile.
+  AVX-512 AES-GCM and RSA IFMA paths) are covered by the development machine
+  and by CI runners whose CPUs offer them, not by a fixed CI profile.
+- The performance work of November 2026 (AVX-512 AES-GCM, P-256 kernels and
+  safegcd inversion, RSA IFMA and safegcd unblinding) had one independent
+  review per area; constant time was checked by inspecting generated code,
+  not by statistical timing tests. The RSA BMI2/ADX kernel uses `rbp` as a
+  general register, which breaks frame-pointer unwinding inside the block and
+  would need attention for kernel builds (objtool). Secret-derived values may
+  remain in vector registers after AVX-512 code returns.

@@ -140,8 +140,8 @@ ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM) with one level per kind:
 `native::default_provider_with_acceleration` set levels; `accel::status_all`,
 `accelerated` and `accelerated_by(kind)` report, per family, the policy, the
 kinds the CPU offers, and the selected backend with the kinds it uses.
-Keyed objects (AES-GCM and ML-KEM keys) keep the backend chosen when they
-were created. Hardware feature checks that guard `unsafe` code are
+Keyed objects (AES-GCM, ML-KEM and RSA private keys) keep the backend chosen
+when they were created or loaded. Hardware feature checks that guard `unsafe` code are
 independent of the policy.
 
 ### Operating-system interface

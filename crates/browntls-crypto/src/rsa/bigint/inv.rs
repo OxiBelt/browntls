@@ -342,6 +342,7 @@ fn mod_inverse_n<const N: usize>(out: [&mut [u64]; N], x: [&[u64]; N], m: [&[u64
         d[c].zeroize();
         e[c].zeroize();
     }
+    m_inv62.zeroize();
 }
 
 #[cfg(test)]

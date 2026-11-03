@@ -11,7 +11,6 @@ use super::HALF_LIMBS;
 use super::mont::Mont;
 
 /// Backend for the two CRT exponentiations of a private key.
-#[derive(Clone)]
 pub(crate) struct CrtExp {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     ifma: Option<super::ifma::CrtIfma>,

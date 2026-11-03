@@ -144,7 +144,7 @@ fn exp_pub_v<const V: usize, const CAP: usize>(
 
     let mut x = [[0u64; 8]; V];
     to_radix52(&mut x, base);
-    let [x] = amm.mul([&x], [&enter]);
+    [x] = amm.mul([&x], [&enter]);
     let mut acc = x;
     let nbits = 64 - e.leading_zeros();
     for i in (0..nbits - 1).rev() {
@@ -153,12 +153,16 @@ fn exp_pub_v<const V: usize, const CAP: usize>(
             [acc] = amm.mul([&acc], [&x]);
         }
     }
-    let [res] = amm.mul([&acc], [&exit]);
+    let [mut res] = amm.mul([&acc], [&exit]);
     // The result is below 2 m < 2^(64 len + 1): its bit 64 len is the only
     // one beyond `out`; one conditional subtraction completes the reduction.
     from_radix52(out, &res);
     let top = 64 * len;
     let hi = (res.as_flattened()[top / 52] >> (top % 52)) & 1;
+    // The base may be secret (the blinding factor, the unreleased signature).
+    for v in [&mut x, &mut acc, &mut res] {
+        v.as_flattened_mut().zeroize();
+    }
     super::cond_sub_mod(out, hi, ctx.modulus());
 }
 
@@ -208,7 +212,6 @@ fn entry_constant<const CAP: usize>(ctx: &Mont<CAP>, out: &mut [u64]) {
 }
 
 /// Radix-2^52 constants of one prime.
-#[derive(Clone)]
 struct Prime52 {
     /// The prime.
     m: [[u64; 8]; VMAX],
@@ -255,7 +258,6 @@ impl Zeroize for Prime52 {
 }
 
 /// Precomputed radix-2^52 data for the two primes of a key.
-#[derive(Clone)]
 pub(crate) struct CrtIfma {
     token: Ifma,
     primes: [Prime52; 2],
@@ -321,20 +323,20 @@ impl CrtIfma {
         assert!(exp[0].len() == len && exp[1].len() == len);
         assert!(base[0].len() == len && base[1].len() == len);
         let rows = |x: &[[u64; 8]; VMAX]| -> Num<V> { core::array::from_fn(|i| x[i]) };
-        let ctx = Amm::<V, 2> {
+        let mut ctx = Amm::<V, 2> {
             m: [rows(&self.primes[0].m), rows(&self.primes[1].m)],
             k0: [self.primes[0].k0, self.primes[1].k0],
             k,
         };
-        let enter = [rows(&self.primes[0].enter), rows(&self.primes[1].enter)];
-        let exit = [rows(&self.primes[0].exit), rows(&self.primes[1].exit)];
+        let mut enter = [rows(&self.primes[0].enter), rows(&self.primes[1].enter)];
+        let mut exit = [rows(&self.primes[0].exit), rows(&self.primes[1].exit)];
 
         // Entry: x R = AMM(x R64, R^2 / R64); one = R = AMM(R^2 / R64, R64).
-        let mut x = [[[0u64; 8]; V]; 2];
-        to_radix52(&mut x[0], base[0]);
-        to_radix52(&mut x[1], base[1]);
-        let x = ctx.mul([&x[0], &x[1]], [&enter[0], &enter[1]]);
-        let one = ctx.mul([&enter[0], &enter[1]], [&exit[0], &exit[1]]);
+        let mut b52 = [[[0u64; 8]; V]; 2];
+        to_radix52(&mut b52[0], base[0]);
+        to_radix52(&mut b52[1], base[1]);
+        let mut x = ctx.mul([&b52[0], &b52[1]], [&enter[0], &enter[1]]);
+        let mut one = ctx.mul([&enter[0], &enter[1]], [&exit[0], &exit[1]]);
 
         // table[j] = x^j for j < 16.
         let mut table = [[[[0u64; 8]; V]; 2]; 16];
@@ -377,6 +379,12 @@ impl CrtIfma {
         sel.as_flattened_mut().as_flattened_mut().zeroize();
         res.as_flattened_mut().as_flattened_mut().zeroize();
         wide.zeroize();
+        m64.zeroize();
+        for v in [
+            &mut b52, &mut x, &mut one, &mut enter, &mut exit, &mut ctx.m,
+        ] {
+            v.as_flattened_mut().as_flattened_mut().zeroize();
+        }
     }
 }
 

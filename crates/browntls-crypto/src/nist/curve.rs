@@ -131,24 +131,55 @@ pub(crate) trait Curve<const N: usize>: Copy + 'static {
     fn sqr(a: &Fe<N>) -> Fe<N> {
         Self::mul(a, a)
     }
+
+    /// Field addition (operands below `p`).
+    #[inline]
+    fn add(a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
+        mont::add_mod(a, b, &Self::P)
+    }
+
+    /// Field subtraction (operands below `p`).
+    #[inline]
+    fn sub(a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
+        mont::sub_mod(a, b, &Self::P)
+    }
+
+    /// Constant-time field inversion in the Montgomery domain (`0` maps to `0`).
+    #[inline]
+    fn invert(a: &Fe<N>) -> Fe<N> {
+        fe_invert_fermat::<Self, N>(a)
+    }
+
+    /// Constant-time inversion modulo the group order: maps `a R mod n` to
+    /// `a^-1 R mod n` (`0` maps to `0`).
+    #[inline]
+    fn scalar_invert(a: &[u64; N]) -> [u64; N] {
+        mont::pow_pubexp(
+            a,
+            &Self::ORDER_MINUS_2,
+            &Self::ORDER,
+            Self::ORDER_INV,
+            &Self::ORDER_ONE,
+        )
+    }
 }
 
 /// Field addition.
 #[inline(always)]
 pub(crate) fn fe_add<C: Curve<N>, const N: usize>(a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
-    mont::add_mod(a, b, &C::P)
+    C::add(a, b)
 }
 
 /// Field subtraction.
 #[inline(always)]
 pub(crate) fn fe_sub<C: Curve<N>, const N: usize>(a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
-    mont::sub_mod(a, b, &C::P)
+    C::sub(a, b)
 }
 
-/// Field negation.
+/// Field negation (`0` maps to `0`).
 #[inline(always)]
 pub(crate) fn fe_neg<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
-    mont::neg_mod(a, &C::P)
+    C::sub(&[0; N], a)
 }
 
 /// Portable Montgomery multiplication.
@@ -170,11 +201,17 @@ pub(crate) fn fe_to_canonical<C: Curve<N>, const N: usize>(a: &Fe<N>) -> [u64; N
     mont::from_mont(a, &C::P, C::P_INV)
 }
 
-/// Constant-time field inversion (`0` maps to `0`).
-///
-/// Fermat: left-to-right fixed 4-bit windows over the public exponent `p - 2`;
-/// the operation sequence is independent of `a`.
+/// Constant-time field inversion (`0` maps to `0`) with the curve's method.
+#[inline]
 pub(crate) fn fe_invert<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
+    C::invert(a)
+}
+
+/// Constant-time field inversion by Fermat's little theorem (`0` maps to `0`).
+///
+/// Left-to-right fixed 4-bit windows over the public exponent `p - 2`; the
+/// operation sequence is independent of `a`.
+pub(crate) fn fe_invert_fermat<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
     let mut table = [[0u64; N]; 16];
     table[0] = C::ONE;
     for i in 1..16 {

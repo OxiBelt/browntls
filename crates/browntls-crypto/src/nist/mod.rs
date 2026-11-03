@@ -8,23 +8,32 @@
 //! # Implementation
 //!
 //! * Field and scalar arithmetic: 64-bit limbs in Montgomery form, word-by-word
-//!   CIOS multiplication with masked final subtraction (`mont`).
+//!   CIOS multiplication with masked final subtraction (`mont`). P-256 has a
+//!   specialised field multiplication that exploits the shape of `p`
+//!   (`p256_field`).
 //! * Group law: complete projective formulas (Renes–Costello–Batina 2016,
 //!   `a = -3`), so no secret-dependent special cases (`curve`).
 //! * Secret scalars: fixed-window Booth recoding with masked table scans;
 //!   fixed-base multiplication uses committed, test-validated comb tables
-//!   (`scalar_mul`, `table`). Inversions are Fermat exponentiations with a
-//!   fixed schedule.
-//! * Verification uses variable-time interleaved wNAF (public inputs only).
-//! * x86-64 with BMI2 + ADX: `mulx`/`adcx`/`adox` field multiplication for P-256
-//!   (`p256_x86`). aarch64 and riscv64 use the portable backend.
+//!   (`scalar_mul`, `table`; width 6 without doublings for P-256). Between
+//!   complete additions, runs of doublings use branch-free Jacobian doubling,
+//!   which has no exceptional case on prime-order curves (`jacobian`).
+//! * Inversions: P-256 uses constant-time Bernstein–Yang safegcd for the field
+//!   and the group order (`safegcd`); P-384 and P-521 use Fermat
+//!   exponentiations with a fixed schedule.
+//! * Verification is variable time (public inputs only): interleaved wNAF in
+//!   Jacobian coordinates with explicit exceptional cases, and `x(R) mod n = r`
+//!   checked as `X = r Z^2` without an inversion.
+//! * x86-64 with BMI2 + ADX: `mulx`/`adcx`/`adox` multiplication and squaring
+//!   with the P-256 reduction, and branch-free addition and subtraction in
+//!   assembly (`p256_x86`). aarch64 and riscv64 use the portable backend.
 //!
 //! Nonces follow RFC 6979, hedged with fresh randomness by default.
 
 mod api;
 mod curve;
-mod jacobian;
 mod ecdsa;
+mod jacobian;
 mod keys;
 mod mont;
 mod p256_field;

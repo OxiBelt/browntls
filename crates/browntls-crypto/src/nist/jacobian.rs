@@ -227,8 +227,8 @@ mod tests {
             y: curve::fe_neg::<C, N>(&g.y),
         };
         let g2 = to_affine::<C, N>(&curve::double::<C, N>(&gp)).unwrap();
-        let g3 = to_affine::<C, N>(&curve::add_mixed::<C, N>(&curve::double::<C, N>(&gp), &g))
-            .unwrap();
+        let g3 =
+            to_affine::<C, N>(&curve::add_mixed::<C, N>(&curve::double::<C, N>(&gp), &g)).unwrap();
         let z = C::B; // an arbitrary non-zero, non-one field element
         let id = Jacobian::<N>::identity::<C>();
         let jg = rescale::<C, N>(&g, &z);
@@ -237,9 +237,18 @@ mod tests {
         assert!(double::<C, N>(&id).is_identity());
         // Mixed addition: generic, identity, P = Q, P = -Q.
         let j2 = rescale::<C, N>(&g2, &C::sqr(&z));
-        assert_eq!(to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&j2, &g)), Some(g3));
-        assert_eq!(to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&id, &g)), Some(g));
-        assert_eq!(to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&jg, &g)), Some(g2));
+        assert_eq!(
+            to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&j2, &g)),
+            Some(g3)
+        );
+        assert_eq!(
+            to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&id, &g)),
+            Some(g)
+        );
+        assert_eq!(
+            to_affine_jacobian::<C, N>(&add_mixed::<C, N>(&jg, &g)),
+            Some(g2)
+        );
         assert!(add_mixed::<C, N>(&jg, &neg_g).is_identity());
         // General addition: generic, identities, P = Q, P = -Q.
         let jneg = rescale::<C, N>(&neg_g, &C::ONE);
@@ -249,7 +258,10 @@ mod tests {
         assert_eq!(to_affine_jacobian::<C, N>(&add::<C, N>(&jg, &id)), Some(g));
         assert!(add::<C, N>(&id, &id).is_identity());
         let jg_other = rescale::<C, N>(&g, &C::sqr(&z));
-        assert_eq!(to_affine_jacobian::<C, N>(&add::<C, N>(&jg, &jg_other)), Some(g2));
+        assert_eq!(
+            to_affine_jacobian::<C, N>(&add::<C, N>(&jg, &jg_other)),
+            Some(g2)
+        );
         assert!(add::<C, N>(&jg_other, &jneg).is_identity());
         // Conversions round-trip, the identity included, and doubling in
         // Jacobian coordinates matches the complete projective doubling.

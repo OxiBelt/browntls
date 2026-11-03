@@ -131,7 +131,13 @@ mod tests {
         assert_eq!(C::BASE_TABLE.len(), base.len());
         for (i, (g, want)) in C::BASE_TABLE.iter().zip(&base).enumerate() {
             assert!(is_on_curve::<C, N>(g));
-            assert_eq!(g, want, "base table position {} multiple {}", i / row, i % row + 1);
+            assert_eq!(
+                g,
+                want,
+                "base table position {} multiple {}",
+                i / row,
+                i % row + 1
+            );
         }
         let odd = generate::odd_table::<C, N>();
         for (i, (g, w)) in C::G_ODD.iter().zip(&odd).enumerate() {

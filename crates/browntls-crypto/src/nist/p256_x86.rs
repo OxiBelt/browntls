@@ -488,8 +488,16 @@ mod tests {
             assert_eq!(sqr(a), fe_mul_soft::<P256, 4>(a, a), "sqr a={a:x?}");
             for b in &v {
                 assert_eq!(mul(a, b), fe_mul_soft::<P256, 4>(a, b), "a={a:x?} b={b:x?}");
-                assert_eq!(add(a, b), mont::add_mod(a, b, &P256::P), "add a={a:x?} b={b:x?}");
-                assert_eq!(sub(a, b), mont::sub_mod(a, b, &P256::P), "sub a={a:x?} b={b:x?}");
+                assert_eq!(
+                    add(a, b),
+                    mont::add_mod(a, b, &P256::P),
+                    "add a={a:x?} b={b:x?}"
+                );
+                assert_eq!(
+                    sub(a, b),
+                    mont::sub_mod(a, b, &P256::P),
+                    "sub a={a:x?} b={b:x?}"
+                );
             }
         }
     }

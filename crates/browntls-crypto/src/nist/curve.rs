@@ -9,8 +9,9 @@
 //! 2016), algorithms 4 (addition), 5 (mixed addition) and 6 (doubling) for
 //! `a = -3`. They are exception-free, so the constant-time scalar
 //! multiplications never need to special-case the identity, doubling or
-//! inverses. Field multiplication goes through [`Curve::mul`], which a
-//! backend (such as the x86-64 BMI2/ADX kernel for P-256) can override.
+//! inverses. Field arithmetic goes through [`Curve`] methods (`mul`, `sqr`,
+//! `add`, `sub`, `invert`), which a backend (such as the x86-64 BMI2/ADX
+//! kernel for P-256) can override.
 
 use super::mont;
 

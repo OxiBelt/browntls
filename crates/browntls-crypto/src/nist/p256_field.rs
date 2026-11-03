@@ -122,7 +122,11 @@ mod tests {
         for a in &v {
             assert!(mont::lt(a, &p) != 0);
             for b in &v {
-                assert_eq!(mul(a, b), fe_mul_soft::<P256, 4>(a, b), "a = {a:x?} b = {b:x?}");
+                assert_eq!(
+                    mul(a, b),
+                    fe_mul_soft::<P256, 4>(a, b),
+                    "a = {a:x?} b = {b:x?}"
+                );
             }
         }
     }

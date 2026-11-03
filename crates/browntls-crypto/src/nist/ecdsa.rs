@@ -7,8 +7,8 @@
 //! deterministic derivation is masked by the randomness.
 //!
 //! Signing is constant time in the private key and the nonce (fixed-base
-//! comb, Fermat inversion, Montgomery arithmetic modulo `n`). Verification is
-//! variable time, as its inputs are public.
+//! comb, constant-time inversion, Montgomery arithmetic modulo `n`).
+//! Verification is variable time, as its inputs are public.
 
 use crate::Error;
 use crate::der::{self, Writer, tag};

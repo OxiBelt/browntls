@@ -123,7 +123,11 @@ fn divsteps_59(mut zeta: i64, f0: u64, g0: u64) -> (i64, Matrix) {
 /// `[d, e] = (t [d, e] + m [md, me]) / 2^62` with `md`, `me` chosen to make
 /// the division exact and keep `d`, `e` in `(-2m, m)`.
 #[inline]
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
 fn update_de(d: &mut [i64; 5], e: &mut [i64; 5], t: &Matrix, m: &Modulus) {
     let (u, v, q, r) = (t.u, t.v, t.q, t.r);
     // Start with [u, q] if d is negative, plus [v, r] if e is negative.
@@ -160,7 +164,11 @@ fn update_de(d: &mut [i64; 5], e: &mut [i64; 5], t: &Matrix, m: &Modulus) {
 
 /// `[f, g] = t [f, g] / 2^62` (exact).
 #[inline]
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
 fn update_fg(f: &mut [i64; 5], g: &mut [i64; 5], t: &Matrix) {
     let (u, v, q, r) = (t.u, t.v, t.q, t.r);
     let mut cf = i128::from(u) * i128::from(f[0]) + i128::from(v) * i128::from(g[0]);

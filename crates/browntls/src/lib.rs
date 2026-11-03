@@ -1,13 +1,17 @@
 //! browntls: a TLS 1.2 and TLS 1.3 library with a pluggable cryptography provider.
 //!
 //! The crate is `#![no_std]` with `alloc`; the `std` feature (default) adds the
-//! buffered I/O helpers, `KeyLogFile`, the in-memory session caches and the
-//! process-wide default [`crypto::CryptoProvider`].
+//! buffered I/O helpers ([`Stream`], [`StreamOwned`], `read_tls`/`write_tls`),
+//! [`KeyLogFile`], the in-memory session caches and the process-wide default
+//! [`crypto::CryptoProvider`].
 //!
 //! # Layout
 //!
 //! * [`crypto`]: the provider mount point (cipher suites, key exchange, signing,
 //!   randomness) and the providers shipped with the crate.
+//! * [`client`] / [`server`]: configuration ([`ClientConfig`], [`ServerConfig`])
+//!   and connections ([`ClientConnection`], [`ServerConnection`]).
+//! * [`ConnectionCommon`]: the buffered connection API shared by both sides.
 //! * [`Error`] and its sub-enums describe every failure the library reports.
 #![no_std]
 #![forbid(unsafe_code)]
@@ -38,15 +42,29 @@ pub(crate) mod sync {
 
 #[macro_use]
 mod msgs;
+#[macro_use]
+mod check;
+mod builder;
 mod common_state;
+pub mod compress;
+mod conn;
 pub mod crypto;
+mod ct;
 mod enums;
 mod error;
 mod hash_hs;
 mod key_log;
+#[cfg(feature = "std")]
+mod key_log_file;
+#[cfg(feature = "std")]
+mod limited_cache;
 mod rand;
 mod record_layer;
+#[cfg(feature = "std")]
+mod stream;
 mod suites;
+#[cfg(feature = "std")]
+pub mod ticketer;
 #[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
@@ -56,18 +74,26 @@ mod versions;
 mod webpki;
 mod x509;
 
+pub use crate::builder::{ConfigBuilder, ConfigSide, WantsVerifier, WantsVersions};
 pub use crate::common_state::{CommonState, HandshakeKind, IoState, Side};
+#[cfg(feature = "std")]
+pub use crate::conn::{Connection, Reader, Writer};
+pub use crate::conn::{ConnectionCommon, SideData};
 pub use crate::enums::{
     AlertDescription, CertificateCompressionAlgorithm, CertificateType, CipherSuite, ContentType,
     HandshakeType, ProtocolVersion, SignatureAlgorithm, SignatureScheme,
 };
 pub use crate::error::{
-    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage, OtherError,
-    PeerIncompatible, PeerMisbehaved,
+    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage,
+    OtherError, PeerIncompatible, PeerMisbehaved,
 };
 pub use crate::key_log::{KeyLog, NoKeyLog};
+#[cfg(feature = "std")]
+pub use crate::key_log_file::KeyLogFile;
 pub use crate::msgs::enums::NamedGroup;
 pub use crate::msgs::handshake::DistinguishedName;
+#[cfg(feature = "std")]
+pub use crate::stream::{Stream, StreamOwned};
 pub use crate::suites::{
     CipherSuiteCommon, ConnectionTrafficSecrets, ExtractedSecrets, SupportedCipherSuite,
 };
@@ -77,6 +103,81 @@ pub use crate::tls13::Tls13CipherSuite;
 pub use crate::verify::DigitallySignedStruct;
 pub use crate::versions::{ALL_VERSIONS, DEFAULT_VERSIONS, SupportedProtocolVersion};
 pub use crate::webpki::RootCertStore;
+
+/// Items for use by TLS clients.
+pub mod client {
+    pub(super) mod builder;
+    mod client_conn;
+    mod common;
+    pub(super) mod handy;
+    mod hs;
+    mod tls13;
+
+    pub use builder::WantsClientCert;
+    #[cfg(feature = "std")]
+    pub use client_conn::ClientConnection;
+    pub use client_conn::{
+        ClientConfig, ClientConnectionData, ClientSessionStore, ResolvesClientCert, Resumption,
+        Tls12Resumption,
+    };
+    #[cfg(feature = "std")]
+    pub use handy::ClientSessionMemoryCache;
+    pub use handy::NoClientSessionStorage;
+
+    /// Dangerous configuration that must be audited and used with extreme care.
+    pub mod danger {
+        pub use super::builder::danger::DangerousClientConfigBuilder;
+        pub use super::client_conn::danger::DangerousClientConfig;
+        pub use crate::verify::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    }
+
+    #[cfg(feature = "tls12")]
+    pub use crate::msgs::persist::Tls12ClientSessionValue;
+    pub use crate::msgs::persist::Tls13ClientSessionValue;
+    pub use crate::webpki::{
+        ServerCertVerifierBuilder, VerifierBuilderError, WebPkiServerVerifier,
+        verify_server_cert_signed_by_trust_anchor, verify_server_name,
+    };
+}
+
+pub use client::ClientConfig;
+#[cfg(feature = "std")]
+pub use client::ClientConnection;
+
+/// Items for use by TLS servers.
+pub mod server {
+    pub(crate) mod builder;
+    mod common;
+    pub(crate) mod handy;
+    mod hs;
+    mod server_conn;
+    mod tls13;
+
+    pub use builder::WantsServerCert;
+    #[cfg(feature = "std")]
+    pub use handy::{ResolvesServerCertUsingSni, ServerSessionMemoryCache};
+    pub use handy::NoServerSessionStorage;
+    #[cfg(feature = "std")]
+    pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ServerConnection};
+    pub use server_conn::{
+        ClientHello, ProducesTickets, ResolvesServerCert, ServerConfig, ServerConnectionData,
+        StoresServerSessions,
+    };
+
+    pub use crate::verify::NoClientAuth;
+    pub use crate::webpki::{
+        ClientCertVerifierBuilder, ParsedCertificate, VerifierBuilderError, WebPkiClientVerifier,
+    };
+
+    /// Dangerous configuration that must be audited and used with extreme care.
+    pub mod danger {
+        pub use crate::verify::{ClientCertVerified, ClientCertVerifier};
+    }
+}
+
+pub use server::ServerConfig;
+#[cfg(feature = "std")]
+pub use server::ServerConnection;
 
 /// All defined protocol versions appear in this module.
 pub mod version {
@@ -93,7 +194,9 @@ pub mod pki_types {
 
 /// Message signing interfaces.
 pub mod sign {
-    pub use crate::crypto::signer::{CertifiedKey, Signer, SigningKey, public_key_to_spki};
+    pub use crate::crypto::signer::{
+        CertifiedKey, Signer, SigningKey, SingleCertAndKey, public_key_to_spki,
+    };
 }
 
 /// APIs for implementing a time source.

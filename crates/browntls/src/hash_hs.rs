@@ -110,6 +110,14 @@ impl HandshakeHash {
         self.ctx.fork_finish()
     }
 
+    /// The hash of the transcript so far followed by `extra`, without
+    /// changing the transcript (used for PSK binders).
+    pub(crate) fn hash_with(&self, extra: &[u8]) -> hash::Output {
+        let mut ctx = self.ctx.fork();
+        ctx.update(extra);
+        ctx.finish()
+    }
+
     /// Takes the raw transcript kept for client authentication, if any.
     pub(crate) fn take_handshake_buf(&mut self) -> Option<Vec<u8>> {
         self.client_auth.take()

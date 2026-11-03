@@ -101,8 +101,10 @@ fn from_signed62(out: &mut [u64], x: &[u64]) {
     }
 }
 
-/// Runs 62 divsteps on the low words `f0` (odd) and `g0`, updating `delta`
-/// and returning the transition matrix scaled by `2^62`.
+/// Runs 62 divsteps on the low words `f0` (odd) and `g0` of each of `N`
+/// independent problems (interleaved, so that their serial dependency chains
+/// overlap), updating `delta` and returning the transition matrices scaled
+/// by `2^62`.
 ///
 /// Each divstep is, with `δ > 0` and `g` odd: `(δ, f, g) ← (1 - δ, g,
 /// (g - f) / 2)`; otherwise `(δ, f, g) ← (1 + δ, f, (g + (g mod 2) f) / 2)`.
@@ -110,43 +112,46 @@ fn from_signed62(out: &mut [u64], x: &[u64]) {
 /// its entries stay in `[-2^62, 2^62]` (each row's absolute sum at most
 /// doubles per step).
 #[inline(always)]
-fn divsteps_62(delta: &mut i64, f0: u64, g0: u64) -> Trans {
-    let (mut u, mut v, mut q, mut r) = (1u64, 0u64, 0u64, 1u64);
+fn divsteps_62<const N: usize>(delta: &mut [i64; N], f0: [u64; N], g0: [u64; N]) -> [Trans; N] {
+    let (mut u, mut v, mut q, mut r) = ([1u64; N], [0u64; N], [0u64; N], [1u64; N]);
     let (mut f, mut g) = (f0, g0);
     let mut d = *delta;
     for _ in 0..62 {
-        debug_assert_eq!(f & 1, 1);
-        // c1: δ > 0 (|δ| is far below 2^62, so the negation cannot overflow).
-        let c1 = black_box((d.wrapping_neg() >> 63) as u64);
-        // c2: g odd.
-        let c2 = black_box((g & 1).wrapping_neg());
-        // x, y, z: f, u, v negated when δ > 0.
-        let x = (f ^ c1).wrapping_sub(c1);
-        let y = (u ^ c1).wrapping_sub(c1);
-        let z = (v ^ c1).wrapping_sub(c1);
-        // g += ±f when g is odd (g - f in the swap case, g + f otherwise).
-        g = g.wrapping_add(x & c2);
-        q = q.wrapping_add(y & c2);
-        r = r.wrapping_add(z & c2);
-        // Swap case (δ > 0 and g odd): f ← old g (= f + (g - f)), δ ← -δ.
-        let c = c1 & c2;
-        d = (d ^ c as i64).wrapping_sub(c as i64).wrapping_add(1);
-        f = f.wrapping_add(g & c);
-        u = u.wrapping_add(q & c);
-        v = v.wrapping_add(r & c);
-        // g is even now: halve it, and double the f row instead of halving
-        // the g row of the matrix.
-        g >>= 1;
-        u <<= 1;
-        v <<= 1;
+        for c in 0..N {
+            debug_assert_eq!(f[c] & 1, 1);
+            // c1: δ > 0 (|δ| is far below 2^62, so the negation cannot
+            // overflow).
+            let c1 = black_box((d[c].wrapping_neg() >> 63) as u64);
+            // c2: g odd.
+            let c2 = black_box((g[c] & 1).wrapping_neg());
+            // x, y, z: f, u, v negated when δ > 0.
+            let x = (f[c] ^ c1).wrapping_sub(c1);
+            let y = (u[c] ^ c1).wrapping_sub(c1);
+            let z = (v[c] ^ c1).wrapping_sub(c1);
+            // g += ±f when g is odd (g - f in the swap case, g + f otherwise).
+            g[c] = g[c].wrapping_add(x & c2);
+            q[c] = q[c].wrapping_add(y & c2);
+            r[c] = r[c].wrapping_add(z & c2);
+            // Swap case (δ > 0 and g odd): f ← old g (= f + (g - f)), δ ← -δ.
+            let m = c1 & c2;
+            d[c] = (d[c] ^ m as i64).wrapping_sub(m as i64).wrapping_add(1);
+            f[c] = f[c].wrapping_add(g[c] & m);
+            u[c] = u[c].wrapping_add(q[c] & m);
+            v[c] = v[c].wrapping_add(r[c] & m);
+            // g is even now: halve it, and double the f row instead of
+            // halving the g row of the matrix.
+            g[c] >>= 1;
+            u[c] <<= 1;
+            v[c] <<= 1;
+        }
     }
     *delta = d;
-    Trans {
-        u: u as i64,
-        v: v as i64,
-        q: q as i64,
-        r: r as i64,
-    }
+    core::array::from_fn(|c| Trans {
+        u: u[c] as i64,
+        v: v[c] as i64,
+        q: q[c] as i64,
+        r: r[c] as i64,
+    })
 }
 
 /// `[f, g] ← t [f, g] / 2^62` (exact division). Limbs below the top are
@@ -268,46 +273,75 @@ fn inv_word(m0: u64) -> u64 {
 ///
 /// Panics if the lengths differ, are zero or exceed [`HALF_LIMBS`] (lengths
 /// are public parameters).
-#[inline(never)]
 pub(crate) fn mod_inverse(out: &mut [u64], x: &[u64], m: &[u64]) {
-    let len = m.len();
-    assert!(len >= 1 && len <= HALF_LIMBS && x.len() == len && out.len() == len);
-    debug_assert_eq!(m[0] & 1, 1);
+    mod_inverse_n::<1>([out], [x], [m]);
+}
+
+/// Two independent [`mod_inverse`] problems of the same length, computed
+/// together (about the cost of one: their divstep chains run interleaved).
+///
+/// # Panics
+///
+/// As [`mod_inverse`], and if the two lengths differ.
+pub(crate) fn mod_inverse_pair(out: [&mut [u64]; 2], x: [&[u64]; 2], m: [&[u64]; 2]) {
+    mod_inverse_n::<2>(out, x, m);
+}
+
+#[inline(never)]
+fn mod_inverse_n<const N: usize>(out: [&mut [u64]; N], x: [&[u64]; N], m: [&[u64]; N]) {
+    let len = m[0].len();
+    assert!((1..=HALF_LIMBS).contains(&len));
+    for c in 0..N {
+        assert!(m[c].len() == len && x[c].len() == len && out[c].len() == len);
+        debug_assert_eq!(m[c][0] & 1, 1);
+    }
     let n = limbs62(len);
 
-    let mut mm = [0u64; CAP62];
-    let mut f = [0u64; CAP62];
-    let mut g = [0u64; CAP62];
-    let mut d = [0u64; CAP62];
-    let mut e = [0u64; CAP62];
-    let (mm, f, g, d, e) = (
-        &mut mm[..n],
-        &mut f[..n],
-        &mut g[..n],
-        &mut d[..n],
-        &mut e[..n],
-    );
-    to_signed62(mm, m);
-    f.copy_from_slice(mm);
-    to_signed62(g, x);
-    e[0] = 1;
-    let m_inv62 = inv_word(m[0]) & M62;
-    let mut delta = 1i64;
+    let mut mm = [[0u64; CAP62]; N];
+    let mut f = [[0u64; CAP62]; N];
+    let mut g = [[0u64; CAP62]; N];
+    let mut d = [[0u64; CAP62]; N];
+    let mut e = [[0u64; CAP62]; N];
+    let mut m_inv62 = [0u64; N];
+    for c in 0..N {
+        to_signed62(&mut mm[c][..n], m[c]);
+        f[c] = mm[c];
+        to_signed62(&mut g[c][..n], x[c]);
+        e[c][0] = 1;
+        m_inv62[c] = inv_word(m[c][0]) & M62;
+    }
+    let mut delta = [1i64; N];
 
     for _ in 0..batches(len) {
-        let t = divsteps_62(&mut delta, f[0], g[0]);
-        update_de(d, e, t, mm, m_inv62);
-        update_fg(f, g, t);
+        let t = divsteps_62::<N>(
+            &mut delta,
+            core::array::from_fn(|c| f[c][0]),
+            core::array::from_fn(|c| g[c][0]),
+        );
+        for c in 0..N {
+            update_de(
+                &mut d[c][..n],
+                &mut e[c][..n],
+                t[c],
+                &mm[c][..n],
+                m_inv62[c],
+            );
+            update_fg(&mut f[c][..n], &mut g[c][..n], t[c]);
+        }
     }
     // g = 0 and f = ±1 now (for coprime inputs), and d = ±x^-1 mod m.
-    normalize(d, f[n - 1], mm);
-    from_signed62(out, d);
+    for (c, o) in out.into_iter().enumerate() {
+        normalize(&mut d[c][..n], f[c][n - 1], &mm[c][..n]);
+        from_signed62(o, &d[c][..n]);
+    }
 
-    mm.zeroize();
-    f.zeroize();
-    g.zeroize();
-    d.zeroize();
-    e.zeroize();
+    for c in 0..N {
+        mm[c].zeroize();
+        f[c].zeroize();
+        g[c].zeroize();
+        d[c].zeroize();
+        e[c].zeroize();
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +507,33 @@ mod tests {
                 mod_inverse(&mut inv, x, &p);
                 assert_eq!(inv, fermat_inverse(x, &p), "bits {bits}");
                 assert_eq!(mul_mod(x, &inv, &p), one(len));
+            }
+        }
+    }
+
+    #[test]
+    fn pair_matches_single() {
+        let mut seed = 0xabcd_u64;
+        for len in [1usize, 2, 7, 16, 17, 24, 32, 48, 64] {
+            for _ in 0..3 {
+                let ms: Vec<Vec<u64>> = (0..2)
+                    .map(|_| {
+                        let mut m: Vec<u64> = (0..len).map(|_| rng(&mut seed)).collect();
+                        m[0] |= 1;
+                        m
+                    })
+                    .collect();
+                let xs: Vec<Vec<u64>> = (0..2)
+                    .map(|_| (0..len).map(|_| rng(&mut seed)).collect())
+                    .collect();
+                let mut single = [vec![0u64; len], vec![0u64; len]];
+                for c in 0..2 {
+                    mod_inverse(&mut single[c], &xs[c], &ms[c]);
+                }
+                let mut pair = [vec![0u64; len], vec![0u64; len]];
+                let [p0, p1] = &mut pair;
+                mod_inverse_pair([p0, p1], [&xs[0], &xs[1]], [&ms[0], &ms[1]]);
+                assert_eq!(pair, single, "len {len}");
             }
         }
     }

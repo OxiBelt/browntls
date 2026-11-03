@@ -29,31 +29,50 @@ pub(crate) enum Kernel {
     /// BMI2 `mulx` + ADX `adcx`/`adox` assembly.
     #[cfg(target_arch = "x86_64")]
     MulxAdx(super::x86_64::MulxAdx),
+    /// BMI2/ADX for single multiplications, AVX-512 IFMA (radix 2^52) for
+    /// public-exponent exponentiations and the CRT exponentiation pair.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    Ifma(super::x86_64::MulxAdx, super::ifma::Ifma),
 }
 
 impl Kernel {
     /// Picks the best kernel for this CPU.
     pub(crate) fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
-        if matches!(
-            crate::accel::select::<crate::rsa::RsaBackend>(),
-            crate::rsa::RsaBackend::Ifma | crate::rsa::RsaBackend::MulxAdx
-        ) && let Some(token) = super::x86_64::MulxAdx::detect()
         {
-            return Self::MulxAdx(token);
+            let backend = crate::accel::select::<crate::rsa::RsaBackend>();
+            #[cfg(target_feature = "sse2")]
+            if backend == crate::rsa::RsaBackend::Ifma
+                && let (Some(adx), Some(ifma)) = (
+                    super::x86_64::MulxAdx::detect(),
+                    super::ifma::Ifma::detect(),
+                )
+            {
+                return Self::Ifma(adx, ifma);
+            }
+            if backend != crate::rsa::RsaBackend::Soft
+                && let Some(token) = super::x86_64::MulxAdx::detect()
+            {
+                return Self::MulxAdx(token);
+            }
         }
         Self::Soft
     }
 
     /// Every kernel usable on this CPU (for differential tests).
     #[cfg(test)]
-    pub(crate) fn available() -> [Option<Self>; 2] {
-        let best = Self::detect();
-        if best == Self::Soft {
-            [Some(Self::Soft), None]
-        } else {
-            [Some(Self::Soft), Some(best)]
+    pub(crate) fn available() -> [Option<Self>; 3] {
+        #[allow(unused_mut, reason = "only x86-64 adds kernels")]
+        let mut all = [Some(Self::Soft), None, None];
+        #[cfg(target_arch = "x86_64")]
+        if let Some(adx) = super::x86_64::MulxAdx::detect() {
+            all[1] = Some(Self::MulxAdx(adx));
+            #[cfg(target_feature = "sse2")]
+            if let Some(ifma) = super::ifma::Ifma::detect() {
+                all[2] = Some(Self::Ifma(adx, ifma));
+            }
         }
+        all
     }
 
     /// Short name for diagnostics.
@@ -62,16 +81,38 @@ impl Kernel {
             Self::Soft => "soft",
             #[cfg(target_arch = "x86_64")]
             Self::MulxAdx(_) => "mulx-adx",
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Ifma(..) => "mulx-adx+ifma",
+        }
+    }
+
+    /// The IFMA token when this kernel uses IFMA.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    pub(crate) fn ifma(self) -> Option<super::ifma::Ifma> {
+        match self {
+            Self::Ifma(_, ifma) => Some(ifma),
+            _ => None,
+        }
+    }
+
+    /// The BMI2/ADX token when this kernel uses the assembly.
+    #[cfg(target_arch = "x86_64")]
+    fn mulx_adx(self) -> Option<super::x86_64::MulxAdx> {
+        match self {
+            Self::MulxAdx(token) => Some(token),
+            #[cfg(target_feature = "sse2")]
+            Self::Ifma(token, _) => Some(token),
+            Self::Soft => None,
         }
     }
 
     #[inline]
     fn step(self, w: &mut [u64], a: &[u64], bi: u64, m: &[u64], m0inv: u64) {
-        match self {
-            Self::Soft => soft::step(w, a, bi, m, m0inv),
-            #[cfg(target_arch = "x86_64")]
-            Self::MulxAdx(token) => token.step(w, a, bi, m, m0inv),
+        #[cfg(target_arch = "x86_64")]
+        if let Some(token) = self.mulx_adx() {
+            return token.step(w, a, bi, m, m0inv);
         }
+        soft::step(w, a, bi, m, m0inv);
     }
 }
 
@@ -208,7 +249,7 @@ impl<const CAP: usize> Mont<CAP> {
         debug_assert!(scratch.len() >= 2 * len + 2);
         let m = &self.m[..len];
         #[cfg(target_arch = "x86_64")]
-        if let Kernel::MulxAdx(token) = self.kernel
+        if let Some(token) = self.kernel.mulx_adx()
             && len.is_multiple_of(4)
         {
             let t = &mut scratch[..len + 2];
@@ -324,6 +365,12 @@ impl<const CAP: usize> Mont<CAP> {
     #[inline(never)]
     pub(crate) fn exp_pub_vartime(&self, out: &mut [u64], base: &[u64], e: u64) {
         debug_assert!(e >= 1);
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        if let Some(ifma) = self.kernel.ifma()
+            && ifma.exp_pub_vartime(self, out, base, e)
+        {
+            return;
+        }
         let len = self.len;
         let mut scratch = [0u64; MAX_LIMBS * 2 + 2];
         let mut acc = [0u64; CAP];

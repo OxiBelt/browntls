@@ -174,19 +174,35 @@ fn reduce_to_mont(ctx: &Mont<HALF_LIMBS>, x: &[u64], out: &mut [u64]) {
     b.zeroize();
 }
 
-/// Multiplies `s` (Montgomery form modulo the context's prime) by
-/// `r^-1 mod prime` in place, with `r` of up to `2 * ctx.len()` limbs and
-/// `rinv`, `tmp` as scratch of at least `ctx.len()` limbs. Constant time.
+/// Multiplies `sp` and `sq` (Montgomery form modulo `p` and `q`) in place by
+/// `r^-1 mod p` and `r^-1 mod q`, with `r` of up to `2 * p.len()` limbs. The
+/// two inversions run together ([`inv::mod_inverse_pair`]). Constant time.
 #[inline(never)]
-fn unblind(ctx: &Mont<HALF_LIMBS>, r: &[u64], s: &mut [u64], rinv: &mut [u64], tmp: &mut [u64]) {
-    let h = ctx.len();
-    let (rinv, tmp) = (&mut rinv[..h], &mut tmp[..h]);
-    reduce_to_mont(ctx, r, rinv); // r R mod prime
-    ctx.demont(tmp, rinv); // r mod prime
-    inv::mod_inverse(rinv, tmp, ctx.modulus()); // r^-1 mod prime
-    ctx.to_mont(tmp, rinv); // r^-1 R mod prime
-    ctx.mul(rinv, s, tmp);
-    s.copy_from_slice(rinv);
+fn unblind(p: &Mont<HALF_LIMBS>, q: &Mont<HALF_LIMBS>, r: &[u64], sp: &mut [u64], sq: &mut [u64]) {
+    let h = p.len();
+    let mut rm = [[0u64; HALF_LIMBS]; 2];
+    let mut rn = [[0u64; HALF_LIMBS]; 2];
+    let mut ri = [[0u64; HALF_LIMBS]; 2];
+    for (c, ctx) in [p, q].into_iter().enumerate() {
+        reduce_to_mont(ctx, r, &mut rm[c][..h]); // r R mod prime
+        ctx.demont(&mut rn[c][..h], &rm[c][..h]); // r mod prime
+    }
+    {
+        let [i0, i1] = &mut ri;
+        inv::mod_inverse_pair(
+            [&mut i0[..h], &mut i1[..h]],
+            [&rn[0][..h], &rn[1][..h]],
+            [p.modulus(), q.modulus()],
+        );
+    }
+    for (c, (ctx, s)) in [(p, sp), (q, sq)].into_iter().enumerate() {
+        ctx.to_mont(&mut rm[c][..h], &ri[c][..h]); // r^-1 R mod prime
+        ctx.mul(&mut rn[c][..h], s, &rm[c][..h]);
+        s.copy_from_slice(&rn[c][..h]);
+    }
+    rm.as_flattened_mut().zeroize();
+    rn.as_flattened_mut().zeroize();
+    ri.as_flattened_mut().zeroize();
 }
 
 /// Fills `buf` from the operating-system entropy source when one is
@@ -615,10 +631,8 @@ impl RsaPrivateKey {
 
         // Unblind each half: multiply by r^-1 mod prime (constant-time
         // safegcd inversion of r mod prime).
-        let mut rinv = [0u64; HALF_LIMBS];
         let mut tmp = [0u64; HALF_LIMBS];
-        unblind(&self.p, &r[..l], &mut sp[..half], &mut rinv, &mut tmp);
-        unblind(&self.q, &r[..l], &mut sq[..half], &mut rinv, &mut tmp);
+        unblind(&self.p, &self.q, &r[..l], &mut sp[..half], &mut sq[..half]);
 
         // Garner: s = s_q + q * ((s_p - s_q) qInv mod p).
         let mut sq_n = [0u64; HALF_LIMBS];
@@ -663,7 +677,6 @@ impl RsaPrivateKey {
         sp.zeroize();
         sq.zeroize();
         base.zeroize();
-        rinv.zeroize();
         tmp.zeroize();
         sq_n.zeroize();
         diff.zeroize();

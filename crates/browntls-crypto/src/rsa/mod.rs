@@ -94,8 +94,9 @@ pub(crate) fn ifma_available() -> bool {
 /// RSA arithmetic backends (for the acceleration policy).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RsaBackend {
-    /// AVX-512 IFMA dual CRT exponentiation for signing, BMI2/ADX
-    /// Montgomery kernel elsewhere (x86-64).
+    /// AVX-512 IFMA (radix 2^52) for the CRT exponentiation pair and the
+    /// public-exponent exponentiations, BMI2/ADX for single Montgomery
+    /// multiplications (x86-64).
     Ifma,
     /// BMI2 `mulx` + ADX `adcx`/`adox` (x86-64).
     MulxAdx,

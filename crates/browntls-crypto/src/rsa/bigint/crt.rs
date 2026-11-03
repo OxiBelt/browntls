@@ -1,8 +1,9 @@
 //! The pair of secret-exponent exponentiations of a CRT signature.
 //!
 //! [`CrtExp`] is created with a key and keeps the backend chosen then: the
-//! AVX-512 IFMA dual exponentiation ([`super::ifma`]) when the RSA
-//! acceleration policy selects it, otherwise two
+//! AVX-512 IFMA dual exponentiation ([`super::ifma`]) when the primes'
+//! Montgomery kernel includes IFMA (the RSA acceleration policy selected it
+//! when the key was created), otherwise two
 //! [`Mont::exp_ct`] calls with the key's Montgomery kernel. Both compute the
 //! same values with the same constant-time structure.
 
@@ -23,33 +24,20 @@ impl core::fmt::Debug for CrtExp {
 }
 
 impl CrtExp {
-    /// Chooses the backend for primes `p` and `q` under the current policy.
+    /// Chooses the backend for primes `p` and `q` from their kernel.
     pub(crate) fn new(p: &Mont<HALF_LIMBS>, q: &Mont<HALF_LIMBS>) -> Self {
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         {
-            let ifma = if crate::accel::select::<crate::rsa::RsaBackend>()
-                == crate::rsa::RsaBackend::Ifma
-            {
-                super::ifma::Ifma::detect().and_then(|t| super::ifma::CrtIfma::new(t, p, q))
-            } else {
-                None
-            };
+            let ifma = p
+                .kernel()
+                .ifma()
+                .and_then(|t| super::ifma::CrtIfma::new(t, p, q));
             Self { ifma }
         }
         #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
         {
             let _ = (p, q);
             Self {}
-        }
-    }
-
-    /// The portable/scalar backend (two [`Mont::exp_ct`] calls), whatever
-    /// the policy (for differential tests).
-    #[cfg(test)]
-    pub(crate) fn scalar() -> Self {
-        Self {
-            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-            ifma: None,
         }
     }
 

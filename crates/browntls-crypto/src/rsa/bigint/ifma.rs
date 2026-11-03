@@ -70,6 +70,96 @@ impl Ifma {
         let f = crate::cpu::features();
         (f.x86_avx512() && f.x86_avx512_ifma()).then_some(Self(()))
     }
+
+    /// `out = base^e` modulo the context's modulus for a public `e >= 1`
+    /// (variable time in `e` only), base and result in the context's
+    /// radix-2^64 Montgomery form; returns `false` (leaving `out` untouched)
+    /// for sizes this backend does not cover.
+    pub(crate) fn exp_pub_vartime<const CAP: usize>(
+        self,
+        ctx: &Mont<CAP>,
+        out: &mut [u64],
+        base: &[u64],
+        e: u64,
+    ) -> bool {
+        if ctx.len() < 2 {
+            return false;
+        }
+        let k = lanes(ctx.len());
+        // A vector count with a spare lane above `k` (for the shadow
+        // variant where it is used); more lanes only add zeros.
+        // SAFETY (each arm): the token proves the AVX-512F and IFMA support
+        // that `exp_pub_v` requires.
+        match k {
+            // SAFETY: see above.
+            0..24 => unsafe { exp_pub_v::<3, CAP>(ctx, out, base, e) },
+            // SAFETY: see above.
+            24..32 => unsafe { exp_pub_v::<4, CAP>(ctx, out, base, e) },
+            // SAFETY: see above.
+            32..48 => unsafe { exp_pub_v::<6, CAP>(ctx, out, base, e) },
+            // SAFETY: see above.
+            48..64 => unsafe { exp_pub_v::<8, CAP>(ctx, out, base, e) },
+            // SAFETY: see above.
+            64..88 => unsafe { exp_pub_v::<11, CAP>(ctx, out, base, e) },
+            // SAFETY: see above.
+            88..168 => unsafe { exp_pub_v::<21, CAP>(ctx, out, base, e) },
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// [`Ifma::exp_pub_vartime`] with `V` vectors per value: left-to-right
+/// square and multiply on the bits of `e` in the radix-2^52 domain.
+///
+/// Callers must have confirmed that the CPU supports AVX-512F and IFMA.
+#[target_feature(enable = "avx512f,avx512ifma")]
+fn exp_pub_v<const V: usize, const CAP: usize>(
+    ctx: &Mont<CAP>,
+    out: &mut [u64],
+    base: &[u64],
+    e: u64,
+) {
+    let len = ctx.len();
+    let k = lanes(len);
+    assert!(k <= 8 * V && e >= 1 && out.len() == len && base.len() == len);
+    let mut m = [[0u64; 8]; V];
+    to_radix52(&mut m, ctx.modulus());
+    let m0 = ctx.modulus()[0];
+    let mut inv = m0;
+    for _ in 0..5 {
+        inv = inv.wrapping_mul(2u64.wrapping_sub(m0.wrapping_mul(inv)));
+    }
+    let amm = Amm::<V, 1> {
+        m: [m],
+        k0: [inv.wrapping_neg() & MASK52],
+        k,
+    };
+    let mut wide = [0u64; CAP];
+    let mut enter = [[0u64; 8]; V];
+    entry_constant(ctx, &mut wide[..len]);
+    to_radix52(&mut enter, &wide[..len]);
+    let mut exit = [[0u64; 8]; V];
+    to_radix52(&mut exit, ctx.one());
+
+    let mut x = [[0u64; 8]; V];
+    to_radix52(&mut x, base);
+    let [x] = amm.mul([&x], [&enter]);
+    let mut acc = x;
+    let nbits = 64 - e.leading_zeros();
+    for i in (0..nbits - 1).rev() {
+        [acc] = amm.mul([&acc], [&acc]);
+        if (e >> i) & 1 == 1 {
+            [acc] = amm.mul([&acc], [&x]);
+        }
+    }
+    let [res] = amm.mul([&acc], [&exit]);
+    // The result is below 2 m < 2^(64 len + 1): its bit 64 len is the only
+    // one beyond `out`; one conditional subtraction completes the reduction.
+    from_radix52(out, &res);
+    let top = 64 * len;
+    let hi = (res.as_flattened()[top / 52] >> (top % 52)) & 1;
+    super::cond_sub_mod(out, hi, ctx.modulus());
 }
 
 /// Converts radix-2^64 limbs to radix-2^52 lanes (`out` must have room for
@@ -104,6 +194,19 @@ fn from_radix52(out: &mut [u64], x: &[[u64; 8]]) {
     }
 }
 
+/// `out = R^2 / R64 mod m = 2^(104 k - 64 len) mod m` for the context's
+/// modulus, as the Montgomery form `to_mont(2^t)` of `2^t` with
+/// `t = 104 k - 128 len`. Since `64 len + 2 <= 52 k < 64 len + 54`, `t` is
+/// in `4..=106`, so `2^t` fits in two limbs and is below `R64`.
+fn entry_constant<const CAP: usize>(ctx: &Mont<CAP>, out: &mut [u64]) {
+    let len = ctx.len();
+    let t = 104 * lanes(len) - 128 * len;
+    debug_assert!((4..=106).contains(&t));
+    let mut pow = [0u64; CAP];
+    pow[t / 64] = 1 << (t % 64);
+    ctx.to_mont(out, &pow[..len]);
+}
+
 /// Radix-2^52 constants of one prime.
 #[derive(Clone)]
 struct Prime52 {
@@ -120,15 +223,8 @@ struct Prime52 {
 impl Prime52 {
     fn new(ctx: &Mont<HALF_LIMBS>) -> Self {
         let len = ctx.len();
-        let k = lanes(len);
-        // 2^(104 k) mod m, then divided by R64 with a Montgomery reduction.
-        let mut pow = [0u64; 2 * HALF_LIMBS + 2];
-        let pow_len = 104 * k / 64 + 1;
-        pow[104 * k / 64] = 1 << (104 * k % 64);
-        let mut t = [0u64; HALF_LIMBS];
         let mut u = [0u64; HALF_LIMBS];
-        super::ct_mod(&mut t[..len], &pow[..pow_len], ctx.modulus());
-        ctx.demont(&mut u[..len], &t[..len]);
+        entry_constant(ctx, &mut u[..len]);
         let mut p = Self {
             m: [[0; 8]; VMAX],
             enter: [[0; 8]; VMAX],
@@ -144,7 +240,6 @@ impl Prime52 {
             inv = inv.wrapping_mul(2u64.wrapping_sub(m0.wrapping_mul(inv)));
         }
         p.k0 = inv.wrapping_neg() & MASK52;
-        t.zeroize();
         u.zeroize();
         p
     }
@@ -179,7 +274,7 @@ impl CrtIfma {
     /// Builds the constants for `p` and `q` (equal limb counts of at most
     /// [`HALF_LIMBS`]). Constant time.
     pub(crate) fn new(token: Ifma, p: &Mont<HALF_LIMBS>, q: &Mont<HALF_LIMBS>) -> Option<Self> {
-        if p.len() != q.len() || p.len() == 0 || lanes(p.len()) > 8 * VMAX {
+        if p.len() != q.len() || p.len() < 2 || lanes(p.len()) > 8 * VMAX {
             return None;
         }
         Some(Self {
@@ -328,13 +423,14 @@ struct Amm<const V: usize, const C: usize> {
 impl<const V: usize, const C: usize> Amm<V, C> {
     /// `AMM(a_c, b_c) = a_c b_c / R mod m_c` (below `2 m_c` for inputs below
     /// `2 m_c`), normalised to 52-bit lanes, for every context: picks
-    /// [`Self::mul_shadow`] where it is faster on the CPUs measured (up to
-    /// four vectors; it needs one spare lane above `k`), otherwise
+    /// [`Self::mul_shadow`] where it was faster in measurements (up to four
+    /// vectors, or eight for a single context; it needs one spare lane above
+    /// `k`), otherwise
     /// [`Self::mul_shift`]. Both compute the same value; the choice depends
     /// only on the (public) sizes.
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn mul(&self, a: [&Num<V>; C], b: [&Num<V>; C]) -> [Num<V>; C] {
-        if V <= 4 && self.k < 8 * V {
+        if self.k < 8 * V && (V <= 4 || (C == 1 && V <= 8)) {
             self.mul_shadow(a, b)
         } else {
             self.mul_shift(a, b)
@@ -468,6 +564,9 @@ impl<const V: usize, const C: usize> Amm<V, C> {
     }
 }
 
+/// Words of the carry-lookahead masks in [`normalize`] (up to 24 vectors).
+const CLA_WORDS: usize = 3;
+
 /// Carries lanes (each below `2^63`) into 52-bit digits; the value must fit
 /// in `8 V` digits. Constant time.
 #[target_feature(enable = "avx512f")]
@@ -486,58 +585,30 @@ fn normalize<const V: usize>(x: &mut [__m512i; V]) {
     // Remaining carries are single bits: lanes above 2^52 - 1 generate one,
     // lanes equal to 2^52 - 1 propagate one. Resolve them like an adder:
     // the carries into each lane are ((G << 1) + P) ^ P.
-    let mut g = 0u128;
-    let mut p = 0u128;
+    // One bit per lane, eight vectors per 64-bit word (multi-word for more
+    // than eight vectors).
+    const { assert!(V <= 8 * CLA_WORDS) };
+    let mut g = [0u64; CLA_WORDS];
+    let mut p = [0u64; CLA_WORDS];
     for v in 0..V {
-        g |= u128::from(_mm512_cmpgt_epu64_mask(x[v], mask)) << (8 * v);
-        p |= u128::from(_mm512_cmpeq_epu64_mask(x[v], mask)) << (8 * v);
+        g[v / 8] |= u64::from(_mm512_cmpgt_epu64_mask(x[v], mask)) << (8 * (v % 8));
+        p[v / 8] |= u64::from(_mm512_cmpeq_epu64_mask(x[v], mask)) << (8 * (v % 8));
     }
-    let cin = black_box(((g << 1).wrapping_add(p)) ^ p);
+    let mut cin = [0u64; CLA_WORDS];
+    let (mut shift_in, mut carry) = (0u64, 0u64);
+    for w in 0..CLA_WORDS {
+        let g1 = (g[w] << 1) | shift_in;
+        shift_in = g[w] >> 63;
+        let (s1, c1) = g1.overflowing_add(p[w]);
+        let (s2, c2) = s1.overflowing_add(carry);
+        carry = u64::from(c1 | c2);
+        cin[w] = black_box(s2 ^ p[w]);
+    }
     let one = _mm512_set1_epi64(1);
     for v in 0..V {
-        let k = (cin >> (8 * v)) as u8;
+        let k = (cin[v / 8] >> (8 * (v % 8))) as u8;
         x[v] = _mm512_and_si512(_mm512_mask_add_epi64(x[v], k, x[v], one), mask);
     }
-}
-
-/// Times `C` interleaved multiplications (temporary benchmark hook).
-#[cfg(test)]
-#[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) fn bench_amm<const V: usize, const C: usize>(iters: usize) -> f64 {
-    let mut m = [[0u64; 8]; V];
-    for (i, l) in m.as_flattened_mut().iter_mut().enumerate() {
-        *l = (0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1)) & MASK52;
-    }
-    m[0][0] |= 1;
-    let k = 8 * V - 4;
-    for l in &mut m.as_flattened_mut()[k - 1..] {
-        *l = 0;
-    }
-    m.as_flattened_mut()[k - 2] |= 1 << 40;
-    let ctx = Amm::<V, C> {
-        m: [m; C],
-        k0: [0x1234_5678_9abc & MASK52; C],
-        k,
-    };
-    let mut x = [m; C];
-    let t = std::time::Instant::now();
-    for _ in 0..iters {
-        let r: [&Num<V>; C] = core::array::from_fn(|c| &x[c]);
-        x = ctx.mul_shift(r, r);
-    }
-    black_box(&x);
-    let t1 = t.elapsed().as_nanos() as f64 / iters as f64;
-    let mut x2 = [m; C];
-    let t = std::time::Instant::now();
-    for _ in 0..iters {
-        let r: [&Num<V>; C] = core::array::from_fn(|c| &x2[c]);
-        x2 = ctx.mul_shadow(r, r);
-    }
-    black_box(&x2);
-    let t2 = t.elapsed().as_nanos() as f64 / iters as f64;
-    assert_eq!(x, x2);
-    std::println!("V{V} C{C} k{k}: mul {t1:.0} ns, mul2 {t2:.0} ns");
-    t1
 }
 
 #[cfg(test)]
@@ -582,24 +653,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn normalize_resolves_carry_chains() {
-        let Some(_) = Ifma::detect() else { return };
-        // Lanes of 2^52 - 1 with a carry entering at the bottom, large lanes
-        // and random lanes; compare with a scalar carry loop.
-        let mut seed = 21u64;
-        for case in 0..64 {
-            let mut lanes = [[0u64; 8]; 4];
+    fn normalize_case<const V: usize>(seed: &mut u64) {
+        for case in 0..40 {
+            let mut lanes = [[0u64; 8]; V];
             for (i, l) in lanes.as_flattened_mut().iter_mut().enumerate() {
-                *l = match case % 4 {
+                *l = match case % 5 {
                     0 => MASK52,
-                    1 => rng(&mut seed) >> 2,
+                    1 => rng(seed) >> 2,
                     2 => MASK52 + u64::from(i % 5 == 0),
-                    _ => rng(&mut seed) & MASK52 | u64::from(i % 3 == 0) * MASK52,
+                    // A carry entering at the bottom ripples through all
+                    // lanes (and every mask word).
+                    3 => MASK52 + u64::from(i == 0),
+                    _ => rng(seed) & MASK52 | u64::from(i % 3 == 0) * MASK52,
                 };
             }
-            // Keep the value below 2^(52 * 32).
-            lanes[3][7] &= MASK52 >> 4;
+            // Keep the value below 2^(52 * 8 V).
+            lanes[V - 1][7] &= MASK52 >> 4;
             let mut expect = lanes;
             let mut carry = 0u64;
             for l in expect.as_flattened_mut() {
@@ -607,10 +676,23 @@ mod tests {
                 *l = carry & MASK52;
                 carry >>= 52;
             }
-            // SAFETY: AVX-512F was detected above.
+            // SAFETY: the caller detected AVX-512F.
             let got = unsafe { normalize_for_test(&lanes) };
-            assert_eq!(got, expect, "case {case}");
+            assert_eq!(got, expect, "V {V} case {case}");
         }
+    }
+
+    #[test]
+    fn normalize_resolves_carry_chains() {
+        let Some(_) = Ifma::detect() else { return };
+        let mut seed = 21u64;
+        normalize_case::<1>(&mut seed);
+        normalize_case::<3>(&mut seed);
+        normalize_case::<4>(&mut seed);
+        normalize_case::<8>(&mut seed);
+        normalize_case::<9>(&mut seed);
+        normalize_case::<21>(&mut seed);
+        normalize_case::<24>(&mut seed);
     }
 
     /// Both AMM variants against each other and against the definition
@@ -708,11 +790,44 @@ mod tests {
         }
     }
 
+    /// The IFMA public-exponent path against the portable one at every RSA
+    /// size and at each length where the vector count changes.
+    #[test]
+    fn exp_pub_matches_portable() {
+        let Some(token) = Ifma::detect() else { return };
+        let mut seed = 0x5151_u64;
+        let lens = [
+            2usize, 3, 16, 18, 19, 24, 25, 26, 32, 38, 39, 48, 51, 52, 64, 70, 71, 96, 128,
+        ];
+        for len in lens {
+            let m = random_odd(&mut seed, len, 1 << 63);
+            let soft = Mont::<{ bigint::MAX_LIMBS }>::new(&m, Kernel::Soft).unwrap();
+            let mut mm1 = m.clone();
+            bigint::sub_word(&mut mm1, 1);
+            for (i, x) in [below(&mut seed, &m), mm1, vec![0u64; len]]
+                .iter()
+                .enumerate()
+            {
+                let mut xm = vec![0u64; len];
+                soft.to_mont(&mut xm, x);
+                for e in [1u64, 3, 65537, (1 << 33) - 1] {
+                    let mut expect = vec![0u64; len];
+                    soft.exp_pub_vartime(&mut expect, &xm, e);
+                    let mut got = vec![0u64; len];
+                    assert!(token.exp_pub_vartime(&soft, &mut got, &xm, e));
+                    assert_eq!(got, expect, "len {len} case {i} e {e}");
+                }
+            }
+        }
+        let one = Mont::<{ bigint::MAX_LIMBS }>::new(&[7], Kernel::Soft).unwrap();
+        assert!(!token.exp_pub_vartime(&one, &mut [0], &[1], 3));
+    }
+
     #[target_feature(enable = "avx512f")]
-    fn normalize_for_test(x: &Num<4>) -> Num<4> {
+    fn normalize_for_test<const V: usize>(x: &Num<V>) -> Num<V> {
         let mut v = load(x);
         normalize(&mut v);
-        let mut out = [[0u64; 8]; 4];
+        let mut out = [[0u64; 8]; V];
         store(&mut out, &v);
         out
     }

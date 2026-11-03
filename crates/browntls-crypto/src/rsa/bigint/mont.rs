@@ -219,6 +219,15 @@ impl<const CAP: usize> Mont<CAP> {
             super::cond_sub_mod_with(out, hi, m, &mut t[..len]);
             return;
         }
+        if self.kernel == Kernel::Soft {
+            let t = &mut scratch[..len + 1];
+            t.fill(0);
+            soft::mont_mul(t, a, b, m, self.m0inv);
+            let hi = t[len];
+            out.copy_from_slice(&t[..len]);
+            super::cond_sub_mod_with(out, hi, m, &mut scratch[len + 1..2 * len + 1]);
+            return;
+        }
         let t = &mut scratch[..2 * len + 2];
         t[..len + 2].fill(0);
         for i in 0..len {

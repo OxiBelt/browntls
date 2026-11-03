@@ -7,7 +7,10 @@
 //! implemented yet.
 //!
 //! This target runs the cases in `cases/interop.rs` with the native provider;
-//! `interop.rs` runs them with the RustCrypto provider.
+//! `interop.rs` runs them with the RustCrypto provider. The cases in
+//! `cases/interop_native_only.rs` cover what only the native provider can
+//! do: RSA signing for every scheme in both directions, certificate chains
+//! signed by native keys, and the ML-KEM-1024 groups' negotiation.
 
 #![cfg(feature = "native")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -18,3 +21,4 @@ mod prov;
 mod common;
 
 include!("cases/interop.rs");
+include!("cases/interop_native_only.rs");

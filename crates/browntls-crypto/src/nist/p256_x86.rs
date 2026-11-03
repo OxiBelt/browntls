@@ -27,9 +27,6 @@ const P1: u64 = 0x0000_0000_ffff_ffff;
 /// `p[3] = 2^64 - 2^32 + 1`.
 const P3: u64 = 0xffff_ffff_0000_0001;
 
-/// `p[3]` as a memory operand for the multiplication kernels.
-static P3_MEM: u64 = P3;
-
 /// Whether the CPU has BMI2 and ADX.
 #[inline]
 pub(crate) fn available() -> bool {
@@ -50,7 +47,10 @@ macro_rules! reduce_round {
             "shr ",
             $q,
             ", 32\n",
-            "mulx rcx, rax, qword ptr [rip + {p3m}]\n",
+            // `p[3]` as an immediate: a RIP-relative static would need a
+            // relocation that shared objects cannot use.
+            "mov rax, 0xffffffff00000001\n",
+            "mulx rcx, rax, rax\n",
             "shl rdx, 32\n",
             "add ",
             $w1,
@@ -94,10 +94,11 @@ macro_rules! reduce_tail {
             "mov r14, r10\n",
             "mov r15, r11\n",
             "mov ecx, 0xffffffff\n",
+            "mov rdx, 0xffffffff00000001\n",
             "sub r12, -1\n",
             "sbb r13, rcx\n",
             "sbb r14, 0\n",
-            "sbb r15, qword ptr [rip + {p3m}]\n",
+            "sbb r15, rdx\n",
             "sbb rax, 0\n",
             "cmovnc r8, r12\n",
             "cmovnc r9, r13\n",
@@ -185,7 +186,6 @@ pub(crate) fn mul(a: &Fe<4>, b: &Fe<4>) -> Fe<4> {
             reduce_tail!(),
             a = in(reg) a.as_ptr(),
             b = in(reg) b.as_ptr(),
-            p3m = sym P3_MEM,
             out("rax") _,
             out("rcx") _,
             out("rdx") _,
@@ -261,7 +261,6 @@ pub(crate) fn sqr(a: &Fe<4>) -> Fe<4> {
             "adox r15, rcx",
             reduce_tail!(),
             a = in(reg) a.as_ptr(),
-            p3m = sym P3_MEM,
             out("rax") _,
             out("rcx") _,
             out("rdx") _,

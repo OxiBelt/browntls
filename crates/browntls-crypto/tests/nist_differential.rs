@@ -238,7 +238,8 @@ macro_rules! curve_tests {
             use ::$rc::ecdsa::signature::{Signer, Verifier};
             let mut rng = XorShift(0x0123_4567_89ab_cdef);
             let mut scalars: Vec<Vec<u8>> = Vec::new();
-            // Scalars that hit single comb-table entries: m * 2^(16 j).
+            // Sparse scalars m * 2^(16 j); every entry of the width-6 P-256
+            // comb is covered by `p256_comb_entries_match_rustcrypto`.
             for j in 0..($fl * 8 / 16 + 1) {
                 for m in [1u8, 2, 7, 8] {
                     let mut d = vec![0u8; $fl];

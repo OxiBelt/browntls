@@ -94,6 +94,15 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo test --workspace --all-features --locked
 
+      # Inline assembly must not use relocations that position-independent
+      # shared objects reject (e.g. PC32 against a preemptible symbol).
+      - name: Link browntls-crypto as a shared library
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          cargo rustc -p browntls-crypto --lib --locked --crate-type dylib
+          cargo rustc -p browntls-crypto --lib --locked --release --crate-type dylib
+
   test-aarch64:
     name: Test aarch64 (native)
     runs-on: ubuntu-24.04-arm

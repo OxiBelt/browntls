@@ -6,7 +6,8 @@
 //!
 //! The input is processed in 10 batches of 59 division steps. For moduli and
 //! inputs below `2^256`, 590 hddivsteps always suffice to reach `g = 0` (the
-//! bound computed in the analysis above), so the number of batches is fixed
+//! bound derived in Bernstein–Yang and in §5 of `safegcd_implementation.md`;
+//! relied on here, not re-proved), so the number of batches is fixed
 //! and the operation sequence never depends on the input. Every data-dependent
 //! choice is a mask that passes through [`barrier`].
 //!

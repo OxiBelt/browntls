@@ -141,7 +141,7 @@ fn hello_retry_request_when_server_prefers_another_group() {
 }
 
 #[test]
-fn hello_retry_request_reuses_hybrid_classical_component() {
+fn server_may_answer_hybrid_share_with_its_classical_half() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
     let client_config = tls13_only_client(
@@ -162,10 +162,9 @@ fn hello_retry_request_reuses_hybrid_classical_component() {
         .unwrap();
     let (mut client, mut server) = connect(client_config, server_config);
     do_handshake(&mut client, &mut server).unwrap();
-    assert_eq!(
-        client.handshake_kind(),
-        Some(HandshakeKind::FullWithHelloRetryRequest)
-    );
+    // X25519 went out as a second share, so no HelloRetryRequest is needed.
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
     assert_eq!(
         client.negotiated_key_exchange_group().unwrap().name(),
         NamedGroup::X25519

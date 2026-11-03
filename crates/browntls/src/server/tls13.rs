@@ -60,11 +60,16 @@ impl CompleteClientHelloHandling {
         psk: &[u8],
         binder: &[u8],
     ) -> bool {
+        // Hash the bytes as received, not a re-encoding: the peer may order
+        // its extensions differently from us.
         let binder_plaintext = match &client_hello.payload {
-            MessagePayload::Handshake { parsed, .. } => parsed.encoding_for_binder_signing(),
+            MessagePayload::Handshake { parsed, encoded } => {
+                let bytes = encoded.bytes();
+                &bytes[..bytes.len().saturating_sub(parsed.total_binder_length())]
+            }
             _ => return false,
         };
-        let handshake_hash = self.transcript.hash_with(&binder_plaintext);
+        let handshake_hash = self.transcript.hash_with(binder_plaintext);
         let key_schedule = KeyScheduleEarly::new(suite, psk);
         let real_binder =
             key_schedule.resumption_psk_binder_key_and_sign_verify_data(handshake_hash.as_ref());

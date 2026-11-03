@@ -628,13 +628,21 @@ impl<'a> HandshakeMessagePayload<'a> {
     pub(crate) fn encoding_for_binder_signing(&self) -> Vec<u8> {
         let mut encoded = Vec::new();
         self.encode(&mut encoded);
-        if let HandshakePayload::ClientHello(ch) = &self.0
-            && let Some(psk) = &ch.extensions.preshared_key
-        {
-            let truncate = psk.binders_encoded_len();
-            encoded.truncate(encoded.len().saturating_sub(truncate));
-        }
+        encoded.truncate(encoded.len().saturating_sub(self.total_binder_length()));
         encoded
+    }
+
+    /// The encoded length of a ClientHello's PSK binders: zero for any other
+    /// message, or for a ClientHello without a PSK offer.
+    pub(crate) fn total_binder_length(&self) -> usize {
+        match &self.0 {
+            HandshakePayload::ClientHello(ch) => ch
+                .extensions
+                .preshared_key
+                .as_ref()
+                .map_or(0, |psk| psk.binders_encoded_len()),
+            _ => 0,
+        }
     }
 
     /// Converts into an owned message.

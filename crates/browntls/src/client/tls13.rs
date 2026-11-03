@@ -9,7 +9,7 @@ use super::client_conn::ClientConnectionData;
 use super::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
 use super::hs::{ClientContext, NextState, NextStateOrError, OfferedKeyShare};
 use super::{ClientConfig, hs};
-use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
+use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState, Side};
 use crate::conn::State;
 use crate::crypto::hmac;
 use crate::ct::constant_time_eq;
@@ -138,6 +138,23 @@ pub(super) fn handle_server_hello(
         .key_share
         .as_ref()
         .ok_or_else(|| cx.common.missing_extension(PeerMisbehaved::MissingKeyShare))?;
+
+    // The server may answer our hybrid share with its classical half, which we
+    // also offered (when the provider supports that group on its own).
+    let our_key_share = match our_key_share {
+        OfferedKeyShare::Full(kx)
+            if kx.group() != their_key_share.group
+                && kx
+                    .hybrid_component()
+                    .is_some_and(|(g, _)| g == their_key_share.group)
+                && let Some(component_group) =
+                    config.find_kx_group(their_key_share.group, ProtocolVersion::TLSv1_3) =>
+        {
+            cx.common.kx_state = KxState::Started(component_group);
+            OfferedKeyShare::HybridComponent(kx)
+        }
+        other => other,
+    };
 
     if our_key_share.group() != their_key_share.group {
         return Err(cx.common.send_fatal_alert(

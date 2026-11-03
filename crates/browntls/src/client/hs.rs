@@ -87,6 +87,14 @@ impl OfferedKeyShare {
         }
     }
 
+    /// The classical half of a hybrid share, offered alongside it.
+    pub(super) fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
+        match self {
+            Self::Full(kx) => kx.hybrid_component(),
+            Self::HybridComponent(_) => None,
+        }
+    }
+
     pub(super) fn complete(self, peer: &[u8]) -> Result<SharedSecret, Error> {
         match self {
             Self::Full(kx) => kx.complete(peer),
@@ -313,9 +321,22 @@ fn emit_client_hello_for_retry(
         extended_master_secret: supports_tls12.then_some(()),
         supported_versions: Some(supported_versions),
         psk_modes: supports_tls13.then(|| vec![PskKeyExchangeMode::PSK_DHE_KE]),
-        key_shares: key_share
-            .as_ref()
-            .map(|ks| vec![KeyShareEntry::new(ks.group(), ks.pub_key())]),
+        key_shares: key_share.as_ref().map(|ks| {
+            let mut shares = vec![KeyShareEntry::new(ks.group(), ks.pub_key())];
+            // For the first ClientHello (or a HelloRetryRequest that names no
+            // group) a hybrid share's classical half is offered too, for
+            // free, when the provider also supports that group on its own.
+            let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+            if !hrr_named_group
+                && let Some((component_group, component_share)) = ks.hybrid_component()
+                && config
+                    .find_kx_group(component_group, ProtocolVersion::TLSv1_3)
+                    .is_some()
+            {
+                shares.push(KeyShareEntry::new(component_group, component_share));
+            }
+            shares
+        }),
         cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
         certificate_compression: (supports_tls13 && !config.cert_decompressors.is_empty()).then(
             || {
@@ -711,29 +732,23 @@ impl ExpectServerHelloOrHelloRetryRequest {
                         PeerMisbehaved::IllegalHelloRetryRequestWithUnofferedNamedGroup,
                     ));
                 };
-                let offered = self.next.offered_key_share.take();
-                match offered {
-                    // RFC 8446 §4.1.4: the server must not ask for a group we
-                    // already offered a share for.
-                    Some(offered) if offered.group() == group => {
+                // RFC 8446 §4.1.4: the server must not ask for a group we
+                // already offered a share for, including the classical half
+                // of a hybrid share that went out alongside it.
+                if let Some(offered) = self.next.offered_key_share.take() {
+                    let offered_component = offered
+                        .hybrid_component()
+                        .map(|(g, _)| g)
+                        .filter(|g| config.find_kx_group(*g, ProtocolVersion::TLSv1_3).is_some());
+                    if offered.group() == group || offered_component == Some(group) {
                         return Err(cx.common.send_fatal_alert(
                             AlertDescription::IllegalParameter,
                             PeerMisbehaved::IllegalHelloRetryRequestWithOfferedGroup,
                         ));
                     }
-                    // A hybrid share whose classical half is what the server
-                    // wants can be reused without a new key pair.
-                    Some(OfferedKeyShare::Full(kx))
-                        if kx.hybrid_component().is_some_and(|(g, _)| g == group) =>
-                    {
-                        cx.common.kx_state = KxState::Started(kx_group);
-                        OfferedKeyShare::HybridComponent(kx)
-                    }
-                    _ => {
-                        cx.common.kx_state = KxState::Started(kx_group);
-                        OfferedKeyShare::Full(kx_group.start()?)
-                    }
                 }
+                cx.common.kx_state = KxState::Started(kx_group);
+                OfferedKeyShare::Full(kx_group.start()?)
             }
             None => self.next.offered_key_share.take().ok_or_else(|| {
                 cx.common.send_fatal_alert(

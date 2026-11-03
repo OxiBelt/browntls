@@ -476,6 +476,7 @@ fn browntls_client_to_rustls_server_every_suite_group_and_key() {
 #[test]
 fn rustls_client_to_browntls_server_every_suite_group_and_key() {
     init_logging();
+    let mut rsa_handshakes = 0;
     for (version, suite, keys) in suite_matrix() {
         // Only key types the provider under test can sign with (RustCrypto
         // does not sign with RSA keys, so its ECDHE_RSA suites are skipped).
@@ -507,9 +508,14 @@ fn rustls_client_to_browntls_server_every_suite_group_and_key() {
                 );
                 assert_eq!(server.server_name(), Some("localhost"));
                 round_trip(&mut client, &mut server);
+                if key_type == KeyType::Rsa2048 {
+                    rsa_handshakes += 1;
+                }
             }
         }
     }
+    // RSA: 3 TLS 1.3 suites and 3 ECDHE_RSA suites, 3 groups each.
+    assert_eq!(rsa_handshakes, if prov::SIGNS_RSA { 18 } else { 0 });
 }
 
 // --------------------------------------------------------- version choice

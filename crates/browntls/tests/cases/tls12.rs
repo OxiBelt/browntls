@@ -66,6 +66,7 @@ fn suite_fits_key(suite: &browntls::SupportedCipherSuite, key_type: KeyType) -> 
 #[test]
 fn full_handshake_every_suite_group_and_key_type() {
     init_logging();
+    let mut covered = std::collections::BTreeSet::new();
     for &key_type in KeyType::SIGNING {
         let chain = server_chain(key_type);
         for suite in prov::ALL_CIPHER_SUITES
@@ -121,9 +122,18 @@ fn full_handshake_every_suite_group_and_key_type() {
                     send_and_receive(&mut server, &mut client, b"hello from server"),
                     b"hello from server"
                 );
+                covered.insert(u16::from(suite.suite()));
             }
         }
     }
+    // Every TLS 1.2 suite ran, except `ECDHE_RSA` when the provider cannot
+    // sign with RSA.
+    let expected = prov::ALL_CIPHER_SUITES
+        .iter()
+        .filter(|s| s.tls13().is_none())
+        .filter(|s| prov::SIGNS_RSA || !format!("{:?}", s.suite()).contains("_RSA_"))
+        .count();
+    assert_eq!(covered.len(), expected);
 }
 
 #[test]

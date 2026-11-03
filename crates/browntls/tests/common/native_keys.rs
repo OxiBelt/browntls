@@ -128,6 +128,18 @@ pub fn chain(
     purpose: ExtendedKeyUsagePurpose,
 ) -> Chain {
     let (ca, ee) = keys();
+    chain_with(ca, ee, alg, names, purpose)
+}
+
+/// Like [`chain`] with the given CA and end-entity keys (of any size; the
+/// chain's `key_type` is then only the key family).
+pub fn chain_with(
+    ca: &NativeRsaKey,
+    ee: &NativeRsaKey,
+    alg: &'static rcgen::SignatureAlgorithm,
+    names: &[&str],
+    purpose: ExtendedKeyUsagePurpose,
+) -> Chain {
     let chain = issue_chain(
         KeyType::Rsa2048,
         ca.with_alg(alg),

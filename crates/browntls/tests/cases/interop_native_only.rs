@@ -364,6 +364,41 @@ fn natively_signed_chains_interoperate_with_rustls() {
     }
 }
 
+/// RSA-3072 and RSA-4096 keys from `browntls-crypto`: natively signed
+/// chains and handshake signatures accepted by rustls, and rustls signing
+/// with the natively generated keys, in both versions.
+#[test]
+fn larger_native_rsa_keys_interoperate_with_rustls() {
+    init_logging();
+    for bits in [3072usize, 4096] {
+        let key = native_keys::NativeRsaKey::generate(bits);
+        let chain = native_keys::chain_with(
+            &key,
+            &key,
+            native_keys::CERT_ALGS[2],
+            &["localhost"],
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        );
+        for version in [0x0304u16, 0x0303] {
+            let mut client = r_connect_client(r_client(&chain, version, None, None));
+            let mut server =
+                browntls::ServerConnection::new(Arc::new(b_server(&chain, version, None, None)))
+                    .unwrap();
+            handshake_ok(&mut client, &mut server);
+            assert_eq!(server.version(), Some(version), "{bits}");
+            round_trip(&mut client, &mut server);
+
+            let mut client = b_connect_client(b_client(&chain, version, None, None));
+            let mut server =
+                rustls::ServerConnection::new(Arc::new(r_server(&chain, version, None, None)))
+                    .unwrap();
+            handshake_ok(&mut client, &mut server);
+            assert_eq!(client.version(), Some(version), "{bits}");
+            round_trip(&mut client, &mut server);
+        }
+    }
+}
+
 // ------------------------------------------------- ML-KEM-1024 negotiation
 
 #[test]

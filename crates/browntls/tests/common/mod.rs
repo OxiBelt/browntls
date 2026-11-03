@@ -1,6 +1,9 @@
 //! Shared helpers for the integration tests: run-time generated certificate
-//! chains, a pinned-certificate verifier (path validation in `browntls-pki`
-//! is not implemented yet) and in-memory transport plumbing.
+//! chains, a pinned-certificate verifier and in-memory transport plumbing.
+//!
+//! Every target that declares `mod common;` also declares `mod prov;` (one of
+//! `tests/providers/*.rs`): the provider under test, used for the default
+//! configurations, the verifiers' algorithms and key loading here.
 #![allow(
     dead_code,
     unreachable_pub,
@@ -13,7 +16,7 @@ use std::io;
 use std::sync::{Arc, OnceLock};
 
 use browntls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use browntls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms, rustcrypto};
+use browntls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use browntls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer,
     UnixTime,
@@ -46,8 +49,16 @@ impl KeyType {
         KeyType::Rsa2048,
     ];
 
-    /// Key types the RustCrypto provider can *sign* with (RSA is verify-only).
-    pub const SIGNING: [KeyType; 3] = [KeyType::Ed25519, KeyType::EcdsaP256, KeyType::EcdsaP384];
+    /// Key types every provider can sign with.
+    pub const NON_RSA: [KeyType; 3] = [KeyType::Ed25519, KeyType::EcdsaP256, KeyType::EcdsaP384];
+
+    /// Key types the provider under test can *sign* with: RSA only when its
+    /// key loader signs RSA (the RustCrypto provider's is verify-only).
+    pub const SIGNING: &'static [KeyType] = if crate::prov::SIGNS_RSA {
+        &Self::ALL
+    } else {
+        &Self::NON_RSA
+    };
 
     fn algorithm(self) -> &'static SignatureAlgorithm {
         match self {
@@ -183,7 +194,7 @@ pub fn client_chain(key_type: KeyType) -> Chain {
 }
 
 pub fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustcrypto::default_provider())
+    Arc::new(crate::prov::default_provider())
 }
 
 pub fn server_name() -> ServerName<'static> {
@@ -205,7 +216,7 @@ impl PinnedServerVerifier {
         Arc::new(Self {
             expected: chain.end_entity.clone(),
             spki: chain.spki(),
-            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
             raw: false,
         })
     }
@@ -215,7 +226,7 @@ impl PinnedServerVerifier {
         Arc::new(Self {
             expected: CertificateDer::from(chain.end_entity_spki.clone()),
             spki: chain.spki(),
-            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
             raw: true,
         })
     }
@@ -280,7 +291,7 @@ impl PinnedClientVerifier {
         Arc::new(Self {
             expected: chain.end_entity.clone(),
             spki: chain.spki(),
-            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
             mandatory,
             hints: Vec::new(),
             raw: false,
@@ -292,7 +303,7 @@ impl PinnedClientVerifier {
         Arc::new(Self {
             expected: CertificateDer::from(chain.end_entity_spki.clone()),
             spki: chain.spki(),
-            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
             mandatory: true,
             hints: Vec::new(),
             raw: true,

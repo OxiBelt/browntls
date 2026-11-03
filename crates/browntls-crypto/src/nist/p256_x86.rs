@@ -382,7 +382,9 @@ impl Curve<4> for P256Adx {
     const B: Fe<4> = P256::B;
     const G: Affine<4> = P256::G;
     const OID: &'static [u8] = P256::OID;
-    const BASE_TABLE: &'static [[Affine<4>; 8]] = P256::BASE_TABLE;
+    const COMB_WIDTH: usize = P256::COMB_WIDTH;
+    const COMB_INTERLEAVE: usize = P256::COMB_INTERLEAVE;
+    const BASE_TABLE: &'static [Affine<4>] = P256::BASE_TABLE;
     const G_ODD: &'static [Affine<4>; 16] = P256::G_ODD;
 
     #[inline]

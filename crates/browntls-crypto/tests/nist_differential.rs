@@ -577,3 +577,57 @@ fn throughput() {
     bench!(p384, Sha384, 500);
     bench!(p521, Sha512, 200);
 }
+
+/// Big-endian `a - b` (no underflow expected).
+fn be_sub(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; a.len()];
+    let mut borrow = 0i16;
+    for i in (0..a.len()).rev() {
+        let mut d = i16::from(a[i]) - i16::from(b[i]) - borrow;
+        borrow = 0;
+        if d < 0 {
+            d += 256;
+            borrow = 1;
+        }
+        out[i] = u8::try_from(d).unwrap();
+    }
+    assert_eq!(borrow, 0);
+    out
+}
+
+/// Every entry of a P-256 comb table with Booth width up to 6, positive and
+/// negative: public keys for `m * 2^(6 j)` and `n - m * 2^(6 j)`
+/// (`m <= 32`) agree with RustCrypto.
+#[test]
+fn p256_comb_entries_match_rustcrypto() {
+    let n = unhex_fixed(
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+        32,
+    );
+    for j in 0..43usize {
+        for m in 1u64..=32 {
+            // k = m << (6 j) as 32 big-endian bytes, if it fits.
+            let bit = 6 * j;
+            if bit + 64 - m.leading_zeros() as usize > 256 {
+                continue;
+            }
+            let mut k = vec![0u8; 32];
+            let wide = u128::from(m) << (bit % 8);
+            for (o, b) in wide.to_le_bytes().iter().enumerate() {
+                let byte = bit / 8 + o;
+                if byte < 32 {
+                    k[31 - byte] |= b;
+                }
+            }
+            for d in [k.clone(), be_sub(&n, &k)] {
+                let theirs = ::p256::SecretKey::from_slice(&d).unwrap();
+                let ours = p256::SecretKey::from_bytes(&d).unwrap();
+                assert_eq!(
+                    ours.public_key().to_uncompressed().as_slice(),
+                    &theirs.public_key().to_sec1_bytes()[..],
+                    "j = {j}, m = {m}"
+                );
+            }
+        }
+    }
+}

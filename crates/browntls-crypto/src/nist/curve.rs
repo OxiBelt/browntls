@@ -117,9 +117,13 @@ pub(crate) trait Curve<const N: usize>: Copy + 'static {
     const G: Affine<N>;
     /// DER contents of the curve's `namedCurve` OBJECT IDENTIFIER.
     const OID: &'static [u8];
-    /// Fixed-base comb table: entry `[j][m - 1]` is `m * 2^(16 j) * G` for `m`
-    /// in `1..=8` (see `scalar_mul::mul_base`).
-    const BASE_TABLE: &'static [[Affine<N>; 8]];
+    /// Booth digit width `w` of the fixed-base comb.
+    const COMB_WIDTH: usize;
+    /// Digits sharing one comb table row (`s`).
+    const COMB_INTERLEAVE: usize;
+    /// Fixed-base comb table, flattened rows of `2^(w-1)` entries: entry
+    /// `m - 1` of row `j` is `m * 2^(w s j) * G` (see `scalar_mul::mul_comb`).
+    const BASE_TABLE: &'static [Affine<N>];
     /// Odd multiples `(2i + 1) * G` for `i` in `0..16` (verification wNAF table).
     const G_ODD: &'static [Affine<N>; 16];
 

@@ -25,6 +25,7 @@ macro_rules! define_curve {
     (
         $(#[$m:meta])*
         $name:ident, $n:literal, $bits:literal, $field_len:literal, $tables:ident,
+        comb = ($w:literal, $s:literal),
         oid = $oid:expr,
         p = $p:literal, n = $order:literal, b = $b:literal, gx = $gx:literal, gy = $gy:literal
         $(, extra = { $($extra:item)* })?
@@ -52,7 +53,9 @@ macro_rules! define_curve {
                 y: fe_from_canonical::<Self, $n>(&mont::from_hex($gy)),
             };
             const OID: &'static [u8] = $oid;
-            const BASE_TABLE: &'static [[Affine<$n>; 8]] = &tables::$tables::BASE;
+            const COMB_WIDTH: usize = $w;
+            const COMB_INTERLEAVE: usize = $s;
+            const BASE_TABLE: &'static [Affine<$n>] = tables::$tables::BASE.as_flattened();
             const G_ODD: &'static [Affine<$n>; 16] = &tables::$tables::ODD;
 
             #[inline]
@@ -68,6 +71,7 @@ macro_rules! define_curve {
 define_curve! {
     /// NIST P-256 / secp256r1 / prime256v1 on the portable backend.
     P256, 4, 256, 32, p256,
+    comb = (6, 1),
     oid = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
     p = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
     n = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
@@ -122,6 +126,7 @@ pub(crate) fn p256_scalar_invert(a: &[u64; 4]) -> [u64; 4] {
 define_curve! {
     /// NIST P-384 / secp384r1 on the portable backend.
     P384, 6, 384, 48, p384,
+    comb = (4, 4),
     oid = &[0x2b, 0x81, 0x04, 0x00, 0x22],
     p = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
     n = "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
@@ -133,6 +138,7 @@ define_curve! {
 define_curve! {
     /// NIST P-521 / secp521r1 on the portable backend.
     P521, 9, 521, 66, p521,
+    comb = (4, 4),
     oid = &[0x2b, 0x81, 0x04, 0x00, 0x23],
     p = "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     n = "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",

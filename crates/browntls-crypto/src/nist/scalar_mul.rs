@@ -3,7 +3,8 @@
 //! * [`mul`]: constant-time variable-base multiplication (ECDH) with signed
 //!   5-bit fixed windows and a masked table scan.
 //! * [`mul_base`]: constant-time fixed-base multiplication (key generation,
-//!   ECDSA signing) using the precomputed comb table and signed 4-bit digits.
+//!   ECDSA signing) using the precomputed comb table and signed Booth digits
+//!   of the curve's comb width.
 //! * [`mul_double_vartime`]: variable-time `u1 * G + u2 * Q` for signature
 //!   verification only (all inputs are public there), using interleaved
 //!   width-6 (base point) and width-5 (public key) wNAF.
@@ -16,9 +17,9 @@
 use super::curve::{Affine, Curve, Projective, add, add_mixed, double, fe_neg};
 use super::jacobian::{self, Jacobian};
 use super::mont;
-use super::table::{INTERLEAVE, comb_digits, comb_positions};
+use super::table::{comb_digits, comb_positions};
 
-/// Booth digit `i` of width `w` (`w <= 6`) of `k`: `(magnitude, negate_mask)`.
+/// Booth digit `i` of width `w` (`w <= 8`) of `k`: `(magnitude, negate_mask)`.
 ///
 /// `i` and `w` are public; the result depends on `k` only through arithmetic.
 #[inline]
@@ -35,13 +36,22 @@ fn booth<const N: usize>(k: &[u64; N], i: usize, w: usize) -> (u64, u64) {
     ((d >> 1) + (d & 1), neg)
 }
 
+/// Largest table scanned by [`lookup_affine`].
+const MAX_AFFINE_TABLE: usize = 64;
+
 /// Masked scan of an affine table: returns `table[index - 1]` for `index` in
 /// `1..=table.len()` and `Affine::ZERO` for `index == 0`, in constant time.
+/// The masks are built (and barriered) first so that the scan itself is a
+/// plain AND/OR loop over every entry, which the compiler can vectorise.
 #[inline]
 fn lookup_affine<const N: usize>(table: &[Affine<N>], index: u64) -> Affine<N> {
+    debug_assert!(table.len() <= MAX_AFFINE_TABLE);
+    let mut masks = [0u64; MAX_AFFINE_TABLE];
+    for (j, m) in masks.iter_mut().enumerate().take(table.len()) {
+        *m = mont::barrier(mont::zero_mask_u64(index ^ (j as u64 + 1)));
+    }
     let mut out = Affine::<N>::ZERO;
-    for (j, entry) in table.iter().enumerate() {
-        let mask = mont::barrier(mont::zero_mask_u64(index ^ (j as u64 + 1)));
+    for (entry, mask) in table.iter().zip(&masks) {
         for l in 0..N {
             out.x[l] |= mask & entry.x[l];
             out.y[l] |= mask & entry.y[l];
@@ -50,12 +60,16 @@ fn lookup_affine<const N: usize>(table: &[Affine<N>], index: u64) -> Affine<N> {
     out
 }
 
-/// Masked scan of a projective table indexed from zero, in constant time.
+/// Masked scan of a projective table indexed from zero, in constant time
+/// (masks first, as in [`lookup_affine`]).
 #[inline]
-fn lookup_projective<const N: usize>(table: &[Projective<N>], index: u64) -> Projective<N> {
+fn lookup_projective<const N: usize>(table: &[Projective<N>; 17], index: u64) -> Projective<N> {
+    let mut masks = [0u64; 17];
+    for (j, m) in masks.iter_mut().enumerate() {
+        *m = mont::barrier(mont::zero_mask_u64(index ^ j as u64));
+    }
     let mut out = Projective::<N>::ZERO;
-    for (j, entry) in table.iter().enumerate() {
-        let mask = mont::barrier(mont::zero_mask_u64(index ^ j as u64));
+    for (entry, mask) in table.iter().zip(&masks) {
         for l in 0..N {
             out.x[l] |= mask & entry.x[l];
             out.y[l] |= mask & entry.y[l];
@@ -104,7 +118,7 @@ pub(crate) fn mul<C: Curve<N>, const N: usize>(p: &Affine<N>, k: &[u64; N]) -> P
 #[inline]
 fn comb_step<C: Curve<N>, const N: usize>(
     acc: &Projective<N>,
-    entries: &[Affine<N>; 8],
+    entries: &[Affine<N>],
     mag: u64,
     neg: u64,
 ) -> Projective<N> {
@@ -115,27 +129,43 @@ fn comb_step<C: Curve<N>, const N: usize>(
     Projective::select(mont::zero_mask_u64(mag), acc, &sum)
 }
 
-/// Constant-time `k * G` using the precomputed comb table.
-///
-/// With Booth digits `d_i` (width 4), `s = INTERLEAVE` and `T_j = 2^(4 s j) G`:
-/// `k G = sum_{r < s} 16^r * sum_j d_{s j + r} T_j`, evaluated Horner-style
-/// from the highest phase `r` down, with four doublings between phases.
+/// Constant-time `k * G` using the curve's precomputed comb table.
 pub(crate) fn mul_base<C: Curve<N>, const N: usize>(k: &[u64; N]) -> Projective<N> {
-    let table = C::BASE_TABLE;
-    let digits = comb_digits(C::BITS);
-    debug_assert_eq!(table.len(), comb_positions(C::BITS));
+    mul_comb::<C, N>(C::BASE_TABLE, C::COMB_WIDTH, C::COMB_INTERLEAVE, k)
+}
+
+/// Constant-time `k * G` with a comb table of Booth width `w` and interleave
+/// `s` (see `table`): row `j` holds `m * 2^(w s j) G` for `m` in
+/// `1..=2^(w-1)`.
+///
+/// With Booth digits `d_i` and `T_j = 2^(w s j) G`:
+/// `k G = sum_{r < s} 2^(w r) * sum_j d_{s j + r} T_j`, evaluated Horner-style
+/// from the highest phase `r` down, with `w` doublings (in Jacobian
+/// coordinates) between phases. `w`, `s` and the table are public.
+pub(crate) fn mul_comb<C: Curve<N>, const N: usize>(
+    table: &[Affine<N>],
+    w: usize,
+    s: usize,
+    k: &[u64; N],
+) -> Projective<N> {
+    let row = 1 << (w - 1);
+    let digits = comb_digits(C::BITS, w);
+    debug_assert_eq!(table.len(), row * comb_positions(C::BITS, w, s));
     let mut acc = Projective::identity::<C>();
-    for phase in (0..INTERLEAVE).rev() {
-        if phase + 1 != INTERLEAVE {
-            for _ in 0..4 {
-                acc = double::<C, N>(&acc);
+    for phase in (0..s).rev() {
+        if phase + 1 != s {
+            let mut j = jacobian::from_projective_ct::<C, N>(&acc);
+            for _ in 0..w {
+                j = jacobian::double::<C, N>(&j);
             }
+            acc = jacobian::to_projective::<C, N>(&j);
         }
         let mut i = phase;
         while i < digits {
-            let (mag, neg) = booth(k, i, 4);
-            acc = comb_step::<C, N>(&acc, &table[i / INTERLEAVE], mag, neg);
-            i += INTERLEAVE;
+            let (mag, neg) = booth(k, i, w);
+            let pos = i / s;
+            acc = comb_step::<C, N>(&acc, &table[pos * row..(pos + 1) * row], mag, neg);
+            i += s;
         }
     }
     acc

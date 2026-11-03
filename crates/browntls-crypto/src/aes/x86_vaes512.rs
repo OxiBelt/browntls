@@ -73,7 +73,10 @@ macro_rules! dispatch_regs {
             5 => $($f)::+::<5, $($g),*>($($arg),*),
             6 => $($f)::+::<6, $($g),*>($($arg),*),
             7 => $($f)::+::<7, $($g),*>($($arg),*),
-            _ => $($f)::+::<8, $($g),*>($($arg),*),
+            8 => $($f)::+::<8, $($g),*>($($arg),*),
+            // Callers pass 1..=8 (tails are under 512 bytes); any other count
+            // would silently skip data in the zipped loops, so stop instead.
+            _ => unreachable!("register count out of range"),
         }
     };
 }

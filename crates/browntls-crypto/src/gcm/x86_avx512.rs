@@ -130,6 +130,7 @@ fn mul_acc(x: __m512i, h: __m512i, sum: &mut [__m512i; 3]) {
 #[inline]
 #[target_feature(enable = "vpclmulqdq,avx512f")]
 fn mul_regs<const N: usize>(h: &[[[u8; 16]; LANES]], x: &[__m512i; N]) -> [__m512i; 3] {
+    debug_assert!(h.len() >= N);
     let mut sum = [_mm512_setzero_si512(); 3];
     for (x, h) in x.iter().zip(h) {
         mul_acc(*x, aes512::load(h), &mut sum);
@@ -444,6 +445,9 @@ fn gcm_impl<const DECRYPT: bool>(
 ) {
     let keys = aes512::load_keys(rk);
     let nr = rk.rounds;
+    // The eight register multiplications of a group are interleaved with
+    // the middle rounds (9 for AES-128, 13 for AES-256).
+    debug_assert!(nr > REGS);
     let swap128 = x86::bswap_mask();
 
     // E(J0) in lane 0 (the other lanes encrypt round key 0 and are dropped);

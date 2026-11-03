@@ -20,7 +20,12 @@
 //! [`GhashBackend::VpclmulAvx512`]) are selected, sealing and opening run
 //! through a fused loop that encrypts and hashes 32 blocks per iteration
 //! (see `x86_avx512`); other backend combinations run CTR and GHASH as
-//! separate passes.
+//! separate passes. On the fused path decryption writes plaintext into the
+//! caller's buffer while the tag is being computed and zeroes the buffer
+//! before returning an error; the buffer is exclusively borrowed, but memory
+//! that other processes can observe (for example a shared mapping) may
+//! briefly hold unauthenticated plaintext, as with other fused
+//! implementations.
 //!
 //! Messages are limited to `2^36 - 32` bytes and additional data to
 //! `2^61 - 1` bytes (SP 800-38D §5.2.1.1). Authentication failures zero the
@@ -471,6 +476,22 @@ gcm_variant!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ZMM backend pair, and only that pair, takes the fused path, so
+    /// differential tests of that pair exercise the fused loop.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    #[test]
+    fn fused_path_exactly_for_the_zmm_pair() {
+        for ab in aes::Backend::ALL {
+            for gb in GhashBackend::ALL {
+                let Ok(gcm) = Gcm::new(&[7; 16], ab, gb) else {
+                    continue;
+                };
+                let zmm = ab == aes::Backend::VaesAvx512 && gb == GhashBackend::VpclmulAvx512;
+                assert_eq!(gcm.fused().is_some(), zmm, "{ab:?}/{gb:?}");
+            }
+        }
+    }
 
     #[test]
     fn polyval_key_matches_rfc8452_relation() {

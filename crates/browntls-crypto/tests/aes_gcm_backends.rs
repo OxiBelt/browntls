@@ -86,9 +86,13 @@ fn accelerated_pairs() -> Vec<(aes::Backend, GhashBackend)> {
     v
 }
 
+/// Bytes kept after the plaintext and AAD inside their buffers, so writes
+/// past the end of a slice are detected.
+const TRAIL: usize = 16;
+
 /// One random message: key, nonce, AAD and plaintext placed at `offset`
-/// inside larger buffers (unaligned), with the portable implementation's
-/// ciphertext and tag.
+/// inside larger buffers (unaligned, followed by [`TRAIL`] canary bytes),
+/// with the portable implementation's ciphertext and tag.
 struct Case {
     key: Vec<u8>,
     nonce: [u8; 12],
@@ -103,19 +107,27 @@ struct Case {
 impl Case {
     fn new(rng: &mut Rng, len: usize, aad_len: usize) -> Self {
         let key_len = if rng.below(2) == 0 { 16 } else { 32 };
+        Self::with_key_len(rng, key_len, len, aad_len)
+    }
+
+    fn with_key_len(rng: &mut Rng, key_len: usize, len: usize, aad_len: usize) -> Self {
         let mut key = vec![0u8; key_len];
         rng.fill(&mut key);
         let mut nonce = [0u8; 12];
         rng.fill(&mut nonce);
         let aad_offset = rng.below(16);
-        let mut aad = vec![0u8; aad_offset + aad_len];
+        let mut aad = vec![0u8; aad_offset + aad_len + TRAIL];
         rng.fill(&mut aad);
         let offset = rng.below(16);
-        let mut pt = vec![0u8; offset + len];
+        let mut pt = vec![0u8; offset + len + TRAIL];
         rng.fill(&mut pt);
         let mut ct = pt.clone();
         let reference = Gcm::new(&key, aes::Backend::Soft, GhashBackend::Soft);
-        let tag = reference.seal(&nonce, &aad[aad_offset..], &mut ct[offset..]);
+        let tag = reference.seal(
+            &nonce,
+            &aad[aad_offset..aad_offset + aad_len],
+            &mut ct[offset..offset + len],
+        );
         Self {
             key,
             nonce,
@@ -129,15 +141,27 @@ impl Case {
     }
 
     fn aad(&self) -> &[u8] {
-        &self.aad[self.aad_offset..]
+        &self.aad[self.aad_offset..self.aad.len() - TRAIL]
+    }
+
+    fn range(&self) -> core::ops::Range<usize> {
+        self.offset..self.pt.len() - TRAIL
     }
 
     fn plaintext(&self) -> &[u8] {
-        &self.pt[self.offset..]
+        &self.pt[self.range()]
     }
 
     fn ciphertext(&self) -> &[u8] {
-        &self.ct[self.offset..]
+        &self.ct[self.range()]
+    }
+
+    /// The bytes around the message in `buf` equal those of the plaintext
+    /// buffer.
+    fn assert_surroundings(&self, buf: &[u8], what: &str) {
+        let r = self.range();
+        assert_eq!(buf[..r.start], self.pt[..r.start], "{what}: prefix");
+        assert_eq!(buf[r.end..], self.pt[r.end..], "{what}: suffix");
     }
 
     /// Seals and opens with `pair`, checking against the reference.
@@ -153,20 +177,37 @@ impl Case {
             self.aad_offset
         );
         let mut buf = self.pt.clone();
-        let tag = gcm.seal(&self.nonce, self.aad(), &mut buf[self.offset..]);
+        let tag = gcm.seal(&self.nonce, self.aad(), &mut buf[self.range()]);
         assert!(
-            buf[self.offset..] == *self.ciphertext(),
+            buf[self.range()] == *self.ciphertext(),
             "{what}: ciphertext differs"
         );
         assert_eq!(tag, self.tag, "{what}: tag differs");
-        // The bytes before the offset are untouched.
-        assert_eq!(buf[..self.offset], self.pt[..self.offset], "{what}: prefix");
-        gcm.open(&self.nonce, self.aad(), &mut buf[self.offset..], &tag)
+        self.assert_surroundings(&buf, &format!("{what} seal"));
+        gcm.open(&self.nonce, self.aad(), &mut buf[self.range()], &tag)
             .unwrap_or_else(|e| panic!("{what}: open failed: {e}"));
-        assert!(
-            buf[self.offset..] == *self.plaintext(),
-            "{what}: round trip"
+        assert!(buf[self.range()] == *self.plaintext(), "{what}: round trip");
+        self.assert_surroundings(&buf, &format!("{what} open"));
+        // A failed open zeroes exactly the message.
+        let mut bad = self.tag;
+        bad[0] ^= 1;
+        let mut buf = self.ct.clone();
+        assert_eq!(
+            gcm.open(&self.nonce, self.aad(), &mut buf[self.range()], &bad),
+            Err(Error::DecryptFailed),
+            "{what}: forged tag accepted"
         );
+        assert!(
+            buf[self.range()].iter().all(|&b| b == 0),
+            "{what}: not zeroed"
+        );
+        let r = self.range();
+        assert_eq!(
+            buf[..r.start],
+            self.ct[..r.start],
+            "{what}: failed open prefix"
+        );
+        assert_eq!(buf[r.end..], self.ct[r.end..], "{what}: failed open suffix");
     }
 
     /// Checks that `open` with the given modifications fails and zeroes the
@@ -352,7 +393,7 @@ fn tampering_is_rejected_on_every_pair() {
         4097,
         65536 + 13,
     ] {
-        for aad_len in [0usize, 13, 300] {
+        for aad_len in [0usize, 13, 49, 64, 300] {
             let case = Case::new(&mut rng, len, aad_len);
             for &pair in &pairs {
                 case.check_rejected(pair);
@@ -381,6 +422,26 @@ fn boundary_lengths_match_portable() {
             let case = Case::new(&mut rng, len, aad_len);
             for &pair in &pairs {
                 case.check(pair);
+            }
+        }
+    }
+}
+
+#[test]
+fn short_long_split_for_both_key_sizes() {
+    // The ZMM path hashes a message in one reduction when its AAD is at
+    // most four blocks and AAD, ciphertext and lengths blocks total at most
+    // 32 blocks: cover both sides of that limit for every AAD block count
+    // and both key sizes.
+    let mut rng = Rng(0x5407_1046_0000_000b);
+    let pairs = accelerated_pairs();
+    for key_len in [16usize, 32] {
+        for aad_len in [0usize, 1, 16, 17, 32, 33, 48, 49, 64, 65] {
+            for len in 26 * 16..=32 * 16 + 1 {
+                let case = Case::with_key_len(&mut rng, key_len, len, aad_len);
+                for &pair in &pairs {
+                    case.check(pair);
+                }
             }
         }
     }

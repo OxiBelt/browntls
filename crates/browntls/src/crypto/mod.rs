@@ -8,8 +8,8 @@
 //!
 //! Two providers ship with the crate behind cargo features:
 //!
+//! * [`native`] (feature `native`, default): backed by `browntls-crypto`.
 //! * [`rustcrypto`] (feature `rustcrypto`): backed by the RustCrypto crates.
-//! * `native` (feature `native`): backed by `browntls-crypto`.
 //!
 //! When exactly one of them is enabled it becomes the process default, unless
 //! another provider is installed first with [`CryptoProvider::install_default`].
@@ -34,13 +34,10 @@ pub(crate) mod signer;
 pub mod tls12;
 pub mod tls13;
 
+#[cfg(feature = "native")]
+pub mod native;
 #[cfg(feature = "rustcrypto")]
 pub mod rustcrypto;
-
-// The `native` provider (feature `native`, backed by `browntls-crypto`) is
-// added by the integrator as `crypto/native/mod.rs`, declared here as
-// `#[cfg(feature = "native")] pub mod native;` and wired into
-// `CryptoProvider::from_crate_features` below.
 
 pub use crate::msgs::handshake::KeyExchangeAlgorithm;
 pub use crate::rand::GetRandomFailed;
@@ -105,12 +102,14 @@ impl CryptoProvider {
     }
 
     fn from_crate_features() -> Option<Self> {
+        #[cfg(all(feature = "native", not(feature = "rustcrypto")))]
+        {
+            return Some(native::default_provider());
+        }
         #[cfg(all(feature = "rustcrypto", not(feature = "native")))]
         {
             return Some(rustcrypto::default_provider());
         }
-        // `native`-only builds return `Some(native::default_provider())` here
-        // once that provider lands.
         #[allow(unreachable_code)]
         None
     }

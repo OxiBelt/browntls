@@ -30,6 +30,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install cross C toolchains
+        # Test-only dependencies (ring via rcgen) compile C code, which the
+        # cross-target Clippy runs need.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu \
+            libc6-dev-arm64-cross libc6-dev-riscv64-cross
+
       - name: Install Rust
         run: scripts/ci/install-rust.sh
 

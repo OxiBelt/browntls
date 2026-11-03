@@ -105,6 +105,15 @@ pub(super) fn karatsuba(x: __m128i, h: __m128i, hx: __m128i, acc: &mut [__m128i;
 pub(super) fn reduce(acc: [__m128i; 3]) -> __m128i {
     let [lo, mid, hi] = acc;
     let mid = _mm_xor_si128(mid, _mm_xor_si128(lo, hi));
+    reduce_product(lo, mid, hi)
+}
+
+/// Reduces the 256-bit product `hi * x^128 + mid * x^64 + lo` (schoolbook
+/// form: `mid` is the sum of the two cross products) by `x^128` modulo
+/// `x^128 + x^127 + x^126 + x^121 + 1`.
+#[inline]
+#[target_feature(enable = "pclmulqdq,sse2")]
+pub(super) fn reduce_product(lo: __m128i, mid: __m128i, hi: __m128i) -> __m128i {
     let lo = _mm_xor_si128(lo, _mm_slli_si128(mid, 8));
     let hi = _mm_xor_si128(hi, _mm_srli_si128(mid, 8));
     #[allow(clippy::cast_possible_wrap)]
@@ -118,9 +127,10 @@ pub(super) fn reduce(acc: [__m128i; 3]) -> __m128i {
     _mm_xor_si128(hi, lo)
 }
 
+/// The reduced product of two POLYVAL-form elements.
 #[inline]
 #[target_feature(enable = "pclmulqdq,sse2")]
-fn mul(a: __m128i, b: __m128i) -> __m128i {
+pub(super) fn mul(a: __m128i, b: __m128i) -> __m128i {
     let mut acc = [_mm_setzero_si128(); 3];
     karatsuba(a, b, _mm_xor_si128(b, swap_halves(b)), &mut acc);
     reduce(acc)

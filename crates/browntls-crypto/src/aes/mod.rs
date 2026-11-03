@@ -11,6 +11,7 @@
 //! | [`Backend::Soft`] | everywhere | 64-bit bitsliced, four blocks in parallel, constant time |
 //! | [`Backend::AesNi`] | x86-64 with AES-NI | eight independent blocks per iteration |
 //! | [`Backend::Vaes`] | x86-64 with VAES + AVX2 | sixteen blocks per iteration on YMM registers |
+//! | [`Backend::VaesAvx512`] | x86-64 with VAES + AVX-512 | thirty-two blocks per iteration on ZMM registers |
 //! | [`Backend::ArmAes`] | aarch64 with FEAT_AES | eight independent blocks per iteration |
 //! | [`Backend::RvZvkned`] | riscv64 with RVV 1.0 + Zvkned + Zvkb | `LMUL=4`, VLEN-agnostic |
 //! | [`Backend::RvZkne`] | riscv64 with Zkne | scalar `aes64es`/`aes64esm`, four blocks interleaved |
@@ -29,6 +30,8 @@ mod soft;
 mod x86;
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86_vaes;
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+pub(crate) mod x86_vaes512;
 
 use crate::Error;
 use crate::cpu::features;
@@ -92,6 +95,8 @@ pub enum Backend {
     AesNi,
     /// x86-64 VAES on YMM registers (requires AVX2).
     Vaes,
+    /// x86-64 VAES on ZMM registers (requires AVX-512 F/BW/VL).
+    VaesAvx512,
     /// Armv8 Cryptographic Extension (FEAT_AES).
     ArmAes,
     /// RISC-V vector AES (Zvkned over RVV 1.0).
@@ -102,10 +107,11 @@ pub enum Backend {
 
 impl Backend {
     /// Every backend, in no particular order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Soft,
         Self::AesNi,
         Self::Vaes,
+        Self::VaesAvx512,
         Self::ArmAes,
         Self::RvZvkned,
         Self::RvZkne,
@@ -119,6 +125,9 @@ impl Backend {
             Self::Soft => true,
             Self::AesNi => f.x86_aes() && f.x86_sse41(),
             Self::Vaes => f.x86_vaes() && f.x86_avx2() && f.x86_aes() && f.x86_sse41(),
+            Self::VaesAvx512 => {
+                f.x86_avx512() && f.x86_vaes() && f.x86_avx2() && f.x86_aes() && f.x86_sse41()
+            }
             Self::ArmAes => f.arm_aes(),
             // The CTR path byte-swaps counters with Zvkb `vrev8.v`.
             Self::RvZvkned => f.rv_v() && f.rv_zvkned() && f.rv_zvkb(),
@@ -136,6 +145,7 @@ impl Backend {
 impl crate::accel::Backends for Backend {
     const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Aes;
     const PREFERENCE: &'static [Self] = &[
+        Self::VaesAvx512,
         Self::Vaes,
         Self::AesNi,
         Self::ArmAes,
@@ -154,6 +164,7 @@ impl crate::accel::Backends for Backend {
             Self::Soft => Uses::PORTABLE,
             Self::AesNi => Uses::DEDICATED,
             Self::Vaes => Uses::BOTH,
+            Self::VaesAvx512 => Uses::BOTH,
             Self::ArmAes => Uses::DEDICATED,
             Self::RvZvkned => Uses::BOTH,
             Self::RvZkne => Uses::DEDICATED,
@@ -165,6 +176,7 @@ impl crate::accel::Backends for Backend {
             Self::Soft => "portable",
             Self::AesNi => "AES-NI",
             Self::Vaes => "VAES (AVX2)",
+            Self::VaesAvx512 => "VAES (AVX-512)",
             Self::ArmAes => "FEAT_AES",
             Self::RvZvkned => "Zvkned",
             Self::RvZkne => "Zkne",
@@ -181,6 +193,8 @@ enum Imp {
     AesNi(x86::Key),
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Vaes(x86_vaes::Key),
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    VaesAvx512(x86_vaes512::Key),
     #[cfg(target_arch = "aarch64")]
     ArmAes(aarch64::Key),
     #[cfg(target_arch = "riscv64")]
@@ -214,6 +228,10 @@ impl Key {
             Backend::AesNi => Imp::AesNi(x86::Key::new(RoundKeys::new(&words, rounds))),
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Backend::Vaes => Imp::Vaes(x86_vaes::Key::new(RoundKeys::new(&words, rounds))),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Backend::VaesAvx512 => {
+                Imp::VaesAvx512(x86_vaes512::Key::new(RoundKeys::new(&words, rounds)))
+            }
             #[cfg(target_arch = "aarch64")]
             Backend::ArmAes => Imp::ArmAes(aarch64::Key::new(RoundKeys::new(&words, rounds))),
             #[cfg(target_arch = "riscv64")]
@@ -237,12 +255,24 @@ impl Key {
             Imp::AesNi(_) => Backend::AesNi,
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(_) => Backend::Vaes,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Imp::VaesAvx512(_) => Backend::VaesAvx512,
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(_) => Backend::ArmAes,
             #[cfg(target_arch = "riscv64")]
             Imp::RvZvkned(_) => Backend::RvZvkned,
             #[cfg(target_arch = "riscv64")]
             Imp::RvZkne(_) => Backend::RvZkne,
+        }
+    }
+
+    /// The ZMM VAES key, when that backend is in use (for the fused AES-GCM
+    /// path).
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    pub(crate) fn vaes_avx512(&self) -> Option<&x86_vaes512::Key> {
+        match &self.imp {
+            Imp::VaesAvx512(k) => Some(k),
+            _ => None,
         }
     }
 
@@ -254,6 +284,8 @@ impl Key {
             Imp::AesNi(k) => k.encrypt_blocks(blocks),
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(k) => k.encrypt_blocks(blocks),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Imp::VaesAvx512(k) => k.encrypt_blocks(blocks),
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(k) => k.encrypt_blocks(blocks),
             #[cfg(target_arch = "riscv64")]
@@ -273,6 +305,8 @@ impl Key {
             Imp::AesNi(k) => k.ctr32_xor(ctr, in_out),
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Imp::Vaes(k) => k.ctr32_xor(ctr, in_out),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Imp::VaesAvx512(k) => k.ctr32_xor(ctr, in_out),
             #[cfg(target_arch = "aarch64")]
             Imp::ArmAes(k) => k.ctr32_xor(ctr, in_out),
             #[cfg(target_arch = "riscv64")]

@@ -9,10 +9,18 @@
 //! |---|---|---|
 //! | [`GhashBackend::Soft`] | everywhere | masked integer multiplications, constant time |
 //! | [`GhashBackend::Clmul`] | x86-64 with PCLMULQDQ | 8 blocks per reduction, Karatsuba |
+//! | [`GhashBackend::Vpclmul`] | x86-64 with VPCLMULQDQ + AVX2 | 8 blocks per reduction on YMM registers |
+//! | [`GhashBackend::VpclmulAvx512`] | x86-64 with VPCLMULQDQ + AVX-512 | 32 blocks per reduction on ZMM registers |
 //! | [`GhashBackend::Pmull`] | aarch64 with FEAT_PMULL | 8 blocks per reduction, Karatsuba |
 //! | [`GhashBackend::RvZvkg`] | riscv64 with RVV 1.0 + Zvkg | `vghsh.vv` |
 //! | [`GhashBackend::RvZvbc`] | riscv64 with RVV 1.0 + Zvbc | `vclmul`/`vclmulh` |
 //! | [`GhashBackend::RvClmul`] | riscv64 with Zbc or Zbkc | scalar `clmul`/`clmulh` |
+//!
+//! When both ZMM backends ([`aes::Backend::VaesAvx512`] and
+//! [`GhashBackend::VpclmulAvx512`]) are selected, sealing and opening run
+//! through a fused loop that encrypts and hashes 32 blocks per iteration
+//! (see `x86_avx512`); other backend combinations run CTR and GHASH as
+//! separate passes.
 //!
 //! Messages are limited to `2^36 - 32` bytes and additional data to
 //! `2^61 - 1` bytes (SP 800-38D §5.2.1.1). Authentication failures zero the
@@ -25,6 +33,10 @@ mod riscv64;
 mod soft;
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+mod x86_avx512;
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+mod x86_vpclmul;
 
 use crate::Error;
 use crate::aead::{Aead, NONCE_LEN, TAG_LEN};
@@ -47,6 +59,10 @@ pub enum GhashBackend {
     Soft,
     /// x86-64 PCLMULQDQ on XMM registers.
     Clmul,
+    /// x86-64 VPCLMULQDQ on YMM registers (requires AVX2).
+    Vpclmul,
+    /// x86-64 VPCLMULQDQ on ZMM registers (requires AVX-512 F/BW/VL).
+    VpclmulAvx512,
     /// aarch64 FEAT_PMULL.
     Pmull,
     /// RISC-V vector GHASH (Zvkg).
@@ -59,9 +75,11 @@ pub enum GhashBackend {
 
 impl GhashBackend {
     /// Every backend, in no particular order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Soft,
         Self::Clmul,
+        Self::Vpclmul,
+        Self::VpclmulAvx512,
         Self::Pmull,
         Self::RvZvkg,
         Self::RvZvbc,
@@ -75,6 +93,16 @@ impl GhashBackend {
         match self {
             Self::Soft => true,
             Self::Clmul => f.x86_pclmulqdq() && f.x86_sse41(),
+            Self::Vpclmul => {
+                f.x86_vpclmulqdq() && f.x86_avx2() && f.x86_pclmulqdq() && f.x86_sse41()
+            }
+            Self::VpclmulAvx512 => {
+                f.x86_avx512()
+                    && f.x86_vpclmulqdq()
+                    && f.x86_avx2()
+                    && f.x86_pclmulqdq()
+                    && f.x86_sse41()
+            }
             Self::Pmull => f.arm_aes(),
             Self::RvZvkg => f.rv_v() && f.rv_zvkg(),
             Self::RvZvbc => f.rv_v() && f.rv_zvbc(),
@@ -92,6 +120,8 @@ impl GhashBackend {
 impl crate::accel::Backends for GhashBackend {
     const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Ghash;
     const PREFERENCE: &'static [Self] = &[
+        Self::VpclmulAvx512,
+        Self::Vpclmul,
         Self::Clmul,
         Self::Pmull,
         Self::RvZvkg,
@@ -109,6 +139,8 @@ impl crate::accel::Backends for GhashBackend {
         match self {
             Self::Soft => Uses::PORTABLE,
             Self::Clmul => Uses::DEDICATED,
+            Self::Vpclmul => Uses::BOTH,
+            Self::VpclmulAvx512 => Uses::BOTH,
             Self::Pmull => Uses::DEDICATED,
             Self::RvZvkg => Uses::BOTH,
             Self::RvZvbc => Uses::BOTH,
@@ -120,6 +152,8 @@ impl crate::accel::Backends for GhashBackend {
         match self {
             Self::Soft => "portable",
             Self::Clmul => "PCLMULQDQ",
+            Self::Vpclmul => "VPCLMULQDQ (AVX2)",
+            Self::VpclmulAvx512 => "VPCLMULQDQ (AVX-512)",
             Self::Pmull => "FEAT_PMULL",
             Self::RvZvkg => "Zvkg",
             Self::RvZvbc => "Zvbc",
@@ -135,6 +169,10 @@ enum GhashKey {
     Soft(soft::Key),
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     Clmul(x86::Key),
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    Vpclmul(x86_vpclmul::Key),
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    VpclmulAvx512(x86_avx512::Key),
     #[cfg(target_arch = "aarch64")]
     Pmull(aarch64::Key),
     #[cfg(target_arch = "riscv64")]
@@ -154,6 +192,10 @@ impl GhashKey {
             GhashBackend::Soft => Self::Soft(soft::Key::new(h)),
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             GhashBackend::Clmul => Self::Clmul(x86::Key::new(h)),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            GhashBackend::Vpclmul => Self::Vpclmul(x86_vpclmul::Key::new(h)),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            GhashBackend::VpclmulAvx512 => Self::VpclmulAvx512(x86_avx512::Key::new(h)),
             #[cfg(target_arch = "aarch64")]
             GhashBackend::Pmull => Self::Pmull(aarch64::Key::new(h)),
             #[cfg(target_arch = "riscv64")]
@@ -172,6 +214,10 @@ impl GhashKey {
             Self::Soft(_) => GhashBackend::Soft,
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Clmul(_) => GhashBackend::Clmul,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Vpclmul(_) => GhashBackend::Vpclmul,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::VpclmulAvx512(_) => GhashBackend::VpclmulAvx512,
             #[cfg(target_arch = "aarch64")]
             Self::Pmull(_) => GhashBackend::Pmull,
             #[cfg(target_arch = "riscv64")]
@@ -189,6 +235,10 @@ impl GhashKey {
             Self::Soft(k) => k.update(y, blocks),
             #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             Self::Clmul(k) => k.update(y, blocks),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Vpclmul(k) => k.update(y, blocks),
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::VpclmulAvx512(k) => k.update(y, blocks),
             #[cfg(target_arch = "aarch64")]
             Self::Pmull(k) => k.update(y, blocks),
             #[cfg(target_arch = "riscv64")]
@@ -289,6 +339,15 @@ impl Gcm {
         self.aes.ctr32_xor(&counter, in_out);
     }
 
+    /// The ZMM keys when both ZMM backends are in use.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    fn fused(&self) -> Option<(&aes::x86_vaes512::Key, &x86_avx512::Key)> {
+        match (&self.ghash, self.aes.vaes_avx512()) {
+            (GhashKey::VpclmulAvx512(g), Some(a)) => Some((a, g)),
+            _ => None,
+        }
+    }
+
     fn seal(
         &self,
         nonce: &[u8; NONCE_LEN],
@@ -296,6 +355,10 @@ impl Gcm {
         in_out: &mut [u8],
     ) -> Result<[u8; TAG_LEN], Error> {
         check_lengths(aad, in_out)?;
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        if let Some((a, g)) = self.fused() {
+            return Ok(x86_avx512::seal(a, g, nonce, aad, in_out));
+        }
         self.ctr(nonce, in_out);
         Ok(self.tag(nonce, aad, in_out))
     }
@@ -308,6 +371,10 @@ impl Gcm {
         tag: &[u8; TAG_LEN],
     ) -> Result<(), Error> {
         check_lengths(aad, in_out)?;
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        if let Some((a, g)) = self.fused() {
+            return x86_avx512::open(a, g, nonce, aad, in_out, tag);
+        }
         let expected = self.tag(nonce, aad, in_out);
         if !crate::ct::eq(&expected, tag) {
             zeroize_bytes(in_out);

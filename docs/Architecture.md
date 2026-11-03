@@ -179,5 +179,6 @@ is not a security assessment.
 ## Status
 
 The first implementation milestone establishes the crates, the provider mount
-point, primitive backends and the TLS state machines. Coverage, gaps and
+point, primitive backends and the TLS state machines. Measured throughput
+against OpenSSL is recorded in [Performance](Performance.md). Coverage, gaps and
 deferred features are listed in the [roadmap](Roadmap.md).

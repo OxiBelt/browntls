@@ -23,17 +23,19 @@ intent.
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
-| TLS record layer and handshake (1.2, 1.3) | in progress | |
-| Crypto provider mount point, RustCrypto provider | in progress | |
-| Native provider (`browntls-crypto`) | planned | After primitives land |
+| TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels) and TLS 1.2 (ECDHE suites, EMS, session ID and ticket resumption, client auth, renegotiation refused); interoperability tested against rustls 0.23 in both directions |
+| Crypto provider mount point, RustCrypto provider | done | rustls 0.23-shaped traits; RustCrypto provider verifies RSA but does not sign with it (advisory) |
+| Native provider (`browntls-crypto`) | done | All suites, X25519/NIST/ML-KEM and hybrid groups, ECDSA/Ed25519/RSA signing and verification, AEAD tickets; byte-identical records to the RustCrypto provider. Handshake suites on the native provider: in progress |
 
 ## Later milestones
 
 | Area | Status |
 |---|---|
-| 0-RTT, hybrid post-quantum groups, kTLS secret export | planned |
-| Raw public keys, certificate compression, OCSP/SCT passthrough | planned |
+| 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
+| Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
+| Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
+| Fuzzing targets for codecs, PKI and handshake state | planned |
 | Kernel integration design | planned |
 
 ## Governance gaps

@@ -54,7 +54,20 @@ Providers shipped in the `browntls` crate:
 
 A provider is plain data (static trait objects), so applications can build a
 mixed provider, for example native AEADs with RustCrypto signatures, or supply
-their own implementation of any trait.
+their own implementation of any trait; `crates/browntls/tests/native_mixed.rs`
+shows the pattern. When exactly one provider feature is enabled it becomes the
+implicit default; with both enabled, the application installs one explicitly.
+
+### Cargo features (`browntls`)
+
+| Feature | Default | Effect |
+|---|---|---|
+| `std` | yes | I/O helpers (`Stream`, `KeyLogFile`), default session caches, system time |
+| `native` | yes | Provider backed by `browntls-crypto` |
+| `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
+| `tls12` | yes | TLS 1.2 support |
+| `logging` | yes | `log` crate diagnostics |
+| `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
 
 ## Primitive backends
 

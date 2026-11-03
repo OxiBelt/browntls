@@ -33,24 +33,23 @@ pub(super) fn compress(state: &mut [u64; 8], blocks: &[u8]) {
 
 #[target_feature(enable = "avx2,bmi1,bmi2")]
 fn compress_v3(state: &mut [u64; 8], blocks: &[u8]) {
-    let mut chunks = blocks.as_chunks::<128>().0;
-    let mut wk = [[0u64; 80]; 2];
-    while let Some((b0, rest)) = chunks.split_first() {
-        // Schedule two blocks at once (the single last block is scheduled
-        // twice and the duplicate discarded).
-        let (b1, rest, two) = match rest.split_first() {
-            Some((b1, rest)) => (b1, rest, true),
-            None => (b0, rest, false),
-        };
-        schedule(b0, b1, &mut wk);
-        soft::rounds(state, &wk[0]);
-        if two {
+    let (pairs, tail) = blocks.as_chunks::<128>().0.as_chunks::<2>();
+    if !pairs.is_empty() {
+        // Schedule two blocks at once in the two 128-bit lanes.
+        let mut wk = [[0u64; 80]; 2];
+        for [b0, b1] in pairs {
+            schedule(b0, b1, &mut wk);
+            soft::rounds(state, &wk[0]);
             soft::rounds(state, &wk[1]);
         }
-        chunks = rest;
+        // The schedule is derived from the (possibly secret) message.
+        crate::zeroize::zeroize_u64(wk.as_flattened_mut());
     }
-    // The schedule is derived from the (possibly secret) message.
-    crate::zeroize::zeroize_u64(wk.as_flattened_mut());
+    // A lone block (including every single-block message) does not amortise
+    // the two-lane schedule or the wipe above, so it takes the scalar path.
+    if let [last] = tail {
+        soft::compress(state, last);
+    }
 }
 
 #[target_feature(enable = "avx2")]

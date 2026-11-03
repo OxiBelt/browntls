@@ -26,6 +26,7 @@
 )]
 
 use std::hint::black_box;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use browntls_crypto::accel::{self, Acceleration, Policy};
@@ -102,6 +103,14 @@ fn hash<H: HashFunction>(name: &str, budget: Duration) {
     }
 }
 
+/// Algorithms selected with `--only` (comma-separated names); all if unset.
+static ONLY: OnceLock<Vec<String>> = OnceLock::new();
+
+fn wanted(name: &str) -> bool {
+    ONLY.get()
+        .is_none_or(|only| only.iter().any(|o| o.eq_ignore_ascii_case(name)))
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut policy = Policy::PREFERRED;
@@ -120,6 +129,11 @@ fn main() {
                 }
             }
             "--seconds" => seconds = args.next().unwrap().parse().unwrap(),
+            "--only" => {
+                let list = args.next().unwrap();
+                ONLY.set(list.split(',').map(str::to_owned).collect())
+                    .unwrap();
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -131,74 +145,92 @@ fn main() {
     }
 
     // Symmetric primitives.
-    aead::<Aes128Gcm>("AES-128-GCM", &[1; 16], budget);
-    aead::<Aes256Gcm>("AES-256-GCM", &[2; 32], budget);
-    aead::<ChaCha20Poly1305>("ChaCha20-Poly1305", &[3; 32], budget);
-    hash::<Sha256>("SHA-256", budget);
-    hash::<Sha512>("SHA-512", budget);
-    hash::<Sha3_256>("SHA3-256", budget);
+    if wanted("AES-128-GCM") {
+        aead::<Aes128Gcm>("AES-128-GCM", &[1; 16], budget);
+    }
+    if wanted("AES-256-GCM") {
+        aead::<Aes256Gcm>("AES-256-GCM", &[2; 32], budget);
+    }
+    if wanted("ChaCha20-Poly1305") {
+        aead::<ChaCha20Poly1305>("ChaCha20-Poly1305", &[3; 32], budget);
+    }
+    if wanted("SHA-256") {
+        hash::<Sha256>("SHA-256", budget);
+    }
+    if wanted("SHA-512") {
+        hash::<Sha512>("SHA-512", budget);
+    }
+    if wanted("SHA3-256") {
+        hash::<Sha3_256>("SHA3-256", budget);
+    }
 
-    // X25519: one Diffie-Hellman derivation (as `openssl speed ecdhx25519`).
-    let peer = x25519::x25519_base(&[9; 32]);
-    ops_line(
-        "X25519",
-        "derive",
-        rate(budget, || {
-            black_box(x25519::x25519(black_box(&[7; 32]), &peer));
-        }),
-    );
+    if wanted("X25519") {
+        // X25519: one Diffie-Hellman derivation (as `openssl speed ecdhx25519`).
+        let peer = x25519::x25519_base(&[9; 32]);
+        ops_line(
+            "X25519",
+            "derive",
+            rate(budget, || {
+                black_box(x25519::x25519(black_box(&[7; 32]), &peer));
+            }),
+        );
+    }
 
-    // Ed25519 over a 20-byte message (as `openssl speed ed25519`).
-    let ed = ed25519::SigningKey::from_seed(&[4; 32]);
     let msg = [0x42u8; 20];
-    let sig = ed.sign(&msg);
-    let vk = ed.verifying_key();
-    ops_line(
-        "Ed25519",
-        "sign",
-        rate(budget, || {
-            black_box(ed.sign(&msg));
-        }),
-    );
-    ops_line(
-        "Ed25519",
-        "verify",
-        rate(budget, || vk.verify(&msg, &sig).unwrap()),
-    );
+    if wanted("Ed25519") {
+        // Ed25519 over a 20-byte message (as `openssl speed ed25519`).
+        let ed = ed25519::SigningKey::from_seed(&[4; 32]);
+        let sig = ed.sign(&msg);
+        let vk = ed.verifying_key();
+        ops_line(
+            "Ed25519",
+            "sign",
+            rate(budget, || {
+                black_box(ed.sign(&msg));
+            }),
+        );
+        ops_line(
+            "Ed25519",
+            "verify",
+            rate(budget, || vk.verify(&msg, &sig).unwrap()),
+        );
+    }
 
     // ECDSA over a pre-hashed digest and ECDH (as `openssl speed ecdsapN` /
     // `ecdhpN`).
     macro_rules! nist {
         ($m:ident, $name:literal, $hash:expr, $digest_len:literal) => {{
-            let sk = $m::SecretKey::from_bytes(&[5; $m::FIELD_LEN]).unwrap();
-            let pk = sk.public_key();
-            let signer =
-                $m::SigningKey::new($m::SecretKey::from_bytes(&[6; $m::FIELD_LEN]).unwrap());
-            let vk = signer.verifying_key();
-            let digest = [0x33u8; $digest_len];
-            let sig = signer.sign_prehashed($hash, &digest, Some(&OsRng)).unwrap();
-            ops_line(
-                $name,
-                "sign",
-                rate(budget, || {
-                    black_box(signer.sign_prehashed($hash, &digest, Some(&OsRng)).unwrap());
-                }),
-            );
-            ops_line(
-                $name,
-                "verify",
-                rate(budget, || {
-                    $m::verify_prehashed(&vk, &digest, sig.as_der()).unwrap();
-                }),
-            );
-            let other = $m::SecretKey::from_bytes(&[8; $m::FIELD_LEN]).unwrap();
-            ops_line(
-                $name,
-                "ecdh",
-                rate(budget, || {
-                    black_box(other.diffie_hellman(&pk).unwrap());
-                }),
-            );
+            if wanted($name) {
+                let sk = $m::SecretKey::from_bytes(&[5; $m::FIELD_LEN]).unwrap();
+                let pk = sk.public_key();
+                let signer =
+                    $m::SigningKey::new($m::SecretKey::from_bytes(&[6; $m::FIELD_LEN]).unwrap());
+                let vk = signer.verifying_key();
+                let digest = [0x33u8; $digest_len];
+                let sig = signer.sign_prehashed($hash, &digest, Some(&OsRng)).unwrap();
+                ops_line(
+                    $name,
+                    "sign",
+                    rate(budget, || {
+                        black_box(signer.sign_prehashed($hash, &digest, Some(&OsRng)).unwrap());
+                    }),
+                );
+                ops_line(
+                    $name,
+                    "verify",
+                    rate(budget, || {
+                        $m::verify_prehashed(&vk, &digest, sig.as_der()).unwrap();
+                    }),
+                );
+                let other = $m::SecretKey::from_bytes(&[8; $m::FIELD_LEN]).unwrap();
+                ops_line(
+                    $name,
+                    "ecdh",
+                    rate(budget, || {
+                        black_box(other.diffie_hellman(&pk).unwrap());
+                    }),
+                );
+            }
         }};
     }
     nist!(p256, "P-256", HashAlgorithm::Sha256, 32);
@@ -206,9 +238,12 @@ fn main() {
 
     // RSA PKCS #1 v1.5 with SHA-256 (as `openssl speed rsaN`).
     for bits in [2048usize, 3072] {
+        let name = format!("RSA-{bits}");
+        if !wanted(&name) {
+            continue;
+        }
         let key = RsaPrivateKey::generate(bits, &OsRng).unwrap();
         let public = key.public_key();
-        let name = format!("RSA-{bits}");
         let mut sig = vec![0u8; key.modulus_len_bytes()];
         let n = key
             .sign_pkcs1v15(HashAlgorithm::Sha256, &msg, &mut sig)
@@ -235,28 +270,30 @@ fn main() {
         );
     }
 
-    // ML-KEM-768 (no OpenSSL 3.0 counterpart).
-    ops_line(
-        "ML-KEM-768",
-        "keygen",
-        rate(budget, || {
-            black_box(DecapsulationKey::<MlKem768>::generate(&OsRng).unwrap());
-        }),
-    );
-    let (dk, ek) = DecapsulationKey::<MlKem768>::generate(&OsRng).unwrap();
-    let (ct, _) = ek.encapsulate(&OsRng).unwrap();
-    ops_line(
-        "ML-KEM-768",
-        "encaps",
-        rate(budget, || {
-            black_box(ek.encapsulate(&OsRng).unwrap());
-        }),
-    );
-    ops_line(
-        "ML-KEM-768",
-        "decaps",
-        rate(budget, || {
-            black_box(dk.decapsulate(ct.as_ref()).unwrap());
-        }),
-    );
+    if wanted("ML-KEM-768") {
+        // ML-KEM-768 (no OpenSSL 3.0 counterpart).
+        ops_line(
+            "ML-KEM-768",
+            "keygen",
+            rate(budget, || {
+                black_box(DecapsulationKey::<MlKem768>::generate(&OsRng).unwrap());
+            }),
+        );
+        let (dk, ek) = DecapsulationKey::<MlKem768>::generate(&OsRng).unwrap();
+        let (ct, _) = ek.encapsulate(&OsRng).unwrap();
+        ops_line(
+            "ML-KEM-768",
+            "encaps",
+            rate(budget, || {
+                black_box(ek.encapsulate(&OsRng).unwrap());
+            }),
+        );
+        ops_line(
+            "ML-KEM-768",
+            "decaps",
+            rate(budget, || {
+                black_box(dk.decapsulate(ct.as_ref()).unwrap());
+            }),
+        );
+    }
 }

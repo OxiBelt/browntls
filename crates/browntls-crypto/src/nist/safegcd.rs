@@ -8,7 +8,7 @@
 //! inputs below `2^256`, 590 hddivsteps always suffice to reach `g = 0` (the
 //! bound computed in the analysis above), so the number of batches is fixed
 //! and the operation sequence never depends on the input. Every data-dependent
-//! choice is a mask that passes through [`mont::barrier`].
+//! choice is a mask that passes through [`barrier`].
 //!
 //! Numbers are five signed limbs `v[0] + v[1] 2^62 + ... + v[4] 2^248`; limbs
 //! 0..3 are in `[0, 2^62)` in normalised form and the top limb carries the sign.

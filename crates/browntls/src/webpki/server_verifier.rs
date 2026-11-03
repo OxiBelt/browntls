@@ -5,19 +5,23 @@ use core::fmt;
 
 use browntls_pki::{
     CertRevocationList, CertificateDer, CertificateRevocationListDer, ExpirationPolicy,
-    OwnedCertRevocationList, RevocationCheckDepth, RevocationOptionsBuilder, ServerName,
-    UnixTime, UnknownStatusPolicy,
+    OwnedCertRevocationList, RevocationCheckDepth, RevocationOptionsBuilder, ServerName, UnixTime,
+    UnknownStatusPolicy,
 };
 
 use super::anchors::RootCertStore;
-use super::verify::{ParsedCertificate, WebPkiSupportedAlgorithms, verify_cert_for_usage, verify_server_name};
+use super::verify::{
+    ParsedCertificate, WebPkiSupportedAlgorithms, verify_cert_for_usage, verify_server_name,
+};
 use super::{VerifierBuilderError, crl_error};
 use crate::crypto::CryptoProvider;
 use crate::enums::SignatureScheme;
 use crate::error::Error;
 use crate::log::trace;
 use crate::sync::Arc;
-use crate::verify::{DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use crate::verify::{
+    DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
 
 /// Builds a [`WebPkiServerVerifier`].
 #[derive(Debug, Clone)]
@@ -31,7 +35,10 @@ pub struct ServerCertVerifierBuilder {
 }
 
 impl ServerCertVerifierBuilder {
-    pub(crate) fn new(roots: Arc<RootCertStore>, supported_algs: WebPkiSupportedAlgorithms) -> Self {
+    pub(crate) fn new(
+        roots: Arc<RootCertStore>,
+        supported_algs: WebPkiSupportedAlgorithms,
+    ) -> Self {
         Self {
             roots,
             crls: Vec::new(),
@@ -44,7 +51,10 @@ impl ServerCertVerifierBuilder {
 
     /// Adds CRLs to check revocation against. With any CRL present, every
     /// certificate in the chain must have a determinable revocation status.
-    pub fn with_crls(mut self, crls: impl IntoIterator<Item = CertificateRevocationListDer<'static>>) -> Self {
+    pub fn with_crls(
+        mut self,
+        crls: impl IntoIterator<Item = CertificateRevocationListDer<'static>>,
+    ) -> Self {
         self.crls.extend(crls);
         self
     }
@@ -75,7 +85,9 @@ impl ServerCertVerifierBuilder {
         let crls = self
             .crls
             .iter()
-            .map(|der| OwnedCertRevocationList::from_der(der.as_ref()).map(CertRevocationList::from))
+            .map(|der| {
+                OwnedCertRevocationList::from_der(der.as_ref()).map(CertRevocationList::from)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(crl_error)?;
         Ok(Arc::new(WebPkiServerVerifier::new(
@@ -113,11 +125,17 @@ impl WebPkiServerVerifier {
     }
 
     /// Starts a builder using `provider`'s algorithms.
-    pub fn builder_with_provider(roots: Arc<RootCertStore>, provider: Arc<CryptoProvider>) -> ServerCertVerifierBuilder {
+    pub fn builder_with_provider(
+        roots: Arc<RootCertStore>,
+        provider: Arc<CryptoProvider>,
+    ) -> ServerCertVerifierBuilder {
         Self::builder_with_provider_algorithms(roots, provider.signature_verification_algorithms)
     }
 
-    fn builder_with_provider_algorithms(roots: Arc<RootCertStore>, algs: WebPkiSupportedAlgorithms) -> ServerCertVerifierBuilder {
+    fn builder_with_provider_algorithms(
+        roots: Arc<RootCertStore>,
+        algs: WebPkiSupportedAlgorithms,
+    ) -> ServerCertVerifierBuilder {
         ServerCertVerifierBuilder::new(roots, algs)
     }
 
@@ -131,7 +149,10 @@ impl WebPkiServerVerifier {
         None
     }
 
-    pub(crate) fn new_without_revocation(roots: impl Into<Arc<RootCertStore>>, supported: WebPkiSupportedAlgorithms) -> Self {
+    pub(crate) fn new_without_revocation(
+        roots: impl Into<Arc<RootCertStore>>,
+        supported: WebPkiSupportedAlgorithms,
+    ) -> Self {
         Self::new(
             roots,
             Vec::new(),
@@ -182,14 +203,12 @@ impl ServerCertVerifier for WebPkiServerVerifier {
         let revocation = if self.crls.is_empty() {
             None
         } else {
-            RevocationOptionsBuilder::new(&crl_refs)
-                .ok()
-                .map(|b| {
-                    b.with_depth(self.revocation_check_depth)
-                        .with_status_policy(self.unknown_revocation_policy)
-                        .with_expiration_policy(self.revocation_expiration_policy)
-                        .build()
-                })
+            RevocationOptionsBuilder::new(&crl_refs).ok().map(|b| {
+                b.with_depth(self.revocation_check_depth)
+                    .with_status_policy(self.unknown_revocation_policy)
+                    .with_expiration_policy(self.revocation_expiration_policy)
+                    .build()
+            })
         };
 
         verify_cert_for_usage(
@@ -242,7 +261,10 @@ impl fmt::Debug for WebPkiServerVerifier {
             .field("crls", &self.crls.len())
             .field("revocation_check_depth", &self.revocation_check_depth)
             .field("unknown_revocation_policy", &self.unknown_revocation_policy)
-            .field("revocation_expiration_policy", &self.revocation_expiration_policy)
+            .field(
+                "revocation_expiration_policy",
+                &self.revocation_expiration_policy,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -263,7 +285,10 @@ mod tests {
     #[test]
     fn builder_requires_roots() {
         let b = ServerCertVerifierBuilder::new(Arc::new(RootCertStore::empty()), EMPTY_ALGORITHMS);
-        assert!(matches!(b.build(), Err(VerifierBuilderError::NoRootAnchors)));
+        assert!(matches!(
+            b.build(),
+            Err(VerifierBuilderError::NoRootAnchors)
+        ));
         let v = ServerCertVerifierBuilder::new(roots(), EMPTY_ALGORITHMS)
             .only_check_end_entity_revocation()
             .allow_unknown_revocation_status()
@@ -278,6 +303,9 @@ mod tests {
     fn crls_must_parse() {
         let b = ServerCertVerifierBuilder::new(roots(), EMPTY_ALGORITHMS)
             .with_crls([CertificateRevocationListDer::from(alloc::vec![1u8, 2, 3])]);
-        assert!(matches!(b.build(), Err(VerifierBuilderError::InvalidCrl(_))));
+        assert!(matches!(
+            b.build(),
+            Err(VerifierBuilderError::InvalidCrl(_))
+        ));
     }
 }

@@ -22,7 +22,11 @@ pub trait CertDecompressor: Debug + Send + Sync {
 /// Compresses a `Certificate` message for sending.
 pub trait CertCompressor: Debug + Send + Sync {
     /// Compresses `input` at `level`.
-    fn compress(&self, input: Vec<u8>, level: CompressionLevel) -> Result<Vec<u8>, CompressionFailed>;
+    fn compress(
+        &self,
+        input: Vec<u8>,
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, CompressionFailed>;
 
     /// The algorithm implemented.
     fn algorithm(&self) -> CertificateCompressionAlgorithm;
@@ -120,7 +124,11 @@ mod tests {
     struct Reverse;
 
     impl CertCompressor for Reverse {
-        fn compress(&self, mut input: Vec<u8>, _level: CompressionLevel) -> Result<Vec<u8>, CompressionFailed> {
+        fn compress(
+            &self,
+            mut input: Vec<u8>,
+            _level: CompressionLevel,
+        ) -> Result<Vec<u8>, CompressionFailed> {
             input.reverse();
             Ok(input)
         }

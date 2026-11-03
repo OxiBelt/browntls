@@ -168,8 +168,9 @@ pub fn verify_tls13_signature(
     verify_sig_using_any_alg(&cert, possible_algs, msg, dss.signature())
 }
 
-/// Verifies a TLS 1.3 handshake signature with a raw public key (RFC 7250).
-pub(crate) fn verify_tls13_signature_with_raw_key(
+/// Verifies a TLS 1.3 handshake signature with a bare `SubjectPublicKeyInfo`
+/// (RFC 7250 raw public keys, or a certificate's key extracted by the caller).
+pub fn verify_tls13_signature_with_raw_key(
     msg: &[u8],
     spki: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
     dss: &DigitallySignedStruct,
@@ -178,16 +179,52 @@ pub(crate) fn verify_tls13_signature_with_raw_key(
     if !dss.scheme.supported_in_tls13() {
         return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
     }
-    let possible_algs = supported_schemes.convert_scheme(dss.scheme)?;
-    let entity = browntls_pki::RawPublicKeyEntity::try_from(spki).map_err(pki_error)?;
-    let mut last = Error::from(crate::error::CertificateError::BadSignature);
-    for alg in possible_algs {
-        match entity.verify_signature(*alg, msg, dss.signature()) {
-            Ok(()) => return Ok(HandshakeSignatureValid::assertion()),
-            Err(e) => last = pki_error(e),
+    verify_sig_with_spki(
+        spki.as_ref(),
+        supported_schemes.convert_scheme(dss.scheme)?,
+        msg,
+        dss.signature(),
+    )
+}
+
+/// Verifies a TLS 1.2 handshake signature with a bare `SubjectPublicKeyInfo`.
+pub fn verify_tls12_signature_with_raw_key(
+    msg: &[u8],
+    spki: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
+    dss: &DigitallySignedStruct,
+    supported_schemes: &WebPkiSupportedAlgorithms,
+) -> Result<HandshakeSignatureValid, Error> {
+    verify_sig_with_spki(
+        spki.as_ref(),
+        supported_schemes.convert_scheme(dss.scheme)?,
+        msg,
+        dss.signature(),
+    )
+}
+
+/// Tries each algorithm whose `AlgorithmIdentifier` matches the key's.
+fn verify_sig_with_spki(
+    spki: &[u8],
+    algs: &[&dyn SignatureVerificationAlgorithm],
+    message: &[u8],
+    sig: &[u8],
+) -> Result<HandshakeSignatureValid, Error> {
+    let (alg_id, key) = crate::x509::split_spki(spki)?;
+    let mut matched_key_type = false;
+    for alg in algs {
+        if alg.public_key_alg_id().as_bytes() != alg_id {
+            continue;
+        }
+        matched_key_type = true;
+        if alg.verify_signature(key, message, sig).is_ok() {
+            return Ok(HandshakeSignatureValid::assertion());
         }
     }
-    Err(last)
+    Err(if matched_key_type {
+        crate::error::CertificateError::BadSignature.into()
+    } else {
+        crate::error::CertificateError::UnsupportedSignatureAlgorithm.into()
+    })
 }
 
 fn verify_sig_using_any_alg(

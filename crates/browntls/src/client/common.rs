@@ -29,9 +29,7 @@ impl ServerCertDetails {
 /// How the client will answer a CertificateRequest.
 pub(super) enum ClientAuthDetails {
     /// Send an empty Certificate.
-    Empty {
-        auth_context_tls13: Option<Vec<u8>>,
-    },
+    Empty { auth_context_tls13: Option<Vec<u8>> },
     /// Send `certkey` and sign with `signer`.
     Verify {
         certkey: Arc<CertifiedKey>,

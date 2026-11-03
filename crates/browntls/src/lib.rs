@@ -32,8 +32,8 @@ mod log {
 mod log {
     macro_rules! trace ( ($($tt:tt)*) => {{}} );
     macro_rules! debug ( ($($tt:tt)*) => {{}} );
-    macro_rules! warn ( ($($tt:tt)*) => {{}} );
-    pub(crate) use {debug, trace, warn};
+    macro_rules! _warn ( ($($tt:tt)*) => {{}} );
+    pub(crate) use {_warn as warn, debug, trace};
 }
 
 pub(crate) mod sync {
@@ -84,8 +84,8 @@ pub use crate::enums::{
     HandshakeType, ProtocolVersion, SignatureAlgorithm, SignatureScheme,
 };
 pub use crate::error::{
-    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage,
-    OtherError, PeerIncompatible, PeerMisbehaved,
+    CertRevocationListError, CertificateError, Error, InconsistentKeys, InvalidMessage, OtherError,
+    PeerIncompatible, PeerMisbehaved,
 };
 pub use crate::key_log::{KeyLog, NoKeyLog};
 #[cfg(feature = "std")]
@@ -111,7 +111,7 @@ pub mod client {
     mod common;
     pub(super) mod handy;
     mod hs;
-    mod tls13;
+    pub(crate) mod tls13;
 
     pub use builder::WantsClientCert;
     #[cfg(feature = "std")]
@@ -154,9 +154,9 @@ pub mod server {
     mod tls13;
 
     pub use builder::WantsServerCert;
+    pub use handy::NoServerSessionStorage;
     #[cfg(feature = "std")]
     pub use handy::{ResolvesServerCertUsingSni, ServerSessionMemoryCache};
-    pub use handy::NoServerSessionStorage;
     #[cfg(feature = "std")]
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ServerConnection};
     pub use server_conn::{

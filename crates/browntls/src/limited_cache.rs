@@ -9,6 +9,7 @@ use std::collections::HashMap;
 pub(crate) struct LimitedCache<K: Clone + Hash + Eq, V> {
     map: HashMap<K, V>,
     oldest: VecDeque<K>,
+    capacity: usize,
 }
 
 impl<K, V> LimitedCache<K, V>
@@ -18,9 +19,11 @@ where
 {
     /// A cache holding at most `capacity_order_of_magnitude` entries.
     pub(crate) fn new(capacity_order_of_magnitude: usize) -> Self {
+        let capacity = capacity_order_of_magnitude.max(1);
         Self {
-            map: HashMap::with_capacity(capacity_order_of_magnitude),
-            oldest: VecDeque::with_capacity(capacity_order_of_magnitude),
+            map: HashMap::with_capacity(capacity),
+            oldest: VecDeque::with_capacity(capacity),
+            capacity,
         }
     }
 
@@ -61,11 +64,12 @@ where
     }
 
     fn evict_excess(&mut self) {
-        while self.oldest.len() > self.oldest.capacity().max(1) - 1 && self.map.len() >= self.oldest.capacity().max(1) {
-            if let Some(key) = self.oldest.pop_front() {
-                self.map.remove(&key);
-            } else {
-                break;
+        while self.map.len() > self.capacity {
+            match self.oldest.pop_front() {
+                Some(key) => {
+                    self.map.remove(&key);
+                }
+                None => break,
             }
         }
     }
@@ -114,6 +118,9 @@ impl<K: Clone + Hash + Eq + core::fmt::Debug, V> core::fmt::Debug for LimitedCac
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
     use super::*;
 
     #[test]

@@ -11,7 +11,7 @@ use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
-use crate::msgs::codec::Reader;
+use crate::msgs::codec::Reader as CodecReader;
 use crate::msgs::deframer::{Deframed, DeframerVecBuffer, MessageDeframer};
 use crate::msgs::handshake::HandshakeMessagePayload;
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
@@ -20,10 +20,19 @@ use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 /// One position in the handshake state machine.
 pub(crate) trait State<Data>: Send + Sync {
     /// Handles `message`, returning the next state.
-    fn handle(self: Box<Self>, cx: &mut Context<'_, Data>, message: Message<'_>) -> Result<Box<dyn State<Data>>, Error>;
+    fn handle(
+        self: Box<Self>,
+        cx: &mut Context<'_, Data>,
+        message: Message<'_>,
+    ) -> Result<Box<dyn State<Data>>, Error>;
 
     /// RFC 5705 / RFC 8446 §7.5 keying material export.
-    fn export_keying_material(&self, _output: &mut [u8], _label: &[u8], _context: Option<&[u8]>) -> Result<(), Error> {
+    fn export_keying_material(
+        &self,
+        _output: &mut [u8],
+        _label: &[u8],
+        _context: Option<&[u8]>,
+    ) -> Result<(), Error> {
         Err(Error::HandshakeNotComplete)
     }
 
@@ -69,7 +78,10 @@ impl<Data> ConnectionCore<Data> {
     }
 
     /// Processes every complete record in `buffer`.
-    pub(crate) fn process_new_packets(&mut self, buffer: &mut DeframerVecBuffer) -> Result<IoState, Error> {
+    pub(crate) fn process_new_packets(
+        &mut self,
+        buffer: &mut DeframerVecBuffer,
+    ) -> Result<IoState, Error> {
         let mut state = match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
             Ok(state) => state,
             Err(e) => {
@@ -109,7 +121,10 @@ impl<Data> ConnectionCore<Data> {
                     let was_decrypting = self.common_state.record_layer.is_decrypting();
                     let bytes = &self.deframer.joiner.buffered()[..len];
                     let parse_version = self.common_state.negotiated_version.unwrap_or(version);
-                    let result = match HandshakeMessagePayload::read_version(&mut Reader::init(bytes), parse_version) {
+                    let result = match HandshakeMessagePayload::read_version(
+                        &mut CodecReader::init(bytes),
+                        parse_version,
+                    ) {
                         Ok(parsed) => {
                             let msg = Message {
                                 version,
@@ -131,13 +146,17 @@ impl<Data> ConnectionCore<Data> {
                     // RFC 8446 §5.1: a handshake message that changes the read
                     // key must end its record; nothing may follow it under the
                     // old key.
-                    let key_changed = self.common_state.record_layer.is_decrypting() != was_decrypting
+                    let key_changed = self.common_state.record_layer.is_decrypting()
+                        != was_decrypting
                         || (self.common_state.record_layer.is_decrypting()
                             && self.common_state.record_layer.read_seq() < decrypt_epoch);
                     match result {
-                        Ok(_) if key_changed && !self.deframer.joiner.is_empty() => Err(self
-                            .common_state
-                            .send_fatal_alert(AlertDescription::UnexpectedMessage, PeerMisbehaved::KeyEpochWithPendingFragment)),
+                        Ok(_) if key_changed && !self.deframer.joiner.is_empty() => {
+                            Err(self.common_state.send_fatal_alert(
+                                AlertDescription::UnexpectedMessage,
+                                PeerMisbehaved::KeyEpochWithPendingFragment,
+                            ))
+                        }
                         other => other,
                     }
                 }
@@ -152,8 +171,14 @@ impl<Data> ConnectionCore<Data> {
                         self.common_state.send_close_notify();
                     }
                     let payload = &buffer.filled()[plaintext];
-                    let result = match Message::try_from(InboundPlainMessage { typ, version, payload }) {
-                        Ok(msg) => Self::process_msg(&mut self.common_state, &mut self.data, state, msg),
+                    let result = match Message::try_from(InboundPlainMessage {
+                        typ,
+                        version,
+                        payload,
+                    }) {
+                        Ok(msg) => {
+                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                        }
                         Err(err) => Err(self
                             .common_state
                             .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
@@ -195,11 +220,17 @@ impl<Data> ConnectionCore<Data> {
             }
             // Unprotected ChangeCipherSpec records in TLS 1.3 are middlebox
             // compatibility noise (RFC 8446 appendix D.4).
-            MessagePayload::ChangeCipherSpec(_) if common.is_tls13() => {
+            MessagePayload::ChangeCipherSpec(_)
+                if common.is_tls13()
+                    || (common.side == crate::common_state::Side::Client
+                        && common.negotiated_version.is_none()) =>
+            {
                 common.process_middlebox_ccs()?;
                 return Ok(state);
             }
-            MessagePayload::ApplicationData(_) if !common.may_receive_application_data && !common.early_traffic => {
+            MessagePayload::ApplicationData(_)
+                if !common.may_receive_application_data && !common.early_traffic =>
+            {
                 // Application data before the handshake is complete.
                 return Err(common.send_fatal_alert(
                     AlertDescription::UnexpectedMessage,
@@ -264,9 +295,16 @@ impl<Data> ConnectionCore<Data> {
         }
     }
 
-    pub(crate) fn export_keying_material(&self, output: &mut [u8], label: &[u8], context: Option<&[u8]>) -> Result<(), Error> {
+    pub(crate) fn export_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), Error> {
         if output.is_empty() {
-            return Err(Error::general("export_keying_material: output buffer is empty"));
+            return Err(Error::general(
+                "export_keying_material: output buffer is empty",
+            ));
         }
         if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
             return Err(Error::general("export_keying_material: context too long"));
@@ -299,7 +337,10 @@ impl<Data> ConnectionCore<Data> {
 
     /// Reads one plaintext handshake message out of `buffer` without
     /// advancing the state machine; used by the server `Acceptor`.
-    pub(crate) fn first_handshake_message(&mut self, buffer: &mut DeframerVecBuffer) -> Result<Option<Message<'static>>, Error> {
+    pub(crate) fn first_handshake_message(
+        &mut self,
+        buffer: &mut DeframerVecBuffer,
+    ) -> Result<Option<Message<'static>>, Error> {
         match self.deframer.pop(
             &mut self.common_state.record_layer,
             self.common_state.negotiated_version,
@@ -307,8 +348,14 @@ impl<Data> ConnectionCore<Data> {
         ) {
             Ok(Some(Deframed::Handshake { len, version })) => {
                 let bytes = &self.deframer.joiner.buffered()[..len];
-                let parsed = HandshakeMessagePayload::read_version(&mut Reader::init(bytes), ProtocolVersion::TLSv1_2)
-                    .map_err(|e| self.common_state.send_fatal_alert(AlertDescription::from(e), Error::from(e)))?;
+                let parsed = HandshakeMessagePayload::read_version(
+                    &mut CodecReader::init(bytes),
+                    ProtocolVersion::TLSv1_2,
+                )
+                .map_err(|e| {
+                    self.common_state
+                        .send_fatal_alert(AlertDescription::from(e), Error::from(e))
+                })?;
                 let msg = Message {
                     version,
                     payload: MessagePayload::Handshake {
@@ -336,7 +383,11 @@ impl<Data> ConnectionCore<Data> {
 struct NoState;
 
 impl<Data> State<Data> for NoState {
-    fn handle(self: Box<Self>, _cx: &mut Context<'_, Data>, _message: Message<'_>) -> Result<Box<dyn State<Data>>, Error> {
+    fn handle(
+        self: Box<Self>,
+        _cx: &mut Context<'_, Data>,
+        _message: Message<'_>,
+    ) -> Result<Box<dyn State<Data>>, Error> {
         Err(Error::HandshakeNotComplete)
     }
 }
@@ -358,7 +409,12 @@ impl<Data> ConnectionCommon<Data> {
     }
 
     /// Derives keying material bound to this session (RFC 5705, RFC 8446 §7.5).
-    pub fn export_keying_material<T: AsMut<[u8]>>(&self, mut output: T, label: &[u8], context: Option<&[u8]>) -> Result<T, Error> {
+    pub fn export_keying_material<T: AsMut<[u8]>>(
+        &self,
+        mut output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
         self.core
             .export_keying_material(output.as_mut(), label, context)?;
         Ok(output)
@@ -371,7 +427,9 @@ impl<Data> ConnectionCommon<Data> {
     /// records may be protected by this library afterwards.
     pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
         if self.deframer_buffer.has_pending() || self.core.deframer.has_buffered_handshake() {
-            return Err(Error::general("cannot extract secrets with unprocessed received data"));
+            return Err(Error::general(
+                "cannot extract secrets with unprocessed received data",
+            ));
         }
         self.core.dangerous_extract_secrets()
     }
@@ -672,7 +730,12 @@ impl Connection {
     }
 
     /// See [`ConnectionCommon::export_keying_material`].
-    pub fn export_keying_material<T: AsMut<[u8]>>(&self, output: T, label: &[u8], context: Option<&[u8]>) -> Result<T, Error> {
+    pub fn export_keying_material<T: AsMut<[u8]>>(
+        &self,
+        output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
         match self {
             Self::Client(conn) => conn.export_keying_material(output, label, context),
             Self::Server(conn) => conn.export_keying_material(output, label, context),

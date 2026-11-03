@@ -7,7 +7,10 @@ use crate::error::Error;
 use crate::msgs::message::MessagePayload;
 
 /// The error for a message whose content type was not expected.
-pub(crate) fn inappropriate_message(payload: &MessagePayload<'_>, content_types: &[ContentType]) -> Error {
+pub(crate) fn inappropriate_message(
+    payload: &MessagePayload<'_>,
+    content_types: &[ContentType],
+) -> Error {
     Error::InappropriateMessage {
         expect_types: content_types.to_vec(),
         got_type: payload.content_type(),

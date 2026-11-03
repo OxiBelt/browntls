@@ -18,7 +18,8 @@ use crate::error::Error;
 use crate::msgs::handshake::DistinguishedName;
 use crate::sync::Arc;
 use crate::verify::{
-    ClientCertVerified, ClientCertVerifier, DigitallySignedStruct, HandshakeSignatureValid, NoClientAuth,
+    ClientCertVerified, ClientCertVerifier, DigitallySignedStruct, HandshakeSignatureValid,
+    NoClientAuth,
 };
 
 /// Builds a [`WebPkiClientVerifier`].
@@ -35,7 +36,10 @@ pub struct ClientCertVerifierBuilder {
 }
 
 impl ClientCertVerifierBuilder {
-    pub(crate) fn new(roots: Arc<RootCertStore>, supported_algs: WebPkiSupportedAlgorithms) -> Self {
+    pub(crate) fn new(
+        roots: Arc<RootCertStore>,
+        supported_algs: WebPkiSupportedAlgorithms,
+    ) -> Self {
         Self {
             root_hint_subjects: roots.subjects(),
             roots,
@@ -55,13 +59,19 @@ impl ClientCertVerifierBuilder {
     }
 
     /// Adds subjects to hint at in the CertificateRequest.
-    pub fn add_root_hint_subjects(mut self, subjects: impl IntoIterator<Item = DistinguishedName>) -> Self {
+    pub fn add_root_hint_subjects(
+        mut self,
+        subjects: impl IntoIterator<Item = DistinguishedName>,
+    ) -> Self {
         self.root_hint_subjects.extend(subjects);
         self
     }
 
     /// Adds CRLs to check revocation against.
-    pub fn with_crls(mut self, crls: impl IntoIterator<Item = CertificateRevocationListDer<'static>>) -> Self {
+    pub fn with_crls(
+        mut self,
+        crls: impl IntoIterator<Item = CertificateRevocationListDer<'static>>,
+    ) -> Self {
         self.crls.extend(crls);
         self
     }
@@ -98,7 +108,9 @@ impl ClientCertVerifierBuilder {
         let crls = self
             .crls
             .iter()
-            .map(|der| OwnedCertRevocationList::from_der(der.as_ref()).map(CertRevocationList::from))
+            .map(|der| {
+                OwnedCertRevocationList::from_der(der.as_ref()).map(CertRevocationList::from)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(crl_error)?;
         Ok(Arc::new(WebPkiClientVerifier::new(
@@ -146,7 +158,10 @@ impl WebPkiClientVerifier {
     }
 
     /// Starts a builder using `provider`'s algorithms.
-    pub fn builder_with_provider(roots: Arc<RootCertStore>, provider: Arc<CryptoProvider>) -> ClientCertVerifierBuilder {
+    pub fn builder_with_provider(
+        roots: Arc<RootCertStore>,
+        provider: Arc<CryptoProvider>,
+    ) -> ClientCertVerifierBuilder {
         ClientCertVerifierBuilder::new(roots, provider.signature_verification_algorithms)
     }
 
@@ -218,14 +233,12 @@ impl ClientCertVerifier for WebPkiClientVerifier {
         let revocation = if self.crls.is_empty() {
             None
         } else {
-            RevocationOptionsBuilder::new(&crl_refs)
-                .ok()
-                .map(|b| {
-                    b.with_depth(self.revocation_check_depth)
-                        .with_status_policy(self.unknown_revocation_policy)
-                        .with_expiration_policy(self.revocation_expiration_policy)
-                        .build()
-                })
+            RevocationOptionsBuilder::new(&crl_refs).ok().map(|b| {
+                b.with_depth(self.revocation_check_depth)
+                    .with_status_policy(self.unknown_revocation_policy)
+                    .with_expiration_policy(self.revocation_expiration_policy)
+                    .build()
+            })
         };
         verify_cert_for_usage(
             &cert,
@@ -289,10 +302,13 @@ mod tests {
     #[test]
     fn builder_policies() {
         assert!(matches!(
-            ClientCertVerifierBuilder::new(Arc::new(RootCertStore::empty()), EMPTY_ALGORITHMS).build(),
+            ClientCertVerifierBuilder::new(Arc::new(RootCertStore::empty()), EMPTY_ALGORITHMS)
+                .build(),
             Err(VerifierBuilderError::NoRootAnchors)
         ));
-        let mandatory = ClientCertVerifierBuilder::new(roots(), EMPTY_ALGORITHMS).build().unwrap();
+        let mandatory = ClientCertVerifierBuilder::new(roots(), EMPTY_ALGORITHMS)
+            .build()
+            .unwrap();
         assert!(mandatory.offer_client_auth());
         assert!(mandatory.client_auth_mandatory());
         assert_eq!(mandatory.root_hint_subjects().len(), 1);

@@ -67,6 +67,32 @@ impl fmt::Debug for AeadTicketProducer {
     }
 }
 
+/// A [`ProducesTickets`](crate::server::ProducesTickets) with AES-256-GCM
+/// keys rotated every six hours.
+#[cfg(feature = "std")]
+pub struct Ticketer;
+
+#[cfg(feature = "std")]
+impl Ticketer {
+    /// Ticket lifetime in seconds.
+    const LIFETIME: u32 = 6 * 60 * 60;
+
+    /// Makes a ticketer backed by [`crate::ticketer::TicketRotator`].
+    pub fn new() -> Result<alloc::sync::Arc<dyn crate::server::ProducesTickets>, crate::Error> {
+        Ok(alloc::sync::Arc::new(crate::ticketer::TicketRotator::new(
+            Self::LIFETIME,
+            || Ok(alloc::boxed::Box::new(AeadTicketProducer::new()?)),
+        )?))
+    }
+}
+
+#[cfg(feature = "std")]
+impl fmt::Debug for Ticketer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ticketer")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

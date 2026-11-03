@@ -24,7 +24,9 @@ pub mod sign;
 pub(crate) mod hash;
 pub(crate) mod hmac;
 pub(crate) mod kx;
-pub(crate) mod ticketer;
+pub mod ticketer;
+#[cfg(feature = "std")]
+pub use ticketer::Ticketer;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
 pub(crate) mod tls13;

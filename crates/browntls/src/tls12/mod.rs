@@ -10,7 +10,6 @@ use crate::crypto::tls12::Prf;
 use crate::crypto::{ActiveKeyExchange, KeyExchangeAlgorithm, hash};
 use crate::enums::SignatureScheme;
 use crate::error::Error;
-use crate::msgs::handshake::Random;
 use crate::suites::{CipherSuiteCommon, PartiallyExtractedSecrets};
 
 /// A TLS 1.2 cipher suite.
@@ -68,21 +67,7 @@ impl fmt::Debug for Tls12CipherSuite {
     }
 }
 
-/// The two hello randoms.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ConnectionRandoms {
-    pub(crate) client: [u8; 32],
-    pub(crate) server: [u8; 32],
-}
-
-impl ConnectionRandoms {
-    pub(crate) fn new(client: Random, server: Random) -> Self {
-        Self {
-            client: client.0,
-            server: server.0,
-        }
-    }
-}
+pub(crate) use crate::common_state::ConnectionRandoms;
 
 /// The TLS 1.2 master secret and everything derived from it.
 pub(crate) struct ConnectionSecrets {

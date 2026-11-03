@@ -46,7 +46,9 @@ pub struct WantsVersions {}
 
 impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
     /// Enables every version the provider has suites for.
-    pub fn with_safe_default_protocol_versions(self) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {
+    pub fn with_safe_default_protocol_versions(
+        self,
+    ) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {
         self.with_protocol_versions(versions::DEFAULT_VERSIONS)
     }
 

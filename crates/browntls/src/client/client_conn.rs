@@ -54,13 +54,20 @@ pub trait ClientSessionStore: fmt::Debug + Send + Sync {
     fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue);
 
     /// Removes and returns a TLS 1.3 ticket for `server_name`.
-    fn take_tls13_ticket(&self, server_name: &ServerName<'static>) -> Option<Tls13ClientSessionValue>;
+    fn take_tls13_ticket(
+        &self,
+        server_name: &ServerName<'static>,
+    ) -> Option<Tls13ClientSessionValue>;
 }
 
 /// Chooses the client certificate to present.
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
     /// Picks a certificate acceptable to the given issuers and schemes, or `None`.
-    fn resolve(&self, root_hint_subjects: &[&[u8]], sigschemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>>;
+    fn resolve(
+        &self,
+        root_hint_subjects: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>>;
 
     /// Whether the resolver only yields raw public keys (RFC 7250).
     fn only_raw_public_keys(&self) -> bool {
@@ -146,7 +153,9 @@ impl ClientConfig {
     }
 
     /// Starts a builder with `provider`.
-    pub fn builder_with_provider(provider: Arc<CryptoProvider>) -> ConfigBuilder<Self, WantsVersions> {
+    pub fn builder_with_provider(
+        provider: Arc<CryptoProvider>,
+    ) -> ConfigBuilder<Self, WantsVersions> {
         #[cfg(feature = "std")]
         let time_provider = Arc::new(crate::time_provider::DefaultTimeProvider);
         #[cfg(not(feature = "std"))]
@@ -194,7 +203,11 @@ impl ClientConfig {
             .find(|s| s.suite() == suite)
     }
 
-    pub(super) fn find_kx_group(&self, group: NamedGroup, version: ProtocolVersion) -> Option<&'static dyn SupportedKxGroup> {
+    pub(super) fn find_kx_group(
+        &self,
+        group: NamedGroup,
+        version: ProtocolVersion,
+    ) -> Option<&'static dyn SupportedKxGroup> {
         self.provider
             .kx_groups
             .iter()

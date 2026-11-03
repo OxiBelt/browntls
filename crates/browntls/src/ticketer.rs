@@ -32,7 +32,10 @@ struct TicketRotatorState {
 
 impl TicketRotator {
     /// Builds a rotator whose keys come from `generator` and change every `lifetime` seconds.
-    pub fn new(lifetime: u32, generator: fn() -> Result<Box<dyn TicketProducer>, GetRandomFailed>) -> Result<Self, Error> {
+    pub fn new(
+        lifetime: u32,
+        generator: fn() -> Result<Box<dyn TicketProducer>, GetRandomFailed>,
+    ) -> Result<Self, Error> {
         Self::new_with_time_provider(lifetime, generator, Arc::new(DefaultTimeProvider))
     }
 
@@ -119,7 +122,9 @@ mod tests {
     }
 
     fn generator() -> Result<Box<dyn TicketProducer>, GetRandomFailed> {
-        Ok(Box::new(crate::crypto::rustcrypto::ticketer::AeadTicketProducer::new()?))
+        Ok(Box::new(
+            crate::crypto::rustcrypto::ticketer::AeadTicketProducer::new()?,
+        ))
     }
 
     #[test]

@@ -53,9 +53,7 @@ impl<T: core::ops::Deref<Target = ClientSessionCommon>> Retrieved<T> {
     pub(crate) fn has_expired(&self) -> bool {
         let common = &*self.value;
         common.lifetime_secs != 0
-            && common
-                .epoch
-                .saturating_add(u64::from(common.lifetime_secs))
+            && common.epoch.saturating_add(u64::from(common.lifetime_secs))
                 < self.retrieved_at.as_secs()
     }
 }
@@ -91,7 +89,13 @@ impl Tls13ClientSessionValue {
             suite,
             age_add,
             max_early_data_size,
-            common: ClientSessionCommon::new(ticket, secret, time_now, lifetime_secs, server_cert_chain),
+            common: ClientSessionCommon::new(
+                ticket,
+                secret,
+                time_now,
+                lifetime_secs,
+                server_cert_chain,
+            ),
         }
     }
 
@@ -132,6 +136,7 @@ impl fmt::Debug for Tls13ClientSessionValue {
 
 /// A TLS 1.2 session (ID and/or ticket) and its master secret.
 #[cfg(feature = "tls12")]
+#[derive(Clone)]
 pub struct Tls12ClientSessionValue {
     suite: &'static Tls12CipherSuite,
     pub(crate) session_id: SessionId,
@@ -155,7 +160,13 @@ impl Tls12ClientSessionValue {
             suite,
             session_id,
             extended_ms,
-            common: ClientSessionCommon::new(ticket, master_secret, time_now, lifetime_secs, server_cert_chain),
+            common: ClientSessionCommon::new(
+                ticket,
+                master_secret,
+                time_now,
+                lifetime_secs,
+                server_cert_chain,
+            ),
         }
     }
 
@@ -199,6 +210,7 @@ impl fmt::Debug for Tls12ClientSessionValue {
 }
 
 /// What every client session value shares.
+#[derive(Clone)]
 pub struct ClientSessionCommon {
     ticket: Vec<u8>,
     secret: Vec<u8>,
@@ -306,7 +318,11 @@ impl ServerSessionValue {
 
     /// Records whether the client's reported ticket age is consistent with the
     /// ticket's real age (RFC 8446 §8.3), for the 0-RTT decision.
-    pub(crate) fn set_freshness(mut self, obfuscated_client_age_ms: u32, time_now: UnixTime) -> Self {
+    pub(crate) fn set_freshness(
+        mut self,
+        obfuscated_client_age_ms: u32,
+        time_now: UnixTime,
+    ) -> Self {
         let client_age_ms = obfuscated_client_age_ms.wrapping_sub(self.age_obfuscation_offset);
         let server_age_ms = time_now
             .as_secs()
@@ -386,7 +402,8 @@ impl Codec<'_> for ServerSessionValue {
         let sni = match u8::read(r)? {
             1 => {
                 let raw = PayloadU8::read(r)?;
-                let s = core::str::from_utf8(&raw.0).map_err(|_| InvalidMessage::InvalidServerName)?;
+                let s =
+                    core::str::from_utf8(&raw.0).map_err(|_| InvalidMessage::InvalidServerName)?;
                 Some(
                     DnsName::try_from(s)
                         .map_err(|_| InvalidMessage::InvalidServerName)?
@@ -443,7 +460,9 @@ mod tests {
             ProtocolVersion::TLSv1_3,
             CipherSuite::TLS13_AES_128_GCM_SHA256,
             &[1, 2, 3],
-            Some(CertificateChain(alloc::vec![CertificateDer::from_slice(&[9]).into_owned()])),
+            Some(CertificateChain(alloc::vec![
+                CertificateDer::from_slice(&[9]).into_owned()
+            ])),
             Some(alloc::vec![b'h', b'2']),
             alloc::vec![7, 7],
             UnixTime::since_unix_epoch(core::time::Duration::from_secs(1000)),
@@ -497,7 +516,8 @@ mod tests {
             hkdf_provider: &DummyHkdf,
             aead_alg: &DummyAead,
         };
-        let suite: &'static Tls13CipherSuite = alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));
+        let suite: &'static Tls13CipherSuite =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));
         let created = UnixTime::since_unix_epoch(core::time::Duration::from_secs(100));
         let v = Tls13ClientSessionValue::new(suite, alloc::vec![1], &[2], chain, created, 60, 5, 0);
         assert_eq!(v.max_early_data_size(), 0);
@@ -528,25 +548,47 @@ mod tests {
     }
     struct DummyHkdf;
     impl crate::crypto::tls13::Hkdf for DummyHkdf {
-        fn extract_from_zero_ikm(&self, _: Option<&[u8]>) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
+        fn extract_from_zero_ikm(
+            &self,
+            _: Option<&[u8]>,
+        ) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
             unimplemented!()
         }
-        fn extract_from_secret(&self, _: Option<&[u8]>, _: &[u8]) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
+        fn extract_from_secret(
+            &self,
+            _: Option<&[u8]>,
+            _: &[u8],
+        ) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
             unimplemented!()
         }
-        fn expander_for_okm(&self, _: &crate::crypto::tls13::OkmBlock) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
+        fn expander_for_okm(
+            &self,
+            _: &crate::crypto::tls13::OkmBlock,
+        ) -> alloc::boxed::Box<dyn crate::crypto::tls13::HkdfExpander> {
             unimplemented!()
         }
-        fn hmac_sign(&self, _: &crate::crypto::tls13::OkmBlock, _: &[u8]) -> crate::crypto::hmac::Tag {
+        fn hmac_sign(
+            &self,
+            _: &crate::crypto::tls13::OkmBlock,
+            _: &[u8],
+        ) -> crate::crypto::hmac::Tag {
             unimplemented!()
         }
     }
     struct DummyAead;
     impl crate::crypto::cipher::Tls13AeadAlgorithm for DummyAead {
-        fn encrypter(&self, _: crate::crypto::cipher::AeadKey, _: crate::crypto::cipher::Iv) -> alloc::boxed::Box<dyn crate::crypto::cipher::MessageEncrypter> {
+        fn encrypter(
+            &self,
+            _: crate::crypto::cipher::AeadKey,
+            _: crate::crypto::cipher::Iv,
+        ) -> alloc::boxed::Box<dyn crate::crypto::cipher::MessageEncrypter> {
             unimplemented!()
         }
-        fn decrypter(&self, _: crate::crypto::cipher::AeadKey, _: crate::crypto::cipher::Iv) -> alloc::boxed::Box<dyn crate::crypto::cipher::MessageDecrypter> {
+        fn decrypter(
+            &self,
+            _: crate::crypto::cipher::AeadKey,
+            _: crate::crypto::cipher::Iv,
+        ) -> alloc::boxed::Box<dyn crate::crypto::cipher::MessageDecrypter> {
             unimplemented!()
         }
         fn key_len(&self) -> usize {
@@ -556,7 +598,10 @@ mod tests {
             &self,
             _: crate::crypto::cipher::AeadKey,
             _: crate::crypto::cipher::Iv,
-        ) -> Result<crate::suites::ConnectionTrafficSecrets, crate::crypto::cipher::UnsupportedOperationError> {
+        ) -> Result<
+            crate::suites::ConnectionTrafficSecrets,
+            crate::crypto::cipher::UnsupportedOperationError,
+        > {
             Err(crate::crypto::cipher::UnsupportedOperationError)
         }
     }

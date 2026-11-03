@@ -84,7 +84,8 @@ mod cache {
     impl ClientSessionMemoryCache {
         /// Remembers sessions for up to `size` servers.
         pub fn new(size: usize) -> Self {
-            let max_servers = size.saturating_add(MAX_TLS13_TICKETS_PER_SERVER - 1) / MAX_TLS13_TICKETS_PER_SERVER;
+            let max_servers = size.saturating_add(MAX_TLS13_TICKETS_PER_SERVER - 1)
+                / MAX_TLS13_TICKETS_PER_SERVER;
             Self {
                 servers: Mutex::new(LimitedCache::new(max_servers.max(1))),
             }
@@ -94,7 +95,8 @@ mod cache {
     impl ClientSessionStore for ClientSessionMemoryCache {
         fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup) {
             if let Ok(mut servers) = self.servers.lock() {
-                servers.get_or_insert_default_and_edit(server_name, |data| data.kx_hint = Some(group));
+                servers
+                    .get_or_insert_default_and_edit(server_name, |data| data.kx_hint = Some(group));
             }
         }
 
@@ -107,9 +109,14 @@ mod cache {
         }
 
         #[cfg(feature = "tls12")]
-        fn set_tls12_session(&self, server_name: ServerName<'static>, value: Tls12ClientSessionValue) {
+        fn set_tls12_session(
+            &self,
+            server_name: ServerName<'static>,
+            value: Tls12ClientSessionValue,
+        ) {
             if let Ok(mut servers) = self.servers.lock() {
-                servers.get_or_insert_default_and_edit(server_name, |data| data.tls12 = Some(value));
+                servers
+                    .get_or_insert_default_and_edit(server_name, |data| data.tls12 = Some(value));
             }
         }
 
@@ -119,7 +126,7 @@ mod cache {
                 .lock()
                 .ok()?
                 .get(server_name)
-                .and_then(|sd| sd.tls12.as_ref().map(|v| v.clone_for_resumption()))
+                .and_then(|sd| sd.tls12.clone())
         }
 
         #[cfg(feature = "tls12")]
@@ -131,7 +138,11 @@ mod cache {
             }
         }
 
-        fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue) {
+        fn insert_tls13_ticket(
+            &self,
+            server_name: ServerName<'static>,
+            value: Tls13ClientSessionValue,
+        ) {
             if let Ok(mut servers) = self.servers.lock() {
                 servers.get_or_insert_default_and_edit(server_name, |data| {
                     if data.tls13.len() == MAX_TLS13_TICKETS_PER_SERVER {
@@ -142,7 +153,10 @@ mod cache {
             }
         }
 
-        fn take_tls13_ticket(&self, server_name: &ServerName<'static>) -> Option<Tls13ClientSessionValue> {
+        fn take_tls13_ticket(
+            &self,
+            server_name: &ServerName<'static>,
+        ) -> Option<Tls13ClientSessionValue> {
             self.servers
                 .lock()
                 .ok()?
@@ -153,7 +167,8 @@ mod cache {
 
     impl fmt::Debug for ClientSessionMemoryCache {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("ClientSessionMemoryCache").finish_non_exhaustive()
+            f.debug_struct("ClientSessionMemoryCache")
+                .finish_non_exhaustive()
         }
     }
 }
@@ -166,7 +181,11 @@ pub use cache::ClientSessionMemoryCache;
 pub(super) struct FailResolveClientCert {}
 
 impl ResolvesClientCert for FailResolveClientCert {
-    fn resolve(&self, _root_hint_subjects: &[&[u8]], _sigschemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
         None
     }
 
@@ -176,7 +195,11 @@ impl ResolvesClientCert for FailResolveClientCert {
 }
 
 impl ResolvesClientCert for SingleCertAndKey {
-    fn resolve(&self, _root_hint_subjects: &[&[u8]], _sigschemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())
     }
 

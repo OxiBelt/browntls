@@ -64,6 +64,25 @@ pub enum HandshakeKind {
     Resumed,
 }
 
+/// The two hello randoms.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConnectionRandoms {
+    pub(crate) client: [u8; 32],
+    pub(crate) server: [u8; 32],
+}
+
+impl ConnectionRandoms {
+    pub(crate) fn new(
+        client: crate::msgs::handshake::Random,
+        server: crate::msgs::handshake::Random,
+    ) -> Self {
+        Self {
+            client: client.0,
+            server: server.0,
+        }
+    }
+}
+
 /// Which key exchange group is in use.
 #[derive(Debug)]
 pub(crate) enum KxState {

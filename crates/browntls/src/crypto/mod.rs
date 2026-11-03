@@ -46,7 +46,8 @@ pub use crate::msgs::handshake::KeyExchangeAlgorithm;
 pub use crate::rand::GetRandomFailed;
 pub use crate::suites::CipherSuiteCommon;
 pub use crate::webpki::{
-    WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+    WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls12_signature_with_raw_key,
+    verify_tls13_signature, verify_tls13_signature_with_raw_key,
 };
 
 /// Everything the protocol needs from a cryptography library.

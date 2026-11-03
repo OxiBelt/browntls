@@ -1,5 +1,7 @@
 //! A [`KeyLog`] writing to the file named by `SSLKEYLOGFILE`.
 
+use alloc::format;
+use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -38,7 +40,12 @@ impl KeyLogFileInner {
         }
     }
 
-    fn try_write(&mut self, label: &str, client_random: &[u8], secret: &[u8]) -> std::io::Result<()> {
+    fn try_write(
+        &mut self,
+        label: &str,
+        client_random: &[u8],
+        secret: &[u8],
+    ) -> std::io::Result<()> {
         let Some(file) = &mut self.file else {
             return Ok(());
         };

@@ -8,16 +8,16 @@
 //! # Implementation
 //!
 //! * Field and scalar arithmetic: 64-bit limbs in Montgomery form, word-by-word
-//!   CIOS multiplication with masked final subtraction ([`mont`]).
+//!   CIOS multiplication with masked final subtraction (`mont`).
 //! * Group law: complete projective formulas (Renes–Costello–Batina 2016,
-//!   `a = -3`), so no secret-dependent special cases ([`curve`]).
+//!   `a = -3`), so no secret-dependent special cases (`curve`).
 //! * Secret scalars: fixed-window Booth recoding with masked table scans;
 //!   fixed-base multiplication uses committed, test-validated comb tables
-//!   ([`scalar_mul`], [`table`]). Inversions are Fermat exponentiations with a
+//!   (`scalar_mul`, `table`). Inversions are Fermat exponentiations with a
 //!   fixed schedule.
 //! * Verification uses variable-time interleaved wNAF (public inputs only).
 //! * x86-64 with BMI2 + ADX: `mulx`/`adcx`/`adox` field multiplication for P-256
-//!   ([`p256_x86`]). aarch64 and riscv64 use the portable backend.
+//!   (`p256_x86`). aarch64 and riscv64 use the portable backend.
 //!
 //! Nonces follow RFC 6979, hedged with fresh randomness by default.
 

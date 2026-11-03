@@ -205,6 +205,18 @@ impl<const CAP: usize> Mont<CAP> {
         debug_assert!(out.len() == len && a.len() == len && b.len() == len);
         debug_assert!(scratch.len() >= 2 * len + 2);
         let m = &self.m[..len];
+        #[cfg(target_arch = "x86_64")]
+        if let Kernel::MulxAdx(token) = self.kernel
+            && len.is_multiple_of(4)
+        {
+            let t = &mut scratch[..len + 2];
+            t.fill(0);
+            token.mont_mul4(t, a, b, m, self.m0inv);
+            let hi = t[len + 1];
+            out.copy_from_slice(&t[1..=len]);
+            super::cond_sub_mod_with(out, hi, m, &mut t[..len]);
+            return;
+        }
         let t = &mut scratch[..2 * len + 2];
         t[..len + 2].fill(0);
         for i in 0..len {

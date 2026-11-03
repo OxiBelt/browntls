@@ -11,6 +11,7 @@
 )]
 
 use browntls_crypto::Error;
+use browntls_crypto::accel::{self, Acceleration, Algorithm, Policy};
 use browntls_crypto::hash::HashAlgorithm;
 use browntls_crypto::rsa::{RsaPublicKey, verify_pkcs1v15, verify_pss};
 use serde::Deserialize;
@@ -182,4 +183,36 @@ fn pss_3072_sha256() {
 #[test]
 fn pss_4096_sha512() {
     run("rsa_pss_4096_sha512_mgf1_64_test.json", Scheme::Pss);
+}
+
+/// Every file again under each RSA backend this CPU offers (keys parsed
+/// after the policy change keep that backend). The policy is process-wide;
+/// the other tests in this binary give the same results under any backend.
+#[test]
+fn all_files_under_every_backend() {
+    let mut seen = Vec::new();
+    for policy in [
+        Policy::PREFERRED,
+        Policy::new(Acceleration::None, Acceleration::Preferred),
+        Policy::NONE,
+    ] {
+        accel::set_policy(Algorithm::Rsa, policy).unwrap();
+        let backend = accel::status(Algorithm::Rsa).backend;
+        if seen.contains(&backend) {
+            continue;
+        }
+        seen.push(backend);
+        println!("backend {backend}");
+        for (name, scheme) in [
+            ("rsa_signature_2048_sha256_test.json", Scheme::Pkcs1),
+            ("rsa_signature_3072_sha384_test.json", Scheme::Pkcs1),
+            ("rsa_signature_4096_sha512_test.json", Scheme::Pkcs1),
+            ("rsa_pss_2048_sha256_mgf1_32_test.json", Scheme::Pss),
+            ("rsa_pss_3072_sha256_mgf1_32_test.json", Scheme::Pss),
+            ("rsa_pss_4096_sha512_mgf1_64_test.json", Scheme::Pss),
+        ] {
+            run(name, scheme);
+        }
+    }
+    accel::set_policy(Algorithm::Rsa, Policy::PREFERRED).unwrap();
 }

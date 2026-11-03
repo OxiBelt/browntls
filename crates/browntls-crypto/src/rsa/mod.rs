@@ -16,13 +16,14 @@
 //! # Timing model
 //!
 //! Private-key operations are constant time with respect to the key and the
-//! message: Montgomery multiplication (CIOS) has fixed loop counts, secret
-//! exponents are processed with a fixed 4-bit window and constant-time table
-//! selection, and every conditional is a mask. In addition, CRT signing
-//! blinds the base with a random `r^e` (unblinding by `r^-1` modulo each
-//! prime, computed with the constant-time Bernstein–Yang "safegcd"
-//! inversion, which has a fixed number of branch-free divsteps for the key
-//! size), and the result is checked
+//! message: Montgomery multiplication (CIOS, or the radix-2^52
+//! almost-Montgomery product of the IFMA backend) has fixed loop counts,
+//! secret exponents are processed with a fixed 4-bit window and
+//! constant-time table selection, and every conditional is a mask. In
+//! addition, CRT signing blinds the base with a random `r^e` and unblinds by
+//! `r^-1` modulo each prime, computed with the constant-time Bernstein–Yang
+//! "safegcd" inversion (a fixed number of branch-free divsteps for the key
+//! size, the two primes' inversions interleaved); the result is checked
 //! against the public key before it is released, defeating Bellcore-style
 //! fault attacks. Public-key operations (verification, the fault check) are
 //! variable time in the public exponent only.
@@ -31,15 +32,16 @@
 //!
 //! Nothing is heap allocated: values live in fixed-capacity limb arrays
 //! (128 × u64 for the modulus, 64 × u64 per CRT half) with the active length
-//! tracked. Key structures are therefore large (`RsaPublicKey` ≈ 3 KiB,
-//! `RsaPrivateKey` ≈ 8.5 KiB) and callers may want to box them.
+//! tracked. Key structures are therefore large (on x86-64 `RsaPublicKey` ≈
+//! 4 KiB, `RsaPrivateKey` ≈ 14 KiB including ≈ 4 KiB of radix-2^52 prime
+//! constants for the IFMA backend) and callers may want to box them.
 //!
 //! Peak stack use, measured on x86-64 in a release build with a thread-size
 //! binary search (4 KiB granularity, thread start-up subtracted; see the
-//! `stack_usage_probe` test): about 12 KiB for verification, 24 KiB for
-//! signing (the 8 KiB fixed-window table plus the CRT temporaries), 64 KiB
-//! for loading a private key (nested `Result<RsaPrivateKey>` returns plus the
-//! sign/verify self-test) and 72 KiB for key generation. Loading and
+//! `stack_usage_probe` test): about 16 KiB for verification, 24 KiB for
+//! signing (the fixed-window tables plus the CRT temporaries), 76 KiB for
+//! loading a private key (nested `Result<RsaPrivateKey>` returns plus the
+//! sign/verify self-test) and 80 KiB for key generation. Loading and
 //! generation are one-time operations; signing and verification are the
 //! per-handshake paths.
 //!
@@ -51,15 +53,18 @@
 //! [`RsaPrivateKey::sign_pkcs1v15`] when available). Without fresh entropy the
 //! factor is still unpredictable to anyone who does not know the private key,
 //! so a failing or absent entropy source degrades to deterministic blinding
-//! rather than to no blinding. Unblinding costs two half-size inversions,
-//! each about 3% of a half-size exponentiation.
+//! rather than to no blinding. Unblinding costs one interleaved pair of
+//! half-size inversions, a few percent of the CRT exponentiations.
 //!
 //! # Backends
 //!
-//! | Architecture | Kernel |
-//! |---|---|
-//! | x86-64 with BMI2 + ADX | `mulx`/`adcx`/`adox` assembly |
-//! | all | portable `u128` |
+//! | Architecture | Backend (acceleration policy name) | Used for |
+//! |---|---|---|
+//! | x86-64 with AVX-512 F/VL/BW/DQ + IFMA, BMI2, ADX | `AVX-512 IFMA + BMI2/ADX` (SIMD and dedicated) | both CRT exponentiations in lockstep and public-exponent exponentiations in radix 2^52; BMI2/ADX for single multiplications |
+//! | x86-64 with BMI2 + ADX | `BMI2/ADX` (dedicated) | fused `mulx`/`adcx`/`adox` CIOS multiplication (moduli of a multiple of four limbs; other lengths use a per-limb step) |
+//! | all | `portable` | fused `u128` CIOS multiplication |
+//!
+//! Keys keep the backend selected when they were created or loaded.
 //!
 //! Secret material is zeroised on drop.
 

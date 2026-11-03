@@ -14,7 +14,13 @@
 //! window with constant-time table selection and a fixed number of squarings
 //! and multiplications (`64 * exp.len()` squarings, `16 * exp.len()`
 //! multiplications). Public-exponent exponentiation ([`Mont::exp_pub_vartime`])
-//! is variable time in the (public) exponent only.
+//! is variable time in the (public) exponent only; with the IFMA kernel it
+//! runs in radix 2^52 ([`super::ifma`]).
+//!
+//! [`Mont::mul`] uses one fused sweep per limb of `b` (both CIOS row passes
+//! together) in the portable `u128` kernel and in the BMI2/ADX assembly when
+//! the length is a multiple of four limbs; other lengths use the per-limb
+//! two-pass BMI2/ADX step.
 
 use super::{HALF_LIMBS, MAX_LIMBS, soft};
 use crate::Error;

@@ -1,4 +1,8 @@
-//! Portable Montgomery multiplication step (CIOS, 64-bit limbs via `u128`).
+//! Portable Montgomery multiplication (CIOS, 64-bit limbs via `u128`).
+//!
+//! [`mont_mul`] is the portable kernel: a whole multiplication with both row
+//! passes of each step fused into one sweep. [`step`] is the two-pass
+//! single-step form kept as the reference the per-step kernels mirror.
 //!
 //! One step processes a single limb `b_i` of the multiplier against the
 //! accumulator window `w` (`len + 2` limbs): it adds `a * b_i`, then adds the

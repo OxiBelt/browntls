@@ -7,6 +7,10 @@
 //! the high halves of the products), four limbs per iteration with a one-limb
 //! tail, so any `len >= 1` is supported.
 //!
+//! [`MulxAdx::mont_mul4`] runs a whole multiplication in one block for
+//! lengths that are a multiple of four, fusing the two rows of each step
+//! into one sweep.
+//!
 //! Constant time: the instruction sequence depends only on `len`.
 #![allow(unsafe_code)]
 

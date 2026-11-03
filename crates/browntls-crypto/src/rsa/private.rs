@@ -7,10 +7,18 @@
 //!    and blind the encoded message: `m' = m r^e mod n` (public exponent).
 //! 2. Reduce `m'` modulo `p` and `q` with Montgomery multiplications only,
 //!    then compute `s_p' = m'^dp mod p` and `s_q' = m'^dq mod q` with the
-//!    constant-time fixed-window exponentiation.
-//! 3. Unblind each half with `r^-1 mod p` and `r^-1 mod q`, computed by the
-//!    constant-time Bernstein–Yang inversion ([`inv::mod_inverse`]), and
-//!    recombine with Garner's formula `s = s_q + q ((s_p - s_q) qInv mod p)`.
+//!    constant-time fixed-window exponentiation (both in lockstep with the
+//!    IFMA backend; see [`CrtExp`]).
+//! 3. Unblind each half with `r^-1 mod p` and `r^-1 mod q`, computed together
+//!    by the constant-time Bernstein–Yang inversion
+//!    ([`inv::mod_inverse_pair`]), and recombine with Garner's formula
+//!    `s = s_q + q ((s_p - s_q) qInv mod p)`.
+//!
+//! The message is blinded at full size, before any reduction modulo a
+//! prime; the unblinding values `r^-1 mod p` and `r^-1 mod q` are the exact
+//! inverses (safegcd yields the same values as the Fermat exponentiations
+//! `r^(p-2)`, `r^(q-2)` would, in constant time and at a fraction of the
+//! cost).
 //! 4. Verify `s^e mod n == m` with the public key before releasing `s`; a
 //!    mismatch (hardware fault, inconsistent key) returns an error.
 //!
@@ -42,7 +50,7 @@ const SELF_TEST_MESSAGE: &[u8] = b"browntls RSA private key self-test";
 
 /// An RSA private key with CRT parameters.
 ///
-/// Secret components are zeroised on drop. The structure is about 8 KiB;
+/// Secret components are zeroised on drop. The structure is about 14 KiB;
 /// callers may want to keep it boxed.
 pub struct RsaPrivateKey {
     public: RsaPublicKey,

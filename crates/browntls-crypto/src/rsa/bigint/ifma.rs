@@ -664,7 +664,7 @@ mod tests {
                     // A carry entering at the bottom ripples through all
                     // lanes (and every mask word).
                     3 => MASK52 + u64::from(i == 0),
-                    _ => rng(seed) & MASK52 | u64::from(i % 3 == 0) * MASK52,
+                    _ => (rng(seed) & MASK52) | (u64::from(i % 3 == 0) * MASK52),
                 };
             }
             // Keep the value below 2^(52 * 8 V).
@@ -702,7 +702,7 @@ mod tests {
         let k = lanes(len);
         assert!(k <= 8 * V);
         let mut m = random_odd(seed, len, 1 << 63);
-        if *seed % 3 == 0 {
+        if (*seed).is_multiple_of(3) {
             m.fill(u64::MAX);
         }
         let mut m52 = [[0u64; 8]; V];
@@ -753,7 +753,7 @@ mod tests {
                 let mut big = vec![0u64; len + 2 + shift / 64];
                 for (i, &l) in r.iter().enumerate() {
                     big[i + shift / 64] |= l << (shift % 64);
-                    if shift % 64 != 0 {
+                    if !shift.is_multiple_of(64) {
                         big[i + shift / 64 + 1] |= l >> (64 - shift % 64);
                     }
                 }
@@ -772,21 +772,24 @@ mod tests {
         }
     }
 
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn amm_variants_all(seed: &mut u64) {
+        amm_variants_case::<3>(seed, 16);
+        amm_variants_case::<3>(seed, 18);
+        amm_variants_case::<3>(seed, 19);
+        amm_variants_case::<4>(seed, 24);
+        amm_variants_case::<5>(seed, 32);
+        amm_variants_case::<6>(seed, 32);
+        amm_variants_case::<10>(seed, 64);
+    }
+
     #[test]
     fn amm_variants_agree() {
         let Some(_) = Ifma::detect() else { return };
         let mut seed = 0x0123_4567_u64;
         for _ in 0..2 {
             // SAFETY: AVX-512F and IFMA were detected above.
-            unsafe {
-                amm_variants_case::<3>(&mut seed, 16);
-                amm_variants_case::<3>(&mut seed, 18);
-                amm_variants_case::<3>(&mut seed, 19);
-                amm_variants_case::<4>(&mut seed, 24);
-                amm_variants_case::<5>(&mut seed, 32);
-                amm_variants_case::<6>(&mut seed, 32);
-                amm_variants_case::<10>(&mut seed, 64);
-            }
+            unsafe { amm_variants_all(&mut seed) };
         }
     }
 

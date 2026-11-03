@@ -399,7 +399,7 @@ mod tests {
     fn mersenne(bits: usize) -> Vec<u64> {
         let len = bits.div_ceil(64);
         let mut p = vec![u64::MAX; len];
-        if bits % 64 != 0 {
+        if !bits.is_multiple_of(64) {
             p[len - 1] = (1u64 << (bits % 64)) - 1;
         }
         p

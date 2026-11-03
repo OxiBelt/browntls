@@ -10,6 +10,7 @@
 )]
 
 use browntls_crypto::Error;
+use browntls_crypto::accel::{self, Acceleration, Algorithm, Policy};
 use browntls_crypto::der::{self, Reader, Writer, tag};
 use browntls_crypto::hash::HashAlgorithm;
 use browntls_crypto::rand::{FixedRng, OsRng, SecureRandom};
@@ -170,6 +171,77 @@ fn generate_3072_sign_verify() {
     let key = RsaPrivateKey::generate(3072, &OsRng).unwrap();
     assert_eq!(key.modulus_bits(), 3072);
     roundtrip(&key, &[HashAlgorithm::Sha256, HashAlgorithm::Sha384]);
+}
+
+/// RSA policies selecting, in turn, every backend this CPU offers (AVX-512
+/// IFMA, BMI2/ADX, portable), each with the backend it selects.
+fn rsa_backends() -> Vec<(Policy, &'static str)> {
+    let mut out: Vec<(Policy, &'static str)> = Vec::new();
+    for policy in [
+        Policy::PREFERRED,
+        Policy::new(Acceleration::None, Acceleration::Preferred),
+        Policy::NONE,
+    ] {
+        accel::set_policy(Algorithm::Rsa, policy).unwrap();
+        let backend = accel::status(Algorithm::Rsa).backend;
+        if out.iter().all(|&(_, b)| b != backend) {
+            out.push((policy, backend));
+        }
+    }
+    accel::set_policy(Algorithm::Rsa, Policy::PREFERRED).unwrap();
+    out
+}
+
+/// Keys loaded under each backend produce identical PKCS #1 v1.5
+/// signatures and identical PSS signatures for fixed salt and blinding
+/// entropy, and verify each other's signatures, at 2048, 3072 and 4096 bits
+/// (CRT halves of 1024, 1536 and 2048 bits). The policy is process-wide;
+/// other tests in this binary may run under a different backend meanwhile,
+/// which does not change their results.
+#[test]
+fn backends_agree_on_signatures() {
+    let backends = rsa_backends();
+    println!("RSA backends: {backends:?}");
+    let long: Vec<u8> = (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
+    let msgs: [&[u8]; 3] = [b"", b"abc", &long];
+    for bits in [2048usize, 3072, 4096] {
+        let key = RsaPrivateKey::generate(bits, &OsRng).unwrap();
+        let mut der = vec![0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
+        let n = key.to_pkcs1_der(&mut der).unwrap();
+        der.truncate(n);
+        let mut pub_der = vec![0u8; 1100];
+        let pn = key.public_key().to_pkcs1_der(&mut pub_der).unwrap();
+        pub_der.truncate(pn);
+        let k = key.modulus_len_bytes();
+        let mut reference: Option<Vec<Vec<u8>>> = None;
+        for &(policy, backend) in &backends {
+            accel::set_policy(Algorithm::Rsa, policy).unwrap();
+            let loaded = RsaPrivateKey::from_pkcs1_der(&der).unwrap();
+            let public = RsaPublicKey::from_pkcs1_der(&pub_der).unwrap();
+            let mut sigs = Vec::new();
+            for msg in msgs {
+                for hash in [HashAlgorithm::Sha256, HashAlgorithm::Sha512] {
+                    let mut sig = vec![0u8; k];
+                    loaded.sign_pkcs1v15(hash, msg, &mut sig).unwrap();
+                    verify_pkcs1v15(&public, hash, msg, &sig).unwrap();
+                    verify_pkcs1v15(loaded.public_key(), hash, msg, &sig).unwrap();
+                    sigs.push(sig);
+                    let entropy = [0x3cu8; 96];
+                    let mut sig = vec![0u8; k];
+                    loaded
+                        .sign_pss(hash, msg, &FixedRng::new(&entropy), &mut sig)
+                        .unwrap();
+                    verify_pss(&public, hash, msg, &sig).unwrap();
+                    sigs.push(sig);
+                }
+            }
+            match &reference {
+                None => reference = Some(sigs),
+                Some(r) => assert_eq!(&sigs, r, "{bits}-bit, backend {backend}"),
+            }
+        }
+        accel::set_policy(Algorithm::Rsa, Policy::PREFERRED).unwrap();
+    }
 }
 
 #[test]

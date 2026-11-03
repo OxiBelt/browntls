@@ -156,7 +156,7 @@ dependencies = [
  "p256",
  "p384",
  "p521",
- "rand_core",
+ "rand_core 0.10.1",
  "rcgen",
  "rsa 0.10.0-rc.19",
  "rustls",

@@ -581,8 +581,9 @@ mod tests {
         );
         assert_eq!(
             alloc::format!("{SECP384R1MLKEM1024:?}"),
-            "SecP384r1MLKEM1024"
+            "secp384r1MLKEM1024"
         );
+        assert_eq!(SECP384R1MLKEM1024.name(), NamedGroup::secp384r1MLKEM1024);
         assert_eq!(alloc::format!("{X25519MLKEM768:?}"), "X25519MLKEM768");
     }
 

@@ -1,9 +1,7 @@
 //! Tests of the web-PKI verifiers and the SNI resolver.
 //!
-//! These exercise `browntls-pki` certificate parsing and path validation,
-//! whose bodies are still stubs that reject every input, so the tests that
-//! need them are `#[ignore]`d.  Remove the attribute once path validation
-//! lands; the configurations they build are the ones a real deployment uses.
+//! These exercise `browntls-pki` certificate parsing and path validation with
+//! the configurations a real deployment uses.
 
 #![cfg(feature = "rustcrypto")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -35,7 +33,6 @@ fn root_store_starts_empty() {
 }
 
 #[test]
-#[ignore = "requires browntls-pki path validation"]
 fn webpki_server_verifier_accepts_chain_from_trusted_root() {
     init_logging();
     for key_type in KeyType::SIGNING {
@@ -53,7 +50,6 @@ fn webpki_server_verifier_accepts_chain_from_trusted_root() {
 }
 
 #[test]
-#[ignore = "requires browntls-pki path validation"]
 fn webpki_server_verifier_rejects_unknown_root_and_wrong_name() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
@@ -96,7 +92,6 @@ fn webpki_server_verifier_rejects_unknown_root_and_wrong_name() {
 }
 
 #[test]
-#[ignore = "requires browntls-pki path validation"]
 fn webpki_client_verifier_accepts_and_requires_client_certificates() {
     init_logging();
     let server_chain = server_chain(KeyType::EcdsaP256);
@@ -141,7 +136,6 @@ fn webpki_client_verifier_accepts_and_requires_client_certificates() {
 }
 
 #[test]
-#[ignore = "requires browntls-pki path validation"]
 fn sni_resolver_serves_the_matching_certificate() {
     init_logging();
     let localhost = server_chain(KeyType::EcdsaP256);

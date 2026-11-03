@@ -105,7 +105,7 @@ fn rsa_pkcs8(bits: usize) -> Vec<u8> {
 fn rsa_crate_key(bits: usize) -> (Vec<u8>, Vec<u8>) {
     use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::pkcs8::EncodePrivateKey;
-    let mut rng = rsa::rand_core::UnwrapErr(getrandom::SysRng);
+    let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     let key = rsa::RsaPrivateKey::new(&mut rng, bits).unwrap();
     (
         key.to_pkcs8_der().unwrap().as_bytes().to_vec(),

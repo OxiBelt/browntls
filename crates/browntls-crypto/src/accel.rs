@@ -62,7 +62,7 @@
 //! ```
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Error;
 
@@ -79,6 +79,14 @@ pub enum Kind {
 impl Kind {
     /// Both kinds.
     pub const ALL: [Self; 2] = [Self::Simd, Self::Dedicated];
+
+    /// This kind's bit in a kind mask (`Uses::bits`, policy nibbles).
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Simd => 0b01,
+            Self::Dedicated => 0b10,
+        }
+    }
 
     /// `"SIMD"` or `"dedicated"`.
     #[must_use]
@@ -109,22 +117,6 @@ pub enum Acceleration {
 }
 
 impl Acceleration {
-    const fn to_bits(self) -> u8 {
-        match self {
-            Self::Required => 0,
-            Self::Preferred => 1,
-            Self::None => 2,
-        }
-    }
-
-    const fn from_bits(v: u8) -> Self {
-        match v & 3 {
-            0 => Self::Required,
-            2 => Self::None,
-            _ => Self::Preferred,
-        }
-    }
-
     /// `"required"`, `"preferred"` or `"none"`.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -201,21 +193,60 @@ impl Policy {
 
     /// Whether a backend using `uses` may be selected under this policy.
     #[must_use]
-    pub fn permits(self, uses: Uses) -> bool {
-        Kind::ALL.iter().all(|&k| match self.get(k) {
-            Acceleration::Required => uses.get(k),
-            Acceleration::Preferred => true,
-            Acceleration::None => !uses.get(k),
+    pub const fn permits(self, uses: Uses) -> bool {
+        permits_bits(self.to_bits(), uses.bits())
+    }
+
+    /// The mask of kinds set to `level`.
+    const fn mask(self, level: Acceleration) -> u8 {
+        const fn same(a: Acceleration, b: Acceleration) -> bool {
+            matches!(
+                (a, b),
+                (Acceleration::Required, Acceleration::Required)
+                    | (Acceleration::Preferred, Acceleration::Preferred)
+                    | (Acceleration::None, Acceleration::None)
+            )
+        }
+        (if same(self.simd, level) {
+            Kind::Simd.bit()
+        } else {
+            0
+        }) | (if same(self.dedicated, level) {
+            Kind::Dedicated.bit()
+        } else {
+            0
         })
     }
 
+    /// The policy's 4-bit encoding: bits 0-1 hold the mask of `Required`
+    /// kinds, bits 2-3 the mask of `None` kinds; `Preferred` is 0.
     const fn to_bits(self) -> u8 {
-        self.simd.to_bits() | (self.dedicated.to_bits() << 2)
+        self.mask(Acceleration::Required) | (self.mask(Acceleration::None) << 2)
     }
 
+    /// Decodes [`Policy::to_bits`]. A kind marked both required and none
+    /// (never produced by `to_bits`) decodes as required.
     const fn from_bits(v: u8) -> Self {
-        Self::new(Acceleration::from_bits(v), Acceleration::from_bits(v >> 2))
+        const fn level(v: u8, kind: Kind) -> Acceleration {
+            if v & kind.bit() != 0 {
+                Acceleration::Required
+            } else if (v >> 2) & kind.bit() != 0 {
+                Acceleration::None
+            } else {
+                Acceleration::Preferred
+            }
+        }
+        Self::new(level(v, Kind::Simd), level(v, Kind::Dedicated))
     }
+}
+
+/// `permits` on encodings: every required kind is used and no forbidden kind
+/// is used.
+#[inline]
+const fn permits_bits(policy: u8, uses: u8) -> bool {
+    let required = policy & 0b11;
+    let forbidden = (policy >> 2) & 0b11;
+    required & !uses == 0 && forbidden & uses == 0
 }
 
 impl fmt::Display for Policy {
@@ -268,6 +299,17 @@ impl Uses {
     #[must_use]
     pub const fn any(self) -> bool {
         self.simd || self.dedicated
+    }
+
+    /// The kind mask: bit 0 for SIMD, bit 1 for dedicated instructions.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        (if self.simd { Kind::Simd.bit() } else { 0 })
+            | (if self.dedicated {
+                Kind::Dedicated.bit()
+            } else {
+                0
+            })
     }
 
     const fn union(self, other: Self) -> Self {
@@ -397,29 +439,30 @@ fn portable<B: Backends>() -> B {
     B::PREFERENCE[B::PREFERENCE.len() - 1]
 }
 
-/// The most preferred available backend that `policy` permits.
-fn select_under<B: Backends>(policy: Policy) -> Option<B> {
+/// The most preferred available backend that the encoded policy permits.
+#[inline]
+fn select_under<B: Backends>(policy: u8) -> Option<B> {
     B::PREFERENCE
         .iter()
         .copied()
-        .find(|b| b.available() && policy.permits(b.uses()))
+        .find(|b| permits_bits(policy, b.uses().bits()) && b.available())
 }
 
 /// The backend `B`'s family uses under its current policy.
 #[inline]
 pub(crate) fn select<B: Backends>() -> B {
-    // `set_policy` only stores satisfiable policies, so the fallback is only
-    // reached if hardware detection changed underneath us.
-    select_under::<B>(policy(B::ALGORITHM)).unwrap_or_else(portable::<B>)
+    // Only satisfiable policies are stored, so the fallback is only reached
+    // if hardware detection changed underneath us.
+    select_under::<B>(nibble(POLICIES.load(Ordering::Relaxed), B::ALGORITHM))
+        .unwrap_or_else(portable::<B>)
 }
 
 fn satisfiable<B: Backends>(policy: Policy) -> bool {
-    select_under::<B>(policy).is_some()
+    select_under::<B>(policy.to_bits()).is_some()
 }
 
-fn status_of<B: Backends>() -> AlgorithmStatus {
-    let policy = policy(B::ALGORITHM);
-    let selected = select_under::<B>(policy).unwrap_or_else(portable::<B>);
+fn status_of<B: Backends>(policy: Policy) -> AlgorithmStatus {
+    let selected = select_under::<B>(policy.to_bits()).unwrap_or_else(portable::<B>);
     let available = B::PREFERENCE
         .iter()
         .filter(|b| b.available())
@@ -453,13 +496,67 @@ macro_rules! for_family {
     };
 }
 
-static POLICY: [AtomicU8; Algorithm::ALL.len()] =
-    [const { AtomicU8::new(Policy::PREFERRED.to_bits()) }; Algorithm::ALL.len()];
+/// Every algorithm's policy in one word: algorithm `i` occupies bits
+/// `4 * i .. 4 * i + 4` with the [`Policy::to_bits`] encoding. All-preferred
+/// is zero, so the initial value is the default policy. Updates are single
+/// atomic stores or compare-and-swap loops, so readers always observe a
+/// consistent set of policies.
+static POLICIES: AtomicU64 = AtomicU64::new(0);
+
+const NIBBLE: u64 = 0xf;
+
+#[inline]
+const fn shift(alg: Algorithm) -> u32 {
+    // `index` < 12, so the shift is below 48.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        4 * alg.index() as u32
+    }
+}
+
+#[inline]
+const fn nibble(word: u64, alg: Algorithm) -> u8 {
+    // Masked to four bits.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        ((word >> shift(alg)) & NIBBLE) as u8
+    }
+}
+
+#[inline]
+const fn with_nibble(word: u64, alg: Algorithm, policy: Policy) -> u64 {
+    (word & !(NIBBLE << shift(alg))) | ((policy.to_bits() as u64) << shift(alg))
+}
+
+/// The current policies of every algorithm, from one atomic load.
+fn snapshot() -> [Policy; Algorithm::ALL.len()] {
+    let word = POLICIES.load(Ordering::Relaxed);
+    Algorithm::ALL.map(|alg| Policy::from_bits(nibble(word, alg)))
+}
+
+/// Applies `next` to every algorithm's policy atomically, failing (and
+/// changing nothing) if any resulting policy is unsatisfiable.
+fn update_all(next: impl Fn(Algorithm, Policy) -> Policy) -> Result<(), Error> {
+    POLICIES
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+            let mut out = word;
+            for alg in Algorithm::ALL {
+                let p = next(alg, Policy::from_bits(nibble(word, alg)));
+                if !for_family!(alg, satisfiable, p) {
+                    return None;
+                }
+                out = with_nibble(out, alg, p);
+            }
+            Some(out)
+        })
+        .map(|_| ())
+        .map_err(|_| Error::Unsupported)
+}
 
 /// The current policy for `alg`.
 #[must_use]
 pub fn policy(alg: Algorithm) -> Policy {
-    Policy::from_bits(POLICY[alg.index()].load(Ordering::Relaxed))
+    Policy::from_bits(nibble(POLICIES.load(Ordering::Relaxed), alg))
 }
 
 /// Sets the policy for `alg`.
@@ -473,27 +570,22 @@ pub fn set_policy(alg: Algorithm, policy: Policy) -> Result<(), Error> {
     if !for_family!(alg, satisfiable, policy) {
         return Err(Error::Unsupported);
     }
-    POLICY[alg.index()].store(policy.to_bits(), Ordering::Relaxed);
-    Ok(())
+    POLICIES
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+            Some(with_nibble(word, alg, policy))
+        })
+        .map(|_| ())
+        .map_err(|_| Error::Unsupported)
 }
 
-/// Sets the same policy for every algorithm.
+/// Sets the same policy for every algorithm, atomically.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Unsupported`] and changes nothing unless every algorithm
 /// can satisfy `policy` (see [`status_all`]).
 pub fn set_policy_all(policy: Policy) -> Result<(), Error> {
-    if !Algorithm::ALL
-        .iter()
-        .all(|&alg| for_family!(alg, satisfiable, policy))
-    {
-        return Err(Error::Unsupported);
-    }
-    for alg in Algorithm::ALL {
-        POLICY[alg.index()].store(policy.to_bits(), Ordering::Relaxed);
-    }
-    Ok(())
+    update_all(|_, _| policy)
 }
 
 /// Sets the level of one [`Kind`] for `alg`, keeping the other kind's level.
@@ -502,29 +594,24 @@ pub fn set_policy_all(policy: Policy) -> Result<(), Error> {
 ///
 /// As for [`set_policy`].
 pub fn set_kind(alg: Algorithm, kind: Kind, level: Acceleration) -> Result<(), Error> {
-    set_policy(alg, policy(alg).with(kind, level))
+    POLICIES
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+            let p = Policy::from_bits(nibble(word, alg)).with(kind, level);
+            for_family!(alg, satisfiable, p).then(|| with_nibble(word, alg, p))
+        })
+        .map(|_| ())
+        .map_err(|_| Error::Unsupported)
 }
 
 /// Sets the level of one [`Kind`] for every algorithm, keeping each
-/// algorithm's level for the other kind.
+/// algorithm's level for the other kind; applied atomically.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Unsupported`] and changes nothing unless every algorithm
 /// can satisfy its resulting policy.
 pub fn set_kind_all(kind: Kind, level: Acceleration) -> Result<(), Error> {
-    let mut next = [Policy::PREFERRED; Algorithm::ALL.len()];
-    for alg in Algorithm::ALL {
-        let p = policy(alg).with(kind, level);
-        if !for_family!(alg, satisfiable, p) {
-            return Err(Error::Unsupported);
-        }
-        next[alg.index()] = p;
-    }
-    for alg in Algorithm::ALL {
-        POLICY[alg.index()].store(next[alg.index()].to_bits(), Ordering::Relaxed);
-    }
-    Ok(())
+    update_all(|_, p| p.with(kind, level))
 }
 
 /// Per-algorithm acceleration state.
@@ -564,13 +651,15 @@ impl fmt::Display for AlgorithmStatus {
 /// The acceleration state of `alg`.
 #[must_use]
 pub fn status(alg: Algorithm) -> AlgorithmStatus {
-    for_family!(alg, status_of)
+    for_family!(alg, status_of, policy(alg))
 }
 
-/// The acceleration state of every algorithm, in [`Algorithm::ALL`] order.
+/// The acceleration state of every algorithm, in [`Algorithm::ALL`] order,
+/// from one consistent snapshot of the policies.
 #[must_use]
 pub fn status_all() -> [AlgorithmStatus; Algorithm::ALL.len()] {
-    Algorithm::ALL.map(status)
+    let policies = snapshot();
+    Algorithm::ALL.map(|alg| for_family!(alg, status_of, policies[alg.index()]))
 }
 
 /// The algorithms whose selected backend uses any acceleration.
@@ -597,13 +686,27 @@ mod tests {
 
     #[test]
     fn encodings_round_trip() {
-        for simd in LEVELS {
-            for dedicated in LEVELS {
+        assert_eq!(Policy::PREFERRED.to_bits(), 0);
+        assert_eq!(Policy::NONE.to_bits(), 0b1100);
+        assert_eq!(Uses::BOTH.bits(), 0b11);
+        let mut word = 0u64;
+        for (i, simd) in LEVELS.into_iter().enumerate() {
+            for (j, dedicated) in LEVELS.into_iter().enumerate() {
                 let p = Policy::new(simd, dedicated);
                 assert_eq!(Policy::from_bits(p.to_bits()), p);
+                // Neighbouring nibbles are untouched.
+                let alg = Algorithm::ALL[(3 * i + j) % Algorithm::ALL.len()];
+                let before = word;
+                word = with_nibble(word, alg, p);
+                assert_eq!(Policy::from_bits(nibble(word, alg)), p);
+                assert_eq!(
+                    word & !(NIBBLE << shift(alg)),
+                    before & !(NIBBLE << shift(alg))
+                );
             }
             assert_eq!(simd.name().parse::<Acceleration>(), Ok(simd));
         }
+        assert!(word >> 48 == 0, "only 48 bits are used");
         assert_eq!("PREFERED".parse(), Ok(Acceleration::Preferred));
         assert!("fast".parse::<Acceleration>().is_err());
         for (i, a) in Algorithm::ALL.iter().enumerate() {

@@ -156,6 +156,42 @@ fn acceleration_policies_per_kind() {
         }
     }
 
+    // Whole-policy updates are atomic: concurrent readers never observe a
+    // mix of the old and new global policy.
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        accel::set_policy_all(Policy::PREFERRED).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..3)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut seen = 0u64;
+                        while !stop.load(Ordering::Relaxed) {
+                            let all = accel::status_all();
+                            let first = all[0].policy;
+                            assert!(all.iter().all(|s| s.policy == first), "torn read");
+                            seen += 1;
+                        }
+                        seen
+                    })
+                })
+                .collect();
+            for i in 0..20_000 {
+                let p = if i % 2 == 0 {
+                    Policy::NONE
+                } else {
+                    Policy::PREFERRED
+                };
+                accel::set_policy_all(p).unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            for r in readers {
+                assert!(r.join().unwrap() > 0);
+            }
+        });
+    }
+
     // Configuration strings.
     assert_eq!("none".parse(), Ok(Acceleration::None));
     assert_eq!("Required".parse(), Ok(Acceleration::Required));

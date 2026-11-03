@@ -197,6 +197,7 @@ pub struct PinnedServerVerifier {
     pub expected: CertificateDer<'static>,
     pub spki: SubjectPublicKeyInfoDer<'static>,
     pub algs: WebPkiSupportedAlgorithms,
+    pub raw: bool,
 }
 
 impl PinnedServerVerifier {
@@ -205,11 +206,26 @@ impl PinnedServerVerifier {
             expected: chain.end_entity.clone(),
             spki: chain.spki(),
             algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            raw: false,
+        })
+    }
+
+    /// Expects the server to present `chain`'s key as an RFC 7250 raw public key.
+    pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
+        Arc::new(Self {
+            expected: CertificateDer::from(chain.end_entity_spki.clone()),
+            spki: chain.spki(),
+            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            raw: true,
         })
     }
 }
 
 impl ServerCertVerifier for PinnedServerVerifier {
+    fn requires_raw_public_keys(&self) -> bool {
+        self.raw
+    }
+
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -256,6 +272,7 @@ pub struct PinnedClientVerifier {
     pub algs: WebPkiSupportedAlgorithms,
     pub mandatory: bool,
     pub hints: Vec<DistinguishedName>,
+    pub raw: bool,
 }
 
 impl PinnedClientVerifier {
@@ -266,11 +283,28 @@ impl PinnedClientVerifier {
             algs: rustcrypto::SUPPORTED_SIG_ALGS,
             mandatory,
             hints: Vec::new(),
+            raw: false,
+        })
+    }
+
+    /// Expects the client to present `chain`'s key as an RFC 7250 raw public key.
+    pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
+        Arc::new(Self {
+            expected: CertificateDer::from(chain.end_entity_spki.clone()),
+            spki: chain.spki(),
+            algs: rustcrypto::SUPPORTED_SIG_ALGS,
+            mandatory: true,
+            hints: Vec::new(),
+            raw: true,
         })
     }
 }
 
 impl ClientCertVerifier for PinnedClientVerifier {
+    fn requires_raw_public_keys(&self) -> bool {
+        self.raw
+    }
+
     fn client_auth_mandatory(&self) -> bool {
         self.mandatory
     }
@@ -312,6 +346,54 @@ impl ClientCertVerifier for PinnedClientVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algs.supported_schemes()
+    }
+}
+
+/// Serves `chain`'s key as an RFC 7250 raw public key (server or client side).
+#[derive(Debug)]
+pub struct RawKeyResolver(pub Arc<browntls::sign::CertifiedKey>);
+
+impl RawKeyResolver {
+    pub fn new(chain: &Chain) -> Arc<Self> {
+        let key = provider()
+            .key_provider
+            .load_private_key(chain.private_key())
+            .expect("key loads");
+        Arc::new(Self(Arc::new(browntls::sign::CertifiedKey::new(
+            vec![CertificateDer::from(chain.end_entity_spki.clone())],
+            key,
+        ))))
+    }
+}
+
+impl browntls::server::ResolvesServerCert for RawKeyResolver {
+    fn resolve(
+        &self,
+        _client_hello: browntls::server::ClientHello<'_>,
+    ) -> Option<Arc<browntls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+impl browntls::client::ResolvesClientCert for RawKeyResolver {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<browntls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        true
+    }
+
+    fn has_certs(&self) -> bool {
+        true
     }
 }
 

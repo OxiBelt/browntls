@@ -11,7 +11,9 @@ use super::tls13;
 use crate::common_state::{ConnectionRandoms, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{KeyExchangeAlgorithm, SupportedKxGroup};
-use crate::enums::{AlertDescription, HandshakeType, ProtocolVersion, SignatureScheme};
+use crate::enums::{
+    AlertDescription, CertificateType, HandshakeType, ProtocolVersion, SignatureScheme,
+};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
@@ -155,6 +157,28 @@ impl ExpectClientHello {
             })?;
         let certkey = ActiveCertifiedKey::from_certified_key(&certkey);
 
+        // RFC 7250: certificate types, for the server's and the client's credentials.
+        let cert_types = NegotiatedCertTypes {
+            server: negotiate_cert_type(
+                client_hello
+                    .extensions
+                    .server_certificate_types
+                    .as_deref()
+                    .unwrap_or_default(),
+                self.config.cert_resolver.only_raw_public_keys(),
+                cx,
+            )?,
+            client: negotiate_cert_type(
+                client_hello
+                    .extensions
+                    .client_certificate_types
+                    .as_deref()
+                    .unwrap_or_default(),
+                self.config.verifier.requires_raw_public_keys(),
+                cx,
+            )?,
+        };
+
         // ALPN (RFC 7301 §3.2): server preference among the client's offers.
         if let Some(offered) = client_hello.alpn_protocols() {
             let selected = self
@@ -274,6 +298,7 @@ impl ExpectClientHello {
                 randoms,
                 done_retry: self.done_retry,
                 send_tickets: self.send_tickets,
+                cert_types,
             }
             .handle_client_hello(
                 cx,
@@ -300,6 +325,7 @@ impl ExpectClientHello {
                     using_ems,
                     randoms,
                     send_ticket: self.send_tickets > 0,
+                    cert_types,
                 }
                 .handle_client_hello(
                     cx,
@@ -312,6 +338,35 @@ impl ExpectClientHello {
                 )
             }
         }
+    }
+}
+
+/// The RFC 7250 certificate types to announce, one per direction; `None`
+/// when the client did not raise the question.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct NegotiatedCertTypes {
+    pub(super) client: Option<CertificateType>,
+    pub(super) server: Option<CertificateType>,
+}
+
+/// Picks a certificate type from what the client supports. A side configured
+/// for raw public keys only accepts a client that offers them; otherwise X.509
+/// is used (and the client must allow it when it sent the extension at all).
+fn negotiate_cert_type(
+    client_supports: &[CertificateType],
+    requires_raw_keys: bool,
+    cx: &mut ServerContext<'_>,
+) -> Result<Option<CertificateType>, Error> {
+    let raw = client_supports.contains(&CertificateType::RawPublicKey);
+    let x509 = client_supports.contains(&CertificateType::X509);
+    match (requires_raw_keys, raw, x509) {
+        (true, true, _) => Ok(Some(CertificateType::RawPublicKey)),
+        (false, _, true) => Ok(Some(CertificateType::X509)),
+        (false, false, false) => Ok(None),
+        (true, false, _) | (false, true, false) => Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::IncorrectCertificateTypeExtension,
+        )),
     }
 }
 

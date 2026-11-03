@@ -16,7 +16,7 @@ use crate::common_state::ConnectionRandoms;
 use crate::common_state::{CommonState, HandshakeKind, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
-use crate::enums::{AlertDescription, CipherSuite, ProtocolVersion};
+use crate::enums::{AlertDescription, CertificateType, CipherSuite, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
@@ -338,6 +338,15 @@ fn emit_client_hello_for_retry(
             shares
         }),
         cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
+        // RFC 7250: raw public keys instead of certificates, in either direction.
+        client_certificate_types: config
+            .client_auth_cert_resolver
+            .only_raw_public_keys()
+            .then(|| vec![CertificateType::RawPublicKey]),
+        server_certificate_types: config
+            .verifier
+            .requires_raw_public_keys()
+            .then(|| vec![CertificateType::RawPublicKey]),
         certificate_compression: (supports_tls13 && !config.cert_decompressors.is_empty()).then(
             || {
                 config
@@ -464,6 +473,36 @@ fn emit_client_hello_for_retry(
     } else {
         Box::new(ExpectServerHelloOrHelloRetryRequest { next })
     })
+}
+
+/// Checks the server's answers to our RFC 7250 certificate type offers: a
+/// side we required raw public keys for must have been granted them.
+///
+/// An answer we never asked for is caught earlier as an unsolicited extension.
+pub(super) fn process_cert_type_extensions(
+    common: &mut CommonState,
+    config: &ClientConfig,
+    client_negotiated: Option<CertificateType>,
+    server_negotiated: Option<CertificateType>,
+) -> Result<(), Error> {
+    for (required, negotiated) in [
+        (
+            config.client_auth_cert_resolver.only_raw_public_keys(),
+            client_negotiated,
+        ),
+        (
+            config.verifier.requires_raw_public_keys(),
+            server_negotiated,
+        ),
+    ] {
+        if required && negotiated != Some(CertificateType::RawPublicKey) {
+            return Err(common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::IncorrectCertificateTypeExtension,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Checks the server's ALPN choice against what we offered and records it.

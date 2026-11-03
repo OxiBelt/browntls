@@ -1144,3 +1144,137 @@ fn early_data_rustls_client_browntls_server() {
     );
     round_trip(&mut client, &mut server);
 }
+
+// ---------------------------------------------------------- raw public keys
+
+/// A rustls verifier pinning one RFC 7250 raw public key.
+#[derive(Debug)]
+struct RustlsRawKeyVerifier {
+    spki: Vec<u8>,
+    algs: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl rustls::client::danger::ServerCertVerifier for RustlsRawKeyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rpki::CertificateDer<'_>,
+        _intermediates: &[rpki::CertificateDer<'_>],
+        _server_name: &rpki::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rpki::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.spki {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rpki::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General(
+            "raw keys are TLS 1.3 only here".into(),
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        _cert: &rpki::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature_with_raw_key(
+            message,
+            &rpki::SubjectPublicKeyInfoDer::from(self.spki.as_slice()),
+            dss,
+            &self.algs,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algs.supported_schemes()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+/// A rustls resolver serving one raw public key.
+#[derive(Debug)]
+struct RustlsRawKeyResolver(Arc<rustls::sign::CertifiedKey>);
+
+impl rustls::server::ResolvesServerCert for RustlsRawKeyResolver {
+    fn resolve(
+        &self,
+        _client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+fn rustls_raw_key(chain: &Chain) -> Arc<rustls::sign::CertifiedKey> {
+    let key = ring_provider::sign::any_supported_type(&r_key(chain)).unwrap();
+    Arc::new(rustls::sign::CertifiedKey::new(
+        vec![rpki::CertificateDer::from(chain.end_entity_spki.clone())],
+        key,
+    ))
+}
+
+#[test]
+fn raw_public_keys_both_directions() {
+    init_logging();
+    for key_type in KeyType::SIGNING {
+        let chain = server_chain(key_type);
+        let spki = rpki::CertificateDer::from(chain.end_entity_spki.clone());
+
+        // browntls client, rustls raw-key server
+        let server_config = rustls::ServerConfig::builder_with_provider(r_provider(None, None))
+            .with_protocol_versions(r_versions(0x0304))
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(RustlsRawKeyResolver(rustls_raw_key(&chain))));
+        let client_config = browntls::ClientConfig::builder_with_provider(b_provider(None, None))
+            .with_protocol_versions(b_versions(0x0304))
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::raw_public_key(&chain))
+            .with_no_client_auth();
+        let mut client = b_connect_client(client_config);
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
+        handshake_ok(&mut client, &mut server);
+        assert_eq!(client.peer_certs().unwrap(), [spki.as_ref().to_vec()]);
+        round_trip(&mut client, &mut server);
+
+        // rustls client, browntls raw-key server
+        let client_config = rustls::ClientConfig::builder_with_provider(r_provider(None, None))
+            .with_protocol_versions(r_versions(0x0304))
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(RustlsRawKeyVerifier {
+                spki: chain.end_entity_spki.clone(),
+                algs: ring_provider::default_provider().signature_verification_algorithms,
+            }))
+            .with_no_client_auth();
+        let server_config = browntls::ServerConfig::builder_with_provider(b_provider(None, None))
+            .with_protocol_versions(b_versions(0x0304))
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(RawKeyResolver::new(&chain));
+        let mut client = r_connect_client(client_config);
+        let mut server = browntls::ServerConnection::new(Arc::new(server_config)).unwrap();
+        handshake_ok(&mut client, &mut server);
+        assert_eq!(client.peer_certs().unwrap(), [spki.as_ref().to_vec()]);
+        round_trip(&mut client, &mut server);
+    }
+}

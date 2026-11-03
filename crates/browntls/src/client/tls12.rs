@@ -89,6 +89,12 @@ impl CompleteServerHelloHandling {
             &self.alpn_protocols,
             server_hello.extensions.alpn.as_ref().map(|p| p.as_ref()),
         )?;
+        hs::process_cert_type_extensions(
+            cx.common,
+            &self.config,
+            server_hello.extensions.client_certificate_type,
+            server_hello.extensions.server_certificate_type,
+        )?;
 
         if self.config.require_ems && !self.using_ems {
             return Err(cx.common.send_fatal_alert(

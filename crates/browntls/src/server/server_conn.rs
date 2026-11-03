@@ -12,7 +12,7 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
-use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
+use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::key_log::KeyLog;
 use crate::msgs::enums::NamedGroup;
@@ -75,6 +75,8 @@ pub struct ClientHello<'a> {
     pub(super) cipher_suites: &'a [CipherSuite],
     pub(super) certificate_authorities: Option<&'a [DistinguishedName]>,
     pub(super) named_groups: Option<&'a [NamedGroup]>,
+    pub(super) client_cert_types: Option<&'a [CertificateType]>,
+    pub(super) server_cert_types: Option<&'a [CertificateType]>,
 }
 
 impl<'a> ClientHello<'a> {
@@ -90,7 +92,19 @@ impl<'a> ClientHello<'a> {
             cipher_suites: &payload.cipher_suites,
             certificate_authorities: payload.extensions.certificate_authorities.as_deref(),
             named_groups: payload.named_groups(),
+            client_cert_types: payload.extensions.client_certificate_types.as_deref(),
+            server_cert_types: payload.extensions.server_certificate_types.as_deref(),
         }
+    }
+
+    /// The certificate types the client can present (RFC 7250), if it said.
+    pub fn client_cert_types(&self) -> Option<&'a [CertificateType]> {
+        self.client_cert_types
+    }
+
+    /// The certificate types the client accepts from us (RFC 7250), if it said.
+    pub fn server_cert_types(&self) -> Option<&'a [CertificateType]> {
+        self.server_cert_types
     }
 
     /// The server name indicated by the client, if any.

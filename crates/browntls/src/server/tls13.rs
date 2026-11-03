@@ -48,6 +48,7 @@ pub(super) struct CompleteClientHelloHandling {
     pub(super) randoms: ConnectionRandoms,
     pub(super) done_retry: bool,
     pub(super) send_tickets: usize,
+    pub(super) cert_types: hs::NegotiatedCertTypes,
 }
 
 impl CompleteClientHelloHandling {
@@ -321,6 +322,7 @@ impl CompleteClientHelloHandling {
             cx,
             client_hello,
             early_data == EarlyDataDecision::Accepted,
+            self.cert_types,
         );
 
         let doing_client_auth = if resumedata.is_none() {
@@ -594,6 +596,7 @@ fn emit_encrypted_extensions(
     cx: &mut ServerContext<'_>,
     client_hello: &ClientHelloPayload,
     early_data_accepted: bool,
+    cert_types: hs::NegotiatedCertTypes,
 ) {
     let exts = ServerExtensions {
         alpn: cx
@@ -603,6 +606,8 @@ fn emit_encrypted_extensions(
             .map(crate::msgs::handshake::ProtocolName::from),
         server_name_ack: client_hello.sni().map(|_| ()),
         early_data: early_data_accepted.then_some(()),
+        client_certificate_type: cert_types.client,
+        server_certificate_type: cert_types.server,
         ..Default::default()
     };
     let m = Message {

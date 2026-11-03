@@ -46,6 +46,7 @@ pub(super) struct CompleteClientHelloHandling {
     pub(super) using_ems: bool,
     pub(super) randoms: ConnectionRandoms,
     pub(super) send_ticket: bool,
+    pub(super) cert_types: hs::NegotiatedCertTypes,
 }
 
 impl CompleteClientHelloHandling {
@@ -271,6 +272,8 @@ impl CompleteClientHelloHandling {
                 .map(|_| vec![ECPointFormat::Uncompressed]),
             session_ticket_ack: self.send_ticket.then_some(()),
             status_request_ack: staple_ocsp.then_some(()),
+            client_certificate_type: self.cert_types.client,
+            server_certificate_type: self.cert_types.server,
             alpn: cx
                 .common
                 .alpn_protocol

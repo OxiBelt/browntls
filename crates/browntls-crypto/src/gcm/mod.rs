@@ -85,21 +85,46 @@ impl GhashBackend {
     /// The backend the dispatcher selects on the current CPU.
     #[must_use]
     pub fn select() -> Self {
-        if !crate::accel::allowed(crate::accel::Algorithm::Ghash) {
-            return Self::Soft;
+        crate::accel::select::<Self>()
+    }
+}
+
+impl crate::accel::Backends for GhashBackend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Ghash;
+    const PREFERENCE: &'static [Self] = &[
+        Self::Clmul,
+        Self::Pmull,
+        Self::RvZvkg,
+        Self::RvZvbc,
+        Self::RvClmul,
+        Self::Soft,
+    ];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            Self::Clmul => Uses::DEDICATED,
+            Self::Pmull => Uses::DEDICATED,
+            Self::RvZvkg => Uses::BOTH,
+            Self::RvZvbc => Uses::BOTH,
+            Self::RvClmul => Uses::DEDICATED,
         }
-        for candidate in [
-            Self::Clmul,
-            Self::Pmull,
-            Self::RvZvkg,
-            Self::RvZvbc,
-            Self::RvClmul,
-        ] {
-            if candidate.is_available() {
-                return candidate;
-            }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            Self::Clmul => "PCLMULQDQ",
+            Self::Pmull => "FEAT_PMULL",
+            Self::RvZvkg => "Zvkg",
+            Self::RvZvbc => "Zvbc",
+            Self::RvClmul => "Zbc/Zbkc",
         }
-        Self::Soft
     }
 }
 

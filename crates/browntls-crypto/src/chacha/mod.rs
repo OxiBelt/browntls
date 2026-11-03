@@ -116,14 +116,38 @@ impl Backend {
     /// The preferred available tier.
     #[must_use]
     pub fn best() -> Self {
-        if !crate::accel::allowed(crate::accel::Algorithm::ChaCha20) {
-            return Self::Soft;
+        crate::accel::select::<Self>()
+    }
+}
+
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::ChaCha20;
+    const PREFERENCE: &'static [Self] =
+        &[Self::Rvv, Self::Neon, Self::Avx512, Self::Avx2, Self::Soft];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            Self::Avx2 => Uses::SIMD,
+            Self::Avx512 => Uses::SIMD,
+            Self::Neon => Uses::SIMD,
+            Self::Rvv => Uses::SIMD,
         }
-        Self::ALL
-            .into_iter()
-            .rev()
-            .find(|b| b.is_available())
-            .unwrap_or(Self::Soft)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            Self::Avx2 => "AVX2",
+            Self::Avx512 => "AVX-512",
+            Self::Neon => "NEON",
+            Self::Rvv => "RVV",
+        }
     }
 }
 

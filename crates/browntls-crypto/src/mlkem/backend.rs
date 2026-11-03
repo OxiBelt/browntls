@@ -28,13 +28,7 @@ impl Backend {
     /// Returns the best backend available on this CPU.
     #[must_use]
     pub fn detect() -> Self {
-        if !crate::accel::allowed(crate::accel::Algorithm::MlKem) {
-            return Self::Portable;
-        }
-        Self::ALL
-            .into_iter()
-            .find(|b| b.is_available())
-            .unwrap_or(Self::Portable)
+        crate::accel::select::<Self>()
     }
 
     /// Returns whether this backend can run on this CPU.
@@ -56,6 +50,34 @@ impl Backend {
     /// Returns every backend available on this CPU (best first).
     pub fn available() -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(|b| b.is_available())
+    }
+}
+
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::MlKem;
+    const PREFERENCE: &'static [Self] = &[Self::Avx2, Self::Neon, Self::Rvv, Self::Portable];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Portable => Uses::PORTABLE,
+            Self::Avx2 => Uses::SIMD,
+            Self::Neon => Uses::SIMD,
+            Self::Rvv => Uses::SIMD,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Portable => "portable",
+            Self::Avx2 => "AVX2",
+            Self::Neon => "NEON",
+            Self::Rvv => "RVV",
+        }
     }
 }
 

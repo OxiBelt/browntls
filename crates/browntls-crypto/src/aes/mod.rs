@@ -129,21 +129,46 @@ impl Backend {
     /// The backend the dispatcher selects on the current CPU.
     #[must_use]
     pub fn select() -> Self {
-        if !crate::accel::allowed(crate::accel::Algorithm::Aes) {
-            return Self::Soft;
+        crate::accel::select::<Self>()
+    }
+}
+
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Aes;
+    const PREFERENCE: &'static [Self] = &[
+        Self::Vaes,
+        Self::AesNi,
+        Self::ArmAes,
+        Self::RvZvkned,
+        Self::RvZkne,
+        Self::Soft,
+    ];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            Self::AesNi => Uses::DEDICATED,
+            Self::Vaes => Uses::BOTH,
+            Self::ArmAes => Uses::DEDICATED,
+            Self::RvZvkned => Uses::BOTH,
+            Self::RvZkne => Uses::DEDICATED,
         }
-        for candidate in [
-            Self::Vaes,
-            Self::AesNi,
-            Self::ArmAes,
-            Self::RvZvkned,
-            Self::RvZkne,
-        ] {
-            if candidate.is_available() {
-                return candidate;
-            }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            Self::AesNi => "AES-NI",
+            Self::Vaes => "VAES (AVX2)",
+            Self::ArmAes => "FEAT_AES",
+            Self::RvZvkned => "Zvkned",
+            Self::RvZkne => "Zkne",
         }
-        Self::Soft
     }
 }
 

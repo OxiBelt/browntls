@@ -51,6 +51,41 @@ pub(crate) fn p256_hardware_available() -> bool {
 
 /// Whether P-256 operations use the accelerated field arithmetic now.
 pub(crate) fn p256_accelerated() -> bool {
-    crate::accel::allowed(crate::accel::Algorithm::P256) && p256_hardware_available()
+    crate::accel::select::<P256Backend>() == P256Backend::BmiAdx
+}
+
+/// P-256 field arithmetic backends (for the acceleration policy).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum P256Backend {
+    /// BMI2 `mulx` + ADX `adcx`/`adox` (x86-64).
+    BmiAdx,
+    /// Portable 64-bit Montgomery arithmetic.
+    Portable,
+}
+
+impl crate::accel::Backends for P256Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::P256;
+    const PREFERENCE: &'static [Self] = &[Self::BmiAdx, Self::Portable];
+
+    fn available(self) -> bool {
+        match self {
+            Self::BmiAdx => p256_hardware_available(),
+            Self::Portable => true,
+        }
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        match self {
+            Self::BmiAdx => crate::accel::Uses::DEDICATED,
+            Self::Portable => crate::accel::Uses::PORTABLE,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::BmiAdx => "BMI2/ADX",
+            Self::Portable => "portable",
+        }
+    }
 }
 pub mod p521;

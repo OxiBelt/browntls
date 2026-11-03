@@ -63,29 +63,45 @@ fn handshake_every_suite() {
 
 #[test]
 fn handshakes_under_every_acceleration_policy() {
+    use accel::{Acceleration, Kind, Policy};
+
     for s in accel::status_all() {
         println!("{s}");
     }
 
-    // Preferred (default): whatever the CPU offers.
-    let provider = native::default_provider_with_acceleration(accel::Acceleration::Preferred);
-    assert!(provider.is_ok());
-    handshake_every_suite();
-
-    // None: portable primitives only, and the handshakes still succeed.
-    native::default_provider_with_acceleration(accel::Acceleration::None).unwrap();
-    assert_eq!(accel::accelerated().count(), 0);
-    handshake_every_suite();
-
-    // Required for every family succeeds only where all are accelerated, and
-    // a refusal leaves the previous policy in place.
-    let all_hw = accel::status_all().iter().all(|s| s.hardware_available);
-    let required = native::default_provider_with_acceleration(accel::Acceleration::Required);
-    assert_eq!(required.is_ok(), all_hw);
-    if !all_hw {
-        assert!(accel::accelerated().next().is_none());
+    let levels = [
+        Acceleration::Required,
+        Acceleration::Preferred,
+        Acceleration::None,
+    ];
+    for simd in levels {
+        for dedicated in levels {
+            let policy = Policy::new(simd, dedicated);
+            accel::set_policy_all(Policy::PREFERRED).unwrap();
+            match native::default_provider_with_acceleration(policy) {
+                Ok(_) => {
+                    for s in accel::status_all() {
+                        assert!(s.policy.permits(s.uses), "{s}");
+                    }
+                    handshake_every_suite();
+                }
+                // Refused: nothing changed.
+                Err(_) => assert!(
+                    accel::status_all()
+                        .iter()
+                        .all(|s| s.policy == Policy::PREFERRED)
+                ),
+            }
+        }
     }
 
-    accel::set_policy_all(accel::Acceleration::Preferred).unwrap();
-    handshake_every_suite();
+    // Each kind disabled on its own is always satisfiable.
+    for kind in Kind::ALL {
+        accel::set_policy_all(Policy::PREFERRED).unwrap();
+        accel::set_kind_all(kind, Acceleration::None).unwrap();
+        assert_eq!(accel::accelerated_by(kind).count(), 0);
+        handshake_every_suite();
+    }
+
+    accel::set_policy_all(Policy::PREFERRED).unwrap();
 }

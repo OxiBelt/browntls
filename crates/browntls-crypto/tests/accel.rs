@@ -1,4 +1,5 @@
-//! Acceleration policy: `Required` / `Preferred` / `None` and status reports.
+//! Acceleration policies per kind (SIMD / dedicated instructions) and
+//! status reports.
 //!
 //! The policy is process-wide, so everything runs in one test function to
 //! avoid races with other tests (each integration test file is its own
@@ -6,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use browntls_crypto::Error;
-use browntls_crypto::accel::{self, Acceleration, Algorithm};
+use browntls_crypto::accel::{self, Acceleration, Algorithm, Kind, Policy};
 use browntls_crypto::aead::Aead as _;
 use browntls_crypto::chacha::ChaCha20Poly1305;
 use browntls_crypto::curve25519::x25519;
@@ -16,6 +17,12 @@ use browntls_crypto::mlkem::{DecapsulationKey, MlKem768};
 use browntls_crypto::nist::p256;
 use browntls_crypto::rand::OsRng;
 use browntls_crypto::rsa::RsaPrivateKey;
+
+const LEVELS: [Acceleration; 3] = [
+    Acceleration::Required,
+    Acceleration::Preferred,
+    Acceleration::None,
+];
 
 /// Outputs of every policy-controlled algorithm on fixed inputs.
 fn fingerprint(rsa: &RsaPrivateKey) -> Vec<Vec<u8>> {
@@ -68,71 +75,85 @@ fn fingerprint(rsa: &RsaPrivateKey) -> Vec<Vec<u8>> {
     out
 }
 
+/// Every algorithm's selected backend obeys its policy.
+fn assert_policies_obeyed() {
+    for s in accel::status_all() {
+        assert!(s.policy.permits(s.uses), "{s}");
+        assert!(s.uses.simd <= s.available.simd, "{s}");
+        assert!(s.uses.dedicated <= s.available.dedicated, "{s}");
+    }
+}
+
 #[test]
-fn acceleration_policies() {
+fn acceleration_policies_per_kind() {
     let rsa = RsaPrivateKey::generate(2048, &OsRng).unwrap();
 
-    // Default: every algorithm prefers acceleration and uses it when present.
+    // Default: both kinds preferred; anything available is used.
     for s in accel::status_all() {
         println!("{s}");
-        assert_eq!(s.policy, Acceleration::Preferred);
-        assert_eq!(s.accelerated, s.hardware_available, "{s}");
+        assert_eq!(s.policy, Policy::PREFERRED);
+        assert_eq!(s.accelerated(), s.available.any(), "{s}");
     }
-    let preferred = fingerprint(&rsa);
+    let baseline = fingerprint(&rsa);
 
-    // None: portable code everywhere, identical results.
-    accel::set_policy_all(Acceleration::None).unwrap();
-    assert_eq!(accel::accelerated().count(), 0);
-    for s in accel::status_all() {
-        assert_eq!(s.policy, Acceleration::None);
-        assert_eq!(s.backend, "portable");
-    }
-    assert_eq!(fingerprint(&rsa), preferred);
-
-    // Per-algorithm override on top of a global policy.
-    accel::set_policy(Algorithm::Aes, Acceleration::Preferred).unwrap();
-    let aes = accel::status(Algorithm::Aes);
-    assert_eq!(aes.accelerated, aes.hardware_available);
-    assert!(
-        accel::accelerated().all(|s| s.algorithm == Algorithm::Aes),
-        "only AES may be accelerated"
-    );
-    assert_eq!(fingerprint(&rsa), preferred);
-
-    // Required: accepted exactly where hardware exists, and then accelerated.
-    accel::set_policy_all(Acceleration::Preferred).unwrap();
-    for alg in Algorithm::ALL {
-        let hw = accel::status(alg).hardware_available;
-        match accel::set_policy(alg, Acceleration::Required) {
-            Ok(()) => {
-                assert!(hw, "{alg}");
-                let s = accel::status(alg);
-                assert_eq!(s.policy, Acceleration::Required);
-                assert!(s.accelerated, "{s}");
-            }
-            Err(e) => {
-                assert_eq!(e, Error::Unsupported);
-                assert!(!hw, "{alg}");
-                // A refused request leaves the previous policy in place.
-                assert_eq!(accel::policy(alg), Acceleration::Preferred);
+    // Every global combination of levels: accepted ones are obeyed and give
+    // identical results; refused ones change nothing.
+    for simd in LEVELS {
+        for dedicated in LEVELS {
+            let policy = Policy::new(simd, dedicated);
+            accel::set_policy_all(Policy::PREFERRED).unwrap();
+            match accel::set_policy_all(policy) {
+                Ok(()) => {
+                    assert!(Algorithm::ALL.iter().all(|&a| accel::policy(a) == policy));
+                    assert_policies_obeyed();
+                    assert_eq!(fingerprint(&rsa), baseline, "{policy}");
+                }
+                Err(e) => {
+                    assert_eq!(e, Error::Unsupported);
+                    assert!(
+                        Algorithm::ALL
+                            .iter()
+                            .all(|&a| accel::policy(a) == Policy::PREFERRED)
+                    );
+                    // Some family cannot satisfy it on its own either.
+                    let refused = Algorithm::ALL.iter().filter(|&&a| {
+                        let r = accel::set_policy(a, policy);
+                        accel::set_policy(a, Policy::PREFERRED).unwrap();
+                        r.is_err()
+                    });
+                    assert!(refused.count() > 0, "{policy}");
+                }
             }
         }
     }
-    assert_eq!(fingerprint(&rsa), preferred);
 
-    // Required for everything succeeds only if every family is accelerated.
-    accel::set_policy_all(Acceleration::Preferred).unwrap();
-    let all_hw = accel::status_all().iter().all(|s| s.hardware_available);
-    assert_eq!(
-        accel::set_policy_all(Acceleration::Required).is_ok(),
-        all_hw
-    );
-    if !all_hw {
-        assert!(
-            Algorithm::ALL
-                .iter()
-                .all(|&a| accel::policy(a) == Acceleration::Preferred)
-        );
+    // Per algorithm: a required kind is honoured exactly when it is offered.
+    accel::set_policy_all(Policy::PREFERRED).unwrap();
+    for alg in Algorithm::ALL {
+        for kind in Kind::ALL {
+            let offered = accel::status(alg).available.get(kind);
+            let r = accel::set_kind(alg, kind, Acceleration::Required);
+            assert_eq!(r.is_ok(), offered, "{alg} {kind}");
+            if r.is_ok() {
+                assert!(accel::status(alg).uses.get(kind), "{alg} {kind}");
+            } else {
+                assert_eq!(accel::policy(alg), Policy::PREFERRED);
+            }
+            accel::set_policy(alg, Policy::PREFERRED).unwrap();
+        }
+    }
+
+    // Disable one kind everywhere: the other kind is still used where a
+    // backend relies on it alone.
+    for kind in Kind::ALL {
+        accel::set_policy_all(Policy::PREFERRED).unwrap();
+        accel::set_kind_all(kind, Acceleration::None).unwrap();
+        assert_eq!(accel::accelerated_by(kind).count(), 0, "{kind}");
+        assert_policies_obeyed();
+        assert_eq!(fingerprint(&rsa), baseline, "{kind} disabled");
+        for s in accel::status_all() {
+            println!("{kind} none -> {s}");
+        }
     }
 
     // Configuration strings.
@@ -140,5 +161,5 @@ fn acceleration_policies() {
     assert_eq!("Required".parse(), Ok(Acceleration::Required));
     assert_eq!("prefered".parse(), Ok(Acceleration::Preferred));
 
-    accel::set_policy_all(Acceleration::Preferred).unwrap();
+    accel::set_policy_all(Policy::PREFERRED).unwrap();
 }

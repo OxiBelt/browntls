@@ -68,10 +68,30 @@ impl Backend {
     /// The backend [`x25519`] dispatches to.
     #[must_use]
     pub fn best() -> Self {
-        if crate::accel::allowed(crate::accel::Algorithm::X25519) && Self::X86Adx.is_available() {
-            Self::X86Adx
-        } else {
-            Self::Portable
+        crate::accel::select::<Self>()
+    }
+}
+
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::X25519;
+    const PREFERENCE: &'static [Self] = &[Self::X86Adx, Self::Portable];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Portable => Uses::PORTABLE,
+            Self::X86Adx => Uses::DEDICATED,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Portable => "portable",
+            Self::X86Adx => "BMI2/ADX",
         }
     }
 }

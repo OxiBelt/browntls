@@ -34,31 +34,38 @@
 //!
 //! # Hardware acceleration
 //!
-//! The primitives select SIMD and hardware backends at run time under a
-//! process-wide policy per algorithm family, re-exported here as [`accel`]:
-//! `Required`, `Preferred` (default) or `None` (portable code only).
-//! [`accel::status_all`] and [`accel::accelerated`] report what is in use.
+//! The primitives select accelerated backends at run time under a
+//! process-wide policy per algorithm family, re-exported here as [`accel`].
+//! Acceleration comes in two kinds, each with its own level (`Required`,
+//! `Preferred` (default) or `None`):
+//!
+//! * SIMD: AVX2/AVX-512, NEON, RVV vector units.
+//! * Dedicated instructions: AES-NI, PCLMULQDQ, SHA, Armv8 AES/PMULL/SHA,
+//!   RISC-V Zk\*/Zvk\*, and scalar multi-precision extensions (BMI2/ADX).
+//!
+//! [`accel::status_all`], [`accel::accelerated`] and
+//! [`accel::accelerated_by`] report what is in use.
 //!
 //! ```
-//! use browntls::crypto::native::{self, accel::{self, Acceleration, Algorithm}};
+//! use browntls::crypto::native::{self, accel::{self, Acceleration, Algorithm, Kind, Policy}};
 //!
-//! // Which algorithms run accelerated right now?
+//! // Which algorithms run accelerated right now, and how?
 //! for s in accel::accelerated() {
-//!     println!("{s}"); // e.g. "AES: AES-NI (policy preferred, hardware available)"
+//!     println!("{s}"); // e.g. "AES: AES-NI [uses dedicated] (...)"
 //! }
 //!
-//! // Refuse to run AES-GCM without hardware AES and carry-less multiply.
-//! let required = [Algorithm::Aes, Algorithm::Ghash]
-//!     .into_iter()
-//!     .try_for_each(|alg| accel::set_policy(alg, Acceleration::Required));
-//! if required.is_err() {
-//!     // No hardware AES/GHASH on this CPU: decide what to do (here: continue).
-//! }
-//!
-//! // Or apply one policy to every family when building the provider.
-//! let provider = native::default_provider_with_acceleration(Acceleration::Preferred)?;
+//! // Never use the SIMD units, but keep dedicated instructions such as AES-NI.
+//! let provider = native::default_provider_with_acceleration(Policy::new(
+//!     Acceleration::None,
+//!     Acceleration::Preferred,
+//! ))?;
 //! # let _ = provider;
-//! # accel::set_policy_all(Acceleration::Preferred).unwrap();
+//!
+//! // Require dedicated AES instructions, or fail at start-up.
+//! if accel::set_kind(Algorithm::Aes, Kind::Dedicated, Acceleration::Required).is_err() {
+//!     // No AES instructions on this CPU: decide what to do (here: continue).
+//! }
+//! # accel::set_policy_all(Policy::PREFERRED).unwrap();
 //! # Ok::<(), browntls::Error>(())
 //! ```
 //!
@@ -107,24 +114,22 @@ pub fn default_provider() -> CryptoProvider {
 /// (`browntls_crypto::accel`).
 pub use browntls_crypto::accel;
 
-/// [`default_provider`] after applying `policy` to every algorithm family of
-/// [`accel`].
+/// [`default_provider`] after applying `policy` (SIMD and dedicated-
+/// instruction levels) to every algorithm family of [`accel`].
 ///
 /// The policy is process-wide and also affects other users of
-/// `browntls-crypto` in the process. To require acceleration for selected
-/// families only, call [`accel::set_policy`] per [`accel::Algorithm`].
+/// `browntls-crypto` in the process. To set levels for selected families
+/// only, use [`accel::set_policy`] or [`accel::set_kind`].
 ///
 /// # Errors
 ///
-/// With [`accel::Acceleration::Required`], returns [`Error::General`] and
-/// changes no policy unless every family has an accelerated backend on this
-/// CPU (see [`accel::status_all`]).
-pub fn default_provider_with_acceleration(
-    policy: accel::Acceleration,
-) -> Result<CryptoProvider, Error> {
+/// When a kind is [`accel::Acceleration::Required`], returns
+/// [`Error::General`] and changes no policy unless every family has an
+/// available backend satisfying `policy` (see [`accel::status_all`]).
+pub fn default_provider_with_acceleration(policy: accel::Policy) -> Result<CryptoProvider, Error> {
     accel::set_policy_all(policy).map_err(|_| {
         Error::General(alloc::string::String::from(
-            "required hardware acceleration is not available for every algorithm",
+            "the requested hardware acceleration is not available for every algorithm",
         ))
     })?;
     Ok(default_provider())

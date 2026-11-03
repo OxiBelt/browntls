@@ -114,23 +114,34 @@ implemented and executed.
 
 ### Acceleration policy and status
 
-At run time, `browntls_crypto::accel` (re-exported as
-`browntls::crypto::native::accel`) controls and reports backend use per
-algorithm family (SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
-ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM):
+Accelerated backends use one or both kinds of hardware support:
 
-| Policy | Behaviour |
+| Kind | Instructions |
 |---|---|
-| `Preferred` (default) | Best available backend, portable fallback |
-| `Required` | Setting it fails with `Unsupported` unless an accelerated backend is available; then as `Preferred` |
-| `None` | Portable implementation only |
+| SIMD | AVX2, AVX-512, NEON, RVV vector units |
+| Dedicated | AES-NI, PCLMULQDQ, SHA, Armv8 AES/PMULL/SHA2/SHA512/SHA3, RISC-V Zk\*/Zvk\*/Zbc/Zbkc, and scalar multi-precision or bit-manipulation extensions (BMI1/BMI2/ADX, Zbb) |
 
-`accel::set_policy`, `accel::set_policy_all` and
-`native::default_provider_with_acceleration` set policies;
-`accel::status_all` and `accel::accelerated` report, per family, the policy,
-whether the CPU offers acceleration and the backend selected now. Policies are
-process-wide; keyed objects (AES-GCM and ML-KEM keys) keep the backend chosen
-when they were created. Hardware feature checks that guard `unsafe` code are
+For example AES-NI and SHA-NI are dedicated, ChaCha20 AVX2 and the ML-KEM
+NTTs are SIMD, and VAES, RISC-V Zvkned/Zvkg/Zvknh\* and the x86-64-v3 SHA-2
+schedule (AVX2 with BMI2) use both.
+
+At run time, `browntls_crypto::accel` (re-exported as
+`browntls::crypto::native::accel`) holds a process-wide `Policy` per
+algorithm family (SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
+ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM) with one level per kind:
+
+| Level | Behaviour for that kind |
+|---|---|
+| `Preferred` (default) | Backends using it may be selected; the best available one wins |
+| `Required` | The selected backend must use it; setting fails with `Unsupported` if no available backend qualifies |
+| `None` | Backends using it are never selected |
+
+`accel::set_policy`, `set_policy_all`, `set_kind`, `set_kind_all` and
+`native::default_provider_with_acceleration` set levels; `accel::status_all`,
+`accelerated` and `accelerated_by(kind)` report, per family, the policy, the
+kinds the CPU offers, and the selected backend with the kinds it uses.
+Keyed objects (AES-GCM and ML-KEM keys) keep the backend chosen when they
+were created. Hardware feature checks that guard `unsafe` code are
 independent of the policy.
 
 ### Operating-system interface

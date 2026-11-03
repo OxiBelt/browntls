@@ -148,15 +148,32 @@ impl PolyBackend {
     /// The preferred available tier.
     #[must_use]
     pub fn best() -> Self {
-        if !crate::accel::allowed(crate::accel::Algorithm::Poly1305) {
-            return Self::Soft;
+        crate::accel::select::<Self>()
+    }
+}
+
+impl crate::accel::Backends for PolyBackend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Poly1305;
+    const PREFERENCE: &'static [Self] = &[Self::Avx2, Self::Bmi2, Self::Soft];
+
+    fn available(self) -> bool {
+        self.is_available()
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            Self::Bmi2 => Uses::DEDICATED,
+            Self::Avx2 => Uses::BOTH,
         }
-        if Self::Avx2.is_available() {
-            Self::Avx2
-        } else if Self::Bmi2.is_available() {
-            Self::Bmi2
-        } else {
-            Self::Soft
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            Self::Bmi2 => "BMI2/ADX",
+            Self::Avx2 => "AVX2 + BMI2/ADX",
         }
     }
 }

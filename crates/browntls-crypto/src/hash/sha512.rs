@@ -186,14 +186,6 @@ impl Backend {
         }
     }
 
-    pub(crate) fn select(f: Features) -> Self {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|b| b.is_available(f))
-            .unwrap_or(Self::Soft)
-    }
-
     /// Compresses `blocks` (a multiple of 128 bytes) into `state`. Falls
     /// back to [`soft`] if the backend is not available on this CPU.
     pub(crate) fn compress(self, state: &mut [u64; 8], blocks: &[u8]) {
@@ -211,13 +203,40 @@ impl Backend {
     }
 }
 
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Sha512;
+    const PREFERENCE: &'static [Self] = Self::ALL;
+
+    fn available(self) -> bool {
+        self.is_available(crate::cpu::features())
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::X86V3 => Uses::BOTH,
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha512 => Uses::DEDICATED,
+            #[cfg(target_arch = "riscv64")]
+            Self::Zvknhb => Uses::BOTH,
+            #[cfg(target_arch = "riscv64")]
+            Self::Zknh => Uses::DEDICATED,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        Backend::name(self)
+    }
+}
+
 /// Compresses `blocks` (a multiple of 128 bytes) into `state`, selecting the
 /// best available backend.
 #[inline]
 pub(crate) fn compress(state: &mut [u64; 8], blocks: &[u8]) {
     debug_assert_eq!(blocks.len() % BLOCK, 0);
-    Backend::select(crate::accel::features_for(crate::accel::Algorithm::Sha512))
-        .compress(state, blocks);
+    crate::accel::select::<Backend>().compress(state, blocks);
 }
 
 pub(crate) mod soft {

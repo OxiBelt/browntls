@@ -12,14 +12,7 @@ type Fast = P256;
 
 #[inline]
 fn accelerated() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::accel::allowed(crate::accel::Algorithm::P256) && super::p256_x86::available()
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    super::p256_accelerated()
 }
 
 super::api::curve_module! {

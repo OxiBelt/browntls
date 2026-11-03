@@ -77,9 +77,39 @@ pub(crate) fn hardware_kernel_available() -> bool {
     }
 }
 
-/// Whether RSA operations use the accelerated kernel now.
-pub(crate) fn kernel_accelerated() -> bool {
-    Kernel::detect() != Kernel::Soft
+/// RSA Montgomery kernels (for the acceleration policy).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RsaBackend {
+    /// BMI2 `mulx` + ADX `adcx`/`adox` (x86-64).
+    MulxAdx,
+    /// Portable u128 CIOS.
+    Soft,
+}
+
+impl crate::accel::Backends for RsaBackend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Rsa;
+    const PREFERENCE: &'static [Self] = &[Self::MulxAdx, Self::Soft];
+
+    fn available(self) -> bool {
+        match self {
+            Self::MulxAdx => hardware_kernel_available(),
+            Self::Soft => true,
+        }
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        match self {
+            Self::MulxAdx => crate::accel::Uses::DEDICATED,
+            Self::Soft => crate::accel::Uses::PORTABLE,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::MulxAdx => "BMI2/ADX",
+            Self::Soft => "portable",
+        }
+    }
 }
 mod pkcs1;
 mod private;

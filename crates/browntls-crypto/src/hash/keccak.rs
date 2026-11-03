@@ -280,14 +280,6 @@ impl Backend {
         }
     }
 
-    pub(crate) fn select(f: Features) -> Self {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|b| b.is_available(f))
-            .unwrap_or(Self::Soft)
-    }
-
     /// Runs the permutation. Falls back to [`soft`] if the backend is not
     /// available on this CPU.
     pub(crate) fn permute(self, state: &mut [u64; 25]) {
@@ -387,14 +379,6 @@ impl BackendX4 {
         }
     }
 
-    pub(crate) fn select(f: Features) -> Self {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|b| b.is_available(f))
-            .unwrap_or(Self::Soft)
-    }
-
     /// Runs the permutation on four lane-major states. Falls back to
     /// [`soft`] if the backend is not available on this CPU.
     pub(crate) fn permute(self, s: &mut StateX4) {
@@ -416,20 +400,73 @@ impl BackendX4 {
     }
 }
 
+impl crate::accel::Backends for Backend {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::Keccak;
+    const PREFERENCE: &'static [Self] = Self::ALL;
+
+    fn available(self) -> bool {
+        self.is_available(crate::cpu::features())
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::X86Bmi => Uses::DEDICATED,
+            #[cfg(target_arch = "riscv64")]
+            Self::RvZbb => Uses::DEDICATED,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        Backend::name(self)
+    }
+}
+
+impl crate::accel::Backends for BackendX4 {
+    const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::KeccakX4;
+    const PREFERENCE: &'static [Self] = Self::ALL;
+
+    fn available(self) -> bool {
+        self.is_available(crate::cpu::features())
+    }
+
+    fn uses(self) -> crate::accel::Uses {
+        use crate::accel::Uses;
+        match self {
+            Self::Soft => Uses::PORTABLE,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Avx512 => Uses::SIMD,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Avx2 => Uses::SIMD,
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha3 => Uses::BOTH,
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => Uses::SIMD,
+            #[cfg(target_arch = "riscv64")]
+            Self::RvvZvkb => Uses::BOTH,
+            #[cfg(target_arch = "riscv64")]
+            Self::Rvv => Uses::SIMD,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        BackendX4::name(self)
+    }
+}
+
 /// Applies Keccak-f\[1600\] to `state` (lane `x + 5y` at index `x + 5*y`),
 /// selecting the best available backend.
 #[inline]
 pub fn keccak_f1600(state: &mut [u64; 25]) {
-    Backend::select(crate::accel::features_for(crate::accel::Algorithm::Keccak)).permute(state);
+    crate::accel::select::<Backend>().permute(state);
 }
 
 /// Applies Keccak-f\[1600\] to four lane-major states at once.
 #[inline]
 pub(crate) fn keccak_f1600_x4_lanes(s: &mut StateX4) {
-    BackendX4::select(crate::accel::features_for(
-        crate::accel::Algorithm::KeccakX4,
-    ))
-    .permute(s);
+    crate::accel::select::<BackendX4>().permute(s);
 }
 
 /// Applies Keccak-f\[1600\] independently to each of four states, using a

@@ -68,7 +68,7 @@ impl Backend {
     /// The backend [`x25519`] dispatches to.
     #[must_use]
     pub fn best() -> Self {
-        if Self::X86Adx.is_available() {
+        if crate::accel::allowed(crate::accel::Algorithm::X25519) && Self::X86Adx.is_available() {
             Self::X86Adx
         } else {
             Self::Portable

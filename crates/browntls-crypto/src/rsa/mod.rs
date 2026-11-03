@@ -64,6 +64,23 @@
 
 mod bigint;
 mod keygen;
+
+/// Whether the CPU offers the accelerated Montgomery kernel.
+pub(crate) fn hardware_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        bigint::x86_64::MulxAdx::detect().is_some()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether RSA operations use the accelerated kernel now.
+pub(crate) fn kernel_accelerated() -> bool {
+    Kernel::detect() != Kernel::Soft
+}
 mod pkcs1;
 mod private;
 mod pss;

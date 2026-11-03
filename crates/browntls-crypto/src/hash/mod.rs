@@ -20,6 +20,28 @@ mod keccak;
 mod sha256;
 pub mod sha3;
 mod sha512;
+
+use crate::cpu::Features;
+
+/// Name of the SHA-256 backend selected for `f` (acceleration reports).
+pub(crate) fn sha256_backend_name(f: Features) -> &'static str {
+    sha256::Backend::select(f).name()
+}
+
+/// Name of the SHA-512 backend selected for `f` (acceleration reports).
+pub(crate) fn sha512_backend_name(f: Features) -> &'static str {
+    sha512::Backend::select(f).name()
+}
+
+/// Name of the single-state Keccak backend selected for `f`.
+pub(crate) fn keccak_backend_name(f: Features) -> &'static str {
+    keccak::Backend::select(f).name()
+}
+
+/// Name of the four-way Keccak backend selected for `f`.
+pub(crate) fn keccak_x4_backend_name(f: Features) -> &'static str {
+    keccak::BackendX4::select(f).name()
+}
 #[cfg(test)]
 mod tests;
 

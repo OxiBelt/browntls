@@ -116,6 +116,9 @@ impl Backend {
     /// The preferred available tier.
     #[must_use]
     pub fn best() -> Self {
+        if !crate::accel::allowed(crate::accel::Algorithm::ChaCha20) {
+            return Self::Soft;
+        }
         Self::ALL
             .into_iter()
             .rev()

@@ -112,6 +112,27 @@ implemented and executed.
 
 `--cfg browntls_force_soft` disables every SIMD and hardware backend.
 
+### Acceleration policy and status
+
+At run time, `browntls_crypto::accel` (re-exported as
+`browntls::crypto::native::accel`) controls and reports backend use per
+algorithm family (SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
+ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM):
+
+| Policy | Behaviour |
+|---|---|
+| `Preferred` (default) | Best available backend, portable fallback |
+| `Required` | Setting it fails with `Unsupported` unless an accelerated backend is available; then as `Preferred` |
+| `None` | Portable implementation only |
+
+`accel::set_policy`, `accel::set_policy_all` and
+`native::default_provider_with_acceleration` set policies;
+`accel::status_all` and `accel::accelerated` report, per family, the policy,
+whether the CPU offers acceleration and the backend selected now. Policies are
+process-wide; keyed objects (AES-GCM and ML-KEM keys) keep the backend chosen
+when they were created. Hardware feature checks that guard `unsafe` code are
+independent of the policy.
+
 ### Operating-system interface
 
 On Linux x86-64, aarch64 and riscv64, `browntls-crypto` issues `getrandom(2)`

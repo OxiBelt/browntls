@@ -148,6 +148,9 @@ impl PolyBackend {
     /// The preferred available tier.
     #[must_use]
     pub fn best() -> Self {
+        if !crate::accel::allowed(crate::accel::Algorithm::Poly1305) {
+            return Self::Soft;
+        }
         if Self::Avx2.is_available() {
             Self::Avx2
         } else if Self::Bmi2.is_available() {

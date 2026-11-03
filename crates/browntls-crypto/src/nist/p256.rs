@@ -14,7 +14,7 @@ type Fast = P256;
 fn accelerated() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        super::p256_x86::available()
+        crate::accel::allowed(crate::accel::Algorithm::P256) && super::p256_x86::available()
     }
     #[cfg(not(target_arch = "x86_64"))]
     {

@@ -36,4 +36,21 @@ mod p256_x86;
 
 pub mod p256;
 pub mod p384;
+
+/// Whether the CPU offers the accelerated P-256 field arithmetic.
+pub(crate) fn p256_hardware_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        p256_x86::available()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether P-256 operations use the accelerated field arithmetic now.
+pub(crate) fn p256_accelerated() -> bool {
+    crate::accel::allowed(crate::accel::Algorithm::P256) && p256_hardware_available()
+}
 pub mod p521;

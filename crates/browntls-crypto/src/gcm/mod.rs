@@ -85,6 +85,9 @@ impl GhashBackend {
     /// The backend the dispatcher selects on the current CPU.
     #[must_use]
     pub fn select() -> Self {
+        if !crate::accel::allowed(crate::accel::Algorithm::Ghash) {
+            return Self::Soft;
+        }
         for candidate in [
             Self::Clmul,
             Self::Pmull,

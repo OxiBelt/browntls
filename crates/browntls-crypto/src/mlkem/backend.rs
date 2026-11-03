@@ -28,6 +28,9 @@ impl Backend {
     /// Returns the best backend available on this CPU.
     #[must_use]
     pub fn detect() -> Self {
+        if !crate::accel::allowed(crate::accel::Algorithm::MlKem) {
+            return Self::Portable;
+        }
         Self::ALL
             .into_iter()
             .find(|b| b.is_available())

@@ -23,7 +23,7 @@ mod riscv64;
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
 
-use crate::cpu::{self, Features};
+use crate::cpu::Features;
 
 /// Keccak-f\[1600\] round constants.
 pub(crate) const RC: [u64; 24] = [
@@ -269,6 +269,17 @@ impl Backend {
     }
 
     /// The preferred available backend.
+    /// A display name for acceleration status reports.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::X86Bmi => "BMI1/BMI2",
+            #[cfg(target_arch = "riscv64")]
+            Self::RvZbb => "Zbb",
+        }
+    }
+
     pub(crate) fn select(f: Features) -> Self {
         Self::ALL
             .iter()
@@ -357,6 +368,25 @@ impl BackendX4 {
     }
 
     /// The preferred available backend.
+    /// A display name for acceleration status reports.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Avx512 => "AVX-512VL",
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Avx2 => "AVX2",
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha3 => "FEAT_SHA3",
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => "NEON",
+            #[cfg(target_arch = "riscv64")]
+            Self::RvvZvkb => "RVV+Zvkb",
+            #[cfg(target_arch = "riscv64")]
+            Self::Rvv => "RVV",
+        }
+    }
+
     pub(crate) fn select(f: Features) -> Self {
         Self::ALL
             .iter()
@@ -390,13 +420,16 @@ impl BackendX4 {
 /// selecting the best available backend.
 #[inline]
 pub fn keccak_f1600(state: &mut [u64; 25]) {
-    Backend::select(cpu::features()).permute(state);
+    Backend::select(crate::accel::features_for(crate::accel::Algorithm::Keccak)).permute(state);
 }
 
 /// Applies Keccak-f\[1600\] to four lane-major states at once.
 #[inline]
 pub(crate) fn keccak_f1600_x4_lanes(s: &mut StateX4) {
-    BackendX4::select(cpu::features()).permute(s);
+    BackendX4::select(crate::accel::features_for(
+        crate::accel::Algorithm::KeccakX4,
+    ))
+    .permute(s);
 }
 
 /// Applies Keccak-f\[1600\] independently to each of four states, using a

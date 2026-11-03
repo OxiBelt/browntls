@@ -129,6 +129,9 @@ impl Backend {
     /// The backend the dispatcher selects on the current CPU.
     #[must_use]
     pub fn select() -> Self {
+        if !crate::accel::allowed(crate::accel::Algorithm::Aes) {
+            return Self::Soft;
+        }
         for candidate in [
             Self::Vaes,
             Self::AesNi,

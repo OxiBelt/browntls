@@ -1,7 +1,7 @@
 //! SHA-384 and SHA-512 (FIPS 180-4).
 
 use super::{BlockBuffer, HashFunction};
-use crate::cpu::{self, Features};
+use crate::cpu::Features;
 
 const BLOCK: usize = 128;
 
@@ -171,6 +171,21 @@ impl Backend {
     }
 
     /// The preferred available backend.
+    /// A display name for acceleration status reports.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "portable",
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::X86V3 => "x86-64-v3 (AVX2+BMI2)",
+            #[cfg(target_arch = "aarch64")]
+            Self::ArmSha512 => "FEAT_SHA512",
+            #[cfg(target_arch = "riscv64")]
+            Self::Zvknhb => "Zvknhb",
+            #[cfg(target_arch = "riscv64")]
+            Self::Zknh => "Zknh",
+        }
+    }
+
     pub(crate) fn select(f: Features) -> Self {
         Self::ALL
             .iter()
@@ -201,7 +216,8 @@ impl Backend {
 #[inline]
 pub(crate) fn compress(state: &mut [u64; 8], blocks: &[u8]) {
     debug_assert_eq!(blocks.len() % BLOCK, 0);
-    Backend::select(cpu::features()).compress(state, blocks);
+    Backend::select(crate::accel::features_for(crate::accel::Algorithm::Sha512))
+        .compress(state, blocks);
 }
 
 pub(crate) mod soft {

@@ -14,6 +14,7 @@
 //! tables only need positive multiples and negation is a masked `Y` flip.
 
 use super::curve::{Affine, Curve, Projective, add, add_mixed, double, fe_neg};
+use super::jacobian::{self, Jacobian};
 use super::mont;
 use super::table::{INTERLEAVE, comb_digits, comb_positions};
 
@@ -171,20 +172,19 @@ fn wnaf<const N: usize>(k: &[u64; N], w: u32, out: &mut [i8]) -> usize {
     len
 }
 
-/// Variable-time `u1 * G + u2 * Q` for signature verification. All inputs are
-/// public; this function is **not** constant time.
+/// Variable-time `u1 * G + u2 * Q` for signature verification, in Jacobian
+/// coordinates. All inputs are public; this function is **not** constant time.
 pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
     u1: &[u64; N],
     u2: &[u64; N],
     q: &Affine<N>,
-) -> Projective<N> {
+) -> Jacobian<N> {
     // Odd multiples of Q: table[i] = (2i + 1) Q.
-    let qp = Projective::from_affine::<C>(q);
-    let q2 = double::<C, N>(&qp);
-    let mut tq = [Projective::<N>::ZERO; 8];
-    tq[0] = qp;
+    let qj = Jacobian::from_affine::<C>(q);
+    let q2 = jacobian::double::<C, N>(&qj);
+    let mut tq = [qj; 8];
     for i in 1..8 {
-        tq[i] = add::<C, N>(&tq[i - 1], &q2);
+        tq[i] = jacobian::add::<C, N>(&tq[i - 1], &q2);
     }
     // 64 * 9 + 1 digits suffice for every supported curve.
     let mut n1 = [0i8; 577];
@@ -192,16 +192,18 @@ pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
     let l1 = wnaf(u1, 6, &mut n1[..64 * N + 1]);
     let l2 = wnaf(u2, 5, &mut n2[..64 * N + 1]);
     let len = l1.max(l2);
-    let mut acc = Projective::identity::<C>();
+    let mut acc = Jacobian::identity::<C>();
     for i in (0..len).rev() {
-        acc = double::<C, N>(&acc);
+        if !acc.is_identity() {
+            acc = jacobian::double::<C, N>(&acc);
+        }
         let d1 = n1[i];
         if d1 != 0 {
             let mut t = C::G_ODD[usize::from(d1.unsigned_abs()) / 2];
             if d1 < 0 {
                 t.y = fe_neg::<C, N>(&t.y);
             }
-            acc = add_mixed::<C, N>(&acc, &t);
+            acc = jacobian::add_mixed::<C, N>(&acc, &t);
         }
         let d2 = n2[i];
         if d2 != 0 {
@@ -209,7 +211,7 @@ pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
             if d2 < 0 {
                 t.y = fe_neg::<C, N>(&t.y);
             }
-            acc = add::<C, N>(&acc, &t);
+            acc = jacobian::add::<C, N>(&acc, &t);
         }
     }
     acc
@@ -327,8 +329,11 @@ mod tests {
                 to_affine::<C, N>(&double::<C, N>(&Projective::from_affine::<C>(&C::G))).unwrap();
             let u2 = random_scalar::<C, N>(&mut seed);
             let u1 = mont::sub_mod(k, &mont::add_mod(&u2, &u2, &C::ORDER), &C::ORDER);
-            let dbl = to_affine::<C, N>(&mul_double_vartime::<C, N>(&u1, &u2, &two_g)).unwrap();
-            assert_eq!(dbl, var);
+            let dbl = mul_double_vartime::<C, N>(&u1, &u2, &two_g);
+            assert!(jacobian::x_equals::<C, N>(&dbl, &var.x));
+            // The y-coordinate: Y == y Z^3.
+            let z3 = C::mul(&C::sqr(&dbl.z), &dbl.z);
+            assert_eq!(C::mul(&var.y, &z3), dbl.y);
         }
         // k = n gives the identity; n = 0 digit handling in the comb.
         assert!(to_affine::<C, N>(&mul_base::<C, N>(&C::ORDER)).is_none());

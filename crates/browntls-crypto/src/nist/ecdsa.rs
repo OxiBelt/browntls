@@ -20,6 +20,7 @@ use crate::hmac::Hmac;
 use crate::zeroize::{Zeroizing, zeroize_bytes, zeroize_u64};
 
 use super::curve::{Affine, Curve, fe_to_canonical, to_affine};
+use super::jacobian;
 use super::keys::{MAX_FIELD_LEN, SecretScalar};
 use super::mont;
 use super::scalar_mul;
@@ -234,13 +235,25 @@ pub(crate) fn verify<C: Curve<N>, const N: usize>(
     let u1 = mont::mont_mul(&e, &w, &C::ORDER, C::ORDER_INV);
     let u2 = mont::mont_mul(r, &w, &C::ORDER, C::ORDER_INV);
     let point = scalar_mul::mul_double_vartime::<C, N>(&u1, &u2, q);
-    let a = to_affine::<C, N>(&point).ok_or(Error::InvalidSignature)?;
-    let v = reduce_once::<C, N>(&fe_to_canonical::<C, N>(&a.x));
-    if mont::eq(&v, r) != 0 {
-        Ok(())
-    } else {
-        Err(Error::InvalidSignature)
+    // x(point) mod n == r, i.e. x == r or (when r + n < p) x == r + n, checked
+    // projectively as X == x Z^2 (no inversion). The identity never matches.
+    if jacobian::x_equals::<C, N>(&point, &fe_from_canonical_rt::<C, N>(r)) {
+        return Ok(());
     }
+    let (rn, carry) = mont::add(r, &C::ORDER);
+    if carry == 0
+        && mont::lt(&rn, &C::P) != 0
+        && jacobian::x_equals::<C, N>(&point, &fe_from_canonical_rt::<C, N>(&rn))
+    {
+        return Ok(());
+    }
+    Err(Error::InvalidSignature)
+}
+
+/// Converts a public value `a < p` into the field's Montgomery form.
+#[inline]
+fn fe_from_canonical_rt<C: Curve<N>, const N: usize>(a: &[u64; N]) -> [u64; N] {
+    C::mul(a, &C::R2)
 }
 
 /// Writes the DER `Ecdsa-Sig-Value` of `(r, s)`; returns the length.

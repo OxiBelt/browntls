@@ -23,6 +23,7 @@
 
 mod api;
 mod curve;
+mod jacobian;
 mod ecdsa;
 mod keys;
 mod mont;

@@ -204,13 +204,7 @@ pub(crate) fn sign<C: Curve<N>, const N: usize>(
         // s = k^-1 (e + r d) mod n, with k^-1 and d in Montgomery form so each
         // product lands in the plain domain.
         let k_mont = Zeroizing(mont::to_mont(&k, &C::ORDER, C::ORDER_INV, &C::ORDER_R2));
-        let k_inv = Zeroizing(mont::pow_pubexp(
-            &k_mont,
-            &C::ORDER_MINUS_2,
-            &C::ORDER,
-            C::ORDER_INV,
-            &C::ORDER_ONE,
-        ));
+        let k_inv = Zeroizing(C::scalar_invert(&k_mont));
         let rd = Zeroizing(mont::mont_mul(&r, &d_mont, &C::ORDER, C::ORDER_INV));
         let sum = Zeroizing(mont::add_mod(&e, &rd, &C::ORDER));
         let s = mont::mont_mul(&sum, &k_inv, &C::ORDER, C::ORDER_INV);
@@ -236,13 +230,7 @@ pub(crate) fn verify<C: Curve<N>, const N: usize>(
     }
     let e = digest_to_scalar::<C, N>(digest);
     let s_mont = mont::to_mont(s, &C::ORDER, C::ORDER_INV, &C::ORDER_R2);
-    let w = mont::pow_pubexp(
-        &s_mont,
-        &C::ORDER_MINUS_2,
-        &C::ORDER,
-        C::ORDER_INV,
-        &C::ORDER_ONE,
-    );
+    let w = C::scalar_invert(&s_mont);
     let u1 = mont::mont_mul(&e, &w, &C::ORDER, C::ORDER_INV);
     let u2 = mont::mont_mul(r, &w, &C::ORDER, C::ORDER_INV);
     let point = scalar_mul::mul_double_vartime::<C, N>(&u1, &u2, q);

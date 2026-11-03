@@ -7,6 +7,7 @@
 
 use super::curve::{Affine, Curve, Fe, fe_from_canonical, fe_mul_soft};
 use super::mont;
+use super::safegcd;
 use super::tables;
 
 /// DER contents of `id-ecPublicKey` (1.2.840.10045.2.1).
@@ -26,6 +27,7 @@ macro_rules! define_curve {
         $name:ident, $n:literal, $bits:literal, $field_len:literal, $tables:ident,
         oid = $oid:expr,
         p = $p:literal, n = $order:literal, b = $b:literal, gx = $gx:literal, gy = $gy:literal
+        $(, extra = { $($extra:item)* })?
     ) => {
         $(#[$m])*
         #[derive(Clone, Copy, Debug)]
@@ -57,6 +59,8 @@ macro_rules! define_curve {
             fn mul(a: &Fe<$n>, b: &Fe<$n>) -> Fe<$n> {
                 fe_mul_soft::<Self, $n>(a, b)
             }
+
+            $($($extra)*)?
         }
     };
 }
@@ -69,7 +73,50 @@ define_curve! {
     n = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
     b = "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
     gx = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
-    gy = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+    gy = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+    extra = {
+        #[inline]
+        fn invert(a: &Fe<4>) -> Fe<4> {
+            p256_invert::<Self>(a)
+        }
+
+        #[inline]
+        fn scalar_invert(a: &[u64; 4]) -> [u64; 4] {
+            p256_scalar_invert(a)
+        }
+    }
+}
+
+/// `p` of P-256 prepared for safegcd inversion.
+const P256_P_MODULUS: safegcd::Modulus = safegcd::Modulus::new(&P256::P);
+/// `n` of P-256 prepared for safegcd inversion.
+const P256_N_MODULUS: safegcd::Modulus = safegcd::Modulus::new(&P256::ORDER);
+/// `R^3 mod p`: turns the plain inverse of `a R` into `a^-1 R`.
+const P256_P_R3: Fe<4> = mont::mont_mul_const(&P256::R2, &P256::R2, &P256::P, P256::P_INV);
+/// `R^3 mod n`.
+const P256_N_R3: [u64; 4] = mont::mont_mul_const(
+    &P256::ORDER_R2,
+    &P256::ORDER_R2,
+    &P256::ORDER,
+    P256::ORDER_INV,
+);
+
+/// P-256 field inversion in the Montgomery domain of backend `C`:
+/// `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form.
+#[inline]
+pub(crate) fn p256_invert<C: Curve<4>>(a: &Fe<4>) -> Fe<4> {
+    C::mul(&safegcd::invert(a, &P256_P_MODULUS), &P256_P_R3)
+}
+
+/// P-256 scalar inversion in the Montgomery domain of `n`.
+#[inline]
+pub(crate) fn p256_scalar_invert(a: &[u64; 4]) -> [u64; 4] {
+    mont::mont_mul(
+        &safegcd::invert(a, &P256_N_MODULUS),
+        &P256_N_R3,
+        &P256::ORDER,
+        P256::ORDER_INV,
+    )
 }
 
 define_curve! {
@@ -127,6 +174,53 @@ mod tests {
         assert_eq!(var, expect);
         let fixed = to_affine::<C, N>(&scalar_mul::mul_base::<C, N>(&n_minus_1)).unwrap();
         assert_eq!(fixed, expect);
+    }
+
+    /// The P-256 inversions (safegcd) agree with the generic Fermat routines
+    /// on edge and random Montgomery-form inputs.
+    #[test]
+    fn p256_inversions_match_fermat() {
+        use super::super::curve::fe_invert_fermat;
+        let mut seed = 0x6a09_e667_f3bc_c908u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let one = [1u64, 0, 0, 0];
+        for m in [P256::P, P256::ORDER] {
+            let mut inputs = std::vec![
+                [0u64; 4],
+                one,
+                [2, 0, 0, 0],
+                mont::sub(&m, &one).0,
+                mont::sub(&m, &[2, 0, 0, 0]).0,
+                P256::ONE,
+                P256::ORDER_ONE,
+            ];
+            for _ in 0..300 {
+                let v = [next(), next(), next(), next()];
+                if mont::lt(&v, &m) != 0 {
+                    inputs.push(v);
+                }
+            }
+            for a in &inputs {
+                if m == P256::P {
+                    let want = fe_invert_fermat::<P256, 4>(a);
+                    assert_eq!(P256::invert(a), want, "field a = {a:x?}");
+                } else {
+                    let want = mont::pow_pubexp(
+                        a,
+                        &P256::ORDER_MINUS_2,
+                        &P256::ORDER,
+                        P256::ORDER_INV,
+                        &P256::ORDER_ONE,
+                    );
+                    assert_eq!(P256::scalar_invert(a), want, "scalar a = {a:x?}");
+                }
+            }
+        }
     }
 
     #[test]

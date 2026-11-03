@@ -20,7 +20,7 @@
 #![allow(unsafe_code)]
 
 use super::curve::{Affine, Curve, Fe};
-use super::params::P256;
+use super::params::{P256, p256_invert, p256_scalar_invert};
 
 /// `p[1] = 2^32 - 1`.
 const P1: u64 = 0x0000_0000_ffff_ffff;
@@ -403,6 +403,16 @@ impl Curve<4> for P256Adx {
     #[inline]
     fn sub(a: &Fe<4>, b: &Fe<4>) -> Fe<4> {
         sub(a, b)
+    }
+
+    #[inline]
+    fn invert(a: &Fe<4>) -> Fe<4> {
+        p256_invert::<Self>(a)
+    }
+
+    #[inline]
+    fn scalar_invert(a: &[u64; 4]) -> [u64; 4] {
+        p256_scalar_invert(a)
     }
 }
 

@@ -27,6 +27,7 @@ mod ecdsa;
 mod keys;
 mod mont;
 mod params;
+mod safegcd;
 mod scalar_mul;
 mod table;
 mod tables;

@@ -8,16 +8,16 @@
 //! 2. Reduce `m'` modulo `p` and `q` with Montgomery multiplications only,
 //!    then compute `s_p' = m'^dp mod p` and `s_q' = m'^dq mod q` with the
 //!    constant-time fixed-window exponentiation.
-//! 3. Unblind each half with `r^-1 mod p = r^(p-2)` and `r^-1 mod q = r^(q-2)`
-//!    (Fermat; same constant-time exponentiation), and recombine with
-//!    Garner's formula `s = s_q + q ((s_p - s_q) qInv mod p)`.
+//! 3. Unblind each half with `r^-1 mod p` and `r^-1 mod q`, computed by the
+//!    constant-time Bernstein–Yang inversion ([`inv::mod_inverse`]), and
+//!    recombine with Garner's formula `s = s_q + q ((s_p - s_q) qInv mod p)`.
 //! 4. Verify `s^e mod n == m` with the public key before releasing `s`; a
 //!    mismatch (hardware fault, inconsistent key) returns an error.
 //!
 //! Every step has a running time that depends only on the key size.
 
 use super::bigint::mont::Mont;
-use super::bigint::{self, HALF_LIMBS, MAX_LIMBS};
+use super::bigint::{self, HALF_LIMBS, MAX_LIMBS, inv};
 use super::{MAX_MODULUS_BYTES, OID_RSA_ENCRYPTION, RsaPublicKey, pkcs1, pss};
 use crate::Error;
 use crate::ct::{self, Choice};
@@ -168,6 +168,21 @@ fn reduce_to_mont(ctx: &Mont<HALF_LIMBS>, x: &[u64], out: &mut [u64]) {
     hi.zeroize();
     a.zeroize();
     b.zeroize();
+}
+
+/// Multiplies `s` (Montgomery form modulo the context's prime) by
+/// `r^-1 mod prime` in place, with `r` of up to `2 * ctx.len()` limbs and
+/// `rinv`, `tmp` as scratch of at least `ctx.len()` limbs. Constant time.
+#[inline(never)]
+fn unblind(ctx: &Mont<HALF_LIMBS>, r: &[u64], s: &mut [u64], rinv: &mut [u64], tmp: &mut [u64]) {
+    let h = ctx.len();
+    let (rinv, tmp) = (&mut rinv[..h], &mut tmp[..h]);
+    reduce_to_mont(ctx, r, rinv); // r R mod prime
+    ctx.demont(tmp, rinv); // r mod prime
+    inv::mod_inverse(rinv, tmp, ctx.modulus()); // r^-1 mod prime
+    ctx.to_mont(tmp, rinv); // r^-1 R mod prime
+    ctx.mul(rinv, s, tmp);
+    s.copy_from_slice(rinv);
 }
 
 /// Fills `buf` from the operating-system entropy source when one is
@@ -584,24 +599,12 @@ impl RsaPrivateKey {
         self.q
             .exp_ct(&mut sq[..half], &base[..half], &self.dq[..half]);
 
-        // Unblind each half: multiply by r^-1 = r^(prime - 2).
-        let mut exp = [0u64; HALF_LIMBS];
+        // Unblind each half: multiply by r^-1 mod prime (constant-time
+        // safegcd inversion of r mod prime).
         let mut rinv = [0u64; HALF_LIMBS];
         let mut tmp = [0u64; HALF_LIMBS];
-        reduce_to_mont(&self.p, &r[..l], &mut base[..half]);
-        exp[..half].copy_from_slice(self.p.modulus());
-        bigint::sub_word(&mut exp[..half], 2);
-        self.p
-            .exp_ct(&mut rinv[..half], &base[..half], &exp[..half]);
-        self.p.mul(&mut tmp[..half], &sp[..half], &rinv[..half]);
-        sp[..half].copy_from_slice(&tmp[..half]);
-        reduce_to_mont(&self.q, &r[..l], &mut base[..half]);
-        exp[..half].copy_from_slice(self.q.modulus());
-        bigint::sub_word(&mut exp[..half], 2);
-        self.q
-            .exp_ct(&mut rinv[..half], &base[..half], &exp[..half]);
-        self.q.mul(&mut tmp[..half], &sq[..half], &rinv[..half]);
-        sq[..half].copy_from_slice(&tmp[..half]);
+        unblind(&self.p, &r[..l], &mut sp[..half], &mut rinv, &mut tmp);
+        unblind(&self.q, &r[..l], &mut sq[..half], &mut rinv, &mut tmp);
 
         // Garner: s = s_q + q * ((s_p - s_q) qInv mod p).
         let mut sq_n = [0u64; HALF_LIMBS];
@@ -646,7 +649,6 @@ impl RsaPrivateKey {
         sp.zeroize();
         sq.zeroize();
         base.zeroize();
-        exp.zeroize();
         rinv.zeroize();
         tmp.zeroize();
         sq_n.zeroize();

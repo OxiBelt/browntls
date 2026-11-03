@@ -10,6 +10,7 @@
 //! The limb-level helpers here are deliberately simple; the hot path is the
 //! Montgomery multiplication in [`mont`].
 
+pub(crate) mod inv;
 pub(crate) mod mont;
 pub(crate) mod soft;
 #[cfg(target_arch = "x86_64")]

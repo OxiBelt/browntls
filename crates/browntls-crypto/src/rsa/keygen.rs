@@ -8,14 +8,15 @@
 //! `2^(bits/2 - 100)` are rejected. The private exponent is
 //! `d = e^-1 mod (p-1)(q-1)` and `dP`, `dQ` are computed directly as
 //! `e^-1 mod (p-1)` and `e^-1 mod (q-1)` using the small-exponent identity
-//! `d = (1 + k phi) / e` with `k = -phi^-1 mod e`; `qInv` is `q^(p-2) mod p`.
+//! `d = (1 + k phi) / e` with `k = -phi^-1 mod e`; `qInv = q^-1 mod p` comes
+//! from the constant-time Bernstein–Yang inversion.
 //!
 //! Timing: trial division and candidate rejection depend on the candidates,
 //! and the small divisions use hardware division. The Miller–Rabin
 //! exponentiations use the constant-time ladder.
 
 use super::bigint::mont::{Kernel, Mont};
-use super::bigint::{self, HALF_LIMBS, MAX_LIMBS};
+use super::bigint::{self, HALF_LIMBS, MAX_LIMBS, inv};
 use super::{MAX_MODULUS_BYTES, RsaPublicKey, private::RsaPrivateKey};
 use crate::Error;
 use crate::rand::SecureRandom;
@@ -240,7 +241,6 @@ pub(super) fn generate(bits: usize, rng: &dyn SecureRandom) -> Result<RsaPrivate
     let mut dp = [0u64; HALF_LIMBS];
     let mut dq = [0u64; HALF_LIMBS];
     let mut qinv = [0u64; HALF_LIMBS];
-    let mut tmp = [0u64; HALF_LIMBS];
     let mut n_bytes = [0u8; MAX_MODULUS_BYTES];
 
     let result = 'attempts: {
@@ -275,16 +275,9 @@ pub(super) fn generate(bits: usize, rng: &dyn SecureRandom) -> Result<RsaPrivate
                 continue;
             }
 
-            // qInv = q^(p-2) mod p.
-            let p_ctx = Mont::<HALF_LIMBS>::new(&p[..half], kernel)?;
-            p_ctx.to_mont(&mut tmp[..half], &q[..half]);
-            let mut pm2 = [0u64; HALF_LIMBS];
-            pm2[..half].copy_from_slice(&p[..half]);
-            bigint::sub_word(&mut pm2[..half], 2);
-            p_ctx.exp_ct(&mut qinv[..half], &tmp[..half], &pm2[..half]);
-            p_ctx.demont(&mut tmp[..half], &qinv[..half]);
-            qinv[..half].copy_from_slice(&tmp[..half]);
-            pm2.zeroize();
+            // qInv = q^-1 mod p (constant-time inversion; p is odd and
+            // q is a different prime, so the inverse exists).
+            inv::mod_inverse(&mut qinv[..half], &q[..half], &p[..half]);
 
             bigint::to_be_bytes(&n[..l], &mut n_bytes[..bits / 8]);
             let public = RsaPublicKey::from_components(
@@ -313,7 +306,6 @@ pub(super) fn generate(bits: usize, rng: &dyn SecureRandom) -> Result<RsaPrivate
     dp.zeroize();
     dq.zeroize();
     qinv.zeroize();
-    tmp.zeroize();
     result
 }
 

@@ -19,8 +19,10 @@
 //! message: Montgomery multiplication (CIOS) has fixed loop counts, secret
 //! exponents are processed with a fixed 4-bit window and constant-time table
 //! selection, and every conditional is a mask. In addition, CRT signing
-//! blinds the base with a random `r^e` (unblinding by `r^-1`, computed with
-//! Fermat's little theorem modulo each prime), and the result is checked
+//! blinds the base with a random `r^e` (unblinding by `r^-1` modulo each
+//! prime, computed with the constant-time Bernstein–Yang "safegcd"
+//! inversion, which has a fixed number of branch-free divsteps for the key
+//! size), and the result is checked
 //! against the public key before it is released, defeating Bellcore-style
 //! fault attacks. Public-key operations (verification, the fault check) are
 //! variable time in the public exponent only.
@@ -49,9 +51,8 @@
 //! [`RsaPrivateKey::sign_pkcs1v15`] when available). Without fresh entropy the
 //! factor is still unpredictable to anyone who does not know the private key,
 //! so a failing or absent entropy source degrades to deterministic blinding
-//! rather than to no blinding. Unblinding costs two additional half-size
-//! exponentiations (Fermat), so signing is roughly twice the cost of a plain
-//! CRT exponentiation.
+//! rather than to no blinding. Unblinding costs two half-size inversions,
+//! each about 3% of a half-size exponentiation.
 //!
 //! # Backends
 //!

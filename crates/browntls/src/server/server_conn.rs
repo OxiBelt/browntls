@@ -567,7 +567,14 @@ impl Acceptor {
                 self.inner = Some(connection);
                 return Ok(None);
             }
-            Err(err) => return Err((err, AcceptedAlert::from(connection))),
+            Err(err) => {
+                // Every refusal comes with an alert the caller can send.
+                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
+                    &mut connection.core.common_state,
+                    err,
+                );
+                return Err((err, AcceptedAlert::from(connection)));
+            }
         };
 
         let mut cx = crate::conn::Context {
@@ -576,7 +583,13 @@ impl Acceptor {
         };
         let sig_schemes = match hs::process_client_hello(&message, false, &mut cx) {
             Ok((_, sig_schemes)) => sig_schemes,
-            Err(err) => return Err((err, AcceptedAlert::from(connection))),
+            Err(err) => {
+                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
+                    &mut connection.core.common_state,
+                    err,
+                );
+                return Err((err, AcceptedAlert::from(connection)));
+            }
         };
 
         Ok(Some(Accepted {

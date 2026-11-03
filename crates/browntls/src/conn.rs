@@ -242,7 +242,7 @@ impl<Data> ConnectionCore<Data> {
     }
 
     /// Makes sure every fatal error is accompanied by an alert.
-    fn ensure_alert_sent(common: &mut CommonState, err: Error) -> Error {
+    pub(crate) fn ensure_alert_sent(common: &mut CommonState, err: Error) -> Error {
         if common.sent_fatal_alert {
             return err;
         }

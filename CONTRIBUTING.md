@@ -59,6 +59,7 @@ Rust checks (the toolchain is pinned by `rust-toolchain.toml`):
 
 ```sh
 cargo fmt --all --check
+rustfmt --edition 2024 --check crates/browntls/tests/cases/*.rs
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 RUSTFLAGS='--cfg browntls_force_soft' cargo test -p browntls-crypto --locked

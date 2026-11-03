@@ -25,7 +25,7 @@ intent.
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
 | TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels) and TLS 1.2 (ECDHE suites, EMS, session ID and ticket resumption, client auth, renegotiation refused); interoperability tested against rustls 0.23 in both directions |
 | Crypto provider mount point, RustCrypto provider | done | rustls 0.23-shaped traits; RustCrypto provider verifies RSA but does not sign with it (advisory) |
-| Native provider (`browntls-crypto`) | done | All suites, X25519/NIST/ML-KEM and hybrid groups, ECDSA/Ed25519/RSA signing and verification, AEAD tickets; byte-identical records to the RustCrypto provider. Handshake suites on the native provider: in progress |
+| Native provider (`browntls-crypto`) | done | All suites, X25519/NIST/ML-KEM and hybrid groups, ECDSA/Ed25519/RSA signing and verification, AEAD tickets; byte-identical records to the RustCrypto provider. All handshake, API and rustls interop suites run on both providers; native adds RSA, ML-KEM-1024 and mixed-provider handshakes |
 
 ## Later milestones
 

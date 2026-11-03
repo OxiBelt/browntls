@@ -1,7 +1,14 @@
-//! AVX-512 IFMA (`vpmadd52luq`/`vpmadd52huq`) CRT exponentiation: both
-//! half-size exponentiations of an RSA signature run in lockstep in radix
-//! 2^52, with their Montgomery multiplications interleaved so that one
-//! multiplication's serial reduction latency hides behind the other's.
+//! AVX-512 IFMA (`vpmadd52luq`/`vpmadd52huq`) RSA exponentiation in radix
+//! 2^52.
+//!
+//! * [`CrtIfma::exp`]: both half-size secret-exponent exponentiations of a
+//!   CRT signature in lockstep, with their multiplications interleaved so
+//!   that one multiplication's serial reduction latency hides behind the
+//!   other's.
+//! * [`Ifma::exp_pub_vartime`]: public-exponent exponentiation for any
+//!   supported modulus (verification, the blinding factor `r^e`, the fault
+//!   check), with its conversion constants derived per call from the
+//!   caller's radix-2^64 Montgomery context.
 //!
 //! # Representation
 //!
@@ -21,12 +28,14 @@
 //!
 //! # Timing
 //!
-//! The 4-bit fixed window, the number of squarings and multiplications, and
+//! Every multiplication runs a fixed instruction sequence for its size. In
+//! the CRT exponentiation, the 4-bit fixed window, the number of squarings and multiplications, and
 //! the full scan of the 16-entry table with masks match
 //! [`super::mont::Mont::exp_ct`]; all loop counts depend only on `len`.
 //! Carry normalisation uses masked vector adds driven by a carry-lookahead
 //! word computed with plain integer arithmetic. No branch or memory index
-//! depends on secret data.
+//! depends on secret data; the public-exponent path branches on the bits of
+//! the public exponent only.
 #![allow(unsafe_code)]
 
 use core::arch::x86_64::{

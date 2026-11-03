@@ -19,7 +19,7 @@ intent.
 | ChaCha20-Poly1305 (portable, AVX2/AVX-512, NEON, RVV) | done | Poly1305 scalar, BMI2 and four-way AVX2 |
 | X25519 / Ed25519 | done | BMI2/ADX ladder on x86-64; small-order Ed25519 public keys rejected |
 | P-256 / P-384 / P-521 ECDH and ECDSA | done | RCB complete formulas, RFC 6979 with hedging, BMI2/ADX P-256 kernel; generic CIOS reduction and Fermat inversion (performance headroom) |
-| RSA PKCS #1 v1.5 / PSS | in progress | |
+| RSA PKCS #1 v1.5 / PSS | done | 2048-8192-bit verification, CRT signing with blinding and fault check, key generation; BMI2/ADX Montgomery step; no AVX-512 IFMA; signing stack about 24 KiB |
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |

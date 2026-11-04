@@ -374,7 +374,6 @@ fn cases() -> Vec<Case> {
         openssl_group,
         key,
     };
-    #[allow(unused_mut)]
     let mut cases = vec![
         tls13(
             cs::TLS13_AES_128_GCM_SHA256,
@@ -420,6 +419,22 @@ fn cases() -> Vec<Case> {
             KeyType::RsaPssSha384,
         ),
     ];
+    // RFC 7919 finite-field groups (TLS 1.3 only).
+    for (group, name) in [
+        (kx::FFDHE2048, "ffdhe2048"),
+        (kx::FFDHE3072, "ffdhe3072"),
+        (kx::FFDHE4096, "ffdhe4096"),
+        (kx::FFDHE6144, "ffdhe6144"),
+        (kx::FFDHE8192, "ffdhe8192"),
+    ] {
+        cases.push(tls13(
+            cs::TLS13_AES_128_GCM_SHA256,
+            "TLS_AES_128_GCM_SHA256",
+            group,
+            name,
+            KeyType::EcdsaP256,
+        ));
+    }
     #[cfg(feature = "tls12")]
     {
         let tls12 = |suite, openssl_suite, group, openssl_group, key| Case {

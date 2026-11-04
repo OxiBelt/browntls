@@ -89,6 +89,7 @@ enum KeyType {
     EcdsaP384,
     Rsa2048,
     Ed25519,
+    Ed448,
     /// RSASSA-PSS key without parameters (`rsa_pss_pss_*`).
     RsaPss,
     /// RSASSA-PSS key restricted to SHA-384 (MGF1-SHA-384, 48-byte salt).
@@ -102,6 +103,7 @@ impl KeyType {
             Self::EcdsaP384 => &["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-384"],
             Self::Rsa2048 => &["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
             Self::Ed25519 => &["-algorithm", "ED25519"],
+            Self::Ed448 => &["-algorithm", "ED448"],
             Self::RsaPss => &["-algorithm", "RSA-PSS", "-pkeyopt", "rsa_keygen_bits:2048"],
             Self::RsaPssSha384 => &[
                 "-algorithm",
@@ -403,7 +405,29 @@ fn cases() -> Vec<Case> {
             "P-521",
             KeyType::EcdsaP384,
         ),
-        // Non-preferred tier (RFC 9846 optional algorithms).
+        // Non-preferred tier (RFC 9846 optional algorithms). OpenSSL's
+        // default TLS 1.3 list omits CCM, hence the explicit suites.
+        tls13(
+            cs::TLS13_AES_128_CCM_SHA256,
+            "TLS_AES_128_CCM_SHA256",
+            kx::X25519,
+            "X25519",
+            KeyType::EcdsaP256,
+        ),
+        tls13(
+            cs::TLS13_AES_128_CCM_8_SHA256,
+            "TLS_AES_128_CCM_8_SHA256",
+            kx::SECP256R1,
+            "P-256",
+            KeyType::Rsa2048,
+        ),
+        tls13(
+            cs::TLS13_AES_256_GCM_SHA384,
+            "TLS_AES_256_GCM_SHA384",
+            kx::X448,
+            "X448",
+            KeyType::Ed448,
+        ),
         tls13(
             cs::TLS13_AES_128_GCM_SHA256,
             "TLS_AES_128_GCM_SHA256",
@@ -478,6 +502,21 @@ fn cases() -> Vec<Case> {
                 "ECDHE-RSA-AES256-GCM-SHA384",
                 kx::X25519,
                 "X25519",
+                KeyType::Rsa2048,
+            ),
+            // X448 and Ed448 in TLS 1.2 ECDHE (RFC 8422).
+            tls12(
+                cs::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                "ECDHE-ECDSA-AES256-GCM-SHA384",
+                kx::X448,
+                "X448",
+                KeyType::Ed448,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                "ECDHE-RSA-AES128-GCM-SHA256",
+                kx::X448,
+                "X448",
                 KeyType::Rsa2048,
             ),
             // rsa_pss_pss_* also apply to TLS 1.2 (RFC 9846 §4.3.3).
@@ -736,7 +775,15 @@ fn for_all(f: fn(&Path, &Case, bool) -> Result<(), String>) {
     for case in cases() {
         for client_auth in [false, true] {
             runs += 1;
-            if let Err(e) = f(openssl, &case, client_auth) {
+            let start = Instant::now();
+            let result = f(openssl, &case, client_auth);
+            eprintln!(
+                "{} client_auth={client_auth}: {:?} in {:.2?}",
+                case.name(),
+                result.as_ref().map(|()| "ok"),
+                start.elapsed()
+            );
+            if let Err(e) = result {
                 failures.push(format!("{} client_auth={client_auth}: {e}", case.name()));
             }
         }

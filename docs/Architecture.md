@@ -58,6 +58,21 @@ their own implementation of any trait; `crates/browntls/tests/native_mixed.rs`
 shows the pattern. When exactly one provider feature is enabled it becomes the
 implicit default; with both enabled, the application installs one explicitly.
 
+### Algorithm tiers (native provider)
+
+Everything RFC 9846 §9.1 makes mandatory or recommended is preferred. The
+remaining TLS 1.3 algorithms that RFC 9846 defines form a non-preferred tier:
+they come after every other entry of each preference list, so they are only
+negotiated when a peer shares nothing earlier.
+
+| Kind | Preferred (default order) | Non-preferred tier (default) | Opt-in only (`ALL_*` lists) |
+|---|---|---|---|
+| TLS 1.3 suites | AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 | AES-128-CCM | AES-128-CCM-8 (64-bit tag) |
+| Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
+| Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
+
+The RustCrypto provider does not implement the non-preferred tier.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |
@@ -176,7 +191,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64, aarch64 (GitHub Arm runner) and riscv64 (RISE runner), plus QEMU user-mode profiles for each backend tier (x86-64 SHA-NI/VAES, Armv8 crypto, RVV with VLEN 128/256/1024 and vector crypto, scalar Zk) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, and interoperability with rustls in both directions |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 
 Test certificates and keys are generated at run time; no private keys are
 committed. Successful CI is evidence for the tested configurations only and

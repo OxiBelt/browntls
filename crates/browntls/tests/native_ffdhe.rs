@@ -157,11 +157,12 @@ fn every_ffdhe_group_in_tls13_then_resumes() {
             provider_with(&[group]),
             PinnedServerVerifier::new(&chain),
         ));
-        // The server has the whole default list, FFDHE last.
+        // The server has every group, FFDHE last (the defaults stop at
+        // FFDHE4096).
         let server = Arc::new(server_with(
             BOTH,
             &chain,
-            Arc::new(prov::default_provider()),
+            provider_with(prov::ALL_KX_GROUPS),
         ));
         let (mut c, mut s) = connect(&client, &server);
         do_handshake(&mut c, &mut s).unwrap_or_else(|e| panic!("{group:?}: {e}"));
@@ -186,11 +187,11 @@ fn hello_retry_request_into_each_ffdhe_group() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
     for group in ffdhe_groups() {
-        // The default client sends a share for its preferred group only; the
-        // server takes nothing but `group`.
+        // A client with every group sends a share for its preferred group
+        // only; the server takes nothing but `group`.
         let client = Arc::new(client_with(
             TLS13,
-            Arc::new(prov::default_provider()),
+            provider_with(prov::ALL_KX_GROUPS),
             PinnedServerVerifier::new(&chain),
         ));
         let server = Arc::new(server_with(BOTH, &chain, provider_with(&[group])));
@@ -253,8 +254,10 @@ fn ffdhe_is_the_non_preferred_tier() {
     let defaults: Vec<NamedGroup> = prov::DEFAULT_KX_GROUPS.iter().map(|g| g.name()).collect();
     let all: Vec<NamedGroup> = prov::ALL_KX_GROUPS.iter().map(|g| g.name()).collect();
     let ffdhe: Vec<NamedGroup> = ffdhe_groups().iter().map(|g| g.name()).collect();
-    // Last, in increasing size, in both lists.
-    assert_eq!(defaults[defaults.len() - 5..], ffdhe[..]);
+    // Last, in increasing size, in both lists; the defaults stop at
+    // FFDHE4096 (the larger groups cost too much server time to enable by
+    // default).
+    assert_eq!(defaults[defaults.len() - 3..], ffdhe[..3]);
     assert_eq!(all[all.len() - 5..], ffdhe[..]);
 
     // Default client and server: the preferred group, never FFDHE, although

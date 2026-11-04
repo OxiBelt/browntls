@@ -247,6 +247,11 @@ pub mod kx_group {
 /// shares first; a server selects one only when the client sent no key share
 /// for an earlier group and either sent one for the optional group or
 /// supports no earlier group.
+///
+/// FFDHE6144 and FFDHE8192 are left out of the defaults (they remain in
+/// [`ALL_KX_GROUPS`]): a server spends about 10 and 20 ms per handshake on
+/// them, more than 100 times X25519, which a client offering only those
+/// groups could exploit. FFDHE2048 to FFDHE4096 cost about 1 to 5 ms.
 pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     #[cfg(feature = "prefer-post-quantum")]
     kx::X25519MLKEM768,
@@ -259,8 +264,6 @@ pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::FFDHE2048,
     kx::FFDHE3072,
     kx::FFDHE4096,
-    kx::FFDHE6144,
-    kx::FFDHE8192,
 ];
 
 /// Every key exchange group this provider implements, in preference order.

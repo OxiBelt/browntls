@@ -186,19 +186,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install cross toolchains and QEMU
+      - name: Install QEMU
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
           # Statically linked user-mode QEMU where the release still packages
           # it, the dynamically linked one otherwise (scripts/cross-test.sh
           # accepts either).
           sudo apt-get install -y -qq --no-install-recommends qemu-user-static \
             || sudo apt-get install -y -qq --no-install-recommends qemu-user
 
+      # The riscv64 profiles run static musl binaries: Ubuntu 26.04's riscv64
+      # cross glibc is built for RVA23U64 and traps on the emulated CPUs
+      # without vector or Zk extensions (see scripts/cross-test.sh).
       - name: Install Rust
-        run: scripts/ci/install-rust.sh
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          case "${PROFILE}" in
+            riscv64-*) scripts/ci/install-rust.sh riscv64gc-unknown-linux-musl ;;
+            *) scripts/ci/install-rust.sh ;;
+          esac
 
       - name: Test cryptographic primitives
         run: scripts/cross-test.sh "${{ matrix.profile }}" -p browntls-crypto --locked

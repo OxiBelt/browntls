@@ -21,8 +21,18 @@
 #   riscv64-rvv256-zvk RVV 1.0, VLEN=256, Zvkned/Zvknhb/Zvkg/Zvbc/Zvbb/Zvkb
 #   riscv64-rvv1024-zvk RVV 1.0, VLEN=1024 with vector crypto
 #
-# Requirements (Ubuntu 26.04): qemu-user-static or qemu-user, gcc-aarch64-linux-gnu,
-# gcc-riscv64-linux-gnu, and the matching rustup targets.
+# The riscv64 profiles build static musl binaries (riscv64gc-unknown-linux-musl,
+# linked by rust-lld against the RV64GC musl that ships with the Rust target)
+# rather than linking the distribution's cross glibc: from Ubuntu 25.10 on that
+# glibc, its dynamic loader included, is built for RVA23U64 (V, Zvbb, Zicond,
+# Zcb, ...), so it traps on every emulated CPU that lacks those extensions,
+# which is what most profiles are for. These profiles therefore cover crates
+# without C dependencies (browntls-crypto, browntls-pki).
+#
+# Requirements (Ubuntu 26.04): qemu-user-static or qemu-user,
+# gcc-aarch64-linux-gnu for the aarch64 profiles, and the matching rustup
+# targets (x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+# riscv64gc-unknown-linux-musl).
 set -euo pipefail
 
 profile="${1:?usage: $0 <profile> [cargo test args...]}"
@@ -73,40 +83,40 @@ case "${profile}" in
     exec cargo test "$@"
     ;;
   riscv64-scalar)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=false"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=false"
+    linker=rust-lld
     ;;
   riscv64-zk)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=false,zbb=true,zbc=true,zbkb=true,zbkc=true,zknh=true,zkne=true,zknd=true"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=false,zbb=true,zbc=true,zbkb=true,zbkc=true,zknh=true,zkne=true,zknd=true"
+    linker=rust-lld
     extra_rustflags=("${zk_cfg[@]}")
     variant=zk
     ;;
   riscv64-rvv128)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=true,vlen=128,zbb=true"
+    linker=rust-lld
     ;;
   riscv64-rvv128-zvk)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=true,vlen=128,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    linker=rust-lld
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk
     ;;
   riscv64-rvv256-zvk)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=256,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=true,vlen=256,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    linker=rust-lld
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk
     ;;
   riscv64-rvv1024-zvk)
-    target=riscv64gc-unknown-linux-gnu
-    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=1024,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
-    linker=riscv64-linux-gnu-gcc
+    target=riscv64gc-unknown-linux-musl
+    runner="$(qemu riscv64) -cpu rv64,v=true,vlen=1024,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    linker=rust-lld
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk
     ;;
@@ -115,6 +125,14 @@ case "${profile}" in
     exit 2
     ;;
 esac
+
+if [[ "${target}" == *-musl ]]; then
+  # riscv64gc-unknown-linux-musl links dynamically unless asked otherwise.
+  # Doctests are built by rustdoc, which reads RUSTDOCFLAGS only (with
+  # --target these apply to the target, not to build scripts).
+  extra_rustflags=("-C" "target-feature=+crt-static" "${extra_rustflags[@]}")
+  export RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -C target-feature=+crt-static"
+fi
 
 triple_env="$(echo "${target}" | tr '[:lower:]-' '[:upper:]_')"
 export "CARGO_TARGET_${triple_env}_RUNNER=${runner}"

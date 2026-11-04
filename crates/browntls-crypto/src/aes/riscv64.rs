@@ -24,8 +24,8 @@ use crate::zeroize::{zeroize_u32, zeroize_u64};
 /// A value can only be constructed by [`VectorKey::new`], which checks that
 /// RVV 1.0, Zvkned and Zvkb are present; this makes the `asm!` blocks sound.
 pub(crate) struct VectorKey {
-    rk: [u32; 60],
-    rounds: usize,
+    pub(super) rk: [u32; 60],
+    pub(super) rounds: usize,
 }
 
 impl Drop for VectorKey {
@@ -383,13 +383,14 @@ impl ScalarKey {
             st[0] = u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]));
             st[1] = u64::from_le_bytes(b[8..].try_into().unwrap_or([0; 8]));
         }
-        for st in &mut s {
+        let s = &mut s[..n];
+        for st in s.iter_mut() {
             st[0] ^= self.rk[0];
             st[1] ^= self.rk[1];
         }
         for r in 1..self.rounds {
             let (k0, k1) = (self.rk[2 * r], self.rk[2 * r + 1]);
-            for st in &mut s {
+            for st in s.iter_mut() {
                 let t0 = aes64esm(st[0], st[1]);
                 let t1 = aes64esm(st[1], st[0]);
                 st[0] = t0 ^ k0;
@@ -397,13 +398,13 @@ impl ScalarKey {
             }
         }
         let (k0, k1) = (self.rk[2 * self.rounds], self.rk[2 * self.rounds + 1]);
-        for st in &mut s {
+        for st in s.iter_mut() {
             let t0 = aes64es(st[0], st[1]);
             let t1 = aes64es(st[1], st[0]);
             st[0] = t0 ^ k0;
             st[1] = t1 ^ k1;
         }
-        for (b, st) in blocks.iter_mut().zip(&s).take(n) {
+        for (b, st) in blocks.iter_mut().zip(s.iter()) {
             b[..8].copy_from_slice(&st[0].to_le_bytes());
             b[8..].copy_from_slice(&st[1].to_le_bytes());
         }

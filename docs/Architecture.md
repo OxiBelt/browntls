@@ -109,6 +109,7 @@ reference for testing, plus accelerated backends selected at run time.
 | SHA-2 | SHA-NI | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
 | SHA-3 / SHAKE | AVX2 multi-lane | NEON, FEAT_SHA3 | RVV |
 | AES-GCM | AES-NI + PCLMULQDQ, VAES + VPCLMULQDQ (YMM, and ZMM with a fused CTR+GHASH loop) | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
+| AES decryption (CBC) | AES-NI, VAES (YMM) | FEAT_AES | Zvkned, Zknd |
 | ChaCha20-Poly1305 | AVX2, AVX-512 | NEON | RVV |
 | X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
 | X448 / Ed448 | portable 64-bit | portable 64-bit | portable 64-bit |
@@ -120,6 +121,14 @@ reference for testing, plus accelerated backends selected at run time.
 AES-CCM (TLS 1.3 `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256`) runs
 on the AES backends of this table: counter mode uses each backend's
 pipelined keystream, and CBC-MAC encrypts one block at a time.
+
+AES-CBC without padding (`browntls_crypto::cbc`, for the TLS 1.2 CBC suites
+with AES-128 and AES-256) also follows the AES backend selection and
+acceleration policy. Encryption is serial and encrypts one block at a time;
+decryption pipelines eight blocks per iteration (AES-NI, FEAT_AES), sixteen
+(VAES, also on the AVX-512 tier) or `VLEN/32` (Zvkned). The portable inverse
+cipher is bitsliced like the forward one. The scalar riscv64 tier decrypts
+with Zknd when present and with the portable code on Zkne-only CPUs.
 
 The table states the design target; [Status](#status) records what has been
 implemented and executed.

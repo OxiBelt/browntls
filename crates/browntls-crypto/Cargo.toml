@@ -40,7 +40,7 @@ p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
-num-bigint = "0.4"
+num-bigint = "0.5"
 ed448-goldilocks = "0.14.0-pre.15"
 x448 = { version = "0.14.0-pre.12", features = ["static_secrets"] }
 

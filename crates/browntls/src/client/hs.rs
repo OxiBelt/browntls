@@ -304,20 +304,26 @@ fn emit_client_hello_for_retry(
 
     let offered_sigschemes = config.verifier().supported_verify_schemes();
 
+    // Only groups usable with an offered version: a TLS 1.2-only hello must
+    // not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3, RFC 7919
+    // §3) or ML-KEM. The list may not be empty (RFC 9846 §4.3.7), so a
+    // configuration without such a group fails here instead of sending one.
+    let named_groups: Vec<NamedGroup> = config
+        .provider
+        .kx_groups
+        .iter()
+        .filter(|g| supported_versions.iter().any(|v| g.usable_for_version(*v)))
+        .map(|g| g.name())
+        .collect();
+    if named_groups.is_empty() {
+        return Err(Error::General(
+            "no key exchange group is usable with the enabled protocol versions".into(),
+        ));
+    }
+
     let mut exts = ClientExtensions {
         server_name,
-        // Only groups usable with an offered version: a TLS 1.2-only hello
-        // must not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3,
-        // RFC 7919 §3) or ML-KEM.
-        named_groups: Some(
-            config
-                .provider
-                .kx_groups
-                .iter()
-                .filter(|g| supported_versions.iter().any(|v| g.usable_for_version(*v)))
-                .map(|g| g.name())
-                .collect(),
-        ),
+        named_groups: Some(named_groups),
         ec_point_formats: supports_tls12.then(|| vec![ECPointFormat::Uncompressed]),
         signature_schemes: Some(offered_sigschemes.clone()),
         protocols: (!input.alpn_protocols.is_empty()).then(|| {

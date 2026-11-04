@@ -559,3 +559,26 @@ fn tls12_configurations_need_an_ecdhe_group() {
         );
     }
 }
+
+/// A TLS 1.2-only client whose groups are all TLS 1.3-only has nothing to put
+/// in supported_groups; it fails locally instead of sending an empty list
+/// (RFC 9846 §4.3.7 requires at least one entry).
+#[cfg(feature = "tls12")]
+#[test]
+fn tls12_client_without_usable_groups_fails_locally() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut provider = prov::default_provider();
+    provider.kx_groups = vec![prov::kx_group::MLKEM768];
+    // The builder accepts it: ML-KEM's code point maps to an ECDHE-style
+    // key exchange that the TLS 1.2 suites name.
+    let client = Arc::new(client_with(
+        TLS12,
+        Arc::new(provider),
+        PinnedServerVerifier::new(&chain),
+    ));
+    let err = ClientConnection::new(client, server_name()).unwrap_err();
+    assert!(
+        matches!(&err, Error::General(msg) if msg.contains("no key exchange group")),
+        "{err:?}"
+    );
+}

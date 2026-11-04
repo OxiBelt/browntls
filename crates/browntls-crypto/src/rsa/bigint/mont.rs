@@ -289,9 +289,15 @@ impl<const CAP: usize> Mont<CAP> {
     }
 
     /// `out = a b R^-1 mod m` (see [`Self::mul_into`] for the operand bounds).
+    ///
+    /// The scratch space holds the unreduced product and the result before
+    /// and after the final subtraction (for example a CRT half or a
+    /// Diffie-Hellman shared secret on conversion out of Montgomery form), so
+    /// it is wiped before returning.
     pub(crate) fn mul(&self, out: &mut [u64], a: &[u64], b: &[u64]) {
         let mut scratch = [0u64; MAX_LIMBS * 2 + 2];
         self.mul_into(out, a, b, &mut scratch);
+        scratch[..2 * self.len + 2].zeroize();
     }
 
     /// Converts `a < R` to Montgomery form (`a R mod m`), reducing it.

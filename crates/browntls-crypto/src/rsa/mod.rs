@@ -83,8 +83,10 @@
 //!
 //! Secret material is zeroised on drop.
 
-mod bigint;
-mod keygen;
+// Shared with `crate::ffdhe`, which reuses the Montgomery arithmetic and
+// (in its tests) the Miller–Rabin test.
+pub(crate) mod bigint;
+pub(crate) mod keygen;
 
 /// Whether the CPU offers the accelerated Montgomery kernel.
 pub(crate) fn hardware_kernel_available() -> bool {

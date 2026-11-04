@@ -13,6 +13,7 @@
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
 //! | P-256 / P-384 / P-521 | 64-bit Montgomery, BMI2/ADX (P-256) | 64-bit Montgomery | 64-bit Montgomery |
 //! | RSA | 64-bit Montgomery, BMI2/ADX | 64-bit Montgomery | 64-bit Montgomery |
+//! | FFDHE | 64-bit Montgomery, BMI2/ADX (RSA kernels) | 64-bit Montgomery | 64-bit Montgomery |
 //! | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
 //!
 //! The crate is `no_std` and allocation-free by default; `std` adds runtime
@@ -58,6 +59,7 @@ pub mod chacha;
 pub mod gcm;
 
 pub mod curve25519;
+pub mod ffdhe;
 pub mod mlkem;
 pub mod nist;
 pub mod rsa;

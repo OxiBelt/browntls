@@ -102,12 +102,18 @@ fn inverse_of_e(phi: &[u64], out: &mut [u64]) -> Result<(), Error> {
     result
 }
 
-/// Miller–Rabin test of the odd candidate `n` with random bases.
+/// Miller–Rabin test of the odd candidate `n` (at most `CAP` limbs) with
+/// random bases. Key generation uses `CAP = HALF_LIMBS`; the FFDHE tests use
+/// it on the RFC 7919 primes up to `MAX_LIMBS`.
 #[inline(never)]
-fn miller_rabin(n: &[u64], rng: &dyn SecureRandom, kernel: Kernel) -> Result<bool, Error> {
+pub(crate) fn miller_rabin<const CAP: usize>(
+    n: &[u64],
+    rng: &dyn SecureRandom,
+    kernel: Kernel,
+) -> Result<bool, Error> {
     let len = n.len();
-    let ctx = Mont::<HALF_LIMBS>::new(n, kernel)?;
-    let mut nm1 = [0u64; HALF_LIMBS];
+    let ctx = Mont::<CAP>::new(n, kernel)?;
+    let mut nm1 = [0u64; CAP];
     nm1[..len].copy_from_slice(n);
     bigint::sub_word(&mut nm1[..len], 1);
     let mut d = nm1;
@@ -116,17 +122,18 @@ fn miller_rabin(n: &[u64], rng: &dyn SecureRandom, kernel: Kernel) -> Result<boo
         bigint::shr1(&mut d[..len]);
         s += 1;
     }
-    let mut nm1_m = [0u64; HALF_LIMBS];
+    let mut nm1_m = [0u64; CAP];
     ctx.to_mont(&mut nm1_m[..len], &nm1[..len]);
     let one = ctx.one();
     // Bases are sampled with the candidate's bit length so that rejection
     // (a >= n - 1) is rare even for candidates that do not fill their limbs.
     let nbits = bigint::bit_len_vartime(n);
 
-    let mut bytes = [0u8; MAX_MODULUS_BYTES / 2];
-    let mut a = [0u64; HALF_LIMBS];
-    let mut x = [0u64; HALF_LIMBS];
-    let mut y = [0u64; HALF_LIMBS];
+    let mut bytes = [[0u8; 8]; CAP];
+    let bytes = bytes.as_flattened_mut();
+    let mut a = [0u64; CAP];
+    let mut x = [0u64; CAP];
+    let mut y = [0u64; CAP];
     let mut probably_prime = true;
     'rounds: for _ in 0..MR_ROUNDS {
         // Base in [2, n - 2].
@@ -198,7 +205,7 @@ fn random_prime(
                 let sieved = residues[..primes.len()].iter().all(|&r| r != 0);
                 if sieved
                     && bigint::rem_word_vartime(&cand[..len], PUBLIC_EXPONENT) != 1
-                    && miller_rabin(&cand[..len], rng, kernel)?
+                    && miller_rabin::<HALF_LIMBS>(&cand[..len], rng, kernel)?
                 {
                     out.copy_from_slice(&cand[..len]);
                     break 'search Ok(());
@@ -354,16 +361,16 @@ mod tests {
         let rng = crate::rand::OsRng;
         let kernel = Kernel::detect();
         // 2^127 - 1 is prime.
-        assert!(miller_rabin(&[u64::MAX, u64::MAX >> 1], &rng, kernel).unwrap());
+        assert!(miller_rabin::<HALF_LIMBS>(&[u64::MAX, u64::MAX >> 1], &rng, kernel).unwrap());
         // 2^127 - 3? Compose a known composite: (2^64 - 59) * (2^64 - 83)
         // (both prime) is odd.
         let mut prod = [0u64; 2];
         bigint::mul(&mut prod, &[u64::MAX - 58], &[u64::MAX - 82]);
-        assert!(!miller_rabin(&prod, &rng, kernel).unwrap());
+        assert!(!miller_rabin::<HALF_LIMBS>(&prod, &rng, kernel).unwrap());
         // A Carmichael-like composite: 2^89 - 1 = 618970019642690137449562111 is
         // prime; 2^89 + 1 is composite (divisible by 3).
         let mut c = [1u64, 1 << 25];
         c[0] = 1;
-        assert!(!miller_rabin(&c, &rng, kernel).unwrap());
+        assert!(!miller_rabin::<HALF_LIMBS>(&c, &rng, kernel).unwrap());
     }
 }

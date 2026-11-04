@@ -39,6 +39,7 @@ p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
+num-bigint = "0.4"
 
 [lints]
 workspace = true

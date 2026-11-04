@@ -355,7 +355,7 @@ pub enum Algorithm {
     X25519,
     /// P-256 field arithmetic.
     P256,
-    /// RSA Montgomery multiplication.
+    /// RSA Montgomery multiplication (also used by FFDHE, [`crate::ffdhe`]).
     Rsa,
     /// ML-KEM polynomial arithmetic.
     MlKem,

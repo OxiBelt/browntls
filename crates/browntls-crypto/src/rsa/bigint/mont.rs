@@ -22,7 +22,7 @@
 //! the length is a multiple of four limbs; other lengths use the per-limb
 //! two-pass BMI2/ADX step.
 
-use super::{HALF_LIMBS, MAX_LIMBS, soft};
+use super::{MAX_LIMBS, soft};
 use crate::Error;
 use crate::ct;
 use crate::zeroize::Zeroize;
@@ -310,31 +310,28 @@ impl<const CAP: usize> Mont<CAP> {
     ///
     /// `base` is in Montgomery form; `out` receives `base^exp` in Montgomery
     /// form. All `64 * exp.len()` exponent bits are processed, so the running
-    /// time depends only on the lengths. Available for contexts of at most
-    /// [`HALF_LIMBS`] limbs (the 16-entry table is `16 * HALF_LIMBS` limbs,
-    /// 8 KiB, the largest stack object in this module).
+    /// time depends only on the lengths. The 16-entry table holds `16 * CAP`
+    /// limbs, the largest stack object in this module: 8 KiB for the
+    /// [`super::HALF_LIMBS`] contexts of RSA CRT halves, 16 KiB for an 8192-bit
+    /// ([`MAX_LIMBS`]) modulus.
     #[inline(never)]
     pub(crate) fn exp_ct(&self, out: &mut [u64], base: &[u64], exp: &[u64]) {
-        const { assert!(CAP <= HALF_LIMBS) };
+        // `3 * CAP >= 2 * len + 2` scratch limbs, as `mul_into` needs.
+        const { assert!(2 <= CAP && CAP <= MAX_LIMBS) };
         let len = self.len;
         debug_assert!(out.len() == len && base.len() == len);
-        let mut scratch = [0u64; HALF_LIMBS * 2 + 2];
-        let mut table = [0u64; 16 * HALF_LIMBS];
+        let mut scratch = [[0u64; CAP]; 3];
+        let scratch = scratch.as_flattened_mut();
+        let mut table = [[0u64; CAP]; 16];
         let mut acc = [0u64; CAP];
         let mut tmp = [0u64; CAP];
         let mut sel = [0u64; CAP];
 
-        const STRIDE: usize = HALF_LIMBS;
-        table[..len].copy_from_slice(self.one());
-        table[STRIDE..STRIDE + len].copy_from_slice(base);
+        table[0][..len].copy_from_slice(self.one());
+        table[1][..len].copy_from_slice(base);
         for i in 2..16 {
-            let (prev, cur) = table.split_at_mut(i * STRIDE);
-            self.mul_into(
-                &mut cur[..len],
-                &prev[(i - 1) * STRIDE..(i - 1) * STRIDE + len],
-                base,
-                &mut scratch,
-            );
+            let (prev, cur) = table.split_at_mut(i);
+            self.mul_into(&mut cur[0][..len], &prev[i - 1][..len], base, scratch);
         }
 
         acc[..len].copy_from_slice(self.one());
@@ -343,23 +340,23 @@ impl<const CAP: usize> Mont<CAP> {
         while top > 0 {
             let w = super::window(exp, top, 4);
             for _ in 0..4 {
-                self.mul_into(&mut tmp[..len], &acc[..len], &acc[..len], &mut scratch);
+                self.mul_into(&mut tmp[..len], &acc[..len], &acc[..len], scratch);
                 acc[..len].copy_from_slice(&tmp[..len]);
             }
             // Constant-time table lookup: touch every entry.
             sel[..len].fill(0);
-            for (j, entry) in table.as_chunks::<STRIDE>().0.iter().enumerate() {
+            for (j, entry) in table.iter().enumerate() {
                 let mask = core::hint::black_box(ct::eq_u64(j as u64, w).mask());
                 for (s, e) in sel[..len].iter_mut().zip(&entry[..len]) {
                     *s |= mask & e;
                 }
             }
-            self.mul_into(&mut tmp[..len], &acc[..len], &sel[..len], &mut scratch);
+            self.mul_into(&mut tmp[..len], &acc[..len], &sel[..len], scratch);
             acc[..len].copy_from_slice(&tmp[..len]);
             top -= 4;
         }
         out.copy_from_slice(&acc[..len]);
-        table.zeroize();
+        table.as_flattened_mut().zeroize();
         acc.zeroize();
         tmp.zeroize();
         sel.zeroize();
@@ -398,7 +395,7 @@ impl<const CAP: usize> Mont<CAP> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rsa::bigint;
+    use crate::rsa::bigint::{self, HALF_LIMBS};
     use std::vec;
     use std::vec::Vec;
 
@@ -646,5 +643,41 @@ mod tests {
         let mut r = vec![0u64; 6];
         ctx.exp_ct(&mut r, &am, &e);
         assert_eq!(r, acc);
+    }
+
+    #[test]
+    fn exp_ct_full_capacity_matches_ladder_for_every_kernel() {
+        // Moduli above HALF_LIMBS (FFDHE 6144 and 8192 use 96 and 128 limbs)
+        // need a MAX_LIMBS context; 64 limbs must agree with a HALF_LIMBS one.
+        let mut seed = 8192u64;
+        for len in [3usize, 64, 65, 96, 127, 128] {
+            let m = random_modulus(&mut seed, len);
+            let a = random_below(&mut seed, &m);
+            let e: Vec<u64> = (0..7).map(|_| rng(&mut seed)).collect();
+            for kernel in Kernel::available().into_iter().flatten() {
+                let ctx = Mont::<MAX_LIMBS>::new(&m, kernel).unwrap();
+                let mut am = vec![0u64; len];
+                ctx.to_mont(&mut am, &a);
+                let mut acc = ctx.one().to_vec();
+                let mut t = vec![0u64; len];
+                for i in (0..64 * e.len()).rev() {
+                    ctx.mul(&mut t, &acc, &acc);
+                    if bigint::bit(&e, i) == 1 {
+                        ctx.mul(&mut acc, &t, &am);
+                    } else {
+                        acc.copy_from_slice(&t);
+                    }
+                }
+                let mut r = vec![0u64; len];
+                ctx.exp_ct(&mut r, &am, &e);
+                assert_eq!(r, acc, "len {len} kernel {}", kernel.name());
+                if len <= HALF_LIMBS {
+                    let half = Mont::<HALF_LIMBS>::new(&m, kernel).unwrap();
+                    let mut r2 = vec![0u64; len];
+                    half.exp_ct(&mut r2, &am, &e);
+                    assert_eq!(r2, r, "len {len} kernel {}", kernel.name());
+                }
+            }
+        }
     }
 }

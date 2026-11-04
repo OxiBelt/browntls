@@ -83,6 +83,7 @@ reference for testing, plus accelerated backends selected at run time.
 | X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
 | P-256 / P-384 / P-521 | BMI2 + ADX field arithmetic (P-256; specialised portable P-256 arithmetic elsewhere) | portable 64-bit | portable 64-bit |
 | RSA | BMI2 + ADX Montgomery kernel, AVX-512 IFMA exponentiation | portable 64-bit | portable 64-bit |
+| FFDHE (RFC 7919) | RSA BMI2 + ADX Montgomery kernel | portable 64-bit | portable 64-bit |
 | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
 
 The table states the design target; [Status](#status) records what has been

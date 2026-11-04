@@ -89,6 +89,10 @@ enum KeyType {
     EcdsaP384,
     Rsa2048,
     Ed25519,
+    /// RSASSA-PSS key without parameters (`rsa_pss_pss_*`).
+    RsaPss,
+    /// RSASSA-PSS key restricted to SHA-384 (MGF1-SHA-384, 48-byte salt).
+    RsaPssSha384,
 }
 
 impl KeyType {
@@ -98,6 +102,46 @@ impl KeyType {
             Self::EcdsaP384 => &["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-384"],
             Self::Rsa2048 => &["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
             Self::Ed25519 => &["-algorithm", "ED25519"],
+            Self::RsaPss => &["-algorithm", "RSA-PSS", "-pkeyopt", "rsa_keygen_bits:2048"],
+            Self::RsaPssSha384 => &[
+                "-algorithm",
+                "RSA-PSS",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-pkeyopt",
+                "rsa_pss_keygen_md:sha384",
+                "-pkeyopt",
+                "rsa_pss_keygen_mgf1_md:sha384",
+                "-pkeyopt",
+                "rsa_pss_keygen_saltlen:48",
+            ],
+        }
+    }
+
+    /// Extra arguments for signing certificates with this key type: PSS
+    /// signatures use MGF1 with the same hash and a salt as long as the
+    /// digest, the only form RFC 9846 signature schemes describe.
+    fn sign_args(self) -> &'static [&'static str] {
+        match self {
+            Self::RsaPss => &[
+                "-sha256",
+                "-sigopt",
+                "rsa_padding_mode:pss",
+                "-sigopt",
+                "rsa_pss_saltlen:digest",
+                "-sigopt",
+                "rsa_mgf1_md:sha256",
+            ],
+            Self::RsaPssSha384 => &[
+                "-sha384",
+                "-sigopt",
+                "rsa_padding_mode:pss",
+                "-sigopt",
+                "rsa_pss_saltlen:digest",
+                "-sigopt",
+                "rsa_mgf1_md:sha384",
+            ],
+            _ => &[],
         }
     }
 }
@@ -162,10 +206,13 @@ fn make_pki(openssl: &Path, key: KeyType) -> Pki {
         run(openssl, d, &args);
     };
     genpkey("ca.key");
+    let with_sign_args = |args: &[&'static str]| -> Vec<&'static str> {
+        args.iter().chain(key.sign_args()).copied().collect()
+    };
     run(
         openssl,
         d,
-        &[
+        &with_sign_args(&[
             "req",
             "-x509",
             "-new",
@@ -181,7 +228,7 @@ fn make_pki(openssl: &Path, key: KeyType) -> Pki {
             "basicConstraints=critical,CA:TRUE",
             "-addext",
             "keyUsage=critical,keyCertSign,cRLSign",
-        ],
+        ]),
     );
     std::fs::write(
         d.join("ee.ext"),
@@ -210,28 +257,26 @@ fn make_pki(openssl: &Path, key: KeyType) -> Pki {
                 &csr,
             ],
         );
-        run(
-            openssl,
-            d,
-            &[
-                "x509",
-                "-req",
-                "-in",
-                &csr,
-                "-CA",
-                "ca.pem",
-                "-CAkey",
-                "ca.key",
-                "-set_serial",
-                serial,
-                "-days",
-                "2",
-                "-extfile",
-                "ee.ext",
-                "-out",
-                &pem,
-            ],
-        );
+        let mut args = vec![
+            "x509",
+            "-req",
+            "-in",
+            &csr,
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-set_serial",
+            serial,
+            "-days",
+            "2",
+            "-extfile",
+            "ee.ext",
+            "-out",
+            &pem,
+        ];
+        args.extend_from_slice(key.sign_args());
+        run(openssl, d, &args);
     }
     let ca = CertificateDer::from_pem_file(d.join("ca.pem")).unwrap();
     Pki { dir, ca }
@@ -359,6 +404,21 @@ fn cases() -> Vec<Case> {
             "P-521",
             KeyType::EcdsaP384,
         ),
+        // Non-preferred tier (RFC 9846 optional algorithms).
+        tls13(
+            cs::TLS13_AES_128_GCM_SHA256,
+            "TLS_AES_128_GCM_SHA256",
+            kx::X25519,
+            "X25519",
+            KeyType::RsaPss,
+        ),
+        tls13(
+            cs::TLS13_AES_256_GCM_SHA384,
+            "TLS_AES_256_GCM_SHA384",
+            kx::SECP256R1,
+            "P-256",
+            KeyType::RsaPssSha384,
+        ),
     ];
     #[cfg(feature = "tls12")]
     {
@@ -404,6 +464,14 @@ fn cases() -> Vec<Case> {
                 kx::X25519,
                 "X25519",
                 KeyType::Rsa2048,
+            ),
+            // rsa_pss_pss_* also apply to TLS 1.2 (RFC 9846 §4.3.3).
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                "ECDHE-RSA-AES128-GCM-SHA256",
+                kx::SECP256R1,
+                "P-256",
+                KeyType::RsaPss,
             ),
         ]);
     }

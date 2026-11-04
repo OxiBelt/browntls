@@ -266,6 +266,24 @@ fn write_digest(state: &[u32; 5], out: &mut [u8]) {
     }
 }
 
+impl super::MdHash for Sha1 {
+    type State = [u32; 5];
+    const LEN_BYTES: usize = 8;
+    const IV: [u32; 5] = IV;
+
+    fn compress_blocks(state: &mut [u32; 5], blocks: &[u8]) {
+        compress(state, blocks);
+    }
+
+    fn write_digest(state: &[u32; 5], out: &mut [u8]) {
+        write_digest(state, out);
+    }
+
+    fn from_state(state: [u32; 5], bytes: u64) -> Self {
+        Self(Core::new(state, bytes))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

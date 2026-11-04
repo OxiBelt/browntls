@@ -19,6 +19,10 @@
 //! | FFDHE | 64-bit Montgomery, BMI2/ADX (RSA kernels) | 64-bit Montgomery | 64-bit Montgomery |
 //! | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
 //!
+//! [`tls_cbc`] implements the TLS 1.2 CBC record transform (MAC-then-encrypt
+//! with a Lucky Thirteen-resistant constant-time check, and encrypt-then-MAC)
+//! over a caller-supplied block cipher.
+//!
 //! The crate is `no_std` and allocation-free by default; `std` adds runtime
 //! feature detection on aarch64. Unsafe code is denied crate-wide and allowed
 //! only in architecture backend modules, CPU detection and the system-call
@@ -53,6 +57,7 @@ pub mod hash;
 pub mod hkdf;
 pub mod hmac;
 pub mod tls12_prf;
+pub mod tls_cbc;
 
 pub mod der;
 

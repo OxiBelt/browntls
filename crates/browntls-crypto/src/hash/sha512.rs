@@ -300,10 +300,14 @@ struct Core {
 
 impl Core {
     fn new(iv: [u64; 8]) -> Self {
+        Self::with_state(iv, 0)
+    }
+
+    fn with_state(state: [u64; 8], total: u128) -> Self {
         Self {
-            state: iv,
+            state,
             buffer: BlockBuffer::default(),
-            total: 0,
+            total,
         }
     }
 
@@ -325,6 +329,13 @@ impl Core {
             .update(&pad[..pad_len + 16], |blocks| compress(state, blocks));
         debug_assert_eq!(self.buffer.len, 0);
         self.state
+    }
+}
+
+/// Big-endian serialisation of `state`, truncated to `out.len()` bytes.
+fn write_digest(state: &[u64; 8], out: &mut [u8]) {
+    for (chunk, word) in out.chunks_mut(8).zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes()[..chunk.len()]);
     }
 }
 
@@ -356,12 +367,28 @@ macro_rules! sha512_variant {
             }
 
             fn finalize(self) -> [u8; $out] {
-                let state = self.0.finalize();
                 let mut out = [0u8; $out];
-                for (chunk, word) in out.chunks_mut(8).zip(state) {
-                    chunk.copy_from_slice(&word.to_be_bytes()[..chunk.len()]);
-                }
+                write_digest(&self.0.finalize(), &mut out);
                 out
+            }
+        }
+
+        impl super::MdHash for $name {
+            type State = [u64; 8];
+            const LEN_BYTES: usize = 16;
+            const IV: [u64; 8] = $iv;
+
+            fn compress_blocks(state: &mut [u64; 8], blocks: &[u8]) {
+                compress(state, blocks);
+            }
+
+            fn write_digest(state: &[u64; 8], out: &mut [u8]) {
+                debug_assert_eq!(out.len(), $out);
+                write_digest(state, out);
+            }
+
+            fn from_state(state: [u64; 8], bytes: u64) -> Self {
+                Self(Core::with_state(state, bytes.into()))
             }
         }
     };

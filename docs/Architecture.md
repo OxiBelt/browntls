@@ -131,6 +131,13 @@ decryption pipelines eight blocks per iteration (AES-NI, FEAT_AES), sixteen
 cipher is bitsliced like the forward one. The scalar riscv64 tier decrypts
 with Zknd when present and with the portable code on Zkne-only CPUs.
 
+`browntls_crypto::tls_cbc` implements the TLS 1.2 CBC record transform
+(RFC 5246 MAC-then-encrypt and RFC 7366 encrypt-then-MAC, with HMAC-SHA1,
+HMAC-SHA256 or HMAC-SHA384) over a `CbcBlockCipher` trait. For
+MAC-then-encrypt, the padding check and the record MAC are constant time with
+respect to the padding (the Lucky Thirteen countermeasure): the number of hash
+compressions depends only on the record length.
+
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
 

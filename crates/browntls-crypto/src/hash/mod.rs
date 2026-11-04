@@ -239,6 +239,31 @@ impl DynHash {
     }
 }
 
+/// Raw Merkle–Damgård access to a SHA-1/SHA-2 hash (crate-internal).
+///
+/// Used by constant-time code that must control the exact sequence of
+/// compression-function calls, such as the TLS 1.2 CBC record MAC check in
+/// [`crate::tls_cbc`].
+pub(crate) trait MdHash: HashFunction {
+    /// The chaining state.
+    type State: Copy + crate::zeroize::Zeroize;
+    /// Length in bytes of the big-endian message bit length that ends the
+    /// padding (8 for SHA-1/SHA-256, 16 for SHA-384/SHA-512).
+    const LEN_BYTES: usize;
+    /// The initial chaining value.
+    const IV: Self::State;
+    /// Compresses `blocks` (a multiple of [`HashFunction::BLOCK_LEN`] bytes)
+    /// into `state` with the selected backend.
+    fn compress_blocks(state: &mut Self::State, blocks: &[u8]);
+    /// Writes the digest of a finished chaining state (big-endian words
+    /// truncated to [`HashFunction::OUTPUT_LEN`]) to `out`, which must be
+    /// `OUTPUT_LEN` bytes long.
+    fn write_digest(state: &Self::State, out: &mut [u8]);
+    /// A hasher continuing from `state` after `bytes` bytes (a multiple of
+    /// the block length) have been absorbed.
+    fn from_state(state: Self::State, bytes: u64) -> Self;
+}
+
 /// Shared Merkle–Damgård block buffering for the SHA-2 family.
 #[derive(Clone)]
 pub(crate) struct BlockBuffer<const B: usize> {

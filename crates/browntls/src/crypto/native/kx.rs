@@ -1,11 +1,13 @@
 //! Key exchange: X25519 (RFC 7748), the NIST curves (RFC 8422), ML-KEM
-//! (FIPS 203, draft-ietf-tls-mlkem) and the hybrid groups of
-//! draft-ietf-tls-ecdhe-mlkem.
+//! (FIPS 203, draft-ietf-tls-mlkem), the hybrid groups of
+//! draft-ietf-tls-ecdhe-mlkem and the RFC 7919 finite-field groups (TLS 1.3
+//! only).
 //!
 //! Every peer share is validated before use: exact lengths, the uncompressed
 //! point format for NIST curves, full point validation (on the curve, not the
-//! identity), rejection of an all-zero X25519 output (RFC 8446 §7.4.2) and the
-//! FIPS 203 §7.2 encapsulation-key check. All failures map to
+//! identity), rejection of an all-zero X25519 output (RFC 8446 §7.4.2), the
+//! FIPS 203 §7.2 encapsulation-key check and `1 < Y < p - 1` for FFDHE
+//! (RFC 9846 §4.3.8.1). All failures map to
 //! [`PeerMisbehaved::InvalidKeyShare`].
 
 use alloc::boxed::Box;
@@ -14,6 +16,7 @@ use core::fmt;
 use core::marker::PhantomData;
 
 use browntls_crypto::curve25519::x25519;
+use browntls_crypto::ffdhe;
 use browntls_crypto::mlkem::{self, DecapsulationKey, EncapsulationKey, ParameterSet};
 use browntls_crypto::nist::{p256, p384, p521};
 use browntls_crypto::rand::OsRng;
@@ -525,6 +528,140 @@ impl ActiveKeyExchange for ActiveHybrid {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Finite-field groups (RFC 7919)
+
+/// FFDHE over ffdhe2048 (RFC 7919, TLS 1.3 only).
+pub static FFDHE2048: &dyn SupportedKxGroup = &FFDHE2048_GROUP;
+/// FFDHE over ffdhe3072 (RFC 7919, TLS 1.3 only).
+pub static FFDHE3072: &dyn SupportedKxGroup = &FFDHE3072_GROUP;
+/// FFDHE over ffdhe4096 (RFC 7919, TLS 1.3 only).
+pub static FFDHE4096: &dyn SupportedKxGroup = &FFDHE4096_GROUP;
+/// FFDHE over ffdhe6144 (RFC 7919, TLS 1.3 only).
+pub static FFDHE6144: &dyn SupportedKxGroup = &FFDHE6144_GROUP;
+/// FFDHE over ffdhe8192 (RFC 7919, TLS 1.3 only).
+pub static FFDHE8192: &dyn SupportedKxGroup = &FFDHE8192_GROUP;
+
+pub(crate) static FFDHE2048_GROUP: FfdheGroup = FfdheGroup {
+    group: ffdhe::Group::Ffdhe2048,
+    name: NamedGroup::FFDHE2048,
+};
+pub(crate) static FFDHE3072_GROUP: FfdheGroup = FfdheGroup {
+    group: ffdhe::Group::Ffdhe3072,
+    name: NamedGroup::FFDHE3072,
+};
+pub(crate) static FFDHE4096_GROUP: FfdheGroup = FfdheGroup {
+    group: ffdhe::Group::Ffdhe4096,
+    name: NamedGroup::FFDHE4096,
+};
+pub(crate) static FFDHE6144_GROUP: FfdheGroup = FfdheGroup {
+    group: ffdhe::Group::Ffdhe6144,
+    name: NamedGroup::FFDHE6144,
+};
+pub(crate) static FFDHE8192_GROUP: FfdheGroup = FfdheGroup {
+    group: ffdhe::Group::Ffdhe8192,
+    name: NamedGroup::FFDHE8192,
+};
+
+/// Finite-field Diffie-Hellman over an RFC 7919 group (RFC 9846 §4.3.8.1,
+/// §7.4.1).
+///
+/// Shares are `Y = 2^x mod p` and the secret is `Z = Y^x mod p`, both
+/// left-padded to the length of `p` (256 to 1024 bytes); in TLS 1.3 the
+/// secret keeps its leading zeros. Usable for TLS 1.3 only: RFC 10015 §3
+/// forbids FFDHE in TLS 1.2 (and this provider has no DHE cipher suites).
+pub(crate) struct FfdheGroup {
+    group: ffdhe::Group,
+    name: NamedGroup,
+}
+
+impl FfdheGroup {
+    fn generate(&self) -> Result<FfdheKx, Error> {
+        let secret = ffdhe::PrivateKey::generate(self.group, &OsRng).map_err(keygen_error)?;
+        let mut pub_key = alloc::vec![0u8; self.group.element_len()];
+        // Only fails for a wrongly sized buffer.
+        secret
+            .public_key(&mut pub_key)
+            .map_err(|_| Error::general("FFDHE public key computation failed"))?;
+        Ok(FfdheKx {
+            secret,
+            pub_key,
+            name: self.name,
+        })
+    }
+}
+
+impl SupportedKxGroup for FfdheGroup {
+    fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        Ok(Box::new(self.generate()?))
+    }
+
+    fn start_and_complete(&self, client_share: &[u8]) -> Result<CompletedKeyExchange, Error> {
+        // Reject an invalid share before spending an exponentiation on our
+        // own key pair.
+        self.group
+            .validate_public_key(client_share)
+            .map_err(|_| invalid_share())?;
+        let kx = self.generate()?;
+        let secret = kx.agree(client_share)?;
+        Ok(CompletedKeyExchange {
+            group: self.name,
+            pub_key: kx.pub_key,
+            secret,
+        })
+    }
+
+    fn name(&self) -> NamedGroup {
+        self.name
+    }
+
+    fn usable_for_version(&self, version: ProtocolVersion) -> bool {
+        version == ProtocolVersion::TLSv1_3
+    }
+}
+
+impl fmt::Debug for FfdheGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.name)
+    }
+}
+
+/// The private exponent is zeroised on drop by `browntls-crypto`.
+struct FfdheKx {
+    secret: ffdhe::PrivateKey,
+    pub_key: Vec<u8>,
+    name: NamedGroup,
+}
+
+impl FfdheKx {
+    /// Validates `peer` (exact length, `1 < Y < p - 1`) and computes the
+    /// left-padded `Z` (RFC 9846 §7.4.1).
+    fn agree(&self, peer: &[u8]) -> Result<SharedSecret, Error> {
+        let mut secret = alloc::vec![0u8; self.secret.group().element_len()];
+        match self.secret.diffie_hellman(peer, &mut secret) {
+            Ok(()) => Ok(SharedSecret::from(secret)),
+            Err(_) => {
+                zeroize_bytes(&mut secret);
+                Err(invalid_share())
+            }
+        }
+    }
+}
+
+impl ActiveKeyExchange for FfdheKx {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+        self.agree(peer_pub_key)
+    }
+
+    fn pub_key(&self) -> &[u8] {
+        &self.pub_key
+    }
+
+    fn group(&self) -> NamedGroup {
+        self.name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,5 +859,109 @@ mod tests {
         ct[0] ^= 1;
         let secret = client.complete(&ct).unwrap();
         assert_ne!(secret.secret_bytes(), server.secret.secret_bytes());
+    }
+
+    fn ffdhe_groups() -> [(&'static dyn SupportedKxGroup, NamedGroup, usize); 5] {
+        [
+            (FFDHE2048, NamedGroup::FFDHE2048, 256),
+            (FFDHE3072, NamedGroup::FFDHE3072, 384),
+            (FFDHE4096, NamedGroup::FFDHE4096, 512),
+            (FFDHE6144, NamedGroup::FFDHE6144, 768),
+            (FFDHE8192, NamedGroup::FFDHE8192, 1024),
+        ]
+    }
+
+    #[test]
+    fn ffdhe_groups_agree_with_fixed_lengths_in_tls13_only() {
+        for (group, name, len) in ffdhe_groups() {
+            assert_eq!(group.name(), name);
+            assert_eq!(alloc::format!("{group:?}"), alloc::format!("{name:?}"));
+            assert!(group.usable_for_version(ProtocolVersion::TLSv1_3));
+            assert!(!group.usable_for_version(ProtocolVersion::TLSv1_2));
+            let client = group.start().unwrap();
+            assert_eq!(client.group(), name);
+            assert_eq!(client.pub_key().len(), len);
+            assert!(client.hybrid_component().is_none());
+            let server = group.start_and_complete(client.pub_key()).unwrap();
+            assert_eq!(server.group, name);
+            assert_eq!(server.pub_key.len(), len);
+            assert_eq!(server.secret.secret_bytes().len(), len);
+            let secret = client
+                .complete_for_tls_version(&server.pub_key, &crate::versions::TLS13)
+                .unwrap();
+            assert_eq!(secret.secret_bytes(), server.secret.secret_bytes());
+        }
+    }
+
+    #[test]
+    fn ffdhe_tls13_secret_keeps_leading_zeros() {
+        // RFC 9846 §7.4.1: Z is left-padded to the size of p, unlike TLS 1.2.
+        // About one exchange in 256 has a leading zero byte.
+        for _ in 0..4096 {
+            let client = FFDHE2048.start().unwrap();
+            let server = FFDHE2048.start_and_complete(client.pub_key()).unwrap();
+            if server.secret.secret_bytes()[0] != 0 {
+                continue;
+            }
+            let secret = client
+                .complete_for_tls_version(&server.pub_key, &crate::versions::TLS13)
+                .unwrap();
+            assert_eq!(secret.secret_bytes().len(), 256);
+            assert_eq!(secret.secret_bytes(), server.secret.secret_bytes());
+            return;
+        }
+        panic!("no FFDHE secret with a leading zero byte in 4096 exchanges");
+    }
+
+    #[test]
+    fn ffdhe_invalid_shares_are_rejected_by_both_sides() {
+        let invalid = invalid_share();
+        for (group, _, len) in ffdhe_groups() {
+            let p = ffdhe::Group::ALL
+                .into_iter()
+                .find(|g| g.element_len() == len)
+                .unwrap()
+                .prime_be();
+            let mut one = alloc::vec![0u8; len];
+            one[len - 1] = 1;
+            let mut p_minus_one = p.to_vec();
+            p_minus_one[len - 1] -= 1;
+            let mut p_plus_one = p.to_vec();
+            for b in p_plus_one.iter_mut().rev() {
+                let (sum, carry) = b.overflowing_add(1);
+                *b = sum;
+                if !carry {
+                    break;
+                }
+            }
+            let good = group.start().unwrap().pub_key().to_vec();
+            let mut long = alloc::vec![0u8];
+            long.extend_from_slice(&good);
+            let shares: [&[u8]; 9] = [
+                &alloc::vec![0u8; len],
+                &one,
+                &p_minus_one,
+                p,
+                &p_plus_one,
+                &alloc::vec![0xffu8; len],
+                &good[1..],
+                &long,
+                &[],
+            ];
+            for share in shares {
+                assert_eq!(
+                    group.start().unwrap().complete(share).unwrap_err(),
+                    invalid,
+                    "{group:?} client accepted a {}-byte share",
+                    share.len()
+                );
+                assert_eq!(
+                    group.start_and_complete(share).unwrap_err(),
+                    invalid,
+                    "{group:?} server accepted a {}-byte share",
+                    share.len()
+                );
+            }
+        }
     }
 }

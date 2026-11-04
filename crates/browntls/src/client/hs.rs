@@ -306,7 +306,18 @@ fn emit_client_hello_for_retry(
 
     let mut exts = ClientExtensions {
         server_name,
-        named_groups: Some(config.provider.kx_groups.iter().map(|g| g.name()).collect()),
+        // Only groups usable with an offered version: a TLS 1.2-only hello
+        // must not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3,
+        // RFC 7919 §3) or ML-KEM.
+        named_groups: Some(
+            config
+                .provider
+                .kx_groups
+                .iter()
+                .filter(|g| supported_versions.iter().any(|v| g.usable_for_version(*v)))
+                .map(|g| g.name())
+                .collect(),
+        ),
         ec_point_formats: supports_tls12.then(|| vec![ECPointFormat::Uncompressed]),
         signature_schemes: Some(offered_sigschemes.clone()),
         protocols: (!input.alpn_protocols.is_empty()).then(|| {

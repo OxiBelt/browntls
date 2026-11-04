@@ -20,7 +20,7 @@
 //! | Item | Backing |
 //! |---|---|
 //! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM and ChaCha20-Poly1305 from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha}` |
-//! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, nist, mlkem}` |
+//! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, nist, mlkem, ffdhe}` |
 //! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, rsa}` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519 and RSA signing keys from `browntls-crypto` |
 //! | [`SECURE_RANDOM`] | `browntls_crypto::rand::OsRng` |
@@ -200,14 +200,22 @@ pub mod cipher_suite {
 /// The individual key exchange groups.
 pub mod kx_group {
     pub use super::kx::{
-        MLKEM768, MLKEM1024, SECP256R1, SECP256R1MLKEM768, SECP384R1, SECP384R1MLKEM1024,
-        SECP384R1MLKEM1024_CODEPOINT, SECP521R1, X25519, X25519MLKEM768,
+        FFDHE2048, FFDHE3072, FFDHE4096, FFDHE6144, FFDHE8192, MLKEM768, MLKEM1024, SECP256R1,
+        SECP256R1MLKEM768, SECP384R1, SECP384R1MLKEM1024, SECP384R1MLKEM1024_CODEPOINT, SECP521R1,
+        X25519, X25519MLKEM768,
     };
 }
 
 /// The key exchange groups enabled by [`default_provider`], in preference
 /// order. With the `prefer-post-quantum` feature X25519MLKEM768 comes first;
-/// otherwise it comes last.
+/// otherwise it comes after the elliptic curves.
+///
+/// The RFC 9846 optional groups follow as a non-preferred tier, behind every
+/// other group: the RFC 7919 finite-field groups FFDHE2048 to FFDHE8192,
+/// usable for TLS 1.3 only (RFC 10015 §3). A client never sends their key
+/// shares first; a server selects one only when the client sent no key share
+/// for an earlier group and either sent one for the FFDHE group or supports
+/// no earlier group.
 pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     #[cfg(feature = "prefer-post-quantum")]
     kx::X25519MLKEM768,
@@ -216,9 +224,17 @@ pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::SECP384R1,
     #[cfg(not(feature = "prefer-post-quantum"))]
     kx::X25519MLKEM768,
+    kx::FFDHE2048,
+    kx::FFDHE3072,
+    kx::FFDHE4096,
+    kx::FFDHE6144,
+    kx::FFDHE8192,
 ];
 
-/// Every key exchange group this provider implements.
+/// Every key exchange group this provider implements, in preference order.
+///
+/// As in [`DEFAULT_KX_GROUPS`], the RFC 9846 optional groups come last as a
+/// non-preferred tier: FFDHE2048 to FFDHE8192 (TLS 1.3 only).
 pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::X25519MLKEM768,
     kx::SECP256R1MLKEM768,
@@ -229,6 +245,11 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::SECP256R1,
     kx::SECP384R1,
     kx::SECP521R1,
+    kx::FFDHE2048,
+    kx::FFDHE3072,
+    kx::FFDHE4096,
+    kx::FFDHE6144,
+    kx::FFDHE8192,
 ];
 
 /// Every signature verification algorithm this provider implements, used

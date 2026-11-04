@@ -380,5 +380,5 @@ fn default_and_all_groups() {
     #[cfg(not(feature = "prefer-post-quantum"))]
     assert_eq!(names.last(), Some(&NamedGroup::X25519MLKEM768));
     assert!(names.contains(&NamedGroup::X25519));
-    assert_eq!(native::ALL_KX_GROUPS.len(), 9);
+    assert_eq!(native::ALL_KX_GROUPS.len(), 14);
 }

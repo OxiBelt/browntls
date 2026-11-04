@@ -1,4 +1,6 @@
-//! TLS 1.3 cipher suites and record protection (RFC 8446 §5.2, §5.3).
+//! TLS 1.3 cipher suites and record protection (RFC 8446 §5.2, §5.3). The
+//! AES-CCM suites' record protection, with its 8-byte-tag variant, is in
+//! `ccm`.
 
 use alloc::boxed::Box;
 use core::fmt;
@@ -9,7 +11,7 @@ use browntls_crypto::chacha::ChaCha20Poly1305;
 use browntls_crypto::gcm::{Aes128Gcm, Aes256Gcm};
 
 use super::aead::{Kind, TAG_LEN, split_tag};
-use super::{hash, hkdf};
+use super::{ccm, hash, hkdf};
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter,
     Nonce, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload, Tls13AeadAlgorithm,
@@ -58,6 +60,41 @@ pub static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
         aead_alg: &CHACHA20_POLY1305,
+    });
+
+/// `TLS13_AES_128_CCM_SHA256` (RFC 9846 Appendix B.4).
+///
+/// Not preferred: listed after every AES-GCM and ChaCha20-Poly1305 suite.
+pub static TLS13_AES_128_CCM_SHA256: SupportedCipherSuite =
+    SupportedCipherSuite::Tls13(&Tls13CipherSuite {
+        common: CipherSuiteCommon {
+            suite: CipherSuite::TLS13_AES_128_CCM_SHA256,
+            hash_provider: &hash::SHA256_IMPL,
+            // RFC 9147 Appendix B.1: 2^23 records (RFC 9846 §5.5 gives no
+            // CCM limit).
+            confidentiality_limit: ccm::CONFIDENTIALITY_LIMIT,
+        },
+        hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
+        aead_alg: &ccm::AES_128_CCM,
+    });
+
+/// `TLS13_AES_128_CCM_8_SHA256` (RFC 9846 Appendix B.4).
+///
+/// Its 64-bit tag tolerates only 2^7 failed decryptions per key at the usual
+/// TLS 1.3 margin (RFC 9147 Appendix B.3), so it is not in
+/// [`DEFAULT_CIPHER_SUITES`](super::DEFAULT_CIPHER_SUITES); enable it
+/// explicitly, for constrained peers that support nothing else. Its keys
+/// cannot be extracted for kernel TLS offload.
+pub static TLS13_AES_128_CCM_8_SHA256: SupportedCipherSuite =
+    SupportedCipherSuite::Tls13(&Tls13CipherSuite {
+        common: CipherSuiteCommon {
+            suite: CipherSuite::TLS13_AES_128_CCM_8_SHA256,
+            hash_provider: &hash::SHA256_IMPL,
+            // RFC 9147 Appendix B.3: as for AES-128-CCM, 2^23 records.
+            confidentiality_limit: ccm::CONFIDENTIALITY_LIMIT,
+        },
+        hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
+        aead_alg: &ccm::AES_128_CCM_8,
     });
 
 /// A TLS 1.3 AEAD over a `browntls-crypto` [`Aead`].

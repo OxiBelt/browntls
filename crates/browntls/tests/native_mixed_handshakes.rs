@@ -34,6 +34,20 @@ enum Side {
     RustCrypto,
 }
 
+/// The suites both providers implement: the native ones without the AES-CCM
+/// suites, which the RustCrypto provider lacks.
+fn common_suites() -> Vec<SupportedCipherSuite> {
+    native::ALL_CIPHER_SUITES
+        .iter()
+        .filter(|s| {
+            rustcrypto::ALL_CIPHER_SUITES
+                .iter()
+                .any(|r| r.suite() == s.suite())
+        })
+        .copied()
+        .collect()
+}
+
 /// `(client, server)` provider pairs.
 const DIRECTIONS: [(Side, Side); 2] = [
     (Side::Native, Side::RustCrypto),
@@ -214,9 +228,22 @@ fn common_groups_cover_every_rustcrypto_group() {
             NamedGroup::secp521r1
         ]
     );
-    // Both providers implement the same suites.
-    let names = |side: Side| side.suites().iter().map(|s| s.suite()).collect::<Vec<_>>();
-    assert_eq!(names(Side::Native), names(Side::RustCrypto));
+    // The providers implement the same suites, except the native-only
+    // AES-CCM suites.
+    let names =
+        |suites: &[SupportedCipherSuite]| suites.iter().map(|s| s.suite()).collect::<Vec<_>>();
+    assert_eq!(names(&common_suites()), names(Side::RustCrypto.suites()));
+    let native_only: Vec<_> = names(Side::Native.suites())
+        .into_iter()
+        .filter(|s| !names(&common_suites()).contains(s))
+        .collect();
+    assert_eq!(
+        native_only,
+        [
+            CipherSuite::TLS13_AES_128_CCM_SHA256,
+            CipherSuite::TLS13_AES_128_CCM_8_SHA256
+        ]
+    );
 }
 
 #[test]
@@ -226,7 +253,7 @@ fn every_suite_group_and_key_type_both_directions() {
     let chain_for = |k: KeyType| chains.iter().find(|c| c.key_type == k).unwrap();
     let mut handshakes = 0;
     for (client_side, server_side) in DIRECTIONS {
-        for suite in native::ALL_CIPHER_SUITES {
+        for suite in &common_suites() {
             let v = suite.version().version;
             for &key in key_types(suite) {
                 let chain = chain_for(key);
@@ -462,7 +489,7 @@ fn key_update_and_exporters_agree_both_directions() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP384);
     for (client_side, server_side) in DIRECTIONS {
-        for suite in native::ALL_CIPHER_SUITES
+        for suite in common_suites()
             .iter()
             .filter(|s| !format!("{:?}", s.suite()).contains("_RSA_"))
         {

@@ -87,6 +87,10 @@ reference for testing, plus accelerated backends selected at run time.
 | FFDHE (RFC 7919) | RSA BMI2 + ADX Montgomery kernel | portable 64-bit | portable 64-bit |
 | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
 
+AES-CCM (TLS 1.3 `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256`) runs
+on the AES backends of this table: counter mode uses each backend's
+pipelined keystream, and CBC-MAC encrypts one block at a time.
+
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
 

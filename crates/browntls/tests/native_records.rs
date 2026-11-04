@@ -27,16 +27,28 @@ fn random_vec(len: usize) -> Vec<u8> {
     out
 }
 
-/// Each native suite with the RustCrypto suite of the same code point.
+/// Each native suite with the RustCrypto suite of the same code point. The
+/// RustCrypto provider implements every native suite except the AES-CCM
+/// ones, whose primitive is compared with the RustCrypto `ccm` crate in
+/// `browntls-crypto`'s tests instead.
 fn suite_pairs() -> Vec<(SupportedCipherSuite, SupportedCipherSuite)> {
     let pairs: Vec<_> = native::ALL_CIPHER_SUITES
         .iter()
-        .map(|n| {
+        .filter_map(|n| {
             let r = rustcrypto::ALL_CIPHER_SUITES
                 .iter()
-                .find(|r| r.suite() == n.suite())
-                .expect("RustCrypto implements every native suite");
-            (*n, *r)
+                .find(|r| r.suite() == n.suite());
+            if r.is_none() {
+                assert!(
+                    matches!(
+                        n.suite(),
+                        browntls::CipherSuite::TLS13_AES_128_CCM_SHA256
+                            | browntls::CipherSuite::TLS13_AES_128_CCM_8_SHA256
+                    ),
+                    "RustCrypto lacks {n:?}"
+                );
+            }
+            Some((*n, *r?))
         })
         .collect();
     assert_eq!(pairs.len(), if cfg!(feature = "tls12") { 9 } else { 3 });

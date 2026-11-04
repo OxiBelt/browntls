@@ -50,6 +50,7 @@ fn full_handshake_every_suite_group_and_key_type() {
         {
             for group in prov::ALL_KX_GROUPS {
                 let mut provider = prov::default_provider();
+                provider.cipher_suites = prov::ALL_CIPHER_SUITES.to_vec();
                 provider.kx_groups = prov::ALL_KX_GROUPS.to_vec();
                 let server_config = ServerConfig::builder_with_provider(Arc::new(provider))
                     .with_safe_default_protocol_versions()

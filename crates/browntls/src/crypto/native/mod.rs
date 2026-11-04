@@ -19,7 +19,7 @@
 //!
 //! | Item | Backing |
 //! |---|---|
-//! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM and ChaCha20-Poly1305 from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha}` |
+//! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM, ChaCha20-Poly1305 and AES-CCM from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha, ccm}` |
 //! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, curve448::x448, nist, mlkem, ffdhe}` |
 //! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, curve448::ed448, rsa}` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
@@ -93,6 +93,7 @@ pub mod sign;
 pub mod ticketer;
 pub mod verify;
 
+pub(crate) mod ccm;
 pub(crate) mod kx;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
@@ -162,14 +163,43 @@ impl KeyProvider for Native {
     }
 }
 
-/// The cipher suites enabled by [`default_provider`], in preference order.
-pub static DEFAULT_CIPHER_SUITES: &[SupportedCipherSuite] = ALL_CIPHER_SUITES;
+/// The cipher suites enabled by [`default_provider`], in preference order:
+/// [`ALL_CIPHER_SUITES`] without `TLS13_AES_128_CCM_8_SHA256`, whose 64-bit
+/// tag would weaken the default security level.
+///
+/// `TLS13_AES_128_CCM_SHA256` is in the non-preferred tier: after every
+/// AES-GCM and ChaCha20-Poly1305 suite, so it is negotiated only with a peer
+/// that shares none of those.
+pub static DEFAULT_CIPHER_SUITES: &[SupportedCipherSuite] = &[
+    tls13::TLS13_AES_256_GCM_SHA384,
+    tls13::TLS13_AES_128_GCM_SHA256,
+    tls13::TLS13_CHACHA20_POLY1305_SHA256,
+    tls13::TLS13_AES_128_CCM_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+];
 
 /// Every cipher suite this provider implements, in preference order.
+///
+/// The TLS 1.3 suites of RFC 9846's optional, non-preferred tier,
+/// `TLS13_AES_128_CCM_SHA256` and `TLS13_AES_128_CCM_8_SHA256`, follow every
+/// AES-GCM and ChaCha20-Poly1305 suite.
 pub static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     tls13::TLS13_AES_256_GCM_SHA384,
     tls13::TLS13_AES_128_GCM_SHA256,
     tls13::TLS13_CHACHA20_POLY1305_SHA256,
+    tls13::TLS13_AES_128_CCM_SHA256,
+    tls13::TLS13_AES_128_CCM_8_SHA256,
     #[cfg(feature = "tls12")]
     tls12::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     #[cfg(feature = "tls12")]
@@ -193,7 +223,8 @@ pub mod cipher_suite {
         TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     };
     pub use super::tls13::{
-        TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
+        TLS13_AES_128_CCM_8_SHA256, TLS13_AES_128_CCM_SHA256, TLS13_AES_128_GCM_SHA256,
+        TLS13_AES_256_GCM_SHA384, TLS13_CHACHA20_POLY1305_SHA256,
     };
 }
 
@@ -386,7 +417,14 @@ mod tests {
     #[test]
     fn provider_is_consistent() {
         let p = default_provider();
-        assert_eq!(p.cipher_suites.len(), ALL_CIPHER_SUITES.len());
+        // Everything but TLS13_AES_128_CCM_8_SHA256, in the same order.
+        let without_ccm_8: alloc::vec::Vec<_> = ALL_CIPHER_SUITES
+            .iter()
+            .filter(|s| s.suite() != crate::CipherSuite::TLS13_AES_128_CCM_8_SHA256)
+            .copied()
+            .collect();
+        assert_eq!(p.cipher_suites, without_ccm_8);
+        assert_eq!(p.cipher_suites.len() + 1, ALL_CIPHER_SUITES.len());
         assert!(!p.kx_groups.is_empty());
         assert!(!p.fips());
         let mut buf = [0u8; 32];

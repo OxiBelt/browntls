@@ -406,8 +406,15 @@ fn suite_matrix() -> Vec<(u16, u16, &'static [KeyType])> {
         KeyType::EcdsaP384,
         KeyType::Rsa2048,
     ];
+    // rustls with ring implements neither AES-CCM suite (RFC 9846
+    // Appendix B.4), so the matrix covers the suites both sides implement.
     prov::ALL_CIPHER_SUITES
         .iter()
+        .filter(|s| {
+            ring_provider::ALL_CIPHER_SUITES
+                .iter()
+                .any(|r| u16::from(r.suite()) == u16::from(s.suite()))
+        })
         .map(|s| {
             let code = u16::from(s.suite());
             let name = format!("{:?}", s.suite());

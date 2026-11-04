@@ -182,6 +182,15 @@ pub enum ConnectionTrafficSecrets {
         /// The IV.
         iv: Iv,
     },
+    /// AES-128-CCM with a 16-byte tag (Linux `TLS_CIPHER_AES_CCM_128`).
+    /// AES-128-CCM-8 has no kernel TLS cipher, so its keys are never
+    /// extracted.
+    Aes128Ccm {
+        /// The key.
+        key: AeadKey,
+        /// The IV.
+        iv: Iv,
+    },
 }
 
 impl fmt::Debug for ConnectionTrafficSecrets {
@@ -190,6 +199,7 @@ impl fmt::Debug for ConnectionTrafficSecrets {
             Self::Aes128Gcm { .. } => "Aes128Gcm(..)",
             Self::Aes256Gcm { .. } => "Aes256Gcm(..)",
             Self::Chacha20Poly1305 { .. } => "Chacha20Poly1305(..)",
+            Self::Aes128Ccm { .. } => "Aes128Ccm(..)",
         })
     }
 }

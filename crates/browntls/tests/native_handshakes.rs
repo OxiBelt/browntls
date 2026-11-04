@@ -70,9 +70,9 @@ fn rsa_schemes(v: ProtocolVersion) -> Vec<SignatureScheme> {
     }
 }
 
-/// The suites an RSA-keyed server can negotiate in `v`.
+/// The suites a default RSA-keyed server can negotiate in `v`.
 fn rsa_suites(v: ProtocolVersion) -> Vec<SupportedCipherSuite> {
-    prov::ALL_CIPHER_SUITES
+    prov::DEFAULT_CIPHER_SUITES
         .iter()
         .filter(|s| match v {
             ProtocolVersion::TLSv1_2 => {
@@ -213,8 +213,9 @@ fn rsa_server_signs_with_every_scheme_and_suite() {
             }
         }
     }
-    // 3 TLS 1.3 suites x 3 PSS schemes + 3 ECDHE_RSA suites x 6 schemes
-    assert_eq!(handshakes, 27);
+    // 4 TLS 1.3 suites (AES-128-CCM-8 is not a default suite) x 3 PSS
+    // schemes + 3 ECDHE_RSA suites x 6 schemes
+    assert_eq!(handshakes, 30);
 }
 
 #[test]

@@ -34,6 +34,7 @@ intent.
 | Area | Status |
 |---|---|
 | 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
+| RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite, `TLS_AES_128_CCM_8_SHA256` opt-in only; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |

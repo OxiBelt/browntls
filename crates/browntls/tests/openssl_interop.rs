@@ -358,6 +358,12 @@ impl Case {
             vec!["-tls1_2", "-cipher", self.openssl_suite]
         };
         args.extend_from_slice(&["-groups", self.openssl_group]);
+        if self.openssl_suite == "TLS_AES_128_CCM_8_SHA256" {
+            // OpenSSL 3.2 moved the CCM-8 suites to security level 0 for
+            // their 8-byte tag; the default level (2 on most distributions)
+            // would otherwise refuse to negotiate the suite at all.
+            args.extend_from_slice(&["-cipher", "DEFAULT:@SECLEVEL=0"]);
+        }
         args
     }
 

@@ -1,15 +1,17 @@
 # Contributing to browntls
 
-browntls is a Rust TLS library project in initial development. There is currently
-no Rust crate, supported TLS API, or release. This document is the source of truth
-for contributor workflow; [AGENTS.md](AGENTS.md) provides agent orientation.
+browntls is a Rust TLS library project in initial development. Its crates are
+unreleased and have no stable API or support commitment yet. This document is
+the source of truth for contributor workflow; [AGENTS.md](AGENTS.md) provides
+agent orientation and [Architecture](docs/Architecture.md) the design.
 
 ## Repository layout
 
-Root documents describe the project and its policies. Technical documentation
-belongs in `docs/`, portable validation scripts in `tests/scripts/`, and GitHub
-automation in `.github/`. Describe new source layout when introducing the first
-crate; do not create empty runtime directories to imply an architecture.
+Root documents describe the project and its policies. Rust crates live in
+`crates/`, technical documentation in `docs/`, cross-testing and CI helpers in
+`scripts/`, portable repository checks in `tests/scripts/`, and GitHub
+automation in `.github/`. Do not create empty runtime directories to imply an
+architecture.
 
 Use repository-relative paths in documentation and contribution descriptions.
 State explicitly when a command must run outside the repository root.
@@ -51,9 +53,23 @@ fetched. CI uses the same checks and pins the downloaded actionlint archive by
 SHA-256. Optional shellcheck and pyflakes integrations are disabled so the
 documented actionlint result does not depend on host-installed analyzers.
 
-These checks validate repository maintenance files, not TLS correctness. There
-are no Cargo, Docker, or Kubernetes test gates yet. Add applicable gates with the
-first implementation as described in [Maintenance](docs/Maintenance.md).
+These checks validate repository maintenance files, not TLS correctness.
+
+Rust checks (the toolchain is pinned by `rust-toolchain.toml`):
+
+```sh
+cargo fmt --all --check
+rustfmt --edition 2024 --check crates/browntls/tests/cases/*.rs
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+RUSTFLAGS='--cfg browntls_force_soft' cargo test -p browntls-crypto --locked
+```
+
+Accelerated backends for other CPUs are exercised under QEMU user-mode
+emulation with `scripts/cross-test.sh <profile> -p browntls-crypto`; the script
+header lists the profiles and the Ubuntu packages it needs. CI additionally
+runs native aarch64 and riscv64 jobs, `no_std` builds and `cargo deny`.
+There are no Docker or Kubernetes test gates.
 
 ## Commit messages and signatures
 

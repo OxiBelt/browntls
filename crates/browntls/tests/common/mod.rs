@@ -1,0 +1,725 @@
+//! Shared helpers for the integration tests: run-time generated certificate
+//! chains, a pinned-certificate verifier and in-memory transport plumbing.
+//!
+//! Every target that declares `mod common;` also declares `mod prov;` (one of
+//! `tests/providers/*.rs`): the provider under test, used for the default
+//! configurations, the verifiers' algorithms and key loading here.
+#![allow(
+    dead_code,
+    unreachable_pub,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+
+#[cfg(feature = "native")]
+pub mod native_keys;
+
+use std::io;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use browntls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use browntls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
+use browntls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer,
+    UnixTime,
+};
+use browntls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use browntls::{
+    CertificateError, ClientConfig, ClientConnection, ConnectionCommon, DigitallySignedStruct,
+    DistinguishedName, Error, ServerConfig, ServerConnection, SideData, SignatureScheme,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_RSA_SHA256,
+    SignatureAlgorithm,
+};
+
+/// The key algorithm of a generated chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyType {
+    Ed25519,
+    EcdsaP256,
+    EcdsaP384,
+    Rsa2048,
+}
+
+impl KeyType {
+    pub const ALL: [KeyType; 4] = [
+        KeyType::Ed25519,
+        KeyType::EcdsaP256,
+        KeyType::EcdsaP384,
+        KeyType::Rsa2048,
+    ];
+
+    /// Key types every provider can sign with.
+    pub const NON_RSA: [KeyType; 3] = [KeyType::Ed25519, KeyType::EcdsaP256, KeyType::EcdsaP384];
+
+    /// Key types the provider under test can *sign* with: RSA only when its
+    /// key loader signs RSA (the RustCrypto provider's is verify-only).
+    pub const SIGNING: &'static [KeyType] = if crate::prov::SIGNS_RSA {
+        &Self::ALL
+    } else {
+        &Self::NON_RSA
+    };
+
+    fn algorithm(self) -> &'static SignatureAlgorithm {
+        match self {
+            KeyType::Ed25519 => &PKCS_ED25519,
+            KeyType::EcdsaP256 => &PKCS_ECDSA_P256_SHA256,
+            KeyType::EcdsaP384 => &PKCS_ECDSA_P384_SHA384,
+            KeyType::Rsa2048 => &PKCS_RSA_SHA256,
+        }
+    }
+
+    fn generate_key(self) -> KeyPair {
+        match self {
+            KeyType::Rsa2048 => {
+                use rsa::pkcs8::EncodePrivateKey;
+                static RSA_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+                let der = RSA_KEY.get_or_init(|| {
+                    let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
+                    let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+                    key.to_pkcs8_der().expect("pkcs8").as_bytes().to_vec()
+                });
+                KeyPair::from_pkcs8_der_and_sign_algo(
+                    &rustls_pki_types::PrivatePkcs8KeyDer::from(der.clone()),
+                    &PKCS_RSA_SHA256,
+                )
+                .expect("rsa key pair")
+            }
+            other => KeyPair::generate_for(other.algorithm()).expect("keygen"),
+        }
+    }
+
+    /// The TLS signature schemes this key type signs with.
+    pub fn schemes(self) -> &'static [SignatureScheme] {
+        match self {
+            KeyType::Ed25519 => &[SignatureScheme::ED25519],
+            KeyType::EcdsaP256 => &[SignatureScheme::ECDSA_NISTP256_SHA256],
+            KeyType::EcdsaP384 => &[SignatureScheme::ECDSA_NISTP384_SHA384],
+            KeyType::Rsa2048 => &[
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+            ],
+        }
+    }
+}
+
+/// A CA and an end-entity certificate issued by it.
+#[derive(Clone, Debug)]
+pub struct Chain {
+    pub key_type: KeyType,
+    pub ca: CertificateDer<'static>,
+    pub end_entity: CertificateDer<'static>,
+    pub end_entity_key: Vec<u8>,
+    pub end_entity_spki: Vec<u8>,
+}
+
+impl Chain {
+    /// The chain as a server or client presents it: end entity then CA.
+    pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
+        vec![self.end_entity.clone(), self.ca.clone()]
+    }
+
+    pub fn private_key(&self) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.end_entity_key.clone()))
+    }
+
+    pub fn spki(&self) -> SubjectPublicKeyInfoDer<'static> {
+        SubjectPublicKeyInfoDer::from(self.end_entity_spki.clone())
+    }
+}
+
+fn to_der(cert: &rcgen::Certificate) -> CertificateDer<'static> {
+    CertificateDer::from(cert.der().to_vec())
+}
+
+/// Generates a fresh CA and an end-entity certificate for `names` (DNS SANs).
+pub fn gen_chain(key_type: KeyType, names: &[&str], purpose: ExtendedKeyUsagePurpose) -> Chain {
+    let ca_key = key_type.generate_key();
+    let ee_key = key_type.generate_key();
+    let ee_pkcs8 = ee_key.serialize_der();
+    issue_chain(key_type, ca_key, &ee_key, ee_pkcs8, names, purpose)
+}
+
+/// Issues a CA certificate self-signed with `ca_key` and an end-entity
+/// certificate for `ee_key` (whose PKCS #8 private key is `ee_pkcs8`) for
+/// `names` (DNS SANs), signed with `ca_key`.
+pub fn issue_chain<K: rcgen::SigningKey>(
+    key_type: KeyType,
+    ca_key: K,
+    ee_key: &impl rcgen::PublicKeyData,
+    ee_pkcs8: Vec<u8>,
+    names: &[&str],
+    purpose: ExtendedKeyUsagePurpose,
+) -> Chain {
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    ca_params.distinguished_name.push(
+        DnType::CommonName,
+        format!("browntls test CA ({key_type:?})"),
+    );
+    let ca_cert = ca_params.self_signed(&ca_key).expect("ca cert");
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let mut ee_params =
+        CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .expect("ee params");
+    ee_params.is_ca = IsCa::NoCa;
+    ee_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    ee_params.extended_key_usages = vec![purpose];
+    ee_params.distinguished_name.push(
+        DnType::CommonName,
+        names.first().copied().unwrap_or("browntls test"),
+    );
+    let ee_cert = ee_params.signed_by(ee_key, &issuer).expect("ee cert");
+
+    Chain {
+        key_type,
+        ca: to_der(ca_cert_ref(&ca_cert)),
+        end_entity: to_der(&ee_cert),
+        end_entity_key: ee_pkcs8,
+        end_entity_spki: rcgen::PublicKeyData::subject_public_key_info(ee_key),
+    }
+}
+
+fn ca_cert_ref(c: &rcgen::Certificate) -> &rcgen::Certificate {
+    c
+}
+
+/// A server chain for `localhost`.
+pub fn server_chain(key_type: KeyType) -> Chain {
+    gen_chain(
+        key_type,
+        &["localhost", "testserver.example"],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    )
+}
+
+/// A client chain.
+pub fn client_chain(key_type: KeyType) -> Chain {
+    gen_chain(
+        key_type,
+        &["client.example"],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    )
+}
+
+pub fn provider() -> Arc<CryptoProvider> {
+    Arc::new(crate::prov::default_provider())
+}
+
+pub fn server_name() -> ServerName<'static> {
+    ServerName::try_from("localhost").unwrap()
+}
+
+/// Accepts exactly one pinned end-entity certificate and verifies handshake
+/// signatures with the provider's algorithms against its public key.
+#[derive(Debug)]
+pub struct PinnedServerVerifier {
+    pub expected: CertificateDer<'static>,
+    pub spki: SubjectPublicKeyInfoDer<'static>,
+    pub algs: WebPkiSupportedAlgorithms,
+    pub raw: bool,
+}
+
+impl PinnedServerVerifier {
+    pub fn new(chain: &Chain) -> Arc<Self> {
+        Arc::new(Self {
+            expected: chain.end_entity.clone(),
+            spki: chain.spki(),
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
+            raw: false,
+        })
+    }
+
+    /// Expects the server to present `chain`'s key as an RFC 7250 raw public key.
+    pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
+        Arc::new(Self {
+            expected: CertificateDer::from(chain.end_entity_spki.clone()),
+            spki: chain.spki(),
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
+            raw: true,
+        })
+    }
+}
+
+impl ServerCertVerifier for PinnedServerVerifier {
+    fn requires_raw_public_keys(&self) -> bool {
+        self.raw
+    }
+
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        if end_entity.as_ref() == self.expected.as_ref() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(CertificateError::UnknownIssuer.into())
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        _cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls::crypto::verify_tls12_signature_with_raw_key(message, &self.spki, dss, &self.algs)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        _cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls::crypto::verify_tls13_signature_with_raw_key(message, &self.spki, dss, &self.algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algs.supported_schemes()
+    }
+}
+
+/// Accepts exactly one pinned client certificate.
+#[derive(Debug)]
+pub struct PinnedClientVerifier {
+    pub expected: CertificateDer<'static>,
+    pub spki: SubjectPublicKeyInfoDer<'static>,
+    pub algs: WebPkiSupportedAlgorithms,
+    pub mandatory: bool,
+    pub hints: Vec<DistinguishedName>,
+    pub raw: bool,
+}
+
+impl PinnedClientVerifier {
+    pub fn new(chain: &Chain, mandatory: bool) -> Arc<Self> {
+        Arc::new(Self {
+            expected: chain.end_entity.clone(),
+            spki: chain.spki(),
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
+            mandatory,
+            hints: Vec::new(),
+            raw: false,
+        })
+    }
+
+    /// Expects the client to present `chain`'s key as an RFC 7250 raw public key.
+    pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
+        Arc::new(Self {
+            expected: CertificateDer::from(chain.end_entity_spki.clone()),
+            spki: chain.spki(),
+            algs: crate::prov::SUPPORTED_SIG_ALGS,
+            mandatory: true,
+            hints: Vec::new(),
+            raw: true,
+        })
+    }
+}
+
+impl ClientCertVerifier for PinnedClientVerifier {
+    fn requires_raw_public_keys(&self) -> bool {
+        self.raw
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.mandatory
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.hints
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, Error> {
+        if end_entity.as_ref() == self.expected.as_ref() {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(CertificateError::UnknownIssuer.into())
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        _cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls::crypto::verify_tls12_signature_with_raw_key(message, &self.spki, dss, &self.algs)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        _cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls::crypto::verify_tls13_signature_with_raw_key(message, &self.spki, dss, &self.algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algs.supported_schemes()
+    }
+}
+
+/// Serves `chain`'s key as an RFC 7250 raw public key (server or client side).
+#[derive(Debug)]
+pub struct RawKeyResolver(pub Arc<browntls::sign::CertifiedKey>);
+
+impl RawKeyResolver {
+    pub fn new(chain: &Chain) -> Arc<Self> {
+        let key = provider()
+            .key_provider
+            .load_private_key(chain.private_key())
+            .expect("key loads");
+        Arc::new(Self(Arc::new(browntls::sign::CertifiedKey::new(
+            vec![CertificateDer::from(chain.end_entity_spki.clone())],
+            key,
+        ))))
+    }
+}
+
+impl browntls::server::ResolvesServerCert for RawKeyResolver {
+    fn resolve(
+        &self,
+        _client_hello: browntls::server::ClientHello<'_>,
+    ) -> Option<Arc<browntls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+impl browntls::client::ResolvesClientCert for RawKeyResolver {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<browntls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        true
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps a server certificate verifier: the client offers only `offer` in
+/// `signature_algorithms`, and the scheme of every handshake signature
+/// checked is recorded.
+#[derive(Debug)]
+pub struct SchemeRecordingServerVerifier {
+    pub inner: Arc<dyn ServerCertVerifier>,
+    pub offer: Vec<SignatureScheme>,
+    pub seen: Mutex<Vec<SignatureScheme>>,
+}
+
+impl SchemeRecordingServerVerifier {
+    pub fn new(inner: Arc<dyn ServerCertVerifier>, offer: &[SignatureScheme]) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            offer: offer.to_vec(),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The schemes of the signatures checked so far.
+    pub fn seen(&self) -> Vec<SignatureScheme> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl ServerCertVerifier for SchemeRecordingServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.offer.clone()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
+        self.inner.root_hint_subjects()
+    }
+}
+
+/// Wraps a client certificate verifier: the server's CertificateRequest
+/// offers only `offer`, and the scheme of every client signature checked is
+/// recorded.
+#[derive(Debug)]
+pub struct SchemeRecordingClientVerifier {
+    pub inner: Arc<dyn ClientCertVerifier>,
+    pub offer: Vec<SignatureScheme>,
+    pub seen: Mutex<Vec<SignatureScheme>>,
+}
+
+impl SchemeRecordingClientVerifier {
+    pub fn new(inner: Arc<dyn ClientCertVerifier>, offer: &[SignatureScheme]) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            offer: offer.to_vec(),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The schemes of the signatures checked so far.
+    pub fn seen(&self) -> Vec<SignatureScheme> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl ClientCertVerifier for SchemeRecordingClientVerifier {
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, Error> {
+        self.inner
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.offer.clone()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
+}
+
+/// A client configuration trusting `chain`'s end entity, all versions and suites.
+pub fn client_config(chain: &Chain) -> ClientConfig {
+    ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(chain))
+        .with_no_client_auth()
+}
+
+/// A server configuration serving `chain`, no client auth.
+pub fn server_config(chain: &Chain) -> ServerConfig {
+    ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap()
+}
+
+/// Moves all queued TLS bytes from `from` into `to`; returns how many.
+///
+/// When `to`'s receive buffer fills up, its records are processed so the
+/// transfer can continue; plaintext that piles up is left for the caller.
+pub fn transfer<A: SideData, B: SideData>(
+    from: &mut ConnectionCommon<A>,
+    to: &mut ConnectionCommon<B>,
+) -> usize {
+    let mut buf = Vec::new();
+    while from.wants_write() {
+        from.write_tls(&mut buf).unwrap();
+    }
+    let mut total = 0;
+    let mut offset = 0;
+    while offset < buf.len() {
+        match to.read_tls(&mut &buf[offset..]) {
+            Ok(n) => {
+                offset += n;
+                total += n;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Other => {
+                to.process_new_packets().unwrap();
+                if !to.wants_read() {
+                    // plaintext is waiting; the caller must drain it
+                    break;
+                }
+            }
+            Err(e) => panic!("read_tls failed: {e}"),
+        }
+    }
+    total
+}
+
+/// Drives both sides until neither is handshaking; fails on either side's error.
+pub fn do_handshake(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> Result<(), Error> {
+    for _ in 0..16 {
+        if !client.is_handshaking() && !server.is_handshaking() {
+            return Ok(());
+        }
+        transfer(client, server);
+        server.process_new_packets()?;
+        transfer(server, client);
+        client.process_new_packets()?;
+    }
+    assert!(
+        !client.is_handshaking() && !server.is_handshaking(),
+        "handshake did not complete"
+    );
+    Ok(())
+}
+
+/// Runs the handshake expecting an error on one side; returns `(client, server)` results.
+pub fn do_handshake_until_error(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> (Result<(), Error>, Result<(), Error>) {
+    let mut client_res = Ok(());
+    let mut server_res = Ok(());
+    for _ in 0..16 {
+        if (!client.is_handshaking() && !server.is_handshaking())
+            || client_res.is_err()
+            || server_res.is_err()
+        {
+            break;
+        }
+        transfer(client, server);
+        if let Err(e) = server.process_new_packets() {
+            server_res = Err(e);
+            transfer(server, client);
+            client_res = client.process_new_packets().map(|_| ());
+            break;
+        }
+        transfer(server, client);
+        if let Err(e) = client.process_new_packets() {
+            client_res = Err(e);
+            transfer(client, server);
+            server_res = server.process_new_packets().map(|_| ());
+            break;
+        }
+    }
+    (client_res, server_res)
+}
+
+/// Sends `data` from `from` to `to` and returns what `to` received.
+pub fn send_and_receive<A: SideData, B: SideData>(
+    from: &mut ConnectionCommon<A>,
+    to: &mut ConnectionCommon<B>,
+    data: &[u8],
+) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = Vec::new();
+    let mut written = 0;
+    while written < data.len() || from.wants_write() {
+        written += from.writer().write(&data[written..]).unwrap();
+        let mut tls = Vec::new();
+        while from.wants_write() {
+            from.write_tls(&mut tls).unwrap();
+        }
+        let mut offset = 0;
+        while offset < tls.len() {
+            match to.read_tls(&mut &tls[offset..]) {
+                Ok(n) => offset += n,
+                Err(e) if e.kind() == io::ErrorKind::Other => {}
+                Err(e) => panic!("read_tls failed: {e}"),
+            }
+            to.process_new_packets().unwrap();
+            drain(to, &mut out);
+        }
+    }
+    out
+}
+
+fn drain<B: SideData>(conn: &mut ConnectionCommon<B>, out: &mut Vec<u8>) {
+    use std::io::Read;
+    match conn.reader().read_to_end(out) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read failed: {e}"),
+    }
+}
+
+/// Initialises `env_logger` once so `RUST_LOG=trace` shows protocol traces.
+pub fn init_logging() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let _ = env_logger::Builder::from_default_env()
+            .is_test(true)
+            .try_init();
+    });
+}

@@ -2,9 +2,10 @@
 
 ## Current baseline
 
-browntls has project documentation and repository checks, with no Rust crate or
-published releases. The [contributor guide](../CONTRIBUTING.md) owns workflow and
-commit rules; the [security policy](../SECURITY.md) owns disclosure and support.
+browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`)
+described in [Architecture](Architecture.md), with no published releases. The
+[contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
+[security policy](../SECURITY.md) owns disclosure and support.
 
 These conventions adapt [OxiBelt](https://github.com/OxiBelt/OxiBelt)'s separation
 of contributor policy, agent orientation, technical documentation, and evidence.
@@ -12,9 +13,9 @@ They do not import its proxy, WAF, image, or beta-promotion contracts.
 
 ## Routine maintenance
 
-Review dependency and GitHub Actions updates weekly. Dependabot currently covers
-only GitHub Actions, the only declared dependency ecosystem. Review generated
-changes before merging; there is no automatic merge policy.
+Review dependency and GitHub Actions updates weekly. Dependabot covers GitHub
+Actions and the Cargo workspace. Review generated changes before merging; there
+is no automatic merge policy.
 
 Run repository checks for every change. Review weekly scheduled failures, update
 documentation when tools or workflows change, and report unrun checks accurately.
@@ -31,11 +32,23 @@ reporting link. Recheck it after repository setting changes. Hosted branch rules
 and other security features require a separate decision; these documents do not
 claim they are configured.
 
-## First Rust crate prerequisites
+## Rust workspace requirements
 
-The change adding the first crate must also establish:
+The workspace was introduced with the toolchain pin (Rust 1.99.1, also the
+MSRV), a committed `Cargo.lock` used with `--locked`, format/Clippy/test/doc
+CI, QEMU and native multi-architecture test jobs, `no_std` builds, and
+`cargo deny` (advisories, licenses, bans, sources) with a checksum-pinned
+binary. `cargo deny` reads the same RustSec database as `cargo audit`; a
+separate `cargo audit` job is not added because no upstream-published checksum
+is available for its release binaries. Outstanding items are tracked in the
+[roadmap](Roadmap.md#governance-gaps): `cargo vet` admission, fuzzing of
+parsers and protocol state, and named independent review of `unsafe` code and
+cryptography.
 
-- Its public purpose and layout, supported platforms, feature matrix, MSRV, and
+The original prerequisites, which remain the bar for each new crate or
+boundary:
+
+- Public purpose and layout, supported platforms, feature matrix, MSRV, and
   pinned Rust toolchain. Keep toolchain and dependency upgrades explicit.
 - A documented lockfile policy and reproducible resolution for CI. Inventory
   every independent manifest, lockfile, vendored source, and native dependency.

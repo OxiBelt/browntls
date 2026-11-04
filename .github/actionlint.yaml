@@ -1,0 +1,10 @@
+# Runner labels the pinned actionlint does not know.
+self-hosted-runner:
+  labels:
+    # RISE RISC-V runners (https://riscv-runners.riseproject.dev/).
+    - ubuntu-24.04-riscv
+    # GitHub-hosted Ubuntu 26.04 images, newer than the label list of the
+    # pinned actionlint (1.7.12 stops at ubuntu-24.04); drop these once the
+    # pinned version knows them.
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

@@ -17,13 +17,16 @@ concurrency:
 jobs:
   repository-checks:
     name: Documentation and workflows
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Fetch the parent so `git show --check HEAD` inspects only the
+          # changes of the HEAD commit instead of the whole tree.
+          fetch-depth: 2
 
       - name: Test Markdown checker
         run: python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'

@@ -8,7 +8,7 @@
 //! |---|---|---|---|
 //! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
 //! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
-//! | AES / GHASH | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
+//! | AES / GHASH (GCM; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
 //! | X448 / Ed448 | 64-bit | 64-bit | 64-bit |
@@ -56,6 +56,7 @@ pub mod der;
 
 pub mod aead;
 pub mod aes;
+pub mod ccm;
 pub mod chacha;
 pub mod gcm;
 

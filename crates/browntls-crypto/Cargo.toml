@@ -32,6 +32,7 @@ shake = "0.1"
 hmac = "0.13"
 hkdf = "0.13"
 aes-gcm = "0.11"
+ccm = "0.6"
 chacha20poly1305 = "0.11"
 x25519-dalek = { version = "3", features = ["static_secrets"] }
 ed25519-dalek = "3"

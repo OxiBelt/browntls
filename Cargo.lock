@@ -172,6 +172,7 @@ name = "browntls-crypto"
 version = "0.1.0-dev"
 dependencies = [
  "aes-gcm",
+ "ccm",
  "chacha20poly1305",
  "ed25519-dalek",
  "ed448-goldilocks",
@@ -218,6 +219,18 @@ checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
 dependencies = [
  "find-msvc-tools",
  "shlex",
+]
+
+[[package]]
+name = "ccm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+dependencies = [
+ "aead",
+ "cipher",
+ "ctr",
+ "ctutils",
 ]
 
 [[package]]

@@ -1,7 +1,9 @@
 //! Authenticated encryption with associated data.
 //!
-//! All AEADs in this crate use 96-bit nonces and 128-bit tags, as required by
-//! TLS 1.2 (RFC 5288, RFC 7905) and TLS 1.3 (RFC 8446).
+//! [`Aead`] fixes 96-bit nonces and 128-bit tags, as TLS 1.2 (RFC 5288,
+//! RFC 7905) and TLS 1.3 (RFC 9846 §5.3) use them; it is implemented by
+//! AES-GCM, ChaCha20-Poly1305 and AES-128-CCM. AES-128-CCM-8, with its 64-bit
+//! tag, has its own API in [`crate::ccm`].
 
 use crate::Error;
 
@@ -29,7 +31,8 @@ pub trait Aead: Sized + Send + Sync {
     ///
     /// The caller must never reuse a nonce under the same key. Callers must
     /// also keep `in_out.len()` within the algorithm's per-message limit
-    /// (AES-GCM: 2^36 - 32 bytes; ChaCha20-Poly1305: 2^38 - 64 bytes);
+    /// (AES-GCM: 2^36 - 32 bytes; ChaCha20-Poly1305: 2^38 - 64 bytes;
+    /// AES-CCM: 2^24 - 1 bytes);
     /// implementations return [`Error::InvalidLength`] beyond it.
     ///
     /// # Errors

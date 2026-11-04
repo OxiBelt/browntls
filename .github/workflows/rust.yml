@@ -22,7 +22,7 @@ env:
 jobs:
   lint:
     name: Format, Clippy and docs
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -69,7 +69,7 @@ jobs:
 
   test-x86_64:
     name: Test x86-64 (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -109,10 +109,22 @@ jobs:
           cargo rustc -p browntls-crypto --lib --locked --crate-type dylib
           cargo rustc -p browntls-crypto --lib --locked --release --crate-type dylib
 
+  # The GitHub Arm runner implements every Armv8 extension the aarch64
+  # backends use (AES, PMULL, SHA2, SHA512, SHA3), and the backend tests
+  # compare each available backend with the portable code, so aarch64 runs
+  # natively rather than under QEMU.
   test-aarch64:
-    name: Test aarch64 (native)
-    runs-on: ubuntu-24.04-arm
+    name: Test aarch64 (native, ${{ matrix.name }})
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dispatch
+            rustflags: ''
+          - name: portable only
+            rustflags: --cfg browntls_force_soft
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -126,6 +138,10 @@ jobs:
         run: grep -m1 -E '^Features' /proc/cpuinfo || true
 
       - name: Test
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          # The runner image ships OpenSSL 3: interop tests must not skip.
+          BROWNTLS_OPENSSL_INTEROP: require
         run: cargo test --workspace --all-features --locked
 
   test-riscv64:
@@ -151,15 +167,13 @@ jobs:
 
   test-qemu:
     name: Test under QEMU (${{ matrix.profile }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         profile:
           - x86_64-max
-          - aarch64-max
-          - aarch64-a53
           - riscv64-scalar
           - riscv64-zk
           - riscv64-rvv128
@@ -176,8 +190,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            qemu-user-static gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu \
-            libc6-dev-arm64-cross libc6-dev-riscv64-cross
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          # Statically linked user-mode QEMU where the release still packages
+          # it, the dynamically linked one otherwise (scripts/cross-test.sh
+          # accepts either).
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static \
+            || sudo apt-get install -y -qq --no-install-recommends qemu-user
 
       - name: Install Rust
         run: scripts/ci/install-rust.sh
@@ -187,7 +205,7 @@ jobs:
 
   no-std:
     name: Build without std
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -217,7 +235,7 @@ jobs:
 
   dependencies:
     name: Dependency policy (cargo-deny)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out source

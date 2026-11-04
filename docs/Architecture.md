@@ -204,7 +204,7 @@ entropy from the optional `getrandom` crate feature.
 | Layer | Evidence |
 |---|---|
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
-| Platforms | Native x86-64, aarch64 (GitHub Arm runner) and riscv64 (RISE runner), plus QEMU user-mode profiles for each backend tier (x86-64 SHA-NI/VAES, Armv8 crypto, RVV with VLEN 128/256/1024 and vector crypto, scalar Zk) |
+| Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
 | TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 

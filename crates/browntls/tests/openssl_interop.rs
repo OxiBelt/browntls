@@ -7,7 +7,8 @@
 //! data in both directions. Keys and certificates are generated with OpenSSL
 //! at run time in a temporary directory that is removed afterwards.
 //!
-//! The tests are skipped, with a message, when no OpenSSL 3 binary is found.
+//! The tests are skipped, with a message, when no OpenSSL 3 (or later) binary
+//! is found.
 //! Set `BROWNTLS_OPENSSL_INTEROP=require` to make that a failure, and
 //! `BROWNTLS_OPENSSL` to choose the binary.
 
@@ -46,7 +47,12 @@ fn openssl() -> Option<&'static Path> {
             std::env::var_os("BROWNTLS_OPENSSL").map_or_else(|| "openssl".into(), PathBuf::from);
         let out = Command::new(&bin).arg("version").output().ok()?;
         let version = String::from_utf8_lossy(&out.stdout).into_owned();
-        (out.status.success() && version.starts_with("OpenSSL 3.")).then(|| {
+        // OpenSSL 3 or later (the options used here exist since 3.0).
+        let major = version
+            .strip_prefix("OpenSSL ")
+            .and_then(|v| v.split('.').next())
+            .and_then(|m| m.parse::<u32>().ok());
+        (out.status.success() && major.is_some_and(|m| m >= 3)).then(|| {
             eprintln!("OpenSSL interop with {}: {}", bin.display(), version.trim());
             bin
         })
@@ -60,8 +66,8 @@ fn openssl_or_skip() -> Option<&'static Path> {
     let bin = openssl();
     if bin.is_none() {
         let required = std::env::var("BROWNTLS_OPENSSL_INTEROP").is_ok_and(|v| v == "require");
-        assert!(!required, "no OpenSSL 3 binary found");
-        eprintln!("skipping OpenSSL interop: no OpenSSL 3 binary found");
+        assert!(!required, "no OpenSSL 3 or later binary found");
+        eprintln!("skipping OpenSSL interop: no OpenSSL 3 or later binary found");
     }
     bin
 }

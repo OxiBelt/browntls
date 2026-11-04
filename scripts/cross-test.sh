@@ -4,11 +4,14 @@
 # Usage: scripts/cross-test.sh <profile> [cargo test arguments...]
 #
 # Profiles exercise distinct backend tiers:
-#   x86_64-max         QEMU "max" x86-64 CPU: SHA-NI, VAES (YMM), GFNI; QEMU 8.2
-#                      reports no VPCLMULQDQ or AVX-512, so the ZMM AES-GCM and
-#                      VPCLMULQDQ GHASH backends run only on native hardware
+#   x86_64-max         QEMU "max" x86-64 CPU: SHA-NI, VAES (YMM), GFNI; the ZMM
+#                      AES-GCM, VPCLMULQDQ GHASH and IFMA RSA backends run only
+#                      if the QEMU version reports VPCLMULQDQ and AVX-512
+#                      (QEMU 8.2 does not)
 #   aarch64-max        all Armv8/v9 crypto extensions (AES, PMULL, SHA2, SHA3, SHA512)
 #   aarch64-a53        Cortex-A53 model (AES/PMULL/SHA2, no SHA3/SHA512)
+#                      (CI runs aarch64 natively on the GitHub Arm runner; the
+#                      aarch64 profiles are for hosts without one)
 #   host-soft          native host build with --cfg browntls_force_soft
 #                      (portable backends only)
 #   riscv64-scalar     RV64GC without vector or scalar-crypto extensions
@@ -18,7 +21,7 @@
 #   riscv64-rvv256-zvk RVV 1.0, VLEN=256, Zvkned/Zvknhb/Zvkg/Zvbc/Zvbb/Zvkb
 #   riscv64-rvv1024-zvk RVV 1.0, VLEN=1024 with vector crypto
 #
-# Requirements (Ubuntu 24.04): qemu-user-static, gcc-aarch64-linux-gnu,
+# Requirements (Ubuntu 26.04): qemu-user-static or qemu-user, gcc-aarch64-linux-gnu,
 # gcc-riscv64-linux-gnu, and the matching rustup targets.
 set -euo pipefail
 
@@ -34,22 +37,33 @@ for ext in zbb zbc zbkb zbkc zknh zkne zknd; do
   zk_cfg+=("--cfg" "browntls_assume_riscv=\"${ext}\"")
 done
 
+# The user-mode emulator for an architecture: the statically linked build
+# where installed (qemu-user-static), else the dynamically linked one
+# (qemu-user); both work, since the runner is invoked directly.
+qemu() {
+  if command -v "qemu-$1-static" >/dev/null 2>&1; then
+    echo "qemu-$1-static"
+  else
+    echo "qemu-$1"
+  fi
+}
+
 extra_rustflags=()
 variant=plain
 case "${profile}" in
   x86_64-max)
     target=x86_64-unknown-linux-gnu
-    runner="qemu-x86_64-static -cpu max"
+    runner="$(qemu x86_64) -cpu max"
     linker=""
     ;;
   aarch64-max)
     target=aarch64-unknown-linux-gnu
-    runner="qemu-aarch64-static -L /usr/aarch64-linux-gnu -cpu max"
+    runner="$(qemu aarch64) -L /usr/aarch64-linux-gnu -cpu max"
     linker=aarch64-linux-gnu-gcc
     ;;
   aarch64-a53)
     target=aarch64-unknown-linux-gnu
-    runner="qemu-aarch64-static -L /usr/aarch64-linux-gnu -cpu cortex-a53"
+    runner="$(qemu aarch64) -L /usr/aarch64-linux-gnu -cpu cortex-a53"
     linker=aarch64-linux-gnu-gcc
     ;;
   host-soft)
@@ -60,38 +74,38 @@ case "${profile}" in
     ;;
   riscv64-scalar)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=false"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=false"
     linker=riscv64-linux-gnu-gcc
     ;;
   riscv64-zk)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=false,zbb=true,zbc=true,zbkb=true,zbkc=true,zknh=true,zkne=true,zknd=true"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=false,zbb=true,zbc=true,zbkb=true,zbkc=true,zknh=true,zkne=true,zknd=true"
     linker=riscv64-linux-gnu-gcc
     extra_rustflags=("${zk_cfg[@]}")
     variant=zk
     ;;
   riscv64-rvv128)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true"
     linker=riscv64-linux-gnu-gcc
     ;;
   riscv64-rvv128-zvk)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=128,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
     linker=riscv64-linux-gnu-gcc
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk
     ;;
   riscv64-rvv256-zvk)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=256,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=256,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
     linker=riscv64-linux-gnu-gcc
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk
     ;;
   riscv64-rvv1024-zvk)
     target=riscv64gc-unknown-linux-gnu
-    runner="qemu-riscv64-static -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=1024,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
+    runner="$(qemu riscv64) -L /usr/riscv64-linux-gnu -cpu rv64,v=true,vlen=1024,zbb=true,zvkned=true,zvknha=true,zvknhb=true,zvkg=true,zvbc=true,zvbb=true,zvkb=true,zvkt=true"
     linker=riscv64-linux-gnu-gcc
     extra_rustflags=("${zvk_cfg[@]}")
     variant=zvk

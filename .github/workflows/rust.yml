@@ -92,6 +92,8 @@ jobs:
       - name: Test
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          # The runner image ships OpenSSL 3: interop tests must not skip.
+          BROWNTLS_OPENSSL_INTEROP: require
         run: cargo test --workspace --all-features --locked
 
       # Inline assembly must not use relocations that position-independent

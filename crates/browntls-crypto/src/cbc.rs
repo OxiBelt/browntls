@@ -90,6 +90,21 @@ fn as_blocks(buf: &mut [u8]) -> Result<&mut [[u8; BLOCK_LEN]], Error> {
     }
 }
 
+/// Lets [`crate::tls_cbc::RecordKey`] protect TLS 1.2 records with AES-CBC.
+///
+/// The record layer only ever passes whole blocks, so the length checks of
+/// [`AesCbcKey::encrypt`] and [`AesCbcKey::decrypt`] cannot fail; a
+/// non-aligned buffer is left untouched rather than panicking.
+impl crate::tls_cbc::CbcBlockCipher for AesCbcKey {
+    fn cbc_encrypt(&self, iv: &[u8; BLOCK_LEN], buf: &mut [u8]) {
+        let _ = self.encrypt(iv, buf);
+    }
+
+    fn cbc_decrypt(&self, iv: &[u8; BLOCK_LEN], buf: &mut [u8]) {
+        let _ = self.decrypt(iv, buf);
+    }
+}
+
 impl core::fmt::Debug for AesCbcKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AesCbcKey")

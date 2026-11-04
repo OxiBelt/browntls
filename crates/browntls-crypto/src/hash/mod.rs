@@ -1,4 +1,6 @@
-//! Hash functions: SHA-2 (FIPS 180-4) and SHA-3 / SHAKE (FIPS 202).
+//! Hash functions: SHA-2 (FIPS 180-4), SHA-3 / SHAKE (FIPS 202) and, for
+//! HMAC-SHA1 in TLS 1.2 CBC cipher suites only, SHA-1 ([`Sha1`]; never used
+//! for signatures).
 //!
 //! Each compression / permutation function dispatches at run time to the best
 //! available backend (see the crate-level table). The portable backends are
@@ -6,6 +8,7 @@
 //!
 //! | Primitive | x86-64 | aarch64 | riscv64 |
 //! |---|---|---|---|
+//! | SHA-1 compression | SHA-NI | FEAT_SHA1 | Zbb scalar |
 //! | SHA-256 compression | SHA-NI; AVX2 schedule + BMI2 rounds | FEAT_SHA256 | Zvknha+Zvkb; Zknh |
 //! | SHA-512 compression | AVX2 schedule + BMI2 rounds | FEAT_SHA512 | Zvknhb+Zvkb; Zknh |
 //! | Keccak-f\[1600\] | BMI1/BMI2 scalar | portable | Zbb scalar |
@@ -17,16 +20,19 @@
 //! table lookups).
 
 mod keccak;
+mod sha1;
 mod sha256;
 pub mod sha3;
 mod sha512;
 
 pub(crate) use keccak::{Backend as KeccakBackend, BackendX4 as KeccakX4Backend};
+pub(crate) use sha1::Backend as Sha1Backend;
 pub(crate) use sha256::Backend as Sha256Backend;
 pub(crate) use sha512::Backend as Sha512Backend;
 #[cfg(test)]
 mod tests;
 
+pub use sha1::Sha1;
 pub use sha3::{
     Sha3_256, Sha3_384, Sha3_512, Shake128, Shake128x4, Shake256, Shake256x4, ShakeReader,
 };

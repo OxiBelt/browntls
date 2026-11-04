@@ -26,6 +26,7 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Independent implementations used only as differential-test oracles.
+sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.12"
 shake = "0.1"

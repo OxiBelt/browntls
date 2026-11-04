@@ -12,7 +12,7 @@ use browntls_crypto::aead::Aead as _;
 use browntls_crypto::chacha::ChaCha20Poly1305;
 use browntls_crypto::curve25519::x25519;
 use browntls_crypto::gcm::Aes256Gcm;
-use browntls_crypto::hash::{HashAlgorithm, HashFunction as _, Sha256, Sha512, Shake128};
+use browntls_crypto::hash::{HashAlgorithm, HashFunction as _, Sha1, Sha256, Sha512, Shake128};
 use browntls_crypto::mlkem::{DecapsulationKey, MlKem768};
 use browntls_crypto::nist::p256;
 use browntls_crypto::rand::OsRng;
@@ -28,6 +28,7 @@ const LEVELS: [Acceleration; 3] = [
 fn fingerprint(rsa: &RsaPrivateKey) -> Vec<Vec<u8>> {
     let data: Vec<u8> = (0..5000u32).map(|i| (i * 31 + 7) as u8).collect();
     let mut out = vec![
+        Sha1::digest(&data).to_vec(),
         Sha256::digest(&data).to_vec(),
         Sha512::digest(&data).to_vec(),
     ];

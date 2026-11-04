@@ -1,4 +1,8 @@
 //! HMAC (RFC 2104, FIPS 198-1).
+//!
+//! [`Hmac`] is generic over the hash: `Hmac<Sha256>`, `Hmac<Sha384>` and so
+//! on. `Hmac<Sha1>` (HMAC-SHA1, RFC 2202) exists only for the record MAC of
+//! TLS 1.2 `*_CBC_SHA` cipher suites; see [`crate::hash::Sha1`].
 
 use crate::ct;
 use crate::hash::{HashFunction, MAX_BLOCK_LEN};
@@ -84,7 +88,76 @@ impl<H: HashFunction> Hmac<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::{Sha256, Sha384, Sha512};
+    use crate::hash::{Sha1, Sha256, Sha384, Sha512};
+
+    // RFC 2202 section 3: HMAC-SHA1 test cases 1-7.
+    #[test]
+    fn rfc2202_hmac_sha1() {
+        let key4: std::vec::Vec<u8> = (1..=25).collect();
+        let cases: [(&[u8], &[u8], &str); 7] = [
+            (
+                &[0x0b; 20],
+                b"Hi There",
+                "b617318655057264e28bc0b6fb378c8ef146be00",
+            ),
+            (
+                b"Jefe",
+                b"what do ya want for nothing?",
+                "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
+            ),
+            (
+                &[0xaa; 20],
+                &[0xdd; 50],
+                "125d7342b9ac11cd91a39af48aa17b4f63f175d3",
+            ),
+            (
+                &key4,
+                &[0xcd; 50],
+                "4c9007f4026250c6bc8414f9bf50c86c2d7235da",
+            ),
+            (
+                &[0x0c; 20],
+                b"Test With Truncation",
+                "4c1a03424b55e07fe7f27be1d58bb9324a9a5a04",
+            ),
+            (
+                &[0xaa; 80],
+                b"Test Using Larger Than Block-Size Key - Hash Key First",
+                "aa4ae5e15272d00e95705637ce8a3b55ed402112",
+            ),
+            (
+                &[0xaa; 80],
+                b"Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data",
+                "e8e99d0f45237d786d6bbaa7965c7808bbff1a91",
+            ),
+        ];
+        for (key, data, want) in cases {
+            assert_eq!(hex::encode(Hmac::<Sha1>::mac(key, data)), want);
+        }
+        // Test case 5 truncated to 96 bits.
+        let mut m = Hmac::<Sha1>::new(&[0x0c; 20]);
+        m.update(b"Test With Truncation");
+        assert!(m.verify(&hex::decode("4c1a03424b55e07fe7f27be1").unwrap()));
+    }
+
+    #[test]
+    fn hmac_sha1_matches_hmac_crate() {
+        use ::hmac::{KeyInit as _, Mac as _};
+        for key_len in [0, 1, 20, 63, 64, 65, 200] {
+            let key: std::vec::Vec<u8> = (0..key_len).map(|i| (i * 7 + 1) as u8).collect();
+            for len in [0usize, 1, 13, 55, 56, 64, 119, 120, 1000] {
+                let data: std::vec::Vec<u8> = (0..len).map(|i| (i * 31 + 5) as u8).collect();
+                let mut r = ::hmac::Hmac::<::sha1::Sha1>::new_from_slice(&key).unwrap();
+                r.update(&data);
+                let want = r.finalize().into_bytes();
+                assert_eq!(
+                    Hmac::<Sha1>::mac(&key, &data)[..],
+                    want[..],
+                    "{key_len} {len}"
+                );
+            }
+        }
+    }
 
     // RFC 4231 test case 2.
     #[test]

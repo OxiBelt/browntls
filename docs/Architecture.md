@@ -106,6 +106,7 @@ reference for testing, plus accelerated backends selected at run time.
 
 | Family | x86-64 | aarch64 | riscv64 |
 |---|---|---|---|
+| SHA-1 (HMAC-SHA1 for TLS 1.2 `*_CBC_SHA` suites only, never signatures) | SHA-NI | FEAT_SHA1 | Zbb scalar |
 | SHA-2 | SHA-NI | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
 | SHA-3 / SHAKE | AVX2 multi-lane | NEON, FEAT_SHA3 | RVV |
 | AES-GCM | AES-NI + PCLMULQDQ, VAES + VPCLMULQDQ (YMM, and ZMM with a fused CTR+GHASH loop) | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
@@ -172,7 +173,7 @@ schedule (AVX2 with BMI2) use both.
 
 At run time, `browntls_crypto::accel` (re-exported as
 `browntls::crypto::native::accel`) holds a process-wide `Policy` per
-algorithm family (SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
+algorithm family (SHA-1, SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
 ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM) with one level per kind:
 
 | Level | Behaviour for that kind |

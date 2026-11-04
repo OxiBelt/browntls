@@ -1,6 +1,6 @@
 //! Cross-backend tests: every backend available at run time is compared with
-//! the portable backend and with independent implementations (`sha2`,
-//! `sha3`, `shake`), on random and edge-case inputs.
+//! the portable backend and with independent implementations (`sha1`,
+//! `sha2`, `sha3`, `shake`), on random and edge-case inputs.
 
 use std::vec::Vec;
 
@@ -8,7 +8,7 @@ use sha2::Digest as _;
 use shake::{ExtendableOutput as _, Update as _, XofReader as _};
 
 use super::keccak::{self, StateX4};
-use super::{HashFunction, sha256, sha512};
+use super::{HashFunction, sha1, sha256, sha512};
 use crate::cpu;
 
 /// SplitMix64: deterministic test data without a dev-dependency.
@@ -28,6 +28,15 @@ impl Rng {
     fn below(&mut self, n: usize) -> usize {
         usize::try_from(self.next() % (n as u64)).unwrap_or(0)
     }
+}
+
+fn sha1_backends() -> Vec<sha1::Backend> {
+    let f = cpu::features();
+    sha1::Backend::ALL
+        .iter()
+        .copied()
+        .filter(|b| b.is_available(f))
+        .collect()
 }
 
 fn sha256_backends() -> Vec<sha256::Backend> {
@@ -83,6 +92,20 @@ fn md_pad(data: &[u8], block: usize, len_bytes: usize) -> Vec<u8> {
     let bits = (data.len() as u128) * 8;
     m.extend_from_slice(&bits.to_be_bytes()[16 - len_bytes..]);
     m
+}
+
+fn sha1_with(b: sha1::Backend, data: &[u8]) -> Vec<u8> {
+    let mut st = sha1::IV;
+    let m = md_pad(data, 64, 8);
+    let mut rest = &m[..];
+    let mut run = 1;
+    while !rest.is_empty() {
+        let take = (run * 64).min(rest.len());
+        b.compress(&mut st, &rest[..take]);
+        rest = &rest[take..];
+        run = run % 5 + 1;
+    }
+    st.iter().flat_map(|w| w.to_be_bytes()).collect()
 }
 
 fn sha256_with(b: sha256::Backend, iv: [u32; 8], data: &[u8]) -> Vec<u8> {
@@ -144,14 +167,63 @@ const SHA384_IV: [u64; 8] = [
 #[test]
 fn report_backends() {
     std::println!(
-        "features: {:?}\nsha256: {:?}\nsha512: {:?}\nkeccak: {:?}\nkeccak x4: {:?}",
+        "features: {:?}\nsha1: {:?}\nsha256: {:?}\nsha512: {:?}\nkeccak: {:?}\nkeccak x4: {:?}",
         cpu::features(),
+        sha1_backends(),
         sha256_backends(),
         sha512_backends(),
         keccak_backends(),
         keccak_x4_backends()
     );
     assert_eq!(sha256_backends().last(), Some(&sha256::Backend::Soft));
+    assert_eq!(sha1_backends().last(), Some(&sha1::Backend::Soft));
+}
+
+#[test]
+fn sha1_backends_match_soft_on_random_states() {
+    let mut rng = Rng(11);
+    for b in sha1_backends() {
+        for _ in 0..200 {
+            let mut s1: [u32; 5] = core::array::from_fn(|_| rng.next() as u32);
+            let mut s2 = s1;
+            let nb = 1 + rng.below(6);
+            let blocks = rng.bytes(64 * nb);
+            b.compress(&mut s1, &blocks);
+            sha1::soft::compress(&mut s2, &blocks);
+            assert_eq!(s1, s2, "{b:?}");
+        }
+        let mut s = sha1::IV;
+        b.compress(&mut s, &[]);
+        assert_eq!(s, sha1::IV, "{b:?}");
+    }
+}
+
+#[test]
+fn sha1_backends_match_sha1_crate() {
+    let mut rng = Rng(12);
+    for b in sha1_backends() {
+        for len in test_lengths(64) {
+            let data = rng.bytes(len);
+            let want = ::sha1::Sha1::digest(&data);
+            assert_eq!(sha1_with(b, &data), want[..], "{b:?} len {len}");
+        }
+        // FIPS 180-4 / RFC 3174 KATs, including one million 'a'.
+        for (msg, want) in [
+            (&b"abc"[..], "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (
+                &b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"[..],
+                "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+            ),
+        ] {
+            assert_eq!(hex::encode(sha1_with(b, msg)), want, "{b:?}");
+        }
+        let a = std::vec![b'a'; 1_000_000];
+        assert_eq!(
+            hex::encode(sha1_with(b, &a)),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f",
+            "{b:?}"
+        );
+    }
 }
 
 #[test]
@@ -456,6 +528,10 @@ fn hash_types_match_backend_dispatch() {
         let len = rng.below(700);
         let data = rng.bytes(len);
         assert_eq!(
+            super::Sha1::digest(&data)[..],
+            ::sha1::Sha1::digest(&data)[..]
+        );
+        assert_eq!(
             super::Sha256::digest(&data)[..],
             sha2::Sha256::digest(&data)[..]
         );
@@ -496,6 +572,16 @@ fn throughput() {
     let data = std::vec![0x5au8; 4 << 20];
     let mib = |bytes: usize, secs: f64| bytes as f64 / secs / (1024.0 * 1024.0);
 
+    for b in sha1_backends() {
+        let mut st = sha1::IV;
+        let secs = best(|| b.compress(&mut st, &data));
+        std::println!("sha1 {b:?}: {:.0} MiB/s", mib(data.len(), secs));
+        core::hint::black_box(st);
+    }
+    let secs = best(|| {
+        core::hint::black_box(::sha1::Sha1::digest(&data));
+    });
+    std::println!("sha1 (sha1 crate): {:.0} MiB/s", mib(data.len(), secs));
     for b in sha256_backends() {
         let mut st = SHA256_IV;
         let secs = best(|| b.compress(&mut st, &data));
@@ -565,6 +651,13 @@ fn sha2_backends_accept_unaligned_blocks() {
     let buf = rng.bytes(4 * 128 + 16);
     for offset in 0..16 {
         let data = &buf[offset..offset + 4 * 128];
+        let mut want1 = sha1::IV;
+        sha1::soft::compress(&mut want1, data);
+        for &b in &sha1_backends() {
+            let mut st = sha1::IV;
+            b.compress(&mut st, data);
+            assert_eq!(st, want1, "sha1 {b:?} offset {offset}");
+        }
         let iv256 = [0x6a09_e667u32, 1, 2, 3, 4, 5, 6, 7];
         let mut want256 = iv256;
         sha256::soft::compress(&mut want256, data);

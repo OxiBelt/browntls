@@ -5,7 +5,10 @@
 //! §4.3.3): an `rsaEncryption` key (and every PKCS #1 key) signs with
 //! `rsa_pss_rsae_*` and `rsa_pkcs1_*`, an `id-RSASSA-PSS` key (RFC 4055) only
 //! with `rsa_pss_pss_*`, and only with the hash its parameters name, if
-//! any.
+//! any. The key's `SubjectPublicKeyInfo` carries the PKCS #8
+//! `AlgorithmIdentifier` unchanged, so it equals the certificate's when both
+//! were written alike, whichever of the equivalent encodings
+//! `browntls_crypto::rsa::RsaKeyAlgorithm` accepts they use.
 //!
 //! Secret key material is held in `browntls-crypto` key types, which zeroise
 //! it on drop. ECDSA nonces are RFC 6979 deterministic nonces hedged with
@@ -25,13 +28,24 @@ use browntls_crypto::rsa::{MAX_MODULUS_BYTES, RsaKeyAlgorithm, RsaPrivateKey};
 
 use browntls_pki::{PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer, alg_id};
 
-use crate::crypto::signer::{Signer, SigningKey, public_key_to_spki};
+use crate::crypto::signer::{Signer, SigningKey, public_key_to_spki, spki_from_parts};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::Error;
 use crate::sync::Arc;
 
+/// The error for a PKCS #8 `id-RSASSA-PSS` key whose well-formed parameters
+/// are outside the supported set (see `browntls_crypto::rsa::RsaKeyAlgorithm`).
+const UNSUPPORTED_PSS_PARAMETERS: &str = "unsupported RSASSA-PSS key parameters: only \
+    SHA-256, SHA-384 or SHA-512 with MGF1 over the same hash, a minimum salt length of at \
+    most the digest length and trailer field 1 can sign in TLS";
+
 /// Loads any private key this provider can sign with: ECDSA (PKCS #8 or
 /// SEC 1), Ed25519 or Ed448 (PKCS #8) or RSA (PKCS #8 or PKCS #1).
+///
+/// A PKCS #8 key that fits no loader fails with one generic message, except
+/// an `id-RSASSA-PSS` key whose parameters are well formed but unsupported
+/// (for example MGF1 with SHA-1, or SHA-1 itself), which fails with a
+/// message naming the supported parameters.
 pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
     match der {
         PrivateKeyDer::Sec1(_) => any_ecdsa_type(der),
@@ -39,8 +53,9 @@ pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>
         PrivateKeyDer::Pkcs8(pkcs8) => any_ecdsa_type(der)
             .or_else(|_| any_eddsa_type(pkcs8))
             .or_else(|_| any_rsa_type(der))
-            .map_err(|_| {
-                Error::general("failed to parse PKCS#8 private key as ECDSA, EdDSA or RSA")
+            .map_err(|e| match e {
+                Error::General(msg) if msg == UNSUPPORTED_PSS_PARAMETERS => Error::General(msg),
+                _ => Error::general("failed to parse PKCS#8 private key as ECDSA, EdDSA or RSA"),
             }),
         _ => Err(Error::general("unsupported private key encoding")),
     }
@@ -71,8 +86,9 @@ pub fn any_eddsa_type(der: &PrivatePkcs8KeyDer<'_>) -> Result<Arc<dyn SigningKey
 /// Loads an RSA key in PKCS #8 or PKCS #1 form (2048 to 8192 bits). A
 /// PKCS #8 key may be an `rsaEncryption` or an `id-RSASSA-PSS` key (without
 /// parameters, or restricted to SHA-256, SHA-384 or SHA-512 with MGF1 over
-/// the same hash and a salt of the digest length; see
-/// `browntls_crypto::rsa::RsaKeyAlgorithm`).
+/// the same hash and a minimum salt length of at most the digest length;
+/// see `browntls_crypto::rsa::RsaKeyAlgorithm`). A restricted key offers
+/// only the `rsa_pss_pss_*` scheme of its hash.
 pub fn any_rsa_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
     RsaSigningKey::load(der).map(|k| Arc::new(k) as Arc<dyn SigningKey>)
 }
@@ -385,33 +401,44 @@ pub struct RsaSigningKey {
 
 impl RsaSigningKey {
     fn load(der: &PrivateKeyDer<'_>) -> Result<Self, Error> {
+        let invalid = || Error::general("invalid RSA private key");
         // Loading validates the key's consistency and runs a sign/verify
         // self-test.
-        let (key, algorithm) = match der {
-            PrivateKeyDer::Pkcs1(pkcs1) => RsaPrivateKey::from_pkcs1_der(pkcs1.secret_der())
-                .map(|key| (key, RsaKeyAlgorithm::RsaEncryption)),
+        let (key, algorithm, spki_alg) = match der {
+            PrivateKeyDer::Pkcs1(pkcs1) => (
+                RsaPrivateKey::from_pkcs1_der(pkcs1.secret_der()).map_err(|_| invalid())?,
+                RsaKeyAlgorithm::RsaEncryption,
+                alg_id::RSA_ENCRYPTION.as_bytes(),
+            ),
             PrivateKeyDer::Pkcs8(pkcs8) => {
-                RsaPrivateKey::from_pkcs8_der_with_algorithm(pkcs8.secret_der())
+                let der = pkcs8.secret_der();
+                let alg = crate::x509::pkcs8_algorithm_identifier(der);
+                let (key, algorithm) =
+                    RsaPrivateKey::from_pkcs8_der_with_algorithm(der).map_err(|e| {
+                        // `Unsupported` also stands for multi-prime keys;
+                        // the identifier alone tells the two apart.
+                        let pss_params = alg.map(RsaKeyAlgorithm::from_algorithm_identifier);
+                        if e == browntls_crypto::Error::Unsupported
+                            && pss_params == Some(Err(browntls_crypto::Error::Unsupported))
+                        {
+                            Error::general(UNSUPPORTED_PSS_PARAMETERS)
+                        } else {
+                            invalid()
+                        }
+                    })?;
+                // The identifier as the key file has it: one of several
+                // equivalent encodings, which the certificate presumably
+                // shares (RFC 4055 §2.1, §3.1).
+                (key, algorithm, alg.ok_or_else(invalid)?)
             }
             _ => return Err(Error::general("unsupported key encoding for RSA")),
-        }
-        .map_err(|_| Error::general("invalid RSA private key"))?;
-        let spki_alg = match algorithm {
-            RsaKeyAlgorithm::RsaEncryption => alg_id::RSA_ENCRYPTION,
-            RsaKeyAlgorithm::RsassaPss(None) => alg_id::RSASSA_PSS,
-            RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha256)) => alg_id::RSASSA_PSS_SHA256_KEY,
-            RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha384)) => alg_id::RSASSA_PSS_SHA384_KEY,
-            RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha512)) => alg_id::RSASSA_PSS_SHA512_KEY,
-            RsaKeyAlgorithm::RsassaPss(Some(_)) => {
-                return Err(Error::general("unsupported RSASSA-PSS key parameters"));
-            }
         };
         let mut pkcs1 = vec![0u8; MAX_MODULUS_BYTES + 32];
         let len = key
             .public_key()
             .to_pkcs1_der(&mut pkcs1)
             .map_err(|_| Error::general("failed to encode RSA public key"))?;
-        let spki = public_key_to_spki(&spki_alg, &pkcs1[..len]);
+        let spki = spki_from_parts(spki_alg, &pkcs1[..len]);
         Ok(Self {
             key: Arc::new(key),
             algorithm,
@@ -724,6 +751,120 @@ mod tests {
                 scheme,
             };
             assert!(signer.sign(b"msg").is_err(), "{algorithm:?} {scheme:?}");
+        }
+    }
+
+    /// A PKCS #8 `PrivateKeyInfo` for `key` with the `AlgorithmIdentifier`
+    /// contents `alg`.
+    fn pkcs8_with(key: &RsaPrivateKey, alg: &[u8]) -> PrivateKeyDer<'static> {
+        use crate::x509::{asn1_wrap, wrap_in_sequence};
+        let mut pkcs1 = vec![0u8; browntls_crypto::rsa::MAX_PKCS1_PRIVATE_KEY_DER_LEN];
+        let len = key.to_pkcs1_der(&mut pkcs1).unwrap();
+        let mut info = vec![0x02, 0x01, 0x00];
+        info.extend(wrap_in_sequence(alg));
+        info.extend(asn1_wrap(0x04, &pkcs1[..len]));
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(wrap_in_sequence(&info)))
+    }
+
+    #[test]
+    fn rsa_pss_key_keeps_its_parameter_encoding() {
+        use SignatureScheme as S;
+        // OpenSSL 3.0.13 `rsa_pss_keygen_md:sha256` and
+        // `rsa_pss_keygen_mgf1_md:sha256` without `rsa_pss_keygen_saltlen`
+        // (saltLength omitted, a minimum of 20) and with
+        // `rsa_pss_keygen_saltlen:0`; SHA-384 with absent hash parameters
+        // and an explicit trailer field 1.
+        let variants: [(&str, S); 3] = [
+            (
+                "06092a864886f70d01010a302fa00f300d06096086480165030402010500a11c301a06092a8648\
+                 86f70d010108300d06096086480165030402010500",
+                S::RSA_PSS_PSS_SHA256,
+            ),
+            (
+                "06092a864886f70d01010a3034a00f300d06096086480165030402010500a11c301a06092a8648\
+                 86f70d010108300d06096086480165030402010500a203020100",
+                S::RSA_PSS_PSS_SHA256,
+            ),
+            (
+                "06092a864886f70d01010a3035a00d300b0609608648016503040202a11a301806092a864886f7\
+                 0d010108300b0609608648016503040202a203020130a303020101",
+                S::RSA_PSS_PSS_SHA384,
+            ),
+        ];
+        let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+        let all = [
+            S::RSA_PSS_PSS_SHA512,
+            S::RSA_PSS_PSS_SHA384,
+            S::RSA_PSS_PSS_SHA256,
+            S::RSA_PSS_SHA512,
+            S::RSA_PSS_SHA384,
+            S::RSA_PSS_SHA256,
+            S::RSA_PKCS1_SHA256,
+        ];
+        for (alg, only) in variants {
+            let alg = hex::decode(alg).unwrap();
+            let loaded = any_supported_type(&pkcs8_with(&key, &alg)).unwrap();
+            // The SPKI carries the key file's identifier, not the canonical
+            // one, so that it equals a certificate written alike.
+            let spki = loaded.public_key().unwrap();
+            let (spki_alg, _) = crate::x509::split_spki(spki.as_ref()).unwrap();
+            assert_eq!(spki_alg, alg.as_slice());
+            assert_ne!(spki_alg, alg_id::RSASSA_PSS_SHA256_KEY.as_bytes());
+            // Only the key's own scheme, with a salt of the digest length.
+            for scheme in all {
+                assert_eq!(
+                    loaded.choose_scheme(&[scheme]).is_some(),
+                    scheme == only,
+                    "{scheme:?}"
+                );
+            }
+            let signer = loaded.choose_scheme(&all).unwrap();
+            assert_eq!(signer.scheme(), only);
+            let sig = signer.sign(b"msg").unwrap();
+            let (_, _, hash) = rsa_scheme(only).unwrap();
+            browntls_crypto::rsa::verify_pss(key.public_key(), hash, b"msg", &sig).unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_rsa_pss_parameters_have_their_own_error() {
+        let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+        let unsupported = Error::general(UNSUPPORTED_PSS_PARAMETERS);
+        let generic = Error::general("failed to parse PKCS#8 private key as ECDSA, EdDSA or RSA");
+        for (alg, expected) in [
+            // OpenSSL 3.0.13 `rsa_pss_keygen_md:sha256` alone: MGF1 with
+            // SHA-1 and a 20-byte salt by default.
+            (
+                "06092a864886f70d01010a3011a00f300d06096086480165030402010500",
+                &unsupported,
+            ),
+            // Every field DEFAULT (SHA-1), and a trailer field of 2.
+            ("06092a864886f70d01010a3000", &unsupported),
+            (
+                "06092a864886f70d01010a3039a00f300d06096086480165030402010500a11c301a06092a8648\
+                 86f70d010108300d06096086480165030402010500a203020120a303020102",
+                &unsupported,
+            ),
+            // Malformed: an explicit DEFAULT salt length (not DER), NULL
+            // parameters.
+            (
+                "06092a864886f70d01010a3034a00f300d06096086480165030402010500a11c301a06092a8648\
+                 86f70d010108300d06096086480165030402010500a203020114",
+                &generic,
+            ),
+            ("06092a864886f70d01010a0500", &generic),
+        ] {
+            let der = pkcs8_with(&key, &hex::decode(alg).unwrap());
+            assert_eq!(any_supported_type(&der).unwrap_err(), *expected, "{alg}");
+            assert_eq!(
+                any_rsa_type(&der).unwrap_err(),
+                if *expected == unsupported {
+                    unsupported.clone()
+                } else {
+                    Error::general("invalid RSA private key")
+                },
+                "{alg}"
+            );
         }
     }
 }

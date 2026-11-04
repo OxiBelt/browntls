@@ -20,6 +20,8 @@ pub(crate) mod tag {
     pub(crate) const BIT_STRING: u8 = 0x03;
     /// `OCTET STRING`.
     pub(crate) const OCTET_STRING: u8 = 0x04;
+    /// `NULL`.
+    pub(crate) const NULL: u8 = 0x05;
     /// `OBJECT IDENTIFIER`.
     pub(crate) const OID: u8 = 0x06;
     /// `ENUMERATED`.

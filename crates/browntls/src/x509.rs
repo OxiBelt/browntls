@@ -168,6 +168,19 @@ pub(crate) fn split_spki(spki: &[u8]) -> Result<(&[u8], &[u8]), Error> {
     }
 }
 
+/// Returns the contents of the `privateKeyAlgorithm` `AlgorithmIdentifier`
+/// of a DER PKCS #8 `PrivateKeyInfo` (RFC 5958 §2) without examining the
+/// rest, or `None` if the structure does not start as one.
+#[cfg(feature = "native")]
+pub(crate) fn pkcs8_algorithm_identifier(der: &[u8]) -> Option<&[u8]> {
+    let mut outer = Der { input: der };
+    let (info, _) = outer.expect(TAG_SEQUENCE).ok()?;
+    outer.done().ok()?;
+    let mut info = Der { input: info };
+    info.expect(TAG_INTEGER).ok()?; // version
+    info.expect(TAG_SEQUENCE).ok().map(|(alg, _)| alg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

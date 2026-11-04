@@ -12,21 +12,30 @@
 //! # RSASSA-PSS public keys
 //!
 //! A key identified by `id-RSASSA-PSS` (TLS `rsa_pss_pss_*`, RFC 9846
-//! §4.3.3) is matched by its exact `AlgorithmIdentifier`, as every key here:
+//! §4.3.3) is matched by the canonical form of its `AlgorithmIdentifier`
+//! (`browntls_pki::alg_id::canonical_public_key_alg_id`, through
+//! `AlgorithmIdentifier::matches_public_key`), so that the encodings
+//! RFC 4055 treats as equal (NULL or absent hash parameters, an absent or
+//! explicit trailer field 1, any minimum salt length up to the digest
+//! length) select the same algorithm:
 //!
 //! * without parameters ([`alg_id::RSASSA_PSS`]) by the
 //!   `RSA_PSS_PSS_2048_8192_SHA*` algorithms, which verify RSASSA-PSS with
 //!   any of the three hashes;
-//! * with the parameters of one scheme ([`alg_id::RSASSA_PSS_SHA256_KEY`]
-//!   and the SHA-384 and SHA-512 equivalents) only by the
-//!   `RSA_PSS_PSS_2048_8192_SHA*_RESTRICTED` algorithm with that hash, so a
-//!   restricted key verifies only signatures with its own parameters
-//!   (RFC 4055 §3.3, RFC 9846 §4.3.3).
+//! * with parameters restricting it to one hash
+//!   ([`alg_id::RSASSA_PSS_SHA256_KEY`] and the SHA-384 and SHA-512
+//!   equivalents) only by the `RSA_PSS_PSS_2048_8192_SHA*_RESTRICTED`
+//!   algorithm with that hash, so a restricted key verifies only signatures
+//!   with its own hash, MGF1 over it and a salt of the digest length, which
+//!   meets the key's minimum (RFC 4055 §3.3, RFC 9846 §4.3.3).
 //!
-//! Any other parameters match no algorithm and are rejected as unsupported;
-//! `browntls_crypto::rsa::RsaKeyAlgorithm` documents the accepted set. An
-//! `id-RSASSA-PSS` key never matches an RSASSA-PKCS1-v1_5 algorithm, and an
-//! `rsaEncryption` key never matches an `rsa_pss_pss_*` one.
+//! Certificate signature identifiers are canonicalised likewise
+//! (`canonical_signature_alg_id`) but must have a salt of the digest
+//! length. Any other parameters match no algorithm and are rejected as
+//! unsupported; `browntls_crypto::rsa::RsaKeyAlgorithm` documents the
+//! accepted set, which is the canonicaliser's. An `id-RSASSA-PSS` key never
+//! matches an RSASSA-PKCS1-v1_5 algorithm, and an `rsaEncryption` key never
+//! matches an `rsa_pss_pss_*` one.
 
 use core::fmt;
 
@@ -324,26 +333,28 @@ rsa_alg!(
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
-    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
-    /// parameters).
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-256,
+    /// in any encoding that canonicalises to `RSASSA_PSS_SHA256_KEY`).
     RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED, Pss, Sha256, RSA_PSS_SHA256, RSASSA_PSS_SHA256_KEY
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
-    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
-    /// parameters).
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-384,
+    /// in any encoding that canonicalises to `RSASSA_PSS_SHA384_KEY`).
     RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED, Pss, Sha384, RSA_PSS_SHA384, RSASSA_PSS_SHA384_KEY
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
-    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
-    /// parameters).
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-512,
+    /// in any encoding that canonicalises to `RSASSA_PSS_SHA512_KEY`).
     RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED, Pss, Sha512, RSA_PSS_SHA512, RSASSA_PSS_SHA512_KEY
 );
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
     use browntls_crypto::rand::OsRng;
 
     #[test]
@@ -543,5 +554,160 @@ mod tests {
                 assert!(alg.verify_signature(pk, b"msg", &sig).is_err());
             }
         }
+    }
+
+    /// `id-RSASSA-PSS` identifiers with every combination of field values
+    /// that matters to the parsers, and the salt length each states (`None`
+    /// when absent).
+    fn pss_identifier_corpus() -> Vec<(Vec<u8>, Option<u16>)> {
+        fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+            assert!(value.len() < 0x80);
+            [&[tag, value.len() as u8][..], value].concat()
+        }
+        fn hash_alg(oid: &[u8], null: bool) -> Vec<u8> {
+            let null: &[u8] = if null { &[0x05, 0x00] } else { &[] };
+            tlv(0x30, &[tlv(0x06, oid).as_slice(), null].concat())
+        }
+        const SHA2: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+        const MGF1: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08];
+        let oids: [Vec<u8>; 6] = [
+            vec![0x2b, 0x0e, 0x03, 0x02, 0x1a], // SHA-1
+            [&SHA2[..], &[4]].concat(),         // SHA-224
+            [&SHA2[..], &[1]].concat(),         // SHA-256
+            [&SHA2[..], &[2]].concat(),         // SHA-384
+            [&SHA2[..], &[3]].concat(),         // SHA-512
+            vec![0x2a, 0x03],                   // unknown
+        ];
+        let mut hashes = vec![None];
+        let mut mask_gens = vec![None];
+        for oid in &oids {
+            for null in [true, false] {
+                hashes.push(Some(tlv(0xa0, &hash_alg(oid, null))));
+                let mgf1 = [tlv(0x06, &MGF1), hash_alg(oid, null)].concat();
+                mask_gens.push(Some(tlv(0xa1, &tlv(0x30, &mgf1))));
+            }
+        }
+        // A function other than MGF1 (id-sha256 in its place).
+        let other = [tlv(0x06, &oids[2]), hash_alg(&oids[2], true)].concat();
+        mask_gens.push(Some(tlv(0xa1, &tlv(0x30, &other))));
+        let salts: [Option<u16>; 13] = [
+            None,
+            Some(0),
+            Some(1),
+            Some(20),
+            Some(28),
+            Some(32),
+            Some(33),
+            Some(48),
+            Some(49),
+            Some(64),
+            Some(65),
+            Some(0x7f),
+            Some(0x100),
+        ];
+        let mut corpus = Vec::new();
+        for hash in &hashes {
+            for mask_gen in &mask_gens {
+                for salt in salts {
+                    for trailer in [None, Some(0u8), Some(1), Some(2)] {
+                        let mut params = Vec::new();
+                        params.extend(hash.iter().flatten());
+                        params.extend(mask_gen.iter().flatten());
+                        if let Some(len) = salt {
+                            let int = len.to_be_bytes();
+                            let int = if len < 0x80 { &int[1..] } else { &int[..] };
+                            params.extend(tlv(0xa2, &tlv(0x02, int)));
+                        }
+                        if let Some(t) = trailer {
+                            params.extend(tlv(0xa3, &tlv(0x02, &[t])));
+                        }
+                        let alg = [alg_id::RSASSA_PSS.as_bytes(), &tlv(0x30, &params)].concat();
+                        corpus.push((alg, salt));
+                    }
+                }
+            }
+        }
+        // No parameters, NULL parameters, data after the parameters, and
+        // the fields of a canonical identifier out of order.
+        let canonical = alg_id::RSA_PSS_SHA256.as_bytes();
+        let (head, fields) = canonical.split_at(13);
+        let (hash, rest) = fields.split_at(17);
+        let reordered = [head, &rest[..30], hash, &rest[30..]].concat();
+        corpus.extend([
+            (alg_id::RSASSA_PSS.as_bytes().to_vec(), None),
+            (
+                [alg_id::RSASSA_PSS.as_bytes(), &[0x05, 0x00]].concat(),
+                None,
+            ),
+            ([canonical, &[0x05, 0x00]].concat(), Some(32)),
+            (reordered, Some(32)),
+        ]);
+        corpus
+    }
+
+    #[test]
+    fn pss_key_parser_and_canonicaliser_agree() {
+        use browntls_crypto::rsa::RsaKeyAlgorithm;
+        use browntls_pki::alg_id::{canonical_public_key_alg_id, canonical_signature_alg_id};
+        // `browntls-crypto` loads keys, `browntls-pki` matches them to
+        // verification algorithms: both must accept the same identifiers
+        // and read the same restriction from them.
+        let mut restricted = 0;
+        for (alg, salt) in pss_identifier_corpus() {
+            let parsed = RsaKeyAlgorithm::from_algorithm_identifier(&alg);
+            let expected = match parsed {
+                Ok(RsaKeyAlgorithm::RsassaPss(None)) => Some(alg_id::RSASSA_PSS),
+                Ok(RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha256))) => {
+                    Some(alg_id::RSASSA_PSS_SHA256_KEY)
+                }
+                Ok(RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha384))) => {
+                    Some(alg_id::RSASSA_PSS_SHA384_KEY)
+                }
+                Ok(RsaKeyAlgorithm::RsassaPss(Some(BcHash::Sha512))) => {
+                    Some(alg_id::RSASSA_PSS_SHA512_KEY)
+                }
+                Ok(other) => panic!("{other:?}"),
+                Err(_) => None,
+            };
+            let hex = hex::encode(&alg);
+            assert_eq!(
+                canonical_public_key_alg_id(&alg),
+                expected,
+                "{parsed:?} {hex}"
+            );
+            // A signature identifier needs the parameters and a salt of
+            // exactly the digest length.
+            let expected = match parsed {
+                Ok(RsaKeyAlgorithm::RsassaPss(Some(hash)))
+                    if salt == u16::try_from(hash.output_len()).ok() =>
+                {
+                    Some(match hash {
+                        BcHash::Sha256 => alg_id::RSA_PSS_SHA256,
+                        BcHash::Sha384 => alg_id::RSA_PSS_SHA384,
+                        _ => alg_id::RSA_PSS_SHA512,
+                    })
+                }
+                _ => None,
+            };
+            assert_eq!(canonical_signature_alg_id(&alg), expected, "{hex}");
+            // The provider's table: a restricted key matches the one
+            // algorithm of its hash, an unrestricted key one per hash.
+            let matching = crate::crypto::native::ALL_VERIFICATION_ALGS
+                .iter()
+                .filter(|a| a.public_key_alg_id().matches_public_key(&alg))
+                .count();
+            match parsed {
+                Ok(RsaKeyAlgorithm::RsassaPss(None)) => assert_eq!(matching, 3),
+                Ok(_) => {
+                    restricted += 1;
+                    assert_eq!(matching, 1, "{hex}");
+                }
+                Err(_) => assert_eq!(matching, 0, "{hex}"),
+            }
+        }
+        // Per hash: 2 x 2 hash parameter forms, 2 trailer forms (absent or
+        // 1), and the salts absent or at most hLen but not an explicit 20
+        // (5, 7 and 9 of the list).
+        assert_eq!(restricted, 8 * (5 + 7 + 9));
     }
 }

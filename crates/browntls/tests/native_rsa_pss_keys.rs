@@ -14,6 +14,11 @@
 //!   peers that sign anyway (a signing key that ignores its algorithm), and
 //!   a CA restricted to SHA-256 that signs with SHA-384 parameters.
 //! * OpenSSL 3.0.13 signatures verified through the provider's tables.
+//! * The encodings of `RSASSA-PSS-params` RFC 4055 treats as equal (absent
+//!   hash parameters, §2.1; an omitted or short minimum salt length, §3.3;
+//!   an explicit trailer field 1, §3.1) in keys, key files and certificate
+//!   signatures, through the raw-key and the certificate verification
+//!   paths; and the encodings that stay rejected.
 //!
 //! rcgen cannot make RSASSA-PSS certificates, so a small X.509 builder here
 //! writes them with `browntls_crypto::der` and signs them with
@@ -46,8 +51,8 @@ use browntls_crypto::der::{Writer, header_len, tag};
 use browntls_crypto::hash::HashAlgorithm;
 use browntls_crypto::rand::{OsRng, SecureRandom};
 use browntls_crypto::rsa::{
-    MAX_ALGORITHM_IDENTIFIER_LEN, MAX_MODULUS_BYTES, MAX_PKCS8_PRIVATE_KEY_DER_LEN,
-    RsaKeyAlgorithm, RsaPrivateKey,
+    MAX_ALGORITHM_IDENTIFIER_LEN, MAX_MODULUS_BYTES, MAX_PKCS1_PRIVATE_KEY_DER_LEN,
+    MAX_PKCS8_PRIVATE_KEY_DER_LEN, RsaKeyAlgorithm, RsaPrivateKey,
 };
 use common::*;
 
@@ -117,6 +122,9 @@ fn rsa_keys() -> &'static [Arc<RsaPrivateKey>; 4] {
 struct TestKey {
     key: Arc<RsaPrivateKey>,
     algorithm: RsaKeyAlgorithm,
+    /// The `AlgorithmIdentifier` contents of both encodings, when not the
+    /// canonical encoding of `algorithm`.
+    encoding: Option<Vec<u8>>,
 }
 
 impl TestKey {
@@ -124,7 +132,30 @@ impl TestKey {
         Self {
             key: rsa_keys()[index].clone(),
             algorithm,
+            encoding: None,
         }
+    }
+
+    /// The same key identified by `params` instead.
+    fn encoded(self, params: PssParams) -> Self {
+        Self {
+            algorithm: restricted(params.hash),
+            encoding: Some(params.encode()),
+            ..self
+        }
+    }
+
+    /// The `AlgorithmIdentifier` contents.
+    fn algorithm_identifier(&self) -> Vec<u8> {
+        if let Some(encoding) = &self.encoding {
+            return encoding.clone();
+        }
+        let mut alg = [0u8; MAX_ALGORITHM_IDENTIFIER_LEN];
+        let len = self
+            .algorithm
+            .encode_algorithm_identifier(&mut alg)
+            .unwrap();
+        alg[..len].to_vec()
     }
 
     fn root(algorithm: RsaKeyAlgorithm) -> Self {
@@ -145,29 +176,142 @@ impl TestKey {
 
     /// The `SubjectPublicKeyInfo`.
     fn spki(&self) -> Vec<u8> {
-        let mut alg = [0u8; MAX_ALGORITHM_IDENTIFIER_LEN];
-        let len = self
-            .algorithm
-            .encode_algorithm_identifier(&mut alg)
-            .unwrap();
         let mut pkcs1 = vec![0u8; MAX_MODULUS_BYTES + 32];
         let n = self.key.public_key().to_pkcs1_der(&mut pkcs1).unwrap();
         seq(&[
-            &tlv(tag::SEQUENCE, &alg[..len]),
+            &tlv(tag::SEQUENCE, &self.algorithm_identifier()),
             &tlv(tag::BIT_STRING, &[&[0u8][..], &pkcs1[..n]].concat()),
         ])
     }
 
     /// The PKCS #8 `PrivateKeyInfo` (secret; kept in memory only).
     fn private_key(&self) -> PrivateKeyDer<'static> {
-        let mut der = vec![0u8; MAX_PKCS8_PRIVATE_KEY_DER_LEN];
-        let len = self
-            .key
-            .to_pkcs8_der_with_algorithm(self.algorithm, &mut der)
-            .unwrap();
-        der.truncate(len);
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der))
+        let Some(encoding) = &self.encoding else {
+            let mut der = vec![0u8; MAX_PKCS8_PRIVATE_KEY_DER_LEN];
+            let len = self
+                .key
+                .to_pkcs8_der_with_algorithm(self.algorithm, &mut der)
+                .unwrap();
+            der.truncate(len);
+            return PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der));
+        };
+        let mut pkcs1 = vec![0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
+        let n = self.key.to_pkcs1_der(&mut pkcs1).unwrap();
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(seq(&[
+            &tlv(tag::INTEGER, &[0]),
+            &tlv(tag::SEQUENCE, encoding),
+            &tlv(tag::OCTET_STRING, &pkcs1[..n]),
+        ])))
     }
+}
+
+/// How `saltLength` is written in [`PssParams`].
+#[derive(Clone, Copy, Debug)]
+enum Salt {
+    /// Absent: the DEFAULT 20.
+    Omitted,
+    /// The digest length.
+    Digest,
+    /// Explicitly this many bytes.
+    Explicit(u8),
+}
+
+/// `id-RSASSA-PSS` parameters for `hash` with MGF1 over `hash`, written in
+/// one of the ways RFC 4055 allows: hash identifiers with NULL or absent
+/// parameters (§2.1), a salt length, an optional explicit trailer field.
+#[derive(Clone, Copy, Debug)]
+struct PssParams {
+    hash: HashAlgorithm,
+    null: bool,
+    salt: Salt,
+    trailer: Option<u8>,
+}
+
+impl PssParams {
+    /// The canonical form: NULL parameters, a salt of the digest length.
+    const fn canonical(hash: HashAlgorithm) -> Self {
+        Self {
+            hash,
+            null: true,
+            salt: Salt::Digest,
+            trailer: None,
+        }
+    }
+
+    const fn absent_hash_params(self) -> Self {
+        Self {
+            null: false,
+            ..self
+        }
+    }
+
+    const fn salt(self, salt: Salt) -> Self {
+        Self { salt, ..self }
+    }
+
+    const fn trailer(self, value: u8) -> Self {
+        Self {
+            trailer: Some(value),
+            ..self
+        }
+    }
+
+    /// The `AlgorithmIdentifier` contents.
+    fn encode(self) -> Vec<u8> {
+        const RSASSA_PSS: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
+        const MGF1: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08];
+        let last = match self.hash {
+            Sha256 => 1,
+            Sha384 => 2,
+            Sha512 => 3,
+            other => panic!("{other:?}"),
+        };
+        let oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, last];
+        let null: &[u8] = if self.null { &[tag::NULL, 0] } else { &[] };
+        let hash = seq(&[&tlv(tag::OID, &oid), null]);
+        let mut fields = vec![
+            tlv(tag::context_constructed(0), &hash),
+            tlv(
+                tag::context_constructed(1),
+                &seq(&[&tlv(tag::OID, &MGF1), &hash]),
+            ),
+        ];
+        let salt = match self.salt {
+            Salt::Omitted => None,
+            Salt::Digest => Some(u8::try_from(self.hash.output_len()).unwrap()),
+            Salt::Explicit(len) => Some(len),
+        };
+        if let Some(len) = salt {
+            assert!(len < 0x80);
+            fields.push(tlv(tag::context_constructed(2), &tlv(tag::INTEGER, &[len])));
+        }
+        if let Some(value) = self.trailer {
+            fields.push(tlv(
+                tag::context_constructed(3),
+                &tlv(tag::INTEGER, &[value]),
+            ));
+        }
+        let fields: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+        [tlv(tag::OID, &RSASSA_PSS), seq(&fields)].concat()
+    }
+}
+
+/// Encodings of keys restricted to `hash` that are accepted, other than the
+/// canonical one: absent hash parameters, the minimum salt left at its
+/// DEFAULT 20 (OpenSSL's `rsa_pss_keygen_md` with `rsa_pss_keygen_mgf1_md`),
+/// a minimum of 0, an explicit trailer field 1, and all at once.
+fn equivalent_key_forms(hash: HashAlgorithm) -> [PssParams; 5] {
+    let canonical = PssParams::canonical(hash);
+    [
+        canonical.absent_hash_params(),
+        canonical.salt(Salt::Omitted),
+        canonical.salt(Salt::Explicit(0)),
+        canonical.trailer(1),
+        canonical
+            .absent_hash_params()
+            .salt(Salt::Omitted)
+            .trailer(1),
+    ]
 }
 
 fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
@@ -178,17 +322,6 @@ fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
 
 fn seq(parts: &[&[u8]]) -> Vec<u8> {
     tlv(tag::SEQUENCE, &parts.concat())
-}
-
-/// The `AlgorithmIdentifier` of RSASSA-PSS signatures with `hash`, MGF1 over
-/// `hash` and a salt of the digest length. The parameters have the same
-/// syntax, and here the same value, as those of a key restricted to `hash`.
-fn pss_signature_alg(hash: HashAlgorithm) -> Vec<u8> {
-    let mut alg = [0u8; MAX_ALGORITHM_IDENTIFIER_LEN];
-    let len = restricted(hash)
-        .encode_algorithm_identifier(&mut alg)
-        .unwrap();
-    tlv(tag::SEQUENCE, &alg[..len])
 }
 
 /// A `Name` with one common name.
@@ -273,11 +406,28 @@ fn issue(
     issuer: &TestKey,
     hash: HashAlgorithm,
 ) -> CertificateDer<'static> {
+    let sig_alg = PssParams::canonical(hash);
+    issue_with(subject_cn, subject, role, issuer_cn, issuer, sig_alg)
+}
+
+/// [`issue`] with the signature `AlgorithmIdentifier` written as `sig_alg`
+/// says. The signature itself always uses `sig_alg`'s hash with MGF1 over
+/// it and a salt of the digest length, so the identifier describes it only
+/// when it is equivalent to the canonical one.
+fn issue_with(
+    subject_cn: &str,
+    subject: &TestKey,
+    role: Role,
+    issuer_cn: &str,
+    issuer: &TestKey,
+    sig_alg: PssParams,
+) -> CertificateDer<'static> {
     let mut serial = [0u8; 8];
     OsRng.fill(&mut serial).unwrap();
     serial[0] = (serial[0] & 0x7f) | 0x01;
     const UTC_TIME: u8 = 0x17;
-    let sig_alg = pss_signature_alg(hash);
+    let hash = sig_alg.hash;
+    let sig_alg = tlv(tag::SEQUENCE, &sig_alg.encode());
     let tbs = seq(&[
         &tlv(tag::context_constructed(0), &tlv(tag::INTEGER, &[2])),
         &tlv(tag::INTEGER, &serial),
@@ -1119,5 +1269,381 @@ fn openssl_signatures_verify_with_pss_pss_schemes() {
         // differs only by the modulus).
         let alg_len = 2 + usize::from(reference[5]);
         assert_eq!(key.spki()[4..4 + alg_len], reference[4..4 + alg_len]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Equivalent and rejected encodings of RSASSA-PSS-params
+
+/// A self-signed root with `root`'s key, and an end entity with `ee`'s key
+/// whose certificate signature identifier is written as `sig_alg`.
+fn direct_chain(root: &TestKey, ee: &TestKey, role: Role, sig_alg: PssParams) -> PssChain {
+    // A trust anchor's own signature is not validated; it uses the root
+    // key's hash, if restricted.
+    let root_hash = match root.algorithm {
+        RsaKeyAlgorithm::RsassaPss(Some(hash)) => hash,
+        _ => sig_alg.hash,
+    };
+    let root_cert = issue("PSS root", root, Role::Ca, "PSS root", root, root_hash);
+    PssChain {
+        root: root_cert,
+        chain: vec![issue_with(
+            "end entity",
+            ee,
+            role,
+            "PSS root",
+            root,
+            sig_alg,
+        )],
+        key: ee.clone(),
+    }
+}
+
+/// Runs a handshake with web-PKI verifiers on both sides where the client
+/// offers `offer`, and returns the schemes of the server signatures the
+/// client checked.
+fn webpki_server_signs(
+    v: ProtocolVersion,
+    server: &PssChain,
+    client: &PssChain,
+    offer: &[SignatureScheme],
+) -> Result<Vec<SignatureScheme>, Failure> {
+    let (_, server_config) = webpki_configs(v, server, client);
+    let webpki = WebPkiServerVerifier::builder_with_provider(server.roots(), provider())
+        .build()
+        .unwrap();
+    let verifier = SchemeRecordingServerVerifier::new(webpki, offer);
+    let client_config = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(versions(v))
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_client_auth_cert(client.chain.clone(), client.private_key())
+        .unwrap();
+    let (mut client_conn, mut server_conn) = connect(client_config, server_config);
+    let (client_res, server_res) = do_handshake_until_error(&mut client_conn, &mut server_conn);
+    if client_res.is_err() || server_res.is_err() {
+        return Err((client_res, server_res));
+    }
+    do_handshake(&mut client_conn, &mut server_conn).unwrap();
+    assert_eq!(
+        server_conn.peer_certificates().unwrap(),
+        client.chain.as_slice()
+    );
+    round_trip(&mut client_conn, &mut server_conn);
+    Ok(verifier.seen())
+}
+
+#[test]
+fn equivalent_key_encodings_sign_only_their_scheme() {
+    init_logging();
+    // Keys restricted to one hash, identified in every accepted way in
+    // their key files and certificates, sign and verify exactly as the
+    // canonical form does: only `rsa_pss_pss_<hash>`, with a salt of the
+    // digest length, which meets any minimum up to that length (RFC 4055
+    // §3.3, RFC 9846 §4.3.3).
+    let mut all = RSAE.to_vec();
+    all.extend(PSS_PSS);
+    for hash in [Sha256, Sha384, Sha512] {
+        let own = pss_pss_scheme(hash);
+        let others: Vec<_> = PSS_PSS.into_iter().filter(|s| *s != own).collect();
+        for form in equivalent_key_forms(hash) {
+            let server_key = TestKey::server(UNRESTRICTED).encoded(form);
+            let client_key = TestKey::client(UNRESTRICTED).encoded(form);
+            let root = TestKey::root(RSAE_KEY);
+            let server = direct_chain(
+                &root,
+                &server_key,
+                Role::Server,
+                PssParams::canonical(Sha256),
+            );
+            let client = direct_chain(
+                &root,
+                &client_key,
+                Role::Client,
+                PssParams::canonical(Sha256),
+            );
+            // The loaded key keeps the identifier of its key file.
+            let loaded = prov::KEY_PROVIDER
+                .load_private_key(server_key.private_key())
+                .unwrap();
+            assert_eq!(
+                loaded.public_key().unwrap().as_ref(),
+                server.spki().as_ref()
+            );
+            for v in VERSIONS {
+                // Pinned key (the raw-key verification path).
+                assert_eq!(
+                    server_signs(v, &server, &all).unwrap(),
+                    [own],
+                    "{form:?} {v:?}"
+                );
+                let (client_res, server_res) = server_signs(v, &server, &others).unwrap_err();
+                assert_no_common_scheme(v, client_res, server_res);
+                // Certificate paths and the certificate verification path,
+                // with the client authenticating with the same form.
+                assert_eq!(
+                    webpki_server_signs(v, &server, &client, &all).unwrap(),
+                    [own],
+                    "{form:?} {v:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn equivalent_identifiers_in_certificate_chains_validate() {
+    init_logging();
+    // CA keys and certificate signature identifiers in equivalent forms:
+    // absent hash parameters and an explicit trailer field 1 in the
+    // signature identifiers (whose salt stays the digest length), and CA
+    // keys with short minimum salts.
+    let sha256 = PssParams::canonical(Sha256);
+    let sha384 = PssParams::canonical(Sha384);
+    let root_forms = [
+        sha256.salt(Salt::Omitted),
+        sha256.salt(Salt::Explicit(0)).absent_hash_params(),
+        sha256.trailer(1),
+    ];
+    let sig_forms = [
+        sha256,
+        sha256.absent_hash_params(),
+        sha256.trailer(1),
+        sha256.absent_hash_params().trailer(1),
+    ];
+    for root_form in root_forms {
+        for sig_form in sig_forms {
+            let root = TestKey::root(RSAE_KEY).encoded(root_form);
+            let ica = TestKey::intermediate(RSAE_KEY).encoded(sha384.salt(Salt::Omitted));
+            let ica_cert = issue_with("PSS CA", &ica, Role::Ca, "PSS root", &root, sig_form);
+            let root_cert = issue("PSS root", &root, Role::Ca, "PSS root", &root, Sha256);
+            let chain = |key: TestKey, role| PssChain {
+                root: root_cert.clone(),
+                chain: vec![
+                    issue_with(
+                        "end entity",
+                        &key,
+                        role,
+                        "PSS CA",
+                        &ica,
+                        sha384.absent_hash_params().trailer(1),
+                    ),
+                    ica_cert.clone(),
+                ],
+                key,
+            };
+            let server = chain(TestKey::server(UNRESTRICTED), Role::Server);
+            let client = chain(TestKey::client(restricted(Sha512)), Role::Client);
+            for v in VERSIONS {
+                let (client_config, server_config) = webpki_configs(v, &server, &client);
+                let (mut client_conn, mut server_conn) = connect(client_config, server_config);
+                do_handshake(&mut client_conn, &mut server_conn)
+                    .unwrap_or_else(|e| panic!("{root_form:?} {sig_form:?} {v:?}: {e}"));
+                assert_eq!(
+                    client_conn.peer_certificates().unwrap(),
+                    server.chain.as_slice()
+                );
+                round_trip(&mut client_conn, &mut server_conn);
+            }
+        }
+    }
+}
+
+/// The client's result of a handshake against `server`, validated with
+/// web-PKI verifiers.
+fn webpki_client_result(v: ProtocolVersion, server: &PssChain) -> Result<(), Error> {
+    let client = ChainSpec::direct(RSAE_KEY, Sha256, RSAE_KEY).build(Role::Client);
+    let (client_config, server_config) = webpki_configs(v, server, &client);
+    let (mut client_conn, mut server_conn) = connect(client_config, server_config);
+    do_handshake_until_error(&mut client_conn, &mut server_conn).0
+}
+
+#[test]
+fn certificate_signatures_need_a_digest_length_salt_and_the_key_hash() {
+    init_logging();
+    let unsupported = Err(Error::InvalidCertificate(
+        CertificateError::UnsupportedSignatureAlgorithm,
+    ));
+    let sha256 = PssParams::canonical(Sha256);
+    let server_key = TestKey::server(UNRESTRICTED);
+    for (root_form, sig_alg, ok) in [
+        // A key with a minimum salt of 20 or 0 bytes verifies signatures
+        // with a salt of 32 bytes (RFC 4055 §3.3)...
+        (sha256.salt(Salt::Omitted), sha256, true),
+        (sha256.salt(Salt::Explicit(0)), sha256, true),
+        // ...but signature identifiers stating another salt describe no
+        // TLS scheme (RFC 9846 §4.3.3) and match no algorithm, whatever
+        // the key allows; the signatures here use 32 bytes anyway.
+        (
+            sha256.salt(Salt::Omitted),
+            sha256.salt(Salt::Omitted),
+            false,
+        ),
+        (
+            sha256.salt(Salt::Explicit(0)),
+            sha256.salt(Salt::Explicit(0)),
+            false,
+        ),
+        (sha256, sha256.salt(Salt::Explicit(31)), false),
+        (sha256, sha256.salt(Salt::Explicit(33)), false),
+        // A trailer field other than 1.
+        (sha256, sha256.trailer(2), false),
+        // A key with a short minimum salt is still restricted to its hash.
+        (
+            sha256.salt(Salt::Omitted).absent_hash_params(),
+            PssParams::canonical(Sha384),
+            false,
+        ),
+        (
+            PssParams::canonical(Sha512).salt(Salt::Explicit(0)),
+            PssParams::canonical(Sha512).absent_hash_params(),
+            true,
+        ),
+    ] {
+        let root = TestKey::root(RSAE_KEY).encoded(root_form);
+        let server = direct_chain(&root, &server_key, Role::Server, sig_alg);
+        let expected = if ok { Ok(()) } else { unsupported.clone() };
+        for v in VERSIONS {
+            assert_eq!(
+                webpki_client_result(v, &server),
+                expected,
+                "{root_form:?} {sig_alg:?} {v:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_and_non_der_key_parameters_stay_rejected() {
+    init_logging();
+    let sha256 = PssParams::canonical(Sha256);
+    // (identifier, whether it is well formed but unsupported).
+    let rejected = [
+        (sha256.salt(Salt::Explicit(33)), true),
+        (PssParams::canonical(Sha384).salt(Salt::Explicit(49)), true),
+        (sha256.trailer(2), true),
+        (sha256.trailer(0), true),
+        // An explicit DEFAULT salt length is not DER (X.690 §11.5).
+        (sha256.salt(Salt::Explicit(20)), false),
+    ];
+    let unsupported = Err(Error::InvalidCertificate(
+        CertificateError::UnsupportedSignatureAlgorithm,
+    ));
+    for (form, well_formed) in rejected {
+        // As a CA key: the chain does not validate.
+        let root = TestKey::root(RSAE_KEY).encoded(form);
+        let server = direct_chain(&root, &TestKey::server(UNRESTRICTED), Role::Server, sha256);
+        for v in VERSIONS {
+            assert_eq!(
+                webpki_client_result(v, &server),
+                unsupported,
+                "{form:?} {v:?}"
+            );
+        }
+        // As a key file: loading fails, saying why when the parameters are
+        // merely unsupported.
+        let err = prov::KEY_PROVIDER
+            .load_private_key(TestKey::server(UNRESTRICTED).encoded(form).private_key())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err.contains("unsupported RSASSA-PSS key parameters"),
+            well_formed,
+            "{form:?}: {err}"
+        );
+        // As a raw public key: no scheme verifies with it.
+        let key = TestKey::server(UNRESTRICTED).encoded(form);
+        let mut sig = vec![0u8; 256];
+        key.key.sign_pss(Sha256, b"msg", &OsRng, &mut sig).unwrap();
+        for scheme in PSS_PSS {
+            assert_eq!(
+                verify_raw(&key.spki(), scheme, b"msg", &sig),
+                Err(CertificateError::UnsupportedSignatureAlgorithm.into()),
+                "{form:?} {scheme:?}"
+            );
+        }
+    }
+    // OpenSSL's `rsa_pss_keygen_md:sha256` alone (MGF1 with SHA-1 by
+    // default) is unsupported too.
+    let mgf1_sha1 = TestKey {
+        encoding: Some(
+            hex::decode("06092a864886f70d01010a3011a00f300d06096086480165030402010500").unwrap(),
+        ),
+        ..TestKey::server(UNRESTRICTED)
+    };
+    let err = prov::KEY_PROVIDER
+        .load_private_key(mgf1_sha1.private_key())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("unsupported RSASSA-PSS key parameters"),
+        "{err}"
+    );
+}
+
+#[test]
+fn key_file_and_certificate_must_encode_the_key_alike() {
+    init_logging();
+    // The loaded key's SPKI is its key file's, byte for byte, and the
+    // certificate/key consistency check compares bytes: equivalent but
+    // differently written identifiers are reported as a mismatch.
+    let canonical = TestKey::server(restricted(Sha256));
+    let omitted = canonical
+        .clone()
+        .encoded(PssParams::canonical(Sha256).salt(Salt::Omitted));
+    let root = TestKey::root(RSAE_KEY);
+    for (cert_key, file_key, ok) in [
+        (&omitted, &omitted, true),
+        (&canonical, &canonical, true),
+        (&omitted, &canonical, false),
+        (&canonical, &omitted, false),
+    ] {
+        let chain = direct_chain(&root, cert_key, Role::Server, PssParams::canonical(Sha256));
+        let result = ServerConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(chain.chain.clone(), file_key.private_key())
+            .map(|_| ());
+        if ok {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                Error::InconsistentKeys(browntls::InconsistentKeys::KeyMismatch)
+            );
+        }
+    }
+}
+
+#[test]
+fn scheme_table_canonicalises_equivalent_key_encodings() {
+    // The raw-key path: each accepted form of a key restricted to one hash
+    // verifies that hash's `rsa_pss_pss_*` scheme only.
+    let mut sig = vec![0u8; 256];
+    for hash in [Sha256, Sha384, Sha512] {
+        for form in equivalent_key_forms(hash) {
+            let key = TestKey::server(UNRESTRICTED).encoded(form);
+            for scheme in RSAE[..3].iter().chain(&PSS_PSS) {
+                key.key
+                    .sign_pss(scheme_hash(*scheme), b"msg", &OsRng, &mut sig)
+                    .unwrap();
+                let res = verify_raw(&key.spki(), *scheme, b"msg", &sig);
+                if *scheme == pss_pss_scheme(hash) {
+                    res.unwrap();
+                    assert_eq!(
+                        verify_raw(&key.spki(), *scheme, b"msh", &sig),
+                        Err(CertificateError::BadSignature.into())
+                    );
+                } else {
+                    assert_eq!(
+                        res,
+                        Err(CertificateError::UnsupportedSignatureAlgorithm.into()),
+                        "{form:?} {scheme:?}"
+                    );
+                }
+            }
+        }
     }
 }

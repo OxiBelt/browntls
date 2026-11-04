@@ -28,6 +28,11 @@ browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
 keeps certificate policy independent of any particular primitive library.
+An algorithm is selected by its key and signature `AlgorithmIdentifier`s,
+compared byte for byte except for `id-RSASSA-PSS`, whose equivalent
+parameter encodings (RFC 4055) are first mapped to one canonical constant
+(`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
+path validation and by handshake signature verification alike).
 
 ## Crypto provider mount point
 

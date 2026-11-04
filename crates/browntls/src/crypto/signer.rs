@@ -114,8 +114,17 @@ pub fn public_key_to_spki(
     alg_id: &AlgorithmIdentifier,
     public_key: impl AsRef<[u8]>,
 ) -> SubjectPublicKeyInfoDer<'static> {
-    let mut inner = x509::wrap_in_sequence(alg_id.as_ref());
-    inner.extend(x509::wrap_in_bit_string(public_key.as_ref()));
+    spki_from_parts(alg_id.as_ref(), public_key.as_ref())
+}
+
+/// Encodes a `SubjectPublicKeyInfo` from the contents of its
+/// `AlgorithmIdentifier` and the raw key.
+pub(crate) fn spki_from_parts(
+    algorithm: &[u8],
+    public_key: &[u8],
+) -> SubjectPublicKeyInfoDer<'static> {
+    let mut inner = x509::wrap_in_sequence(algorithm);
+    inner.extend(x509::wrap_in_bit_string(public_key));
     SubjectPublicKeyInfoDer::from(x509::wrap_in_sequence(&inner))
 }
 

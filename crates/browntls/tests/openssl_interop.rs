@@ -94,6 +94,10 @@ enum KeyType {
     RsaPss,
     /// RSASSA-PSS key restricted to SHA-384 (MGF1-SHA-384, 48-byte salt).
     RsaPssSha384,
+    /// RSASSA-PSS key restricted to SHA-256 (MGF1-SHA-256) whose
+    /// `saltLength` OpenSSL omits: a minimum of 20 bytes (RFC 4055 §3.3),
+    /// which TLS signatures (32-byte salts) meet.
+    RsaPssSha256DefaultSalt,
 }
 
 impl KeyType {
@@ -117,6 +121,16 @@ impl KeyType {
                 "-pkeyopt",
                 "rsa_pss_keygen_saltlen:48",
             ],
+            Self::RsaPssSha256DefaultSalt => &[
+                "-algorithm",
+                "RSA-PSS",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-pkeyopt",
+                "rsa_pss_keygen_md:sha256",
+                "-pkeyopt",
+                "rsa_pss_keygen_mgf1_md:sha256",
+            ],
         }
     }
 
@@ -125,7 +139,7 @@ impl KeyType {
     /// digest, the only form RFC 9846 signature schemes describe.
     fn sign_args(self) -> &'static [&'static str] {
         match self {
-            Self::RsaPss => &[
+            Self::RsaPss | Self::RsaPssSha256DefaultSalt => &[
                 "-sha256",
                 "-sigopt",
                 "rsa_padding_mode:pss",
@@ -281,6 +295,14 @@ fn make_pki(openssl: &Path, key: KeyType) -> Pki {
         run(openssl, d, &args);
     }
     let ca = CertificateDer::from_pem_file(d.join("ca.pem")).unwrap();
+    if key == KeyType::RsaPssSha256DefaultSalt {
+        // The case is about the omitted saltLength: OpenSSL writes the CA
+        // key's SPKI algorithm as SHA-256 and MGF1-SHA-256 alone.
+        let alg = "303c06092a864886f70d01010a302fa00f300d06096086480165030402010500a11c301a\
+                   06092a864886f70d010108300d06096086480165030402010500";
+        let alg = hex::decode(alg).unwrap();
+        assert!(ca.as_ref().windows(alg.len()).any(|w| w == alg));
+    }
     Pki { dir, ca }
 }
 
@@ -442,6 +464,13 @@ fn cases() -> Vec<Case> {
             "P-256",
             KeyType::RsaPssSha384,
         ),
+        tls13(
+            cs::TLS13_CHACHA20_POLY1305_SHA256,
+            "TLS_CHACHA20_POLY1305_SHA256",
+            kx::X25519,
+            "X25519",
+            KeyType::RsaPssSha256DefaultSalt,
+        ),
     ];
     // RFC 7919 finite-field groups (TLS 1.3 only).
     for (group, name) in [
@@ -526,6 +555,13 @@ fn cases() -> Vec<Case> {
                 kx::SECP256R1,
                 "P-256",
                 KeyType::RsaPss,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                "ECDHE-RSA-AES256-GCM-SHA384",
+                kx::X25519,
+                "X25519",
+                KeyType::RsaPssSha256DefaultSalt,
             ),
         ]);
     }

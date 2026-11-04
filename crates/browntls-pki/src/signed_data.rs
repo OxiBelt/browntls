@@ -74,7 +74,13 @@ impl<'a> Spki<'a> {
 }
 
 /// Verifies `signed` with the key in `spki` using an algorithm from `algs`
-/// whose identifiers match both the signature algorithm and the key.
+/// whose identifiers match both the signature algorithm and the key
+/// ([`AlgorithmIdentifier::matches_signature`],
+/// [`AlgorithmIdentifier::matches_public_key`]: byte for byte, or by the
+/// canonical form of `id-RSASSA-PSS` parameters).
+///
+/// [`AlgorithmIdentifier::matches_signature`]: crate::AlgorithmIdentifier::matches_signature
+/// [`AlgorithmIdentifier::matches_public_key`]: crate::AlgorithmIdentifier::matches_public_key
 pub(crate) fn verify_signed_data(
     algs: &[&dyn SignatureVerificationAlgorithm],
     spki: &Spki<'_>,
@@ -85,9 +91,9 @@ pub(crate) fn verify_signed_data(
     let mut key_mismatch = false;
     for alg in algs
         .iter()
-        .filter(|alg| alg.signature_alg_id().as_bytes() == signed.algorithm)
+        .filter(|alg| alg.signature_alg_id().matches_signature(signed.algorithm))
     {
-        if alg.public_key_alg_id().as_bytes() != spki.algorithm {
+        if !alg.public_key_alg_id().matches_public_key(spki.algorithm) {
             key_mismatch = true;
             continue;
         }
@@ -103,14 +109,17 @@ pub(crate) fn verify_signed_data(
 }
 
 /// Verifies a detached signature (e.g. a TLS `CertificateVerify`) with a
-/// caller-chosen algorithm, which must match the key type in `spki`.
+/// caller-chosen algorithm, which must match the key type in `spki`
+/// ([`AlgorithmIdentifier::matches_public_key`]).
+///
+/// [`AlgorithmIdentifier::matches_public_key`]: crate::AlgorithmIdentifier::matches_public_key
 pub(crate) fn verify_signature(
     alg: &dyn SignatureVerificationAlgorithm,
     spki: &Spki<'_>,
     msg: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    if alg.public_key_alg_id().as_bytes() != spki.algorithm {
+    if !alg.public_key_alg_id().matches_public_key(spki.algorithm) {
         return Err(Error::UnsupportedSignatureAlgorithmForPublicKey);
     }
     alg.verify_signature(spki.key, msg, signature)

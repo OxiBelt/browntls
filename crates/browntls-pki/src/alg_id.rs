@@ -3,8 +3,19 @@
 //! Each constant holds the DER encoding of the *contents* of the
 //! `AlgorithmIdentifier` SEQUENCE (the OID followed by any parameters), which
 //! is how certificates are compared against verification algorithms.
+//!
+//! The comparison is byte for byte, except for `id-RSASSA-PSS`: its
+//! parameters have several encodings RFC 4055 treats as equal, so
+//! [`AlgorithmIdentifier::matches_public_key`] and
+//! [`AlgorithmIdentifier::matches_signature`] first map them to a canonical
+//! constant ([`canonical_public_key_alg_id`], [`canonical_signature_alg_id`]).
+//! Certificate path validation and handshake signature verification
+//! (including `browntls`' raw public keys) all match through these two
+//! functions.
 
 use core::fmt;
+
+use crate::rsassa_pss;
 
 /// The contents of a DER-encoded `AlgorithmIdentifier` (without the outer
 /// SEQUENCE tag and length).
@@ -23,6 +34,70 @@ impl AlgorithmIdentifier {
     pub const fn as_bytes(&self) -> &'static [u8] {
         self.0
     }
+
+    /// Whether this identifier, the [`public_key_alg_id`] of a verification
+    /// algorithm, matches the contents of a `SubjectPublicKeyInfo`
+    /// `algorithm`: they are equal byte for byte, or both are `id-RSASSA-PSS`
+    /// identifiers with the same [`canonical_public_key_alg_id`].
+    ///
+    /// [`public_key_alg_id`]: crate::SignatureVerificationAlgorithm::public_key_alg_id
+    #[must_use]
+    pub fn matches_public_key(&self, spki_algorithm: &[u8]) -> bool {
+        self.0 == spki_algorithm
+            || canonical_public_key_alg_id(spki_algorithm)
+                .is_some_and(|key| canonical_public_key_alg_id(self.0) == Some(key))
+    }
+
+    /// Whether this identifier, the [`signature_alg_id`] of a verification
+    /// algorithm, matches the contents of a certificate's or CRL's
+    /// `signatureAlgorithm`: they are equal byte for byte, or both are
+    /// `id-RSASSA-PSS` identifiers with the same
+    /// [`canonical_signature_alg_id`].
+    ///
+    /// [`signature_alg_id`]: crate::SignatureVerificationAlgorithm::signature_alg_id
+    #[must_use]
+    pub fn matches_signature(&self, signature_algorithm: &[u8]) -> bool {
+        self.0 == signature_algorithm
+            || canonical_signature_alg_id(signature_algorithm)
+                .is_some_and(|sig| canonical_signature_alg_id(self.0) == Some(sig))
+    }
+}
+
+/// The canonical identifier of an `id-RSASSA-PSS` `SubjectPublicKeyInfo`
+/// algorithm (the `AlgorithmIdentifier` contents), or `None` for any other
+/// algorithm and for parameters outside the supported set.
+///
+/// * Absent parameters: [`RSASSA_PSS`] (RFC 4055 §3.3, case 2: any hash).
+/// * Parameters with hash `H` (SHA-256, SHA-384 or SHA-512), MGF1 over `H`
+///   (both hash identifiers with NULL or absent parameters, RFC 4055
+///   §2.1), a `saltLength` absent (DEFAULT 20) or at most the digest length
+///   (a minimum, RFC 4055 §3.3, case 3, which the digest-length salts of
+///   TLS meet) and a `trailerField` absent or 1 (RFC 4055 §3.1):
+///   [`RSASSA_PSS_SHA256_KEY`], [`RSASSA_PSS_SHA384_KEY`] or
+///   [`RSASSA_PSS_SHA512_KEY`].
+///
+/// Malformed or non-DER parameters (X.690 §11.5; the explicit trailer field
+/// 1, which RFC 4055 §3.1 requires validators to recognise, excepted) and
+/// other hashes, mask generation functions, longer minimum salts or trailer
+/// fields give `None`. `browntls_crypto::rsa::RsaKeyAlgorithm` accepts the
+/// same set when it loads keys.
+#[must_use]
+pub fn canonical_public_key_alg_id(contents: &[u8]) -> Option<AlgorithmIdentifier> {
+    rsassa_pss::public_key(contents).ok()
+}
+
+/// The canonical identifier of an `id-RSASSA-PSS` signature algorithm (the
+/// `AlgorithmIdentifier` contents), or `None` for any other algorithm and
+/// for parameters outside the supported set.
+///
+/// The parameters must be present (RFC 4055 §3.1) and are read as for
+/// [`canonical_public_key_alg_id`], except that `saltLength` must be the
+/// digest length: the only salt a TLS signature scheme describes (RFC 9846
+/// §4.3.3). The result is [`RSA_PSS_SHA256`], [`RSA_PSS_SHA384`] or
+/// [`RSA_PSS_SHA512`].
+#[must_use]
+pub fn canonical_signature_alg_id(contents: &[u8]) -> Option<AlgorithmIdentifier> {
+    rsassa_pss::signature(contents).ok()
 }
 
 impl AsRef<[u8]> for AlgorithmIdentifier {
@@ -132,21 +207,23 @@ pub const RSASSA_PSS: AlgorithmIdentifier = AlgorithmIdentifier::from_slice(&[
 ]);
 
 /// AlgorithmIdentifier of an `id-RSASSA-PSS` public key whose parameters
-/// restrict it to SHA-256, MGF1(SHA-256) and a 32-byte salt (RFC 4055 §3.1).
+/// restrict it to SHA-256 and MGF1(SHA-256) (RFC 4055 §3.1): the canonical
+/// form ([`canonical_public_key_alg_id`]) of every such key, whatever its
+/// minimum salt length (up to 32 bytes) and other equivalent encodings.
 ///
-/// The encoding is that of [`RSA_PSS_SHA256`]: RFC 9846 §4.3.3 requires a
-/// certificate signature made with such a key to carry parameters identical
-/// to the key's.
+/// The encoding is that of [`RSA_PSS_SHA256`], with a 32-byte salt: the
+/// parameters of the signatures such a key makes in TLS (RFC 9846 §4.3.3),
+/// and OpenSSL's encoding for `rsa_pss_keygen_saltlen:32`.
 pub const RSASSA_PSS_SHA256_KEY: AlgorithmIdentifier = RSA_PSS_SHA256;
 
 /// AlgorithmIdentifier of an `id-RSASSA-PSS` public key restricted to
-/// SHA-384, MGF1(SHA-384) and a 48-byte salt; the encoding of
-/// [`RSA_PSS_SHA384`].
+/// SHA-384 and MGF1(SHA-384), with a minimum salt of up to 48 bytes, in
+/// canonical form; the encoding of [`RSA_PSS_SHA384`].
 pub const RSASSA_PSS_SHA384_KEY: AlgorithmIdentifier = RSA_PSS_SHA384;
 
 /// AlgorithmIdentifier of an `id-RSASSA-PSS` public key restricted to
-/// SHA-512, MGF1(SHA-512) and a 64-byte salt; the encoding of
-/// [`RSA_PSS_SHA512`].
+/// SHA-512 and MGF1(SHA-512), with a minimum salt of up to 64 bytes, in
+/// canonical form; the encoding of [`RSA_PSS_SHA512`].
 pub const RSASSA_PSS_SHA512_KEY: AlgorithmIdentifier = RSA_PSS_SHA512;
 
 /// AlgorithmIdentifier for `id-Ed25519`.
@@ -273,6 +350,136 @@ mod tests {
         assert_eq!(
             check(RSASSA_PSS, RSA_PKCS1_SHA256),
             Err(Error::UnsupportedSignatureAlgorithm)
+        );
+    }
+
+    #[test]
+    fn equivalent_pss_encodings_match_the_canonical_algorithms() {
+        use crate::rsassa_pss::testing::{
+            S256, S384, hash_field, mgf_field, pss, restricted, salt, trailer,
+        };
+        use crate::signed_data::verify_signature;
+        static ALGS: [&dyn SignatureVerificationAlgorithm; 3] = [
+            &AcceptAll {
+                public_key: RSASSA_PSS,
+                signature: RSA_PSS_SHA384,
+            },
+            &AcceptAll {
+                public_key: RSASSA_PSS_SHA256_KEY,
+                signature: RSA_PSS_SHA256,
+            },
+            &AcceptAll {
+                public_key: RSASSA_PSS_SHA384_KEY,
+                signature: RSA_PSS_SHA384,
+            },
+        ];
+        let check = |key: &[u8], sig: &[u8]| {
+            let spki = Spki {
+                algorithm: key,
+                key: &[],
+            };
+            let signed = SignedData {
+                data: &[],
+                algorithm: sig,
+                signature: &[],
+            };
+            verify_signed_data(&ALGS, &spki, &signed, &mut Budget::default())
+        };
+        // Keys restricted to SHA-256: absent hash parameters, the DEFAULT
+        // (20) and 0 as minimum salt lengths, an explicit trailer field 1.
+        let keys256 = [
+            restricted(S256, false, false, Some(32), false),
+            restricted(S256, true, false, None, false),
+            restricted(S256, false, true, Some(0), true),
+            restricted(S256, true, true, Some(31), true),
+        ];
+        // SHA-256 signature identifiers (salt 32) written differently.
+        let sigs256 = [
+            RSA_PSS_SHA256.as_bytes().to_vec(),
+            restricted(S256, false, false, Some(32), false),
+            restricted(S256, true, true, Some(32), true),
+        ];
+        let sig384 = restricted(S384, false, true, Some(48), true);
+        for key in &keys256 {
+            assert_eq!(
+                canonical_public_key_alg_id(key),
+                Some(RSASSA_PSS_SHA256_KEY)
+            );
+            assert!(RSASSA_PSS_SHA256_KEY.matches_public_key(key));
+            assert!(!RSASSA_PSS_SHA384_KEY.matches_public_key(key));
+            assert!(!RSASSA_PSS.matches_public_key(key));
+            for sig in &sigs256 {
+                assert_eq!(check(key, sig), Ok(()), "{}", hex::encode(key));
+            }
+            // Still only its own hash.
+            assert_eq!(
+                check(key, &sig384),
+                Err(Error::UnsupportedSignatureAlgorithmForPublicKey)
+            );
+            for alg in ALGS {
+                let spki = Spki {
+                    algorithm: key,
+                    key: &[],
+                };
+                let matched = alg.public_key_alg_id() == RSASSA_PSS_SHA256_KEY;
+                assert_eq!(
+                    verify_signature(alg, &spki, &[], &[]).is_ok(),
+                    matched,
+                    "{alg:?}"
+                );
+            }
+        }
+        for sig in &sigs256 {
+            assert_eq!(canonical_signature_alg_id(sig), Some(RSA_PSS_SHA256));
+            assert!(RSA_PSS_SHA256.matches_signature(sig));
+            assert!(!RSA_PSS_SHA384.matches_signature(sig));
+        }
+        // The unrestricted key and the SHA-384 signature in another form.
+        assert_eq!(check(RSASSA_PSS.as_bytes(), &sig384), Ok(()));
+        assert_eq!(
+            check(&restricted(S384, true, true, Some(0), false), &sig384),
+            Ok(())
+        );
+        // Signature salts other than the digest length match nothing, even
+        // where the key's minimum allows them (no TLS scheme has them).
+        for sig in [
+            restricted(S256, true, true, None, false),
+            restricted(S256, true, true, Some(0), false),
+            restricted(S256, true, true, Some(31), false),
+            restricted(S256, true, true, Some(64), false),
+        ] {
+            assert_eq!(canonical_signature_alg_id(&sig), None);
+            assert_eq!(
+                check(&keys256[1], &sig),
+                Err(Error::UnsupportedSignatureAlgorithm)
+            );
+        }
+        // Keys outside the supported set match nothing.
+        for key in [
+            pss(&[hash_field(S256, true), salt(&[32])]),
+            restricted(S256, true, true, Some(33), false),
+            pss(&[hash_field(S256, true), mgf_field(S256, true), salt(&[20])]),
+            pss(&[hash_field(S256, true), mgf_field(S256, true), trailer(&[2])]),
+            [RSASSA_PSS.as_bytes(), &[0x05, 0x00]].concat(),
+        ] {
+            assert_eq!(canonical_public_key_alg_id(&key), None);
+            assert!(!RSASSA_PSS_SHA256_KEY.matches_public_key(&key));
+            assert_eq!(
+                check(&key, RSA_PSS_SHA256.as_bytes()),
+                Err(Error::UnsupportedSignatureAlgorithmForPublicKey),
+                "{}",
+                hex::encode(&key)
+            );
+        }
+        // Other algorithms keep byte-for-byte matching.
+        assert!(RSA_ENCRYPTION.matches_public_key(RSA_ENCRYPTION.as_bytes()));
+        assert!(!RSA_ENCRYPTION.matches_public_key(RSASSA_PSS.as_bytes()));
+        assert!(!RSASSA_PSS.matches_public_key(RSA_ENCRYPTION.as_bytes()));
+        assert!(!ECDSA_P256.matches_public_key(&ECDSA_P256.as_bytes()[..18]));
+        assert_eq!(canonical_public_key_alg_id(ED25519.as_bytes()), None);
+        assert_eq!(
+            canonical_signature_alg_id(RSA_PKCS1_SHA256.as_bytes()),
+            None
         );
     }
 }

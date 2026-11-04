@@ -20,7 +20,7 @@ intent.
 | X25519 / Ed25519 | done | BMI2/ADX ladder on x86-64; small-order Ed25519 public keys rejected |
 | X448 / Ed448 (optional, non-preferred) | done | Portable 8x56-bit field; X448 group in TLS 1.3 and TLS 1.2 ECDHE, Ed448 certificates and handshake signatures; cofactored Ed448 verification, small-order Ed448 public keys rejected; OpenSSL 3 interop suite (TLS 1.3 and 1.2) |
 | P-256 / P-384 / P-521 ECDH and ECDSA | done | RCB complete formulas for secret-scalar additions, Jacobian doubling in the ladder and variable-time Jacobian verification, RFC 6979 with hedging; P-256: specialised BMI2/ADX and portable field arithmetic, safegcd inversion, width-6 fixed-base comb; P-384/P-521: generic CIOS reduction and Fermat inversion (performance headroom) |
-| RSA PKCS #1 v1.5 / PSS | done | 2048-8192-bit verification, CRT signing with blinding and fault check, key generation; safegcd unblinding; fused BMI2/ADX and portable Montgomery kernels; AVX-512 IFMA CRT and public-exponent exponentiation; signing stack 24-52 KiB by key size (IFMA); RSASSA-PSS (`id-RSASSA-PSS`) keys without parameters or restricted to SHA-256/384/512, signing and verifying only `rsa_pss_pss_*` (TLS 1.3 and 1.2), in the OpenSSL 3 interop suite |
+| RSA PKCS #1 v1.5 / PSS | done | 2048-8192-bit verification, CRT signing with blinding and fault check, key generation; safegcd unblinding; fused BMI2/ADX and portable Montgomery kernels; AVX-512 IFMA CRT and public-exponent exponentiation; signing stack 24-52 KiB by key size (IFMA); RSASSA-PSS (`id-RSASSA-PSS`) keys without parameters or restricted to SHA-256/384/512 (in every encoding RFC 4055 treats as equal, with any minimum salt length up to the digest length), signing and verifying only `rsa_pss_pss_*` (TLS 1.3 and 1.2), matched through one canonical form in path validation and handshake verification, in the OpenSSL 3 interop suite |
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
 | FFDHE (RFC 7919 groups, TLS 1.3 only) | done | ffdhe2048-8192 with RFC 7919 short exponents over the RSA constant-time Montgomery exponentiation; non-preferred groups of the native provider, ffdhe2048-4096 in the defaults and ffdhe6144/8192 opt-in (server cost); OpenSSL 3 interop suite |
 | PKI types and PEM | done | |
@@ -75,10 +75,18 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   keys) are portable code; their constant-time properties rest on
   construction and review, not on timing tests. They exist only in the native
   provider.
-- RSASSA-PSS key and signature `AlgorithmIdentifier`s are matched byte for
-  byte, so hash identifiers with absent instead of NULL parameters (which
-  RFC 4055 §2.1 says verifiers must accept), key salt lengths shorter than
-  the digest and explicit default trailer fields are rejected.
+- RSASSA-PSS `AlgorithmIdentifier`s are matched through a canonical form
+  (`browntls_pki::alg_id::canonical_public_key_alg_id`), which accepts NULL
+  or absent hash parameters, key salt lengths up to the digest and an
+  explicit trailer field 1. Still rejected, fail closed: SHA-1 and SHA-224
+  parameters and MGF1 with SHA-1 (although RFC 4055 §3 says validators MUST
+  support SHA-1; no TLS scheme uses them); certificate signatures whose salt
+  is not the digest length (allowed by RFC 4055 §3.3, described by no TLS
+  scheme); an explicitly written `saltLength` 20, which is not DER. The
+  certificate/key consistency check compares `SubjectPublicKeyInfo` bytes,
+  so a key file and a certificate that write equivalent parameters
+  differently are reported as mismatched; and `tbsCertificate.signature` is
+  compared with `signatureAlgorithm` byte for byte (RFC 5280 §4.1.1.2).
 - The AES-NI and VAES backends leave a copy of round key 0 (the AES key
   itself) in dead stack memory after each call; the portable backend and the
   CCM, X448, Ed448 and FFDHE code wipe their secret intermediates.

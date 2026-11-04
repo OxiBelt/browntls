@@ -202,7 +202,10 @@ pub fn verify_tls12_signature_with_raw_key(
     )
 }
 
-/// Tries each algorithm whose `AlgorithmIdentifier` matches the key's.
+/// Tries each algorithm whose `AlgorithmIdentifier` matches the key's
+/// (byte for byte, or by the canonical form of `id-RSASSA-PSS` parameters:
+/// `browntls_pki::AlgorithmIdentifier::matches_public_key`, as certificate
+/// keys are matched).
 fn verify_sig_with_spki(
     spki: &[u8],
     algs: &[&dyn SignatureVerificationAlgorithm],
@@ -212,7 +215,7 @@ fn verify_sig_with_spki(
     let (alg_id, key) = crate::x509::split_spki(spki)?;
     let mut matched_key_type = false;
     for alg in algs {
-        if alg.public_key_alg_id().as_bytes() != alg_id {
+        if !alg.public_key_alg_id().matches_public_key(alg_id) {
             continue;
         }
         matched_key_type = true;

@@ -38,6 +38,7 @@ mod name;
 mod path;
 pub mod pem;
 mod revocation;
+mod rsassa_pss;
 pub mod server_name;
 mod signed_data;
 pub mod time;

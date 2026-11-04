@@ -63,11 +63,23 @@ impl TicketRotator {
     /// Rotates if the switch time has passed; returns the locked state.
     fn maybe_roll(&self, now: UnixTime) -> Option<std::sync::MutexGuard<'_, TicketRotatorState>> {
         let mut state = self.state.lock().ok()?;
-        if now.as_secs() >= state.next_switch_time {
+        let now = now.as_secs();
+        if now >= state.next_switch_time {
             let new = (self.generator)().ok()?;
             let old = core::mem::replace(&mut state.current, new);
-            state.previous = Some(old);
-            state.next_switch_time = now.as_secs().saturating_add(u64::from(self.lifetime));
+            let lifetime = u64::from(self.lifetime);
+            // The old key issued tickets from `next_switch_time - lifetime`.
+            // Keep it as the previous key only until twice the lifetime has
+            // passed since then, also after an idle period without any
+            // ticket activity; otherwise drop it.
+            let old_expiry = state.next_switch_time.saturating_add(lifetime);
+            if now < old_expiry {
+                state.previous = Some(old);
+                state.next_switch_time = old_expiry;
+            } else {
+                state.previous = None;
+                state.next_switch_time = now.saturating_add(lifetime);
+            }
         }
         Some(state)
     }
@@ -147,5 +159,43 @@ mod tests {
         // two rotations later, the first key is gone
         assert!(rotator.decrypt(&t1).is_none());
         assert_eq!(rotator.decrypt(&t2).unwrap(), b"two");
+    }
+
+    #[test]
+    fn idle_periods_do_not_extend_ticket_lifetime() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let clock = Arc::new(FixedTime(core::sync::atomic::AtomicU64::new(1000)));
+        let rotator = TicketRotator::new_with_time_provider(100, generator, clock.clone()).unwrap();
+        let t1 = rotator.encrypt(b"one").unwrap();
+        // No ticket activity for ten lifetimes: the first key issued t1 at
+        // 1000, so it must not be accepted after 1200 (twice the lifetime).
+        clock.0.store(2000, Relaxed);
+        assert!(rotator.decrypt(&t1).is_none());
+        // The new key starts a fresh period.
+        let t2 = rotator.encrypt(b"two").unwrap();
+        clock.0.store(2150, Relaxed);
+        assert_eq!(rotator.decrypt(&t2).unwrap(), b"two");
+        // Just before twice the lifetime after its key was installed (2000):
+        // still accepted; at 2200 the key is dropped.
+        clock.0.store(2199, Relaxed);
+        assert_eq!(rotator.decrypt(&t2).unwrap(), b"two");
+        clock.0.store(2200, Relaxed);
+        assert!(rotator.decrypt(&t2).is_none());
+    }
+
+    #[test]
+    fn late_rotation_keeps_the_schedule() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let clock = Arc::new(FixedTime(core::sync::atomic::AtomicU64::new(1000)));
+        let rotator = TicketRotator::new_with_time_provider(100, generator, clock.clone()).unwrap();
+        // Issued just after the first key was installed.
+        let t1 = rotator.encrypt(b"one").unwrap();
+        // The first rotation happens late, at 1150: the first key may still
+        // decrypt until 1200 (twice the lifetime after 1000), not 1250.
+        clock.0.store(1150, Relaxed);
+        let _t2 = rotator.encrypt(b"two").unwrap();
+        assert_eq!(rotator.decrypt(&t1).unwrap(), b"one");
+        clock.0.store(1200, Relaxed);
+        assert!(rotator.decrypt(&t1).is_none());
     }
 }

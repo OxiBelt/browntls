@@ -152,13 +152,16 @@ struct CbcMac<'k> {
 }
 
 impl<'k> CbcMac<'k> {
-    /// Starts with `Y_0 = CIPH_K(B_0)` and returns `S_0 = CIPH_K(A_0)`,
-    /// computed by the same block-cipher call.
-    fn start(key: &'k aes::Key, b0: [u8; 16], a0: [u8; 16]) -> (Self, [u8; 16]) {
+    /// Starts with `Y_0 = CIPH_K(B_0)` and writes `S_0 = CIPH_K(A_0)`,
+    /// computed by the same block-cipher call, to the caller's `s0` (so no
+    /// copy of it is left behind in a returned value).
+    fn start(key: &'k aes::Key, b0: [u8; 16], a0: [u8; 16], s0: &mut [u8; 16]) -> Self {
         let mut blocks = [b0, a0];
         key.encrypt_blocks(&mut blocks);
-        let [y, s0] = blocks;
-        (Self { key, y, pos: 0 }, s0)
+        let y = blocks[0];
+        *s0 = blocks[1];
+        zeroize_bytes(blocks.as_flattened_mut());
+        Self { key, y, pos: 0 }
     }
 
     fn encrypt(&mut self) {
@@ -228,19 +231,20 @@ impl Ccm {
         aes::Key::new(key, backend).map(|aes| Self { aes })
     }
 
-    /// Starts CBC-MAC over `B_0` and the additional data; returns the MAC,
-    /// `S_0` and `A_0`.
+    /// Starts CBC-MAC over `B_0` and the additional data; returns the MAC
+    /// and `A_0`, and writes `S_0` to `s0`.
     fn start(
         &self,
         nonce: &[u8],
         p: &Params,
         aad: &[u8],
         msg_len: usize,
-    ) -> (CbcMac<'_>, [u8; 16], [u8; 16]) {
+        s0: &mut [u8; 16],
+    ) -> (CbcMac<'_>, [u8; 16]) {
         let a0 = a0(nonce, p.q);
-        let (mut mac, s0) = CbcMac::start(&self.aes, b0(nonce, p, !aad.is_empty(), msg_len), a0);
+        let mut mac = CbcMac::start(&self.aes, b0(nonce, p, !aad.is_empty(), msg_len), a0, s0);
         mac.absorb_aad(aad);
-        (mac, s0, a0)
+        (mac, a0)
     }
 
     /// SP 800-38C §6.1: encrypts `in_out` and writes the tag, whose length
@@ -253,7 +257,8 @@ impl Ccm {
         tag: &mut [u8],
     ) -> Result<(), Error> {
         let p = Params::new(nonce.len(), tag.len(), in_out.len())?;
-        let (mut mac, mut s0, a0) = self.start(nonce, &p, aad, in_out.len());
+        let mut s0 = [0u8; 16];
+        let (mut mac, a0) = self.start(nonce, &p, aad, in_out.len(), &mut s0);
         mac.absorb(in_out);
         let mut y = mac.finish();
         self.aes.ctr32_xor(&a1(&a0), in_out);
@@ -269,7 +274,8 @@ impl Ccm {
     /// only then decrypts `in_out`; zeroes it on failure.
     fn open(&self, nonce: &[u8], aad: &[u8], in_out: &mut [u8], tag: &[u8]) -> Result<(), Error> {
         let p = Params::new(nonce.len(), tag.len(), in_out.len())?;
-        let (mut mac, mut s0, a0) = self.start(nonce, &p, aad, in_out.len());
+        let mut s0 = [0u8; 16];
+        let (mut mac, a0) = self.start(nonce, &p, aad, in_out.len(), &mut s0);
 
         // Authenticate the plaintext without writing it to `in_out`.
         let mut ctr = a1(&a0);

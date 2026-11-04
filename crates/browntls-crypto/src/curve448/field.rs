@@ -80,7 +80,9 @@ impl Fe {
     pub(crate) const ONE: Self = Self([1, 0, 0, 0, 0, 0, 0, 0]);
 
     /// Carries every limb into the next, folding the top carry into limbs 0
-    /// and 4. Accepts limbs below `2^63`; returns limbs below `2^56 + 2^8`.
+    /// and 4. Accepts any limbs (callers pass at most `2^63 + 2^59`, from
+    /// [`Self::sub`]); returns limbs below `2^56 + 2^9`: every carry is below
+    /// `2^8`, and limb 4 receives two of them.
     #[inline(always)]
     fn weak_reduce(mut l: [u64; 8]) -> Self {
         let c: [u64; 8] = core::array::from_fn(|i| l[i] >> 56);
@@ -108,11 +110,14 @@ impl Fe {
     }
 
     /// Returns the fully reduced limbs (`0 <= value < p`, every limb below
-    /// `2^56`).
+    /// `2^56`). Inlined so that its working copy lives in the caller's frame,
+    /// which [`Self::to_bytes`] wipes.
+    #[inline(always)]
     fn canonical(self) -> [u64; 8] {
         let mut l = self.0;
-        // Carry so every limb is below 2^56 and fold the top carry: the
-        // value is then below 2^448 + 2^6 (2^224 + 1) < 2p.
+        // Carry so every limb is below 2^56 and fold the top carry (at most
+        // 2^7 for limbs below 2^63): the value is then below
+        // 2^448 + 2^7 (2^224 + 1) < 2p.
         let mut c = 0u64;
         for x in &mut l {
             *x += c;
@@ -140,13 +145,15 @@ impl Fe {
         l
     }
 
-    /// Returns the canonical little-endian encoding.
+    /// Returns the canonical little-endian encoding. The canonical limbs
+    /// (for X448, the shared secret) are wiped afterwards.
     pub(crate) fn to_bytes(self) -> [u8; 56] {
-        let l = self.canonical();
+        let mut l = self.canonical();
         let mut out = [0u8; 56];
         for (chunk, li) in out.as_chunks_mut::<7>().0.iter_mut().zip(l) {
             chunk.copy_from_slice(&li.to_le_bytes()[..7]);
         }
+        crate::zeroize::zeroize_u64(&mut l);
         out
     }
 

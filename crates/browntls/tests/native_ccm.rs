@@ -9,8 +9,9 @@
 //!   resumption; record lengths reflect each suite's tag length;
 //! * tampered, truncated, short and oversized records are rejected with the
 //!   right alerts, during and after the handshake;
-//! * negotiation: default configurations never negotiate CCM_8, and CCM only
-//!   when the peers share no AES-GCM or ChaCha20-Poly1305 suite;
+//! * negotiation: default configurations never negotiate CCM_8, and a
+//!   server picks CCM only when the peers share no AES-GCM or
+//!   ChaCha20-Poly1305 suite, whatever the client's order;
 //! * kernel TLS secret extraction: CCM keys extract, CCM_8 keys fail cleanly;
 //! * the integrity limit (RFC 9147 Appendix B) on forged records that a
 //!   server skips while rejecting 0-RTT data.
@@ -532,9 +533,15 @@ fn ccm_is_chosen_only_when_nothing_preferred_is_shared() {
             assert_eq!(negotiate(defaults, &server_suites, false), Ok(p.suite()));
         }
         assert_eq!(negotiate(defaults, &[p, ccm], true), Ok(p.suite()));
-        // A default server preferring its own order picks the preferred
-        // suite even when a client lists CCM first.
-        assert_eq!(negotiate(&[ccm, p], defaults, true), Ok(p.suite()));
+        // A client listing CCM first still gets the preferred suite, from a
+        // default server (client order within a tier) and from one using
+        // its own order: the server ranks the non-preferred tier last.
+        for ignore_client_order in [false, true] {
+            assert_eq!(
+                negotiate(&[ccm, p], defaults, ignore_client_order),
+                Ok(p.suite())
+            );
+        }
     }
 }
 
@@ -581,8 +588,11 @@ fn secret_extraction_maps_ccm_and_refuses_ccm_8() {
 /// `forgeries` forged application-data records after the client's first
 /// flight. The server skips them (RFC 9846 §4.2.10) while trying the client
 /// handshake key on each, as it does on the client's one early-data record.
-/// Returns whether the handshake completed.
-fn rejected_early_data_with_forgeries(suite: SupportedCipherSuite, forgeries: usize) -> bool {
+/// Returns whether the handshake completed, or the server's error.
+fn rejected_early_data_with_forgeries(
+    suite: SupportedCipherSuite,
+    forgeries: usize,
+) -> Result<(), Error> {
     let chain = server_chain(KeyType::EcdsaP256);
     let cache: Arc<dyn StoresServerSessions> = ServerSessionMemoryCache::new(8);
     let server_config = |max_early_data_size| {
@@ -611,16 +621,18 @@ fn rejected_early_data_with_forgeries(suite: SupportedCipherSuite, forgeries: us
         wire.extend([0x17, 3, 3, 0, 24]);
         wire.extend((0..24).map(|j| (i * 31 + j) as u8));
     }
-    feed(&mut s, &wire).unwrap();
+    feed(&mut s, &wire)?;
     for _ in 0..4 {
         transfer(&mut s, &mut c);
         c.process_new_packets().unwrap();
         transfer(&mut c, &mut s);
-        s.process_new_packets().unwrap();
+        s.process_new_packets()?;
     }
     assert!(!c.is_handshaking());
     assert!(!c.is_early_data_accepted());
-    !s.is_handshaking()
+    // Never a silent stall: either complete or failed.
+    assert!(!s.is_handshaking());
+    Ok(())
 }
 
 #[test]
@@ -630,15 +642,22 @@ fn integrity_limit_bounds_forgeries_skipped_with_rejected_early_data() {
     // Appendix B.3). The rejected early-data record is the first; with 126
     // forgeries the genuine Finished is the 128th authentication and is
     // accepted. With 127 the limit is reached first: the client handshake
-    // key accepts nothing more, so the handshake cannot complete.
+    // key accepts nothing more and the server fails at once with
+    // bad_record_mac rather than waiting for records it cannot accept.
     let ccm_8 = cs::TLS13_AES_128_CCM_8_SHA256;
-    assert!(rejected_early_data_with_forgeries(ccm_8, 0));
-    assert!(rejected_early_data_with_forgeries(ccm_8, 126));
-    assert!(!rejected_early_data_with_forgeries(ccm_8, 127));
-    assert!(!rejected_early_data_with_forgeries(ccm_8, 200));
+    assert_eq!(rejected_early_data_with_forgeries(ccm_8, 0), Ok(()));
+    assert_eq!(rejected_early_data_with_forgeries(ccm_8, 126), Ok(()));
+    assert_eq!(
+        rejected_early_data_with_forgeries(ccm_8, 127),
+        Err(Error::DecryptError)
+    );
+    assert_eq!(
+        rejected_early_data_with_forgeries(ccm_8, 200),
+        Err(Error::DecryptError)
+    );
     // AES-128-CCM's limit is 2^23.5 (RFC 9147 Appendix B.2).
-    assert!(rejected_early_data_with_forgeries(
-        cs::TLS13_AES_128_CCM_SHA256,
-        200
-    ));
+    assert_eq!(
+        rejected_early_data_with_forgeries(cs::TLS13_AES_128_CCM_SHA256, 200),
+        Ok(())
+    );
 }

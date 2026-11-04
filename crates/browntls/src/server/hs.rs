@@ -250,23 +250,34 @@ impl ExpectClientHello {
             })
             .collect();
 
-        let suite = if self.config.ignore_client_order {
-            suitable
-                .iter()
-                .copied()
-                .find(|s| client_hello.cipher_suites.contains(&s.suite()))
-        } else {
-            client_hello
-                .cipher_suites
-                .iter()
-                .find_map(|offered| suitable.iter().copied().find(|s| s.suite() == *offered))
-        }
-        .ok_or_else(|| {
-            cx.common.send_fatal_alert(
-                AlertDescription::HandshakeFailure,
-                PeerIncompatible::NoCipherSuitesInCommon,
-            )
-        })?;
+        // Preferred suites first, then the non-preferred tier (RFC 9846
+        // optional suites); within a tier, the client's order unless
+        // `ignore_client_order`.
+        let suite = [false, true]
+            .into_iter()
+            .find_map(|non_preferred| {
+                let tier: Vec<SupportedCipherSuite> = suitable
+                    .iter()
+                    .copied()
+                    .filter(|s| s.suite().is_non_preferred() == non_preferred)
+                    .collect();
+                if self.config.ignore_client_order {
+                    tier.iter()
+                        .copied()
+                        .find(|s| client_hello.cipher_suites.contains(&s.suite()))
+                } else {
+                    client_hello
+                        .cipher_suites
+                        .iter()
+                        .find_map(|offered| tier.iter().copied().find(|s| s.suite() == *offered))
+                }
+            })
+            .ok_or_else(|| {
+                cx.common.send_fatal_alert(
+                    AlertDescription::HandshakeFailure,
+                    PeerIncompatible::NoCipherSuitesInCommon,
+                )
+            })?;
         debug!("decided upon suite {:?}", suite.suite());
         cx.common.suite = Some(suite);
 
@@ -370,9 +381,12 @@ fn negotiate_cert_type(
     }
 }
 
-/// Picks the key exchange group: for TLS 1.3, the first of our groups the
-/// client sent a key share for, otherwise the first group both support (a
-/// HelloRetryRequest will ask for its share).
+/// Picks the key exchange group, preferred groups before the non-preferred
+/// tier ([`NamedGroup::is_non_preferred`]): within a tier, for TLS 1.3 the
+/// first of our groups the client sent a key share for, otherwise the first
+/// group both support (a HelloRetryRequest will ask for its share). A key
+/// share for a non-preferred group is therefore not accepted while a
+/// preferred group is mutually supported.
 fn choose_kx_group(
     ours: &[&'static dyn SupportedKxGroup],
     theirs: &[NamedGroup],
@@ -382,16 +396,24 @@ fn choose_kx_group(
     let usable = |g: &&'static dyn SupportedKxGroup| {
         theirs.contains(&g.name()) && g.usable_for_version(version)
     };
-    if version == ProtocolVersion::TLSv1_3
-        && let Some(shares) = client_hello.key_shares()
-        && let Some(with_share) = ours
-            .iter()
-            .copied()
-            .find(|g| usable(g) && shares.iter().any(|s| s.group == g.name()))
-    {
-        return Some(with_share);
+    for non_preferred in [false, true] {
+        let in_tier = |g: &&'static dyn SupportedKxGroup| {
+            usable(g) && g.name().is_non_preferred() == non_preferred
+        };
+        if version == ProtocolVersion::TLSv1_3
+            && let Some(shares) = client_hello.key_shares()
+            && let Some(with_share) = ours
+                .iter()
+                .copied()
+                .find(|g| in_tier(g) && shares.iter().any(|s| s.group == g.name()))
+        {
+            return Some(with_share);
+        }
+        if let Some(group) = ours.iter().copied().find(in_tier) {
+            return Some(group);
+        }
     }
-    ours.iter().copied().find(usable)
+    None
 }
 
 impl State<ServerConnectionData> for ExpectClientHello {

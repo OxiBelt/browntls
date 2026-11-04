@@ -100,7 +100,10 @@ impl RecordLayer {
                     plaintext,
                 }))
             }
-            Err(Error::DecryptError) if self.doing_trial_decryption(encrypted_len) => {
+            Err(Error::DecryptError)
+                if !self.message_decrypter.integrity_limit_reached()
+                    && self.doing_trial_decryption(encrypted_len) =>
+            {
                 trace!("Dropping undecryptable message after aborted early_data");
                 Ok(None)
             }
@@ -211,8 +214,15 @@ impl RecordLayer {
     /// Decides whether sending `add` more records is allowed under the limits.
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
         match self.write_seq.saturating_add(add) {
-            v if v == self.confidentiality_limit => PreEncryptAction::RefreshOrClose,
-            v if v > self.confidentiality_limit || v >= SEQ_SOFT_LIMIT => PreEncryptAction::Refuse,
+            v if v >= SEQ_SOFT_LIMIT => PreEncryptAction::Refuse,
+            // This write reaches or crosses the limit: refresh (TLS 1.3) or
+            // close (TLS 1.2) now, also when it spans several records.
+            v if v >= self.confidentiality_limit && self.write_seq < self.confidentiality_limit => {
+                PreEncryptAction::RefreshOrClose
+            }
+            // The limit was reached by an earlier write whose refresh has
+            // not happened yet.
+            v if v > self.confidentiality_limit => PreEncryptAction::Refuse,
             _ => PreEncryptAction::Nothing,
         }
     }
@@ -283,7 +293,11 @@ mod tests {
         rl.start_encrypting();
         rl.write_seq = 9;
         assert_eq!(rl.pre_encrypt_action(1), PreEncryptAction::RefreshOrClose);
-        assert_eq!(rl.pre_encrypt_action(2), PreEncryptAction::Refuse);
+        // A multi-record write crossing the limit also refreshes.
+        assert_eq!(rl.pre_encrypt_action(3), PreEncryptAction::RefreshOrClose);
+        // Once at the limit, nothing more until the refresh.
+        rl.write_seq = 10;
+        assert_eq!(rl.pre_encrypt_action(1), PreEncryptAction::Refuse);
         rl.write_seq = 0;
         assert_eq!(rl.pre_encrypt_action(1), PreEncryptAction::Nothing);
         rl.confidentiality_limit = u64::MAX;

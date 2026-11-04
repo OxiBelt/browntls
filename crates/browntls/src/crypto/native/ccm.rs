@@ -20,10 +20,17 @@
 //! record that fails authentication (RFC 9846 §5.2), but a server that
 //! rejects 0-RTT data skips records that fail to decrypt under the handshake
 //! key, up to `max_early_data_size` bytes (RFC 9846 §4.2.10; 16384 bytes even
-//! when early data is disabled), which alone would allow over 1800 CCM_8
-//! forgery attempts. Each decrypter therefore counts the records that fail
-//! authentication under its key; once the count reaches the limit it rejects
-//! every further record without attempting authentication.
+//! when early data is disabled), which alone would allow up to 2048 CCM_8
+//! forgery attempts (8-byte records). Each decrypter therefore counts the
+//! records that fail authentication under its key; once the count reaches
+//! the limit it rejects every further record without attempting
+//! authentication, and reports the limit through
+//! [`MessageDecrypter::integrity_limit_reached`] so that the record layer
+//! fails the connection with `bad_record_mac` instead of skipping records
+//! the key can no longer accept. The count includes the client's own
+//! rejected early-data records: with CCM_8, a client that sends 128 or more
+//! early-data records to a server that rejects them cannot complete the
+//! handshake.
 //!
 //! The Linux kernel TLS interface offers AES-128-CCM
 //! (`TLS_CIPHER_AES_CCM_128`), to which [`ConnectionTrafficSecrets::Aes128Ccm`]
@@ -283,6 +290,10 @@ impl<V: Variant> MessageDecrypter for Decrypter<V> {
         }
         payload.truncate(plain_len);
         msg.into_tls13_unpadded_message()
+    }
+
+    fn integrity_limit_reached(&self) -> bool {
+        self.failures >= V::INTEGRITY_LIMIT
     }
 }
 

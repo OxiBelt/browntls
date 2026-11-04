@@ -217,13 +217,19 @@ impl Scalar {
 
     /// `a * b mod L` for `a, b < L`.
     pub(crate) fn mul(&self, b: &Self) -> Self {
-        let ab_over_r = Self::montgomery_mul(self, b);
-        Self::montgomery_mul(&ab_over_r, &Self(R2))
+        let mut ab_over_r = Self::montgomery_mul(self, b);
+        let ab = Self::montgomery_mul(&ab_over_r, &Self(R2));
+        ab_over_r.zeroize();
+        ab
     }
 
-    /// `a * b + c mod L` for reduced inputs.
+    /// `a * b + c mod L` for reduced inputs. The product is wiped: in Ed448
+    /// signing it is `k s`, from which the public `k` reveals `s`.
     pub(crate) fn mul_add(a: &Self, b: &Self, c: &Self) -> Self {
-        a.mul(b).add(c)
+        let mut ab = a.mul(b);
+        let sum = ab.add(c);
+        ab.zeroize();
+        sum
     }
 
     /// Unpacks a canonical 57-byte encoding without reduction (tests only).

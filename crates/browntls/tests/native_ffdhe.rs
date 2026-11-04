@@ -283,11 +283,28 @@ fn ffdhe_is_the_non_preferred_tier() {
     ));
     assert_eq!(offered, defaults);
 
-    // A client whose only key share is FFDHE gets it accepted without a
-    // retry, even though the server prefers other groups.
+    // A client whose only key share is FFDHE but which also supports X25519
+    // is asked for X25519: the server does not accept a non-preferred share
+    // while a preferred group is mutually supported.
     let client = Arc::new(client_with(
         TLS13,
         provider_with(&[prov::kx_group::FFDHE3072, prov::kx_group::X25519]),
+        PinnedServerVerifier::new(&chain),
+    ));
+    let (mut c, mut s) = connect(&client, &server);
+    do_handshake(&mut c, &mut s).unwrap();
+    assert_eq!(
+        c.handshake_kind(),
+        Some(HandshakeKind::FullWithHelloRetryRequest)
+    );
+    assert_group(&c, &s, NamedGroup::X25519);
+    round_trip(&mut c, &mut s);
+
+    // A client that supports nothing preferred gets its FFDHE share accepted
+    // without a retry.
+    let client = Arc::new(client_with(
+        TLS13,
+        provider_with(&[prov::kx_group::FFDHE3072]),
         PinnedServerVerifier::new(&chain),
     ));
     let (mut c, mut s) = connect(&client, &server);

@@ -79,6 +79,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   byte, so hash identifiers with absent instead of NULL parameters (which
   RFC 4055 §2.1 says verifiers must accept), key salt lengths shorter than
   the digest and explicit default trailer fields are rejected.
+- The AES-NI and VAES backends leave a copy of round key 0 (the AES key
+  itself) in dead stack memory after each call; the portable backend and the
+  CCM, X448, Ed448 and FFDHE code wipe their secret intermediates.
 - A TLS 1.2 server does not take the client's supported groups into account
   when it chooses an ECDSA certificate (RFC 8422 §5.1.1); OpenSSL clients
   then abort with an illegal-parameter alert.

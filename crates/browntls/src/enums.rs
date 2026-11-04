@@ -130,6 +130,20 @@ enum_builder! {
     }
 }
 
+impl CipherSuite {
+    /// Whether the suite belongs to the non-preferred tier: the TLS 1.3
+    /// suites RFC 9846 defines beyond those §9.1 makes mandatory or
+    /// recommended, i.e. AES-128-CCM and AES-128-CCM-8. A server ranks them
+    /// after every other mutually supported suite, whatever the client's
+    /// order.
+    pub fn is_non_preferred(self) -> bool {
+        matches!(
+            self,
+            Self::TLS13_AES_128_CCM_SHA256 | Self::TLS13_AES_128_CCM_8_SHA256
+        )
+    }
+}
+
 enum_builder! {
     /// The `SignatureScheme` TLS protocol enum (RFC 8446 §4.2.3).
     #[repr(u16)]

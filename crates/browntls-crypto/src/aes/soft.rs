@@ -82,6 +82,9 @@ impl Key {
                 *chunk = word.to_le_bytes();
             }
         }
+        // The bitsliced state holds the output blocks (keystream, CBC-MAC
+        // chaining values).
+        zeroize_u64(&mut q);
     }
 
     /// Encrypts every block in place.
@@ -95,6 +98,7 @@ impl Key {
             tmp[..rest.len()].copy_from_slice(rest);
             self.encrypt4(&mut tmp);
             rest.copy_from_slice(&tmp[..rest.len()]);
+            crate::zeroize::zeroize_bytes(tmp.as_flattened_mut());
         }
     }
 }

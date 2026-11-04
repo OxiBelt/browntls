@@ -212,8 +212,10 @@ impl SigningKey {
             seed: *seed,
             s,
             prefix,
-            // An honest key is never of small order: s mod L is non-zero
-            // (s = 2^447 + 4m < 2^448 is not a multiple of L), so A has order L.
+            // An honest key is of small order only if s mod L = 0: among the
+            // pruned scalars (2^447 <= s < 2^448, s = 0 mod 4) the only
+            // multiple of L is 4L, which a uniform seed hits with probability
+            // about 2^-445; otherwise A has order L.
             public: VerifyingKey {
                 bytes: a.compress(),
                 minus_a: a.neg(),

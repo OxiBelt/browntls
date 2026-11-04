@@ -153,6 +153,23 @@ enum_builder! {
 }
 
 impl NamedGroup {
+    /// Whether the group belongs to the non-preferred tier: the groups
+    /// RFC 9846 defines beyond those §9.1 makes mandatory or recommended,
+    /// i.e. X448 and the RFC 7919 finite-field groups. A server ranks them
+    /// after every other mutually supported group, whatever the client's
+    /// key shares or order.
+    pub fn is_non_preferred(self) -> bool {
+        matches!(
+            self,
+            Self::X448
+                | Self::FFDHE2048
+                | Self::FFDHE3072
+                | Self::FFDHE4096
+                | Self::FFDHE6144
+                | Self::FFDHE8192
+        )
+    }
+
     /// The TLS 1.2 key exchange algorithm family of this group.
     pub fn key_exchange_algorithm(self) -> KeyExchangeAlgorithm {
         match u16::from(self) {

@@ -100,6 +100,18 @@ pub trait MessageDecrypter: Send + Sync {
         msg: InboundOpaqueMessage<'a>,
         seq: u64,
     ) -> Result<InboundPlainMessage<'a>, Error>;
+
+    /// Whether too many records have failed authentication under this key
+    /// for it to be used again (an AEAD integrity limit, for example
+    /// RFC 9147 Appendix B for AES-CCM-8).
+    ///
+    /// Once this returns `true`, a decryption failure is fatal even where the
+    /// record layer would otherwise skip undecryptable records (rejected
+    /// 0-RTT data), so the connection fails with `bad_record_mac` instead of
+    /// waiting for records the key can no longer accept.
+    fn integrity_limit_reached(&self) -> bool {
+        false
+    }
 }
 
 /// Encrypts records.

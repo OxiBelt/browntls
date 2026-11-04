@@ -71,6 +71,16 @@ negotiated when a peer shares nothing earlier.
 | Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
 | Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
 
+A browntls server applies the same ranking whatever the client's order:
+within each tier it follows the client's order (or its own with
+`ignore_client_order`), but it picks a non-preferred suite or group only when
+no preferred one is mutually supported, and it answers a key share for a
+non-preferred group with a HelloRetryRequest when a preferred group is
+available (`CipherSuite::is_non_preferred`, `NamedGroup::is_non_preferred`).
+With AES-128-CCM-8, a server that rejects 0-RTT fails the handshake once 2^7
+records have failed authentication under the client handshake key (RFC 9147
+Appendix B.3), including the client's own early-data records.
+
 The RustCrypto provider does not implement the non-preferred tier.
 
 ### Cargo features (`browntls`)

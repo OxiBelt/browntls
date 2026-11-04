@@ -75,32 +75,41 @@ fn ladder(k: &[u8; 56], u: &[u8; 56]) -> [u8; 56] {
     let mut x3 = x1;
     let mut z3 = Fe::ONE;
     let mut swap = 0u64;
-    for t in (0..448).rev() {
-        let kt = u64::from((k[t >> 3] >> (t & 7)) & 1);
+    // The step temporaries live outside the loop so that the last step's
+    // values, which determine the output, can be wiped.
+    let mut t = [Fe::ZERO; 9];
+    for bit in (0..448).rev() {
+        let kt = u64::from((k[bit >> 3] >> (bit & 7)) & 1);
         swap ^= kt;
         let c = Choice::from_bit(swap);
         Fe::conditional_swap(&mut x2, &mut x3, c);
         Fe::conditional_swap(&mut z2, &mut z3, c);
         swap = kt;
-        let a = x2.add(&z2);
-        let aa = a.square();
-        let b = x2.sub(&z2);
-        let bb = b.square();
-        let e = aa.sub(&bb);
-        let c = x3.add(&z3);
-        let d = x3.sub(&z3);
-        let da = d.mul(&a);
-        let cb = c.mul(&b);
-        x3 = da.add(&cb).square();
-        z3 = x1.mul(&da.sub(&cb).square());
-        x2 = aa.mul(&bb);
+        let [a, aa, b, bb, e, c, d, da, cb] = &mut t;
+        *a = x2.add(&z2);
+        *aa = a.square();
+        *b = x2.sub(&z2);
+        *bb = b.square();
+        *e = aa.sub(bb);
+        *c = x3.add(&z3);
+        *d = x3.sub(&z3);
+        *da = d.mul(a);
+        *cb = c.mul(b);
+        x3 = da.add(cb).square();
+        z3 = x1.mul(&da.sub(cb).square());
+        x2 = aa.mul(bb);
         z2 = e.mul(&aa.add(&e.mul_small(A24)));
     }
     let c = Choice::from_bit(swap);
     Fe::conditional_swap(&mut x2, &mut x3, c);
     Fe::conditional_swap(&mut z2, &mut z3, c);
-    let out = x2.mul(&z2.invert()).to_bytes();
-    for v in [&mut x2, &mut z2, &mut x3, &mut z3] {
+    let mut z_inv = z2.invert();
+    let mut result = x2.mul(&z_inv);
+    let out = result.to_bytes();
+    for v in t
+        .iter_mut()
+        .chain([&mut x2, &mut z2, &mut x3, &mut z3, &mut z_inv, &mut result])
+    {
         v.0.zeroize();
     }
     out

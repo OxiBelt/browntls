@@ -474,6 +474,23 @@ mod tests {
 
     #[test]
     fn optional_algorithms_are_non_preferred() {
+        // The lists end with exactly the entries the server ranks last
+        // (`is_non_preferred`), so list order and selection agree.
+        for list in [DEFAULT_KX_GROUPS, ALL_KX_GROUPS] {
+            let flags: alloc::vec::Vec<bool> =
+                list.iter().map(|g| g.name().is_non_preferred()).collect();
+            let first = flags.iter().position(|f| *f).unwrap();
+            assert!(flags[first..].iter().all(|f| *f), "{flags:?}");
+        }
+        for list in [DEFAULT_CIPHER_SUITES, ALL_CIPHER_SUITES] {
+            let tls13: alloc::vec::Vec<bool> = list
+                .iter()
+                .filter(|s| s.tls13().is_some())
+                .map(|s| s.suite().is_non_preferred())
+                .collect();
+            let first = tls13.iter().position(|f| *f).unwrap();
+            assert!(tls13[first..].iter().all(|f| *f), "{tls13:?}");
+        }
         // X448, then FFDHE, follow every mandatory and recommended group.
         for list in [DEFAULT_KX_GROUPS, ALL_KX_GROUPS] {
             let pos = |n: NamedGroup| list.iter().position(|g| g.name() == n).unwrap();

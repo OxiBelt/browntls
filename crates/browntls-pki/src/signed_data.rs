@@ -88,12 +88,19 @@ pub(crate) fn verify_signed_data(
     budget: &mut Budget,
 ) -> Result<(), Error> {
     budget.consume_signature()?;
+    // Canonicalise each input once, not once per algorithm: a crafted
+    // identifier can be long.
+    let signature_alg = crate::alg_id::canonical_signature_alg_id(signed.algorithm);
+    let key_alg = crate::alg_id::canonical_public_key_alg_id(spki.algorithm);
     let mut key_mismatch = false;
-    for alg in algs
-        .iter()
-        .filter(|alg| alg.signature_alg_id().matches_signature(signed.algorithm))
-    {
-        if !alg.public_key_alg_id().matches_public_key(spki.algorithm) {
+    for alg in algs.iter().filter(|alg| {
+        alg.signature_alg_id()
+            .matches_given(signed.algorithm, signature_alg)
+    }) {
+        if !alg
+            .public_key_alg_id()
+            .matches_given(spki.algorithm, key_alg)
+        {
             key_mismatch = true;
             continue;
         }

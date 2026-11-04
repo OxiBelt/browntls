@@ -37,29 +37,40 @@ impl AlgorithmIdentifier {
 
     /// Whether this identifier, the [`public_key_alg_id`] of a verification
     /// algorithm, matches the contents of a `SubjectPublicKeyInfo`
-    /// `algorithm`: they are equal byte for byte, or both are `id-RSASSA-PSS`
-    /// identifiers with the same [`canonical_public_key_alg_id`].
+    /// `algorithm`: they are equal byte for byte, or the input is an
+    /// `id-RSASSA-PSS` identifier whose [`canonical_public_key_alg_id`] is
+    /// this identifier.
+    ///
+    /// Only the input is canonicalised: a verification algorithm's
+    /// identifier must itself be canonical (such as [`RSASSA_PSS`] or
+    /// [`RSASSA_PSS_SHA256_KEY`]) to match equivalent encodings, and a
+    /// non-canonical one matches only its own bytes.
     ///
     /// [`public_key_alg_id`]: crate::SignatureVerificationAlgorithm::public_key_alg_id
     #[must_use]
     pub fn matches_public_key(&self, spki_algorithm: &[u8]) -> bool {
         self.0 == spki_algorithm
-            || canonical_public_key_alg_id(spki_algorithm)
-                .is_some_and(|key| canonical_public_key_alg_id(self.0) == Some(key))
+            || canonical_public_key_alg_id(spki_algorithm).is_some_and(|key| key == *self)
     }
 
     /// Whether this identifier, the [`signature_alg_id`] of a verification
     /// algorithm, matches the contents of a certificate's or CRL's
-    /// `signatureAlgorithm`: they are equal byte for byte, or both are
-    /// `id-RSASSA-PSS` identifiers with the same
-    /// [`canonical_signature_alg_id`].
+    /// `signatureAlgorithm`: they are equal byte for byte, or the input is an
+    /// `id-RSASSA-PSS` identifier whose [`canonical_signature_alg_id`] is
+    /// this identifier. As for [`Self::matches_public_key`], only the input
+    /// is canonicalised.
     ///
     /// [`signature_alg_id`]: crate::SignatureVerificationAlgorithm::signature_alg_id
     #[must_use]
     pub fn matches_signature(&self, signature_algorithm: &[u8]) -> bool {
         self.0 == signature_algorithm
-            || canonical_signature_alg_id(signature_algorithm)
-                .is_some_and(|sig| canonical_signature_alg_id(self.0) == Some(sig))
+            || canonical_signature_alg_id(signature_algorithm).is_some_and(|sig| sig == *self)
+    }
+
+    /// [`Self::matches_public_key`] or [`Self::matches_signature`] with the
+    /// input's canonical form computed once by the caller.
+    pub(crate) fn matches_given(&self, input: &[u8], canonical: Option<Self>) -> bool {
+        self.0 == input || canonical.is_some_and(|c| c == *self)
     }
 }
 
@@ -351,6 +362,22 @@ mod tests {
             check(RSASSA_PSS, RSA_PKCS1_SHA256),
             Err(Error::UnsupportedSignatureAlgorithm)
         );
+    }
+
+    #[test]
+    fn only_the_input_is_canonicalised() {
+        use crate::rsassa_pss::testing::{S256, restricted};
+        // A non-canonical algorithm identifier (minimum salt 0) matches only
+        // its own bytes, not a key whose minimum is the digest length.
+        let salt0 = restricted(S256, false, false, Some(0), false);
+        let alg = AlgorithmIdentifier::from_slice(alloc::boxed::Box::leak(
+            salt0.clone().into_boxed_slice(),
+        ));
+        assert!(alg.matches_public_key(&salt0));
+        assert!(!alg.matches_public_key(RSASSA_PSS_SHA256_KEY.as_bytes()));
+        // The canonical constant matches every equivalent encoding.
+        assert!(RSASSA_PSS_SHA256_KEY.matches_public_key(&salt0));
+        assert!(RSASSA_PSS_SHA256_KEY.matches_public_key(RSASSA_PSS_SHA256_KEY.as_bytes()));
     }
 
     #[test]

@@ -194,9 +194,22 @@ impl<'a> Reader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEncoding`] on a tag mismatch or bad encoding.
+    /// Returns [`Error::InvalidEncoding`] on a tag mismatch or bad encoding,
+    /// including contents that are not a valid OBJECT IDENTIFIER (empty, a
+    /// subidentifier with a leading `0x80` byte, or a truncated last
+    /// subidentifier; X.690 §8.19).
     pub fn read_oid(&mut self) -> Result<&'a [u8], Error> {
-        self.read(tag::OID)
+        let oid = self.read(tag::OID)?;
+        let truncated = oid.last().is_none_or(|b| b & 0x80 != 0);
+        // A subidentifier starts at the beginning or after a final byte.
+        let padded = oid
+            .iter()
+            .enumerate()
+            .any(|(i, &b)| b == 0x80 && (i == 0 || oid[i - 1] & 0x80 == 0));
+        if truncated || padded {
+            return Err(Error::InvalidEncoding);
+        }
+        Ok(oid)
     }
 
     /// Fails unless all input has been consumed.
@@ -355,6 +368,33 @@ pub fn header_len(content_len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oids_are_validated() {
+        let bad: [&[u8]; 4] = [
+            &[0x06, 0x00],
+            &[0x06, 0x02, 0x80, 0x01],
+            &[0x06, 0x01, 0x81],
+            &[0x06, 0x03, 0x2a, 0x80, 0x01],
+        ];
+        for der in bad {
+            assert_eq!(
+                Reader::new(der).read_oid(),
+                Err(Error::InvalidEncoding),
+                "{der:02x?}"
+            );
+        }
+        assert_eq!(
+            Reader::new(&[0x06, 0x03, 0x2b, 0x65, 0x70]).read_oid(),
+            Ok(&[0x2b, 0x65, 0x70][..])
+        );
+        // 0x80 continuing a multi-byte subidentifier is valid.
+        assert!(
+            Reader::new(&[0x06, 0x03, 0x2a, 0x81, 0x00])
+                .read_oid()
+                .is_ok()
+        );
+    }
 
     #[test]
     fn integers() {

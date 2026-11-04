@@ -32,19 +32,23 @@ pub(crate) fn presented_matches_constraint(name: &[u8], constraint: &[u8]) -> Re
         _ => return Err(Error::BadDer),
     };
     let (address, mask) = constraint.split_at(half);
+    // Validate the whole mask before comparing, so a malformed constraint is
+    // rejected whether or not the address differs in an earlier byte (an
+    // excluded subtree must not quietly fail to match).
     let mut seen_zero = false;
-    for ((&n, &a), &m) in name.iter().zip(address).zip(mask) {
+    for &m in mask {
         if m.leading_ones() + m.trailing_zeros() != 8 || (seen_zero && m != 0) {
             return Err(Error::InvalidNetworkMaskConstraint);
         }
         if m != 0xff {
             seen_zero = true;
         }
-        if (n ^ a) & m != 0 {
-            return Ok(false);
-        }
     }
-    Ok(true)
+    Ok(name
+        .iter()
+        .zip(address)
+        .zip(mask)
+        .all(|((&n, &a), &m)| (n ^ a) & m == 0))
 }
 
 #[cfg(test)]
@@ -94,6 +98,12 @@ mod tests {
         );
         assert_eq!(
             presented_matches_constraint(&[192, 0, 2, 7], &[192, 0, 2, 0, 255, 255, 0x7f, 0]),
+            Err(Error::InvalidNetworkMaskConstraint)
+        );
+        // Rejected even when the address already differs before the bad
+        // mask byte.
+        assert_eq!(
+            presented_matches_constraint(&[10, 0, 2, 7], &[192, 0, 2, 0, 255, 0, 255, 0]),
             Err(Error::InvalidNetworkMaskConstraint)
         );
         assert_eq!(

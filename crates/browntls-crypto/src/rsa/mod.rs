@@ -12,6 +12,11 @@
 //!   remainder theorem.
 //! * PSS always uses MGF1 with the message hash and a salt as long as the
 //!   digest, as TLS 1.3 requires.
+//! * Keys are identified by `rsaEncryption` or, through the
+//!   `*_with_algorithm` functions, also by `id-RSASSA-PSS` (RFC 4055), whose
+//!   parameters restrict the key to RSASSA-PSS and possibly one hash; see
+//!   [`RsaKeyAlgorithm`]. The restriction is reported to the caller, which
+//!   enforces it when choosing a signature scheme.
 //!
 //! # Timing model
 //!
@@ -147,6 +152,7 @@ impl crate::accel::Backends for RsaBackend {
         }
     }
 }
+mod key_alg;
 mod pkcs1;
 mod private;
 mod pss;
@@ -157,6 +163,7 @@ use crate::hash::{DynHash, HashAlgorithm};
 use bigint::MAX_LIMBS;
 use bigint::mont::{Kernel, Mont};
 
+pub use key_alg::{MAX_ALGORITHM_IDENTIFIER_LEN, RsaKeyAlgorithm};
 pub use keygen::PUBLIC_EXPONENT as GENERATED_PUBLIC_EXPONENT;
 pub use private::{MAX_PKCS1_PRIVATE_KEY_DER_LEN, MAX_PKCS8_PRIVATE_KEY_DER_LEN, RsaPrivateKey};
 
@@ -323,6 +330,20 @@ impl RsaPublicKey {
             r.read_bit_string_octets()
         })?;
         Self::from_pkcs1_der_with_min_bits(key, min_bits)
+    }
+
+    /// Parses an X.509 `SubjectPublicKeyInfo` with the `rsaEncryption` or
+    /// the `id-RSASSA-PSS` algorithm (RFC 4055 §1.2 and §3.1) and returns
+    /// the key with its algorithm, which restricts how the key may be used
+    /// (see [`RsaKeyAlgorithm`] for the accepted parameters).
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaKeyAlgorithm::from_algorithm_identifier`] for the algorithm,
+    /// and as [`Self::from_spki_der`] otherwise.
+    pub fn from_spki_der_with_algorithm(der: &[u8]) -> Result<(Self, RsaKeyAlgorithm), Error> {
+        let (algorithm, key) = key_alg::split_spki(der)?;
+        Ok((Self::from_pkcs1_der(key)?, algorithm))
     }
 
     /// Modulus length in bytes (the signature length).

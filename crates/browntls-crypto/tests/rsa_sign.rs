@@ -15,8 +15,9 @@ use browntls_crypto::der::{self, Reader, Writer, tag};
 use browntls_crypto::hash::HashAlgorithm;
 use browntls_crypto::rand::{FixedRng, OsRng, SecureRandom};
 use browntls_crypto::rsa::{
-    MAX_PKCS1_PRIVATE_KEY_DER_LEN, MAX_PKCS8_PRIVATE_KEY_DER_LEN, RsaPrivateKey, RsaPublicKey,
-    verify_pkcs1v15, verify_pss,
+    MAX_ALGORITHM_IDENTIFIER_LEN, MAX_MODULUS_BYTES, MAX_PKCS1_PRIVATE_KEY_DER_LEN,
+    MAX_PKCS8_PRIVATE_KEY_DER_LEN, RsaKeyAlgorithm, RsaPrivateKey, RsaPublicKey, verify_pkcs1v15,
+    verify_pss,
 };
 
 const HASHES: [HashAlgorithm; 7] = [
@@ -356,6 +357,184 @@ fn private_key_der_roundtrip() {
     let public = RsaPublicKey::from_pkcs1_der(&pubder[..np]).unwrap();
     assert_eq!(public.n_be(), key.public_key().n_be());
     verify_pkcs1v15(&public, HashAlgorithm::Sha256, msg, &sig).unwrap();
+}
+
+/// The key algorithms an RSA key can be exported and loaded with.
+const KEY_ALGORITHMS: [RsaKeyAlgorithm; 5] = [
+    RsaKeyAlgorithm::RsaEncryption,
+    RsaKeyAlgorithm::RsassaPss(None),
+    RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha256)),
+    RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha384)),
+    RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha512)),
+];
+
+/// A `SubjectPublicKeyInfo` for `key` identified by `algorithm`.
+fn spki_for(key: &RsaPublicKey, algorithm: RsaKeyAlgorithm) -> Vec<u8> {
+    let mut alg = [0u8; MAX_ALGORITHM_IDENTIFIER_LEN];
+    let alg_len = algorithm.encode_algorithm_identifier(&mut alg).unwrap();
+    let mut bits = vec![0u8; MAX_MODULUS_BYTES + 32];
+    let n = key.to_pkcs1_der(&mut bits[1..]).unwrap();
+    bits.truncate(n + 1);
+    let content = der::header_len(alg_len) + alg_len + der::header_len(bits.len()) + bits.len();
+    let mut out = vec![0u8; content + 8];
+    let mut w = Writer::new(&mut out);
+    w.header(tag::SEQUENCE, content).unwrap();
+    w.tlv(tag::SEQUENCE, &alg[..alg_len]).unwrap();
+    w.tlv(tag::BIT_STRING, &bits).unwrap();
+    let len = w.len();
+    out.truncate(len);
+    out
+}
+
+#[test]
+fn rsassa_pss_keys_round_trip() {
+    let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+    let mut sig = [0u8; 256];
+    for algorithm in KEY_ALGORITHMS {
+        // PKCS #8 (RFC 5208 §5; RFC 4055 §1.2: the same RSAPrivateKey).
+        let mut pkcs8 = [0u8; MAX_PKCS8_PRIVATE_KEY_DER_LEN];
+        let n = key
+            .to_pkcs8_der_with_algorithm(algorithm, &mut pkcs8)
+            .unwrap();
+        let (loaded, found) = RsaPrivateKey::from_pkcs8_der_with_algorithm(&pkcs8[..n]).unwrap();
+        assert_eq!(found, algorithm);
+        assert_eq!(loaded.public_key().n_be(), key.public_key().n_be());
+        loaded
+            .sign_pss(HashAlgorithm::Sha256, b"m", &OsRng, &mut sig)
+            .unwrap();
+        verify_pss(key.public_key(), HashAlgorithm::Sha256, b"m", &sig).unwrap();
+        // The rsaEncryption-only loaders refuse RSASSA-PSS keys.
+        let legacy = RsaPrivateKey::from_pkcs8_der(&pkcs8[..n]);
+        let spki = spki_for(key.public_key(), algorithm);
+        let legacy_spki = RsaPublicKey::from_spki_der(&spki);
+        if algorithm == RsaKeyAlgorithm::RsaEncryption {
+            assert!(legacy.is_ok() && legacy_spki.is_ok());
+            let mut plain = [0u8; MAX_PKCS8_PRIVATE_KEY_DER_LEN];
+            let m = key.to_pkcs8_der(&mut plain).unwrap();
+            assert_eq!(&plain[..m], &pkcs8[..n]);
+        } else {
+            assert_eq!(legacy.err(), Some(Error::InvalidEncoding));
+            assert_eq!(legacy_spki.err(), Some(Error::InvalidEncoding));
+        }
+        // SubjectPublicKeyInfo.
+        let (public, found) = RsaPublicKey::from_spki_der_with_algorithm(&spki).unwrap();
+        assert_eq!(found, algorithm);
+        assert_eq!(public.n_be(), key.public_key().n_be());
+        // Truncations and a trailing byte are rejected.
+        for len in [0, 1, 20, n - 1] {
+            assert!(RsaPrivateKey::from_pkcs8_der_with_algorithm(&pkcs8[..len]).is_err());
+        }
+        let mut trailing = spki.clone();
+        trailing.push(0);
+        assert!(RsaPublicKey::from_spki_der_with_algorithm(&trailing).is_err());
+    }
+    let mut small = [0u8; 1000];
+    assert_eq!(
+        key.to_pkcs8_der_with_algorithm(KEY_ALGORITHMS[2], &mut small),
+        Err(Error::InvalidLength)
+    );
+    assert_eq!(
+        key.to_pkcs8_der_with_algorithm(
+            RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha224)),
+            &mut [0u8; MAX_PKCS8_PRIVATE_KEY_DER_LEN]
+        ),
+        Err(Error::Unsupported)
+    );
+}
+
+// Public keys and signatures made by OpenSSL 3.0.13 for these tests (the
+// private keys were discarded):
+//
+//   openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -out a.pem
+//   openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 \
+//     -pkeyopt rsa_pss_keygen_md:sha256 -pkeyopt rsa_pss_keygen_mgf1_md:sha256 \
+//     -pkeyopt rsa_pss_keygen_saltlen:32 -out b.pem
+//   openssl pkey -in a.pem -pubout -outform DER          (OPENSSL_PSS_SPKI)
+//   openssl dgst -sha512 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:64 \
+//     -sigopt rsa_mgf1_md:sha512 -sign a.pem msg         (OPENSSL_PSS_SHA512_SIG)
+//
+// and likewise for b.pem with SHA-256 and a 32-byte salt.
+const OPENSSL_MSG: &[u8] = b"browntls RSASSA-PSS test vector";
+const OPENSSL_PSS_SPKI: &str = concat!(
+    "30820120300b06092a864886f70d01010a0382010f003082010a0282010100af",
+    "44706e28928bb898b9da6b657ca711e2edd287181904fe632899fab589edbb1c",
+    "8cf30da93dec59859ab3d0fa1ef7cf26624cb35024607a1dcb15800949e091e8",
+    "f6821e46a2deebe55de982adfe235fff0cd21a1b60c28d08dda7ff635045e9e2",
+    "cabe0006720c1267fd8b747415d00a8d06a91eed75f5fb38deffed32154d4c15",
+    "6363fb974787748eae2438fa4a549bbeab5dc366b9ca7801caaf618852d41ce5",
+    "9d613a4750cd8186f68e18a9de1618cd613386f827326931ecf73a9fdfa3b713",
+    "899d4e961ff931b4c542a3569dab2d6f77882d671d6b9f34868005585a632c87",
+    "f4e1eceb193a56d842e3585f6ce3a7a44ea7283bbdd3863268d3eaf18fe66302",
+    "03010001",
+);
+const OPENSSL_PSS_SHA512_SIG: &str = concat!(
+    "3f90c4862183f6072d95b3bd076fd375622a7216bd17c2bd6d2c1f26deef9917",
+    "59748af3dda4d066da226f025a1b76a602b2784ed310dc50e666f93e64153b5e",
+    "a531ae8a9a513168d69edccb9e6767304b17d085c5e9a02307880ee239f68dd0",
+    "2f637eaf5f1ddebbb1d88962864c66259728a364f330da985f53105c8561fbe0",
+    "7bcb36aca0ebab1dbeba9ca96253d8df20a15fbc3f6cbdbd73a0062cc98f4326",
+    "227a416e7949d80f4a3b326d6ba8854f22de9fb0e3e6a7b7127ecf313de960ff",
+    "61fee2277df5b7f5dc176fa3044e3a2a160075c17f56202987c70e0efc6fce0a",
+    "c6e8f6e7410503f89ab3f534f27cc0a305d28ee49924fcccdc87a17602d78e89",
+);
+const OPENSSL_PSS_SHA256_SPKI: &str = concat!(
+    "30820156304106092a864886f70d01010a3034a00f300d060960864801650304",
+    "02010500a11c301a06092a864886f70d010108300d0609608648016503040201",
+    "0500a2030201200382010f003082010a0282010100a9cb3bd5a02e5eee5eb103",
+    "a87e19eadedc9bd44c12bfc6fa189c1ff7f790ab8cd20bbf98f7d40b0c206e10",
+    "1baaa398a1dc6cf7652ce86bef43215d2438fc65c09e4e767ef263c350d2b568",
+    "b538dc1f6dc6af9585692587599a039b337e15964711236111c99131c0dce053",
+    "367bafe29831ff44ec67a2d43c54dd310a260d7cdc73794e2e2792b91841091f",
+    "4ece9f75435746a39c76fb45db30473be87cc507313e58fadde9f4a9ec56ea2f",
+    "eb9d9d432b2d06aa0fc8b22db7280c00222a6f8829ee62d3e83bdd52c9aba5c6",
+    "e360a01c1cbfee0048cf429ccb3c4f7f7b8d929d966326257101b395d3d9c231",
+    "38f2566ae7a123b13cb683eb9abe362fa6749d3add0203010001",
+);
+const OPENSSL_PSS_SHA256_SIG: &str = concat!(
+    "3b5c48fc32708b0875acfbab1f5bffc19e19af234ce6785b2e5baa8f45d04ba5",
+    "d628b678ffef425e8199b43f516f02df2c00ef2d9d2962df46d931f086f5871c",
+    "799895cee57aa53908687ecb41f1b0a219b481e022a1095ac01dda13479eeacc",
+    "02cbc22754f8de487e093dbff2f77e8182e26d997d01187be3a989d6444c90cc",
+    "024c009818115665425e96f576d537cd033cebcf5fcf6c2c0310115fe64ae61b",
+    "b7d3fbbf8da0f4043aaffc7e0c02a49e8d7fbc843bc7f900bf2b470e0718fd2c",
+    "1c8253e74f6ddfb62ab8fae0b823a12d649d004f9a559514271e012efb36258e",
+    "730bcbc1a78ac5619bd511b4306b297ae48fc5f0ca366589ad138116664b2c08",
+);
+
+#[test]
+fn openssl_rsassa_pss_public_keys() {
+    for (spki, sig, algorithm, hash) in [
+        (
+            OPENSSL_PSS_SPKI,
+            OPENSSL_PSS_SHA512_SIG,
+            RsaKeyAlgorithm::RsassaPss(None),
+            HashAlgorithm::Sha512,
+        ),
+        (
+            OPENSSL_PSS_SHA256_SPKI,
+            OPENSSL_PSS_SHA256_SIG,
+            RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha256)),
+            HashAlgorithm::Sha256,
+        ),
+    ] {
+        let spki = hex::decode(spki).unwrap();
+        let sig = hex::decode(sig).unwrap();
+        let (key, found) = RsaPublicKey::from_spki_der_with_algorithm(&spki).unwrap();
+        assert_eq!(found, algorithm);
+        assert_eq!(key.modulus_bits(), 2048);
+        assert!(found.allows_pss(hash) && !found.allows_pkcs1v15());
+        verify_pss(&key, hash, OPENSSL_MSG, &sig).unwrap();
+        assert!(verify_pss(&key, hash, b"other", &sig).is_err());
+        assert!(verify_pss(&key, HashAlgorithm::Sha384, OPENSSL_MSG, &sig).is_err());
+        // Re-encoding the parsed key and algorithm reproduces OpenSSL's SPKI.
+        assert_eq!(spki_for(&key, found), spki);
+        assert_eq!(
+            RsaPublicKey::from_spki_der(&spki).err(),
+            Some(Error::InvalidEncoding)
+        );
+    }
+    let restricted = RsaKeyAlgorithm::RsassaPss(Some(HashAlgorithm::Sha256));
+    assert!(!restricted.allows_pss(HashAlgorithm::Sha512));
 }
 
 /// Splits an `RSAPrivateKey` into its nine INTEGER contents.

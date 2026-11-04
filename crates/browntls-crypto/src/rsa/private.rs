@@ -27,7 +27,8 @@
 use super::bigint::crt::CrtExp;
 use super::bigint::mont::Mont;
 use super::bigint::{self, HALF_LIMBS, MAX_LIMBS, inv};
-use super::{MAX_MODULUS_BYTES, OID_RSA_ENCRYPTION, RsaPublicKey, pkcs1, pss};
+use super::key_alg::{self, MAX_ALGORITHM_IDENTIFIER_LEN, RsaKeyAlgorithm};
+use super::{MAX_MODULUS_BYTES, RsaPublicKey, pkcs1, pss};
 use crate::Error;
 use crate::ct::{self, Choice};
 use crate::der::{self, Writer, tag};
@@ -42,8 +43,17 @@ const HALF_BYTES: usize = MAX_MODULUS_BYTES / 2;
 /// by [`RsaPrivateKey::to_pkcs1_der`] (an 8192-bit key needs 4655 bytes).
 pub const MAX_PKCS1_PRIVATE_KEY_DER_LEN: usize = 4672;
 /// Upper bound on the length of a PKCS #8 `PrivateKeyInfo` encoding produced
-/// by [`RsaPrivateKey::to_pkcs8_der`].
-pub const MAX_PKCS8_PRIVATE_KEY_DER_LEN: usize = MAX_PKCS1_PRIVATE_KEY_DER_LEN + 32;
+/// by [`RsaPrivateKey::to_pkcs8_der`] or
+/// [`RsaPrivateKey::to_pkcs8_der_with_algorithm`] (headers, version and an
+/// `AlgorithmIdentifier` of up to 67 bytes around the PKCS #1 encoding).
+pub const MAX_PKCS8_PRIVATE_KEY_DER_LEN: usize = MAX_PKCS1_PRIVATE_KEY_DER_LEN + 96;
+
+// PKCS #8 framing: SEQUENCE header (4), version (3), AlgorithmIdentifier
+// (2 + contents) and OCTET STRING header (4) around the PKCS #1 encoding.
+const _: () = assert!(
+    MAX_PKCS1_PRIVATE_KEY_DER_LEN + 4 + 3 + 2 + MAX_ALGORITHM_IDENTIFIER_LEN + 4
+        <= MAX_PKCS8_PRIVATE_KEY_DER_LEN
+);
 
 /// Message signed during the load-time self-test.
 const SELF_TEST_MESSAGE: &[u8] = b"browntls RSA private key self-test";
@@ -266,23 +276,26 @@ impl RsaPrivateKey {
     ///
     /// As [`Self::from_pkcs1_der`].
     pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, Error> {
-        let inner = der::parse_sequence(der, |r| {
-            if r.read_small_integer()? > 1 {
-                return Err(Error::InvalidEncoding);
-            }
-            let mut alg = r.read_sequence()?;
-            if alg.read_oid()? != OID_RSA_ENCRYPTION || !alg.read(tag::NULL)?.is_empty() {
-                return Err(Error::InvalidEncoding);
-            }
-            alg.finish()?;
-            let key = r.read_octet_string()?;
-            // attributes [0] IMPLICIT SET OF Attribute OPTIONAL
-            r.read_optional(tag::context_constructed(0))?;
-            // publicKey [1] IMPLICIT BIT STRING OPTIONAL (version 2)
-            r.read_optional(tag::context_primitive(1))?;
-            Ok(key)
-        })?;
-        Self::from_pkcs1_der(inner)
+        match key_alg::split_pkcs8(der) {
+            Ok((RsaKeyAlgorithm::RsaEncryption, inner)) => Self::from_pkcs1_der(inner),
+            _ => Err(Error::InvalidEncoding),
+        }
+    }
+
+    /// Parses a PKCS #8 `PrivateKeyInfo` holding an `rsaEncryption` or an
+    /// `id-RSASSA-PSS` key (RFC 4055 §1.2 and §3.1; the private key is a
+    /// PKCS #1 `RSAPrivateKey` in both cases), validates it as
+    /// [`Self::from_pkcs1_der`] and returns it with its algorithm. The caller
+    /// must honour the algorithm's restrictions ([`RsaKeyAlgorithm`]): this
+    /// type signs with any padding and hash it is asked for.
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaKeyAlgorithm::from_algorithm_identifier`] for the algorithm,
+    /// and as [`Self::from_pkcs1_der`] otherwise.
+    pub fn from_pkcs8_der_with_algorithm(der: &[u8]) -> Result<(Self, RsaKeyAlgorithm), Error> {
+        let (algorithm, inner) = key_alg::split_pkcs8(der)?;
+        Ok((Self::from_pkcs1_der(inner)?, algorithm))
     }
 
     /// Generates a new key with `e = 65537` and `bits` in `{2048, 3072,
@@ -759,16 +772,32 @@ impl RsaPrivateKey {
     /// Returns [`Error::InvalidLength`] if `out` is too small
     /// ([`MAX_PKCS8_PRIVATE_KEY_DER_LEN`] bytes always suffice).
     pub fn to_pkcs8_der(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.to_pkcs8_der_with_algorithm(RsaKeyAlgorithm::RsaEncryption, out)
+    }
+
+    /// Writes the PKCS #8 `PrivateKeyInfo` (version 0) encoding of the key
+    /// identified by `algorithm` (for example an `id-RSASSA-PSS` key, as
+    /// [`Self::from_pkcs8_der_with_algorithm`] reads it) to `out` and
+    /// returns its length.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::to_pkcs8_der`], and as
+    /// [`RsaKeyAlgorithm::encode_algorithm_identifier`].
+    pub fn to_pkcs8_der_with_algorithm(
+        &self,
+        algorithm: RsaKeyAlgorithm,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let mut alg = [0u8; MAX_ALGORITHM_IDENTIFIER_LEN];
+        let alg_len = algorithm.encode_algorithm_identifier(&mut alg)?;
         let mut inner = [0u8; MAX_PKCS1_PRIVATE_KEY_DER_LEN];
         let result = self.to_pkcs1_der(&mut inner).and_then(|n| {
-            let alg_len = 2 + OID_RSA_ENCRYPTION.len() + 2;
-            let content = 3 + 2 + alg_len + der::header_len(n) + n;
+            let content = 3 + der::header_len(alg_len) + alg_len + der::header_len(n) + n;
             let mut w = Writer::new(out);
             w.header(tag::SEQUENCE, content)?;
             w.tlv(tag::INTEGER, &[0])?;
-            w.header(tag::SEQUENCE, alg_len)?;
-            w.tlv(tag::OID, &OID_RSA_ENCRYPTION)?;
-            w.tlv(tag::NULL, &[])?;
+            w.tlv(tag::SEQUENCE, &alg[..alg_len])?;
             w.tlv(tag::OCTET_STRING, &inner[..n])?;
             Ok(w.len())
         });

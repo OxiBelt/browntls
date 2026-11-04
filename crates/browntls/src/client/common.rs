@@ -4,9 +4,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::ResolvesClientCert;
-use crate::enums::SignatureScheme;
+use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::log::{debug, trace};
-use crate::msgs::enums::ExtensionType;
+use crate::msgs::enums::{ClientCertificateType, ExtensionType};
 use crate::msgs::handshake::{CertificateChain, DistinguishedName};
 use crate::sign::{CertifiedKey, Signer};
 use crate::sync::Arc;
@@ -39,9 +39,12 @@ pub(super) enum ClientAuthDetails {
 }
 
 impl ClientAuthDetails {
+    /// `certtypes` is the TLS 1.2 CertificateRequest's `certificate_types`
+    /// (RFC 5246 §7.4.4); a certificate of another type is not sent.
     pub(super) fn resolve(
         resolver: &dyn ResolvesClientCert,
         canames: Option<&[DistinguishedName]>,
+        certtypes: Option<&[ClientCertificateType]>,
         sigschemes: &[SignatureScheme],
         auth_context_tls13: Option<Vec<u8>>,
     ) -> Self {
@@ -52,6 +55,23 @@ impl ClientAuthDetails {
             .collect();
 
         if let Some(certkey) = resolver.resolve(&acceptable_issuers, sigschemes) {
+            // RFC 5246 §7.4.4, RFC 8422 §5.5: ecdsa_sign covers ECDSA and EdDSA keys.
+            let wanted = match certkey.key.algorithm() {
+                SignatureAlgorithm::RSA => Some(ClientCertificateType::RSASign),
+                SignatureAlgorithm::ECDSA
+                | SignatureAlgorithm::ED25519
+                | SignatureAlgorithm::ED448 => Some(ClientCertificateType::ECDSASign),
+                _ => None,
+            };
+            let type_acceptable = match (certtypes, wanted) {
+                (Some(types), Some(wanted)) => types.contains(&wanted),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if !type_acceptable {
+                debug!("Client certificate type not among the server's certificate_types");
+                return Self::Empty { auth_context_tls13 };
+            }
             if let Some(signer) = certkey.key.choose_scheme(sigschemes) {
                 debug!("Attempting client auth");
                 return Self::Verify {

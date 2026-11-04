@@ -108,6 +108,7 @@ enum_builder! {
     pub enum CipherSuite {
         TLS_NULL_WITH_NULL_NULL => 0x0000,
         TLS_EMPTY_RENEGOTIATION_INFO_SCSV => 0x00ff,
+        TLS_FALLBACK_SCSV => 0x5600,
         TLS13_AES_128_GCM_SHA256 => 0x1301,
         TLS13_AES_256_GCM_SHA384 => 0x1302,
         TLS13_CHACHA20_POLY1305_SHA256 => 0x1303,
@@ -139,7 +140,16 @@ impl CipherSuite {
     pub fn is_non_preferred(self) -> bool {
         matches!(
             self,
-            Self::TLS13_AES_128_CCM_SHA256 | Self::TLS13_AES_128_CCM_8_SHA256
+            Self::TLS13_AES_128_CCM_SHA256
+                | Self::TLS13_AES_128_CCM_8_SHA256
+                | Self::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+                | Self::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+                | Self::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+                | Self::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+                | Self::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256
+                | Self::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384
+                | Self::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256
+                | Self::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384
         )
     }
 }

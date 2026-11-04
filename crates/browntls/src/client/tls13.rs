@@ -54,6 +54,7 @@ static DISALLOWED_ENCRYPTED_EXTENSIONS: &[ExtensionType] = &[
     ExtensionType::PSKKeyExchangeModes,
     ExtensionType::ECPointFormats,
     ExtensionType::ExtendedMasterSecret,
+    ExtensionType::EncryptThenMac,
     ExtensionType::SessionTicket,
     ExtensionType::RenegotiationInfo,
     ExtensionType::StatusRequest,
@@ -493,6 +494,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
         let client_auth = ClientAuthDetails::resolve(
             &*self.config.client_auth_cert_resolver,
             certreq.extensions.authorities.as_deref(),
+            None,
             &compat_sigschemes,
             Some(certreq.context.0.clone()),
         );

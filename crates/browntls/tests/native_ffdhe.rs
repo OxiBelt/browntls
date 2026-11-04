@@ -507,7 +507,7 @@ fn tls12_client_hello_does_not_offer_ffdhe() {
 #[test]
 fn tls12_server_never_selects_ffdhe() {
     init_logging();
-    let chain = server_chain(KeyType::EcdsaP256);
+    let chain = server_chain(KeyType::Ed25519);
     let all_groups = provider_with(prov::ALL_KX_GROUPS);
     // The client prefers FFDHE (its first key share is FFDHE2048), but the
     // server only speaks TLS 1.2: it must fall through to an ECDHE group.

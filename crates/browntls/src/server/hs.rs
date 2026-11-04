@@ -12,7 +12,8 @@ use crate::common_state::{ConnectionRandoms, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{KeyExchangeAlgorithm, SupportedKxGroup};
 use crate::enums::{
-    AlertDescription, CertificateType, HandshakeType, ProtocolVersion, SignatureScheme,
+    AlertDescription, CertificateType, CipherSuite, HandshakeType, ProtocolVersion,
+    SignatureAlgorithm, SignatureScheme,
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -27,6 +28,31 @@ use crate::sync::Arc;
 pub(super) type NextState = Box<dyn State<ServerConnectionData>>;
 pub(super) type NextStateOrError = Result<NextState, Error>;
 pub(super) type ServerContext<'a> = Context<'a, ServerConnectionData>;
+
+/// The curve of an ECDSA signing key, found through the one ECDSA scheme it
+/// signs with; `None` for other key types.
+fn ecdsa_certificate_curve(key: &dyn crate::sign::SigningKey) -> Option<NamedGroup> {
+    if key.algorithm() != SignatureAlgorithm::ECDSA {
+        return None;
+    }
+    [
+        (
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            NamedGroup::secp256r1,
+        ),
+        (
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            NamedGroup::secp384r1,
+        ),
+        (
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            NamedGroup::secp521r1,
+        ),
+    ]
+    .into_iter()
+    .find(|(scheme, _)| key.choose_scheme(&[*scheme]).is_some())
+    .map(|(_, curve)| curve)
+}
 
 /// Whether a stored session may be resumed with the parameters negotiated now.
 pub(super) fn can_resume(
@@ -115,6 +141,33 @@ impl ExpectClientHello {
             ProtocolVersion::TLSv1_2
         };
 
+        // RFC 7507 §3: a client that fell back to a lower version than it
+        // supports says so with TLS_FALLBACK_SCSV; a server able to speak a
+        // higher version than the client's highest then refuses, since an
+        // attacker may have caused the fallback.
+        if client_hello
+            .cipher_suites
+            .contains(&CipherSuite::TLS_FALLBACK_SCSV)
+        {
+            let client_max = client_hello
+                .extensions
+                .supported_versions
+                .as_ref()
+                .and_then(|versions| versions.iter().map(|v| u16::from(*v)).max())
+                .unwrap_or_else(|| u16::from(client_hello.client_version));
+            let our_max = if tls13_enabled {
+                ProtocolVersion::TLSv1_3
+            } else {
+                ProtocolVersion::TLSv1_2
+            };
+            if client_max < u16::from(our_max) {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::InappropriateFallback,
+                    PeerMisbehaved::InappropriateFallback,
+                ));
+            }
+        }
+
         cx.common.negotiated_version = Some(version);
 
         // RFC 8446 §4.1.2: compression must be null only.
@@ -150,8 +203,14 @@ impl ExpectClientHello {
                 client_hello,
             ))
             .ok_or_else(|| {
+                // RFC 9325 §3.7 (RFC 6066 §3): a server name it does not
+                // serve gets unrecognized_name.
                 cx.common.send_fatal_alert(
-                    AlertDescription::AccessDenied,
+                    if cx.data.sni.is_some() {
+                        AlertDescription::UnrecognisedName
+                    } else {
+                        AlertDescription::AccessDenied
+                    },
                     Error::general("no server certificate chain resolved"),
                 )
             })?;
@@ -204,9 +263,16 @@ impl ExpectClientHello {
         }
 
         // Key exchange groups (RFC 8446 §4.2.7, RFC 8422 §5.1.1).
+        // RFC 8422 §5.1: without the extension no ECC suite may be
+        // negotiated, and ECC suites are all there is (missing_extension is
+        // a TLS 1.3 alert).
         let client_groups = client_hello.named_groups().ok_or_else(|| {
             cx.common.send_fatal_alert(
-                AlertDescription::MissingExtension,
+                if version == ProtocolVersion::TLSv1_3 {
+                    AlertDescription::MissingExtension
+                } else {
+                    AlertDescription::HandshakeFailure
+                },
                 PeerIncompatible::NamedGroupsExtensionRequired,
             )
         })?;
@@ -237,6 +303,18 @@ impl ExpectClientHello {
         // and the key exchange algorithms available.
         let sigalg = certkey.get_key().algorithm();
         let kx_algo = selected_kxg.name().key_exchange_algorithm();
+        // RFC 8422 §5.3: in TLS 1.2 the server must respect the client's
+        // curves for the certificate too; an ECDSA certificate on a curve
+        // the client did not list rules out every ECDSA suite. (TLS 1.3
+        // binds the certificate's curve through signature_algorithms.)
+        let ecdsa_cert_usable = version != ProtocolVersion::TLSv1_2
+            || ecdsa_certificate_curve(certkey.get_key())
+                .is_none_or(|curve| client_groups.contains(&curve));
+        // RFC 7366 §2 and RFC 9325 §4.2: a block cipher suite is only
+        // usable with Encrypt-then-MAC unless the configuration allows
+        // MAC-then-encrypt.
+        let client_offers_etm = client_hello.extensions.encrypt_then_mac.is_some();
+        let block_ciphers_usable = client_offers_etm || self.config.allow_mac_then_encrypt;
         let suitable: Vec<SupportedCipherSuite> = self
             .config
             .provider
@@ -246,8 +324,13 @@ impl ExpectClientHello {
             .filter(|suite| suite.version().version == version)
             .filter(|suite| suite.usable_for_signature_algorithm(sigalg))
             .filter(|suite| {
+                ecdsa_cert_usable
+                    || !suite.usable_for_signature_algorithm(SignatureAlgorithm::ECDSA)
+            })
+            .filter(|suite| {
                 suite.usable_for_kx_algorithm(kx_algo) || kx_algo != KeyExchangeAlgorithm::ECDHE
             })
+            .filter(|suite| block_ciphers_usable || !suite.is_tls12_block_cipher())
             .collect();
 
         // Preferred suites first, then the non-preferred tier (RFC 9846
@@ -328,12 +411,15 @@ impl ExpectClientHello {
                         PeerIncompatible::ExtendedMasterSecretExtensionRequired,
                     ));
                 }
+                // RFC 7366 §3: acknowledged for block cipher suites only.
+                let using_etm = client_offers_etm && suite.record.is_block_cipher();
                 super::tls12::CompleteClientHelloHandling {
                     config: self.config,
                     transcript,
                     session_id: self.session_id,
                     suite,
                     using_ems,
+                    using_etm,
                     randoms,
                     send_ticket: self.send_tickets > 0,
                     cert_types,
@@ -460,11 +546,23 @@ pub(super) fn process_client_hello<'a>(
         cx.data.sni = sni;
     }
 
+    // RFC 5246 §7.4.1.4.1 lets a TLS 1.2 client omit signature_algorithms
+    // and implies SHA-1, which RFC 9155 forbids; so the extension is
+    // required in both versions (missing_extension is a TLS 1.3 alert).
+    let offers_tls13 = client_hello
+        .extensions
+        .supported_versions
+        .as_ref()
+        .is_some_and(|v| v.contains(&ProtocolVersion::TLSv1_3));
     let sig_schemes = client_hello
         .signature_schemes()
         .ok_or_else(|| {
             cx.common.send_fatal_alert(
-                AlertDescription::MissingExtension,
+                if offers_tls13 {
+                    AlertDescription::MissingExtension
+                } else {
+                    AlertDescription::HandshakeFailure
+                },
                 PeerIncompatible::SignatureAlgorithmsExtensionRequired,
             )
         })?

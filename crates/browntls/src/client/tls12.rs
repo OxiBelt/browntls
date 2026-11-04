@@ -12,6 +12,7 @@ use super::hs::{ClientContext, NextStateOrError};
 use super::{ClientConfig, hs, tls13};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState, Side};
 use crate::conn::State;
+use crate::crypto::cipher::Tls12MacOrder;
 use crate::ct::constant_time_eq;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
@@ -35,12 +36,22 @@ use crate::verify::{DigitallySignedStruct, HandshakeSignatureValid, ServerCertVe
 /// How many HelloRequests we answer with `no_renegotiation` before giving up.
 const MAX_HELLO_REQUESTS: u8 = 16;
 
+/// The MAC order negotiated for a block cipher suite (RFC 7366).
+fn mac_order(using_etm: bool) -> Tls12MacOrder {
+    if using_etm {
+        Tls12MacOrder::EncryptThenMac
+    } else {
+        Tls12MacOrder::MacThenEncrypt
+    }
+}
+
 pub(super) struct CompleteServerHelloHandling {
     pub(super) config: Arc<ClientConfig>,
     pub(super) resuming_session: Option<persist::Tls12ClientSessionValue>,
     pub(super) server_name: ServerName<'static>,
     pub(super) randoms: ConnectionRandoms,
     pub(super) using_ems: bool,
+    pub(super) using_etm: bool,
     pub(super) transcript: HandshakeHash,
     pub(super) hello: ClientHelloDetails,
     pub(super) alpn_protocols: Vec<Vec<u8>>,
@@ -63,6 +74,34 @@ impl CompleteServerHelloHandling {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::HandshakeFailure,
                 PeerMisbehaved::UnsolicitedServerHelloExtension,
+            ));
+        }
+        // RFC 9325 §3.5: a TLS 1.2 server that does not acknowledge
+        // renegotiation_info is unsafe to talk to (RFC 5746 §4.1), whether
+        // or not either side ever renegotiates.
+        if self.config.require_secure_renegotiation
+            && server_hello.extensions.renegotiation_info.is_none()
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::SecureRenegotiationExtensionRequired,
+            ));
+        }
+        // RFC 7366 §3: encrypt_then_mac applies to block ciphers only, and a
+        // server must not acknowledge it after selecting an AEAD suite.
+        if self.using_etm && !suite.record.is_block_cipher() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::EncryptThenMacWithAeadCipherSuite,
+            ));
+        }
+        // RFC 9325 §4.2: a CBC suite should not be used without
+        // encrypt_then_mac.
+        if suite.record.is_block_cipher() && !self.using_etm && !self.config.allow_mac_then_encrypt
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::EncryptThenMacExtensionRequired,
             ));
         }
         // RFC 8422 §5.2: only uncompressed points are used.
@@ -122,13 +161,19 @@ impl CompleteServerHelloHandling {
                     ));
                 }
 
-                let secrets = ConnectionSecrets::new_resume(self.randoms, suite, resuming.secret());
+                let secrets = ConnectionSecrets::new_resume(
+                    self.randoms,
+                    suite,
+                    resuming.secret(),
+                    resuming.extended_ms(),
+                );
                 self.config.key_log.log(
                     "CLIENT_RANDOM",
                     &secrets.randoms.client,
                     secrets.master_secret(),
                 );
-                cx.common.start_encryption_tls12(&secrets, Side::Client);
+                cx.common
+                    .start_encryption_tls12(&secrets, Side::Client, mac_order(self.using_etm));
                 cx.common.peer_certificates = Some(resuming.server_cert_chain().clone());
                 cx.common.handshake_kind = Some(HandshakeKind::Resumed);
                 cx.common.kx_state = KxState::Start;
@@ -170,6 +215,7 @@ impl CompleteServerHelloHandling {
             server_name: self.server_name,
             randoms: self.randoms,
             using_ems: self.using_ems,
+            using_etm: self.using_etm,
             transcript: self.transcript,
             suite,
             may_send_cert_status: server_hello.extensions.status_request_ack.is_some(),
@@ -185,6 +231,7 @@ struct ExpectCertificate {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     may_send_cert_status: bool,
@@ -210,6 +257,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 server_name: self.server_name,
                 randoms: self.randoms,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 transcript: self.transcript,
                 suite: self.suite,
                 server_cert_chain,
@@ -223,6 +271,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 server_name: self.server_name,
                 randoms: self.randoms,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 transcript: self.transcript,
                 suite: self.suite,
                 server_cert: ServerCertDetails::new(server_cert_chain, Vec::new()),
@@ -239,6 +288,7 @@ struct ExpectCertificateStatusOrServerKx {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert_chain: CertificateChain<'static>,
@@ -258,6 +308,7 @@ impl State<ClientConnectionData> for ExpectCertificateStatusOrServerKx {
                 server_name: self.server_name,
                 randoms: self.randoms,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 transcript: self.transcript,
                 suite: self.suite,
                 server_cert: ServerCertDetails::new(self.server_cert_chain, Vec::new()),
@@ -274,6 +325,7 @@ impl State<ClientConnectionData> for ExpectCertificateStatusOrServerKx {
                 server_name: self.server_name,
                 randoms: self.randoms,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 transcript: self.transcript,
                 suite: self.suite,
                 server_cert_chain: self.server_cert_chain,
@@ -299,6 +351,7 @@ struct ExpectCertificateStatus {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert_chain: CertificateChain<'static>,
@@ -327,6 +380,7 @@ impl State<ClientConnectionData> for ExpectCertificateStatus {
             server_name: self.server_name,
             randoms: self.randoms,
             using_ems: self.using_ems,
+            using_etm: self.using_etm,
             transcript: self.transcript,
             suite: self.suite,
             server_cert: ServerCertDetails::new(self.server_cert_chain, ocsp_response),
@@ -348,6 +402,7 @@ struct ExpectServerKx {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails,
@@ -388,6 +443,7 @@ impl State<ClientConnectionData> for ExpectServerKx {
             server_name: self.server_name,
             randoms: self.randoms,
             using_ems: self.using_ems,
+            using_etm: self.using_etm,
             transcript: self.transcript,
             suite: self.suite,
             server_cert: self.server_cert,
@@ -407,6 +463,7 @@ struct ExpectServerDoneOrCertReq {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails,
@@ -429,6 +486,7 @@ impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
                 let client_auth = ClientAuthDetails::resolve(
                     &*self.config.client_auth_cert_resolver,
                     Some(&certreq.canames),
+                    Some(&certreq.certtypes),
                     &certreq.sigschemes,
                     None,
                 );
@@ -438,6 +496,7 @@ impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
                     server_name: self.server_name,
                     randoms: self.randoms,
                     using_ems: self.using_ems,
+                    using_etm: self.using_etm,
                     transcript: self.transcript,
                     suite: self.suite,
                     server_cert: self.server_cert,
@@ -456,6 +515,7 @@ impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
                 server_name: self.server_name,
                 randoms: self.randoms,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 transcript: self.transcript,
                 suite: self.suite,
                 server_cert: self.server_cert,
@@ -483,6 +543,7 @@ struct ExpectServerDone {
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     using_ems: bool,
+    using_etm: bool,
     transcript: HandshakeHash,
     suite: &'static Tls12CipherSuite,
     server_cert: ServerCertDetails,
@@ -606,7 +667,8 @@ impl State<ClientConnectionData> for ExpectServerDone {
             &secrets.randoms.client,
             secrets.master_secret(),
         );
-        cx.common.start_encryption_tls12(&secrets, Side::Client);
+        cx.common
+            .start_encryption_tls12(&secrets, Side::Client, mac_order(st.using_etm));
 
         // 5. CertificateVerify over every handshake message so far.
         if let Some(ClientAuthDetails::Verify { signer, .. }) = &st.client_auth {
@@ -912,8 +974,7 @@ impl State<ClientConnectionData> for ExpectTraffic {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
-        self.secrets.export_keying_material(output, label, context);
-        Ok(())
+        self.secrets.export_keying_material(output, label, context)
     }
 
     fn extract_secrets(&self) -> Result<PartiallyExtractedSecrets, Error> {

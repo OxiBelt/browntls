@@ -54,6 +54,27 @@ fn assert_tls12(client: &ClientConnection, server: &ServerConnection) {
     assert_eq!(server.protocol_version(), Some(ProtocolVersion::TLSv1_2));
 }
 
+/// `group` first, plus the curve of a `key_type` ECDSA certificate: RFC 8422
+/// §5.3 forbids a TLS 1.2 server from using an ECDSA certificate on a curve
+/// the client did not list in `supported_groups`.
+fn groups_for(
+    group: &'static dyn browntls::crypto::SupportedKxGroup,
+    key_type: KeyType,
+) -> Vec<&'static dyn browntls::crypto::SupportedKxGroup> {
+    let mut groups = vec![group];
+    let cert_curve = match key_type {
+        KeyType::EcdsaP256 => Some(prov::kx_group::SECP256R1),
+        KeyType::EcdsaP384 => Some(prov::kx_group::SECP384R1),
+        _ => None,
+    };
+    if let Some(curve) = cert_curve
+        && curve.name() != group.name()
+    {
+        groups.push(curve);
+    }
+    groups
+}
+
 /// Whether a TLS 1.2 suite's authentication matches the server key type.
 fn suite_fits_key(suite: &browntls::SupportedCipherSuite, key_type: KeyType) -> bool {
     let rsa_suite = format!("{:?}", suite.suite()).contains("_RSA_");
@@ -78,8 +99,12 @@ fn full_handshake_every_suite_group_and_key_type() {
                 .iter()
                 .filter(|g| g.usable_for_version(ProtocolVersion::TLSv1_2))
             {
+                // The server supports only `group`; the client also lists
+                // the certificate's curve (RFC 8422 §5.3), which the server
+                // need not share for key exchange.
+                let groups = groups_for(*group, key_type);
                 let mut provider = prov::default_provider();
-                provider.kx_groups = prov::ALL_KX_GROUPS.to_vec();
+                provider.kx_groups = vec![*group];
                 let server_config = ServerConfig::builder_with_provider(Arc::new(provider))
                     .with_safe_default_protocol_versions()
                     .unwrap()
@@ -87,7 +112,7 @@ fn full_handshake_every_suite_group_and_key_type() {
                     .with_single_cert(chain.cert_chain(), chain.private_key())
                     .unwrap();
                 let (mut client, mut server) = connect(
-                    tls12_only_client(&chain, Some(&[*suite]), Some(&[*group])),
+                    tls12_only_client(&chain, Some(&[*suite]), Some(&groups)),
                     server_config,
                 );
                 do_handshake(&mut client, &mut server)
@@ -141,11 +166,16 @@ fn hybrid_groups_are_not_offered_for_tls12() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     // The client prefers the post-quantum hybrid, but it cannot be used by
-    // TLS 1.2; the handshake must fall through to X25519.
+    // TLS 1.2; the handshake must fall through to X25519. (P-256 is listed
+    // for the certificate, RFC 8422 §5.3.)
     let client_config = tls12_only_client(
         &chain,
         None,
-        Some(&[prov::kx_group::X25519MLKEM768, prov::kx_group::X25519]),
+        Some(&[
+            prov::kx_group::X25519MLKEM768,
+            prov::kx_group::X25519,
+            prov::kx_group::SECP256R1,
+        ]),
     );
     let mut provider = prov::default_provider();
     provider.kx_groups = prov::ALL_KX_GROUPS.to_vec();
@@ -378,9 +408,10 @@ fn client_auth_mandatory_but_client_has_no_cert() {
     let (mut client, mut server) = connect(client_config, server_config);
     let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server);
     assert_eq!(server_res, Err(Error::NoCertificatesPresented));
+    // RFC 5246 §7.4.6: handshake_failure; certificate_required is TLS 1.3 only.
     assert_eq!(
         client_res,
-        Err(Error::AlertReceived(AlertDescription::CertificateRequired))
+        Err(Error::AlertReceived(AlertDescription::HandshakeFailure))
     );
 }
 
@@ -672,4 +703,215 @@ fn key_update_is_not_available_in_tls12() {
     do_handshake(&mut client, &mut server).unwrap();
     assert!(client.refresh_traffic_keys().is_err());
     assert!(server.refresh_traffic_keys().is_err());
+}
+
+/// A TLS 1.2 ServerHello for `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` with
+/// an all-zero random, no session ID and only the extended_master_secret
+/// extension: in particular no `renegotiation_info`.
+fn server_hello_without_renegotiation_info() -> Vec<u8> {
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0); // session ID length
+    body.extend_from_slice(&[0xc0, 0x2b]);
+    body.push(0); // null compression
+    body.extend_from_slice(&[0x00, 0x04, 0x00, 0x17, 0x00, 0x00]);
+    let mut record = vec![0x16, 0x03, 0x03];
+    record.extend_from_slice(&u16::try_from(body.len() + 4).unwrap().to_be_bytes());
+    record.push(2); // server_hello
+    record.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes()[1..]);
+    record.extend_from_slice(&body);
+    record
+}
+
+/// RFC 9325 §3.5: a client refuses a TLS 1.2 server that does not
+/// acknowledge `renegotiation_info`, unless configured otherwise.
+#[test]
+fn server_hello_without_renegotiation_info_is_refused_by_default() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client = ClientConnection::new(
+        Arc::new(tls12_only_client(&chain, None, None)),
+        server_name(),
+    )
+    .unwrap();
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+
+    client
+        .read_tls(&mut &server_hello_without_renegotiation_info()[..])
+        .unwrap();
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        browntls::PeerIncompatible::SecureRenegotiationExtensionRequired.into()
+    );
+    let mut alert = Vec::new();
+    client.write_tls(&mut alert).unwrap();
+    // handshake_failure, fatal.
+    assert_eq!(alert, [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28]);
+}
+
+#[test]
+fn server_hello_without_renegotiation_info_is_accepted_when_allowed() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut config = tls12_only_client(&chain, None, None);
+    config.require_secure_renegotiation = false;
+    let mut client = ClientConnection::new(Arc::new(config), server_name()).unwrap();
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+
+    client
+        .read_tls(&mut &server_hello_without_renegotiation_info()[..])
+        .unwrap();
+    client.process_new_packets().unwrap();
+    assert!(client.is_handshaking());
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
+}
+
+/// RFC 8422 §5.1: a server may not use an ECDSA certificate on a curve the
+/// client did not list in `supported_groups`.
+#[test]
+fn ecdsa_certificate_curve_must_be_offered_by_the_client() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP384);
+    let client_config = tls12_only_client(&chain, None, Some(&[prov::kx_group::X25519]));
+    let (mut client, mut server) = connect(client_config, tls12_only_server(&chain));
+    let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        server_res,
+        Err(browntls::PeerIncompatible::NoCipherSuitesInCommon.into())
+    );
+    assert_eq!(
+        client_res,
+        Err(Error::AlertReceived(AlertDescription::HandshakeFailure))
+    );
+
+    // Listing the curve, even without using it for key exchange, is enough.
+    let client_config = tls12_only_client(
+        &chain,
+        None,
+        Some(&[prov::kx_group::X25519, prov::kx_group::SECP384R1]),
+    );
+    let (mut client, mut server) = connect(client_config, tls12_only_server(&chain));
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(
+        client.negotiated_key_exchange_group().unwrap().name(),
+        NamedGroup::X25519
+    );
+}
+
+/// RFC 5246 §7.2.2: a session whose connection ended with a fatal alert
+/// cannot be resumed, on either side.
+#[test]
+fn fatal_alert_invalidates_the_session() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = tls12_only_client(&chain, None, None);
+    client_config.resumption =
+        Resumption::in_memory_sessions(4).tls12_resumption(Tls12Resumption::SessionIdOnly);
+    let client_config = Arc::new(client_config);
+    let server_config = Arc::new(tls12_only_server(&chain));
+
+    // Sanity check: a clean connection leaves a resumable session.
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+
+    // The server receives garbage under the session: bad_record_mac both ways.
+    let mut garbage = vec![0x17u8, 3, 3, 0, 24];
+    garbage.extend(1..=24u8);
+    server.read_tls(&mut &garbage[..]).unwrap();
+    assert_eq!(server.process_new_packets(), Err(Error::DecryptError));
+    transfer(&mut server, &mut client);
+    assert_eq!(
+        client.process_new_packets(),
+        Err(Error::AlertReceived(AlertDescription::BadRecordMac))
+    );
+
+    // Neither side resumes the failed session.
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
+}
+
+/// RFC 5246 §7.2.2: alerts the specification defines as always fatal end
+/// the connection even at warning level, while genuine warnings do not.
+#[test]
+fn always_fatal_alerts_are_fatal_at_warning_level() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let (mut client, mut server) =
+        connect(tls12_only_client(&chain, None, None), server_config(&chain));
+    do_handshake(&mut client, &mut server).unwrap();
+    // Before the handshake finishes the alert would be encrypted; at this
+    // point one is too, so use the client's own encrypter by writing an
+    // alert record through a fresh plaintext connection pair instead.
+    let (mut client, mut server) =
+        connect(tls12_only_client(&chain, None, None), server_config(&chain));
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+    server.read_tls(&mut &hello[..]).unwrap();
+    server.process_new_packets().unwrap();
+    // warning-level unrecognized_name is a genuine warning: ignored.
+    client
+        .read_tls(&mut &[0x15u8, 3, 3, 0, 2, 1, 112][..])
+        .unwrap();
+    client.process_new_packets().unwrap();
+    // warning-level handshake_failure is defined as always fatal.
+    client
+        .read_tls(&mut &[0x15u8, 3, 3, 0, 2, 1, 40][..])
+        .unwrap();
+    assert_eq!(
+        client.process_new_packets(),
+        Err(Error::AlertReceived(AlertDescription::HandshakeFailure))
+    );
+}
+
+/// RFC 5246 §6.2.1: an unprotected record may not carry more than 2^14 bytes.
+#[test]
+fn oversized_plaintext_record_is_record_overflow() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let server_config = Arc::new(server_config(&chain));
+    let mut server = ServerConnection::new(server_config).unwrap();
+    let mut record = vec![0x16u8, 3, 3, 0x40, 0x01];
+    record.extend(std::iter::repeat_n(0u8, 0x4001));
+    server.read_tls(&mut &record[..]).unwrap();
+    assert_eq!(
+        server.process_new_packets(),
+        Err(Error::PeerSentOversizedRecord)
+    );
+    let mut alert = Vec::new();
+    server.write_tls(&mut alert).unwrap();
+    assert_eq!(alert, [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x16]);
+}
+
+/// RFC 5246 §7.4.1.1: a HelloRequest received while the client is already
+/// negotiating is ignored.
+#[test]
+fn hello_request_during_handshake_is_ignored() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut config = tls12_only_client(&chain, None, None);
+    config.require_secure_renegotiation = false;
+    let mut client = ClientConnection::new(Arc::new(config), server_name()).unwrap();
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+
+    client
+        .read_tls(&mut &[0x16u8, 3, 3, 0, 4, 0, 0, 0, 0][..])
+        .unwrap();
+    client.process_new_packets().unwrap();
+    client
+        .read_tls(&mut &server_hello_without_renegotiation_info()[..])
+        .unwrap();
+    client.process_new_packets().unwrap();
+    assert!(client.is_handshaking());
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
 }

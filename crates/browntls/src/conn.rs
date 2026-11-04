@@ -13,7 +13,7 @@ use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader as CodecReader;
 use crate::msgs::deframer::{Deframed, DeframerVecBuffer, MessageDeframer};
-use crate::msgs::handshake::HandshakeMessagePayload;
+use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 
@@ -57,7 +57,15 @@ pub(crate) struct Context<'a, Data> {
 }
 
 /// Per-side connection data.
-pub trait SideData: Debug {}
+pub trait SideData: Debug {
+    /// Called once when the connection fails for good, with the version
+    /// negotiated so far.
+    ///
+    /// RFC 5246 §7.2.2: sessions corresponding to a connection that ended
+    /// with a fatal alert cannot be resumed.
+    #[doc(hidden)]
+    fn on_fatal_error(&mut self, _negotiated_version: Option<ProtocolVersion>) {}
+}
 
 /// The state machine plus everything it needs.
 pub(crate) struct ConnectionCore<Data> {
@@ -67,7 +75,7 @@ pub(crate) struct ConnectionCore<Data> {
     pub(crate) deframer: MessageDeframer,
 }
 
-impl<Data> ConnectionCore<Data> {
+impl<Data: SideData> ConnectionCore<Data> {
     pub(crate) fn new(state: Box<dyn State<Data>>, data: Data, common_state: CommonState) -> Self {
         Self {
             state: Ok(state),
@@ -91,8 +99,7 @@ impl<Data> ConnectionCore<Data> {
         };
 
         if self.common_state.encrypt_failed {
-            self.state = Err(Error::EncryptError);
-            return Err(Error::EncryptError);
+            return Err(self.fail(Error::EncryptError));
         }
 
         loop {
@@ -110,8 +117,7 @@ impl<Data> ConnectionCore<Data> {
                 Ok(None) => break,
                 Err(err) => {
                     let err = self.handle_deframe_error(err, &*state);
-                    self.state = Err(err.clone());
-                    return Err(err);
+                    return Err(self.fail(err));
                 }
             };
 
@@ -190,10 +196,7 @@ impl<Data> ConnectionCore<Data> {
 
             match result {
                 Ok(new_state) => state = new_state,
-                Err(err) => {
-                    self.state = Err(err.clone());
-                    return Err(err);
-                }
+                Err(err) => return Err(self.fail(err)),
             }
         }
 
@@ -205,6 +208,15 @@ impl<Data> ConnectionCore<Data> {
         }
 
         Ok(self.common_state.current_io_state())
+    }
+
+    /// Records `err` as the connection's final state and lets the side data
+    /// forget any session the failed connection was using.
+    fn fail(&mut self, err: Error) -> Error {
+        self.data
+            .on_fatal_error(self.common_state.negotiated_version);
+        self.state = Err(err.clone());
+        err
     }
 
     fn process_msg(
@@ -226,6 +238,19 @@ impl<Data> ConnectionCore<Data> {
                         && common.negotiated_version.is_none()) =>
             {
                 common.process_middlebox_ccs()?;
+                return Ok(state);
+            }
+            // RFC 5246 §7.4.1.1: a client ignores HelloRequest while it is
+            // negotiating; once the handshake is done the state machine
+            // answers it (with no_renegotiation).
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::HelloRequest),
+                ..
+            } if common.side == crate::common_state::Side::Client
+                && common.is_handshaking()
+                && !common.is_tls13() =>
+            {
+                common.process_hello_request_during_handshake()?;
                 return Ok(state);
             }
             // Application data during the handshake is for the state machine
@@ -255,7 +280,10 @@ impl<Data> ConnectionCore<Data> {
             Error::PeerIncompatible(_) => AlertDescription::HandshakeFailure,
             Error::InvalidCertificate(e) => AlertDescription::from(e.clone()),
             Error::InvalidCertRevocationList(_) => AlertDescription::BadCertificate,
-            Error::NoCertificatesPresented => AlertDescription::CertificateRequired,
+            Error::NoCertificatesPresented if common.is_tls13() => {
+                AlertDescription::CertificateRequired
+            }
+            Error::NoCertificatesPresented => AlertDescription::HandshakeFailure,
             Error::DecryptError => AlertDescription::BadRecordMac,
             Error::PeerSentOversizedRecord => AlertDescription::RecordOverflow,
             Error::NoApplicationProtocol => AlertDescription::NoApplicationProtocol,
@@ -389,7 +417,7 @@ pub struct ConnectionCommon<Data> {
     pub(crate) deframer_buffer: DeframerVecBuffer,
 }
 
-impl<Data> ConnectionCommon<Data> {
+impl<Data: SideData> ConnectionCommon<Data> {
     /// Processes every complete record received so far.
     ///
     /// Call this after `read_tls`. Returns what the connection now wants to
@@ -441,7 +469,7 @@ impl<Data> ConnectionCommon<Data> {
 }
 
 #[cfg(feature = "std")]
-impl<Data> ConnectionCommon<Data> {
+impl<Data: SideData> ConnectionCommon<Data> {
     /// Reads TLS bytes from `rd` into the connection. Returns the number of
     /// bytes read; zero means the transport reached end of file.
     ///

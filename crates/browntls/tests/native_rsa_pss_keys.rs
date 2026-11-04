@@ -659,7 +659,8 @@ fn pss_server_signs_with_every_tls12_rsa_suite() {
         .filter(|s| s.tls13().is_none() && format!("{:?}", s.suite()).contains("_RSA_"))
         .copied()
         .collect();
-    assert_eq!(suites.len(), 3);
+    // 3 AEAD and 4 CBC `ECDHE_RSA` suites.
+    assert_eq!(suites.len(), 7);
     for suite in suites {
         let mut provider = prov::default_provider();
         provider.cipher_suites = vec![suite];

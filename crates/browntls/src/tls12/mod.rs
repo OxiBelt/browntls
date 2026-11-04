@@ -5,7 +5,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::common_state::Side;
-use crate::crypto::cipher::{AeadKey, MessageDecrypter, MessageEncrypter, Tls12AeadAlgorithm};
+use crate::crypto::cipher::{
+    AeadKey, MessageDecrypter, MessageEncrypter, Tls12MacOrder, Tls12RecordProtection,
+    UnsupportedOperationError,
+};
 use crate::crypto::tls12::Prf;
 use crate::crypto::{ActiveKeyExchange, KeyExchangeAlgorithm, hash};
 use crate::enums::SignatureScheme;
@@ -27,8 +30,8 @@ pub struct Tls12CipherSuite {
     /// in preference order.
     pub sign: &'static [SignatureScheme],
 
-    /// The record protection algorithm.
-    pub aead_alg: &'static dyn Tls12AeadAlgorithm,
+    /// The record protection: an AEAD or a block cipher with an HMAC.
+    pub record: Tls12RecordProtection,
 }
 
 impl Tls12CipherSuite {
@@ -43,7 +46,7 @@ impl Tls12CipherSuite {
 
     /// Whether every component claims FIPS validation.
     pub fn fips(&self) -> bool {
-        self.common.fips() && self.prf_provider.fips() && self.aead_alg.fips()
+        self.common.fips() && self.prf_provider.fips() && self.record.fips()
     }
 }
 
@@ -74,6 +77,8 @@ pub(crate) struct ConnectionSecrets {
     pub(crate) randoms: ConnectionRandoms,
     suite: &'static Tls12CipherSuite,
     master_secret: [u8; 48],
+    /// Whether the master secret is an extended master secret (RFC 7627).
+    extended_master_secret: bool,
 }
 
 impl ConnectionSecrets {
@@ -90,6 +95,7 @@ impl ConnectionSecrets {
             randoms,
             suite,
             master_secret: [0u8; 48],
+            extended_master_secret: ems_seed.is_some(),
         };
         let (label, seed): (&[u8], Vec<u8>) = match ems_seed {
             Some(seed) => (b"extended master secret", seed.as_ref().to_vec()),
@@ -108,16 +114,19 @@ impl ConnectionSecrets {
         Ok(ret)
     }
 
-    /// Reinstates a resumed session's master secret.
+    /// Reinstates a resumed session's master secret; `extended_master_secret`
+    /// says whether the original session used RFC 7627.
     pub(crate) fn new_resume(
         randoms: ConnectionRandoms,
         suite: &'static Tls12CipherSuite,
         master_secret: &[u8],
+        extended_master_secret: bool,
     ) -> Self {
         let mut ret = Self {
             randoms,
             suite,
             master_secret: [0u8; 48],
+            extended_master_secret,
         };
         let n = master_secret.len().min(48);
         ret.master_secret[..n].copy_from_slice(&master_secret[..n]);
@@ -125,38 +134,31 @@ impl ConnectionSecrets {
     }
 
     /// Expands the key block (RFC 5246 §6.3) and builds the record ciphers.
-    pub(crate) fn make_cipher_pair(&self, side: Side) -> MessageCipherPair {
-        let shape = self.suite.aead_alg.key_block_shape();
-        let key_block = self.make_key_block(&shape);
-        let (client_key, rest) = key_block.split_at(shape.enc_key_len);
-        let (server_key, rest) = rest.split_at(shape.enc_key_len);
-        let (client_iv, rest) = rest.split_at(shape.fixed_iv_len);
-        let (server_iv, rest) = rest.split_at(shape.fixed_iv_len);
-        let (client_extra, rest) = rest.split_at(shape.explicit_nonce_len);
-        let (server_extra, _) = rest.split_at(shape.explicit_nonce_len);
-
-        let (write_key, write_iv, write_extra, read_key, read_iv) = match side {
-            Side::Client => (client_key, client_iv, client_extra, server_key, server_iv),
-            Side::Server => (server_key, server_iv, server_extra, client_key, client_iv),
+    /// `order` is the negotiated MAC order; it is ignored by AEAD suites.
+    pub(crate) fn make_cipher_pair(&self, side: Side, order: Tls12MacOrder) -> MessageCipherPair {
+        let shape = self.suite.record.key_block_shape();
+        let mut key_block = self.make_key_block(&shape);
+        let keys = SplitKeyBlock::new(&key_block, &shape, side);
+        let pair = match self.suite.record {
+            Tls12RecordProtection::Aead(alg) => MessageCipherPair {
+                enc: alg.encrypter(
+                    AeadKey::new(keys.write_key),
+                    keys.write_iv,
+                    keys.write_explicit,
+                ),
+                dec: alg.decrypter(AeadKey::new(keys.read_key), keys.read_iv),
+            },
+            Tls12RecordProtection::BlockCipher(alg) => MessageCipherPair {
+                enc: alg.encrypter(keys.write_mac_key, AeadKey::new(keys.write_key), order),
+                dec: alg.decrypter(keys.read_mac_key, AeadKey::new(keys.read_key), order),
+            },
         };
-        let pair = MessageCipherPair {
-            enc: self
-                .suite
-                .aead_alg
-                .encrypter(AeadKey::new(write_key), write_iv, write_extra),
-            dec: self
-                .suite
-                .aead_alg
-                .decrypter(AeadKey::new(read_key), read_iv),
-        };
-        let mut key_block = key_block;
         crate::crypto::zeroize_vec(&mut key_block);
         pair
     }
 
     fn make_key_block(&self, shape: &crate::crypto::cipher::KeyBlockShape) -> Vec<u8> {
-        let len = (shape.enc_key_len + shape.fixed_iv_len + shape.explicit_nonce_len) * 2;
-        let mut out = alloc::vec![0u8; len];
+        let mut out = alloc::vec![0u8; shape.total_len()];
         // RFC 5246 §6.3: key_block = PRF(master_secret, "key expansion", server_random + client_random)
         let seed = join_randoms(&self.randoms.server, &self.randoms.client);
         self.suite
@@ -193,12 +195,22 @@ impl ConnectionSecrets {
     }
 
     /// RFC 5705 keying material export.
+    ///
+    /// Refused for a legacy master secret: RFC 7627 §5.4 says a connection
+    /// without the extended master secret MUST NOT export keying material,
+    /// since a man in the middle may have synchronised it with another
+    /// connection's (triple handshake).
     pub(crate) fn export_keying_material(
         &self,
         output: &mut [u8],
         label: &[u8],
         context: Option<&[u8]>,
-    ) {
+    ) -> Result<(), Error> {
+        if !self.extended_master_secret {
+            return Err(Error::General(
+                "keying material export requires the extended master secret (RFC 7627 §5.4)".into(),
+            ));
+        }
         let mut seed = join_randoms(&self.randoms.client, &self.randoms.server);
         if let Some(context) = context {
             // Context lengths are bounded by callers at u16::MAX.
@@ -208,37 +220,76 @@ impl ConnectionSecrets {
         self.suite
             .prf_provider
             .for_secret(output, &self.master_secret, label, &seed);
+        Ok(())
     }
 
     pub(crate) fn extract_secrets(&self, side: Side) -> Result<PartiallyExtractedSecrets, Error> {
-        let shape = self.suite.aead_alg.key_block_shape();
-        let key_block = self.make_key_block(&shape);
-        let (client_key, rest) = key_block.split_at(shape.enc_key_len);
+        let Tls12RecordProtection::Aead(alg) = self.suite.record else {
+            // Block cipher suites have no kernel TLS representation.
+            return Err(UnsupportedOperationError.into());
+        };
+        let shape = alg.key_block_shape();
+        let mut key_block = self.make_key_block(&shape);
+        let keys = SplitKeyBlock::new(&key_block, &shape, side);
+        let tx = alg.extract_keys(
+            AeadKey::new(keys.write_key),
+            keys.write_iv,
+            keys.write_explicit,
+        );
+        let rx = alg.extract_keys(
+            AeadKey::new(keys.read_key),
+            keys.read_iv,
+            keys.read_explicit,
+        );
+        crate::crypto::zeroize_vec(&mut key_block);
+        Ok(PartiallyExtractedSecrets { tx: tx?, rx: rx? })
+    }
+}
+
+/// The parts of a key block (RFC 5246 §6.3) seen from one side.
+struct SplitKeyBlock<'a> {
+    write_mac_key: &'a [u8],
+    read_mac_key: &'a [u8],
+    write_key: &'a [u8],
+    read_key: &'a [u8],
+    write_iv: &'a [u8],
+    read_iv: &'a [u8],
+    write_explicit: &'a [u8],
+    read_explicit: &'a [u8],
+}
+
+impl<'a> SplitKeyBlock<'a> {
+    fn new(key_block: &'a [u8], shape: &crate::crypto::cipher::KeyBlockShape, side: Side) -> Self {
+        let (client_mac, rest) = key_block.split_at(shape.mac_key_len);
+        let (server_mac, rest) = rest.split_at(shape.mac_key_len);
+        let (client_key, rest) = rest.split_at(shape.enc_key_len);
         let (server_key, rest) = rest.split_at(shape.enc_key_len);
         let (client_iv, rest) = rest.split_at(shape.fixed_iv_len);
         let (server_iv, rest) = rest.split_at(shape.fixed_iv_len);
-        let (client_extra, rest) = rest.split_at(shape.explicit_nonce_len);
-        let (server_extra, _) = rest.split_at(shape.explicit_nonce_len);
-        let client =
-            self.suite
-                .aead_alg
-                .extract_keys(AeadKey::new(client_key), client_iv, client_extra)?;
-        let server =
-            self.suite
-                .aead_alg
-                .extract_keys(AeadKey::new(server_key), server_iv, server_extra)?;
-        let mut key_block = key_block;
-        crate::crypto::zeroize_vec(&mut key_block);
-        Ok(match side {
-            Side::Client => PartiallyExtractedSecrets {
-                tx: client,
-                rx: server,
+        let (client_explicit, rest) = rest.split_at(shape.explicit_nonce_len);
+        let (server_explicit, _) = rest.split_at(shape.explicit_nonce_len);
+        match side {
+            Side::Client => Self {
+                write_mac_key: client_mac,
+                read_mac_key: server_mac,
+                write_key: client_key,
+                read_key: server_key,
+                write_iv: client_iv,
+                read_iv: server_iv,
+                write_explicit: client_explicit,
+                read_explicit: server_explicit,
             },
-            Side::Server => PartiallyExtractedSecrets {
-                tx: server,
-                rx: client,
+            Side::Server => Self {
+                write_mac_key: server_mac,
+                read_mac_key: client_mac,
+                write_key: server_key,
+                read_key: client_key,
+                write_iv: server_iv,
+                read_iv: client_iv,
+                write_explicit: server_explicit,
+                read_explicit: client_explicit,
             },
-        })
+        }
     }
 }
 

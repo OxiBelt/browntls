@@ -108,6 +108,20 @@ pub struct ClientConfig {
     /// Whether TLS 1.2 servers must support the extended master secret (RFC 7627).
     pub require_ems: bool,
 
+    /// Whether a TLS 1.2 server must acknowledge secure renegotiation
+    /// (RFC 5746). On by default: RFC 9325 §3.5 requires a client to abort
+    /// otherwise, since such a server is vulnerable to renegotiation attacks
+    /// whether or not either side renegotiates. Turn off only for a legacy
+    /// server known not to renegotiate.
+    pub require_secure_renegotiation: bool,
+
+    /// Whether a TLS 1.2 CBC cipher suite may be used without the
+    /// `encrypt_then_mac` extension (RFC 7366). Off by default (RFC 9325
+    /// §4.2): the MAC-then-encrypt construction of RFC 5246 is decrypted in
+    /// constant time, but its padding oracle history is the reason for the
+    /// extension. Irrelevant unless the provider offers a CBC suite.
+    pub allow_mac_then_encrypt: bool,
+
     /// The clock.
     pub time_provider: Arc<dyn TimeProvider>,
 
@@ -410,18 +424,36 @@ impl EarlyData {
 pub struct ClientConnectionData {
     pub(super) tls13_tickets_received: u32,
     pub(super) early_data: EarlyData,
+    /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
+    /// can forget it.
+    session_store: Arc<dyn ClientSessionStore>,
+    server_name: ServerName<'static>,
 }
 
 impl ClientConnectionData {
-    fn new() -> Self {
+    fn new(session_store: Arc<dyn ClientSessionStore>, server_name: ServerName<'static>) -> Self {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
+            session_store,
+            server_name,
         }
     }
 }
 
-impl SideData for ClientConnectionData {}
+impl SideData for ClientConnectionData {
+    fn on_fatal_error(&mut self, negotiated_version: Option<ProtocolVersion>) {
+        // RFC 5246 §7.2.2: the session of a connection that failed cannot be
+        // resumed. Before the ServerHello no session belongs to this
+        // connection yet; TLS 1.3 tickets are single-use anyway.
+        #[cfg(feature = "tls12")]
+        if negotiated_version == Some(ProtocolVersion::TLSv1_2) {
+            self.session_store.remove_tls12_session(&self.server_name);
+        }
+        #[cfg(not(feature = "tls12"))]
+        let _ = negotiated_version;
+    }
+}
 
 impl ConnectionCore<ClientConnectionData> {
     pub(crate) fn for_client(
@@ -433,7 +465,7 @@ impl ConnectionCore<ClientConnectionData> {
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
-        let mut data = ClientConnectionData::new();
+        let mut data = ClientConnectionData::new(config.resumption.store.clone(), name.clone());
         let mut cx = crate::conn::Context {
             common: &mut common_state,
             data: &mut data,

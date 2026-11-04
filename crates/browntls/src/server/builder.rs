@@ -100,6 +100,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             send_half_rtt_data: false,
             send_tls13_tickets: 2,
             require_ems,
+            allow_mac_then_encrypt: false,
             time_provider: self.time_provider,
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),

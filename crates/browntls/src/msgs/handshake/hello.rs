@@ -40,6 +40,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) certificate_status_request: Option<CertificateStatusRequest>,
     pub(crate) sct_request: Option<()>,
     pub(crate) extended_master_secret: Option<()>,
+    /// RFC 7366: an empty `encrypt_then_mac` extension.
+    pub(crate) encrypt_then_mac: Option<()>,
     pub(crate) session_ticket: Option<ClientSessionTicket>,
     pub(crate) supported_versions: Option<Vec<ProtocolVersion>>,
     pub(crate) key_shares: Option<Vec<KeyShareEntry>>,
@@ -93,6 +95,10 @@ impl ClientExtensions {
         add(
             self.extended_master_secret.is_some(),
             ExtensionType::ExtendedMasterSecret,
+        );
+        add(
+            self.encrypt_then_mac.is_some(),
+            ExtensionType::EncryptThenMac,
         );
         add(self.session_ticket.is_some(), ExtensionType::SessionTicket);
         add(
@@ -175,6 +181,9 @@ impl Codec<'_> for ClientExtensions {
         }
         if self.extended_master_secret.is_some() {
             encode_extension(ExtensionType::ExtendedMasterSecret, out, |_| {});
+        }
+        if self.encrypt_then_mac.is_some() {
+            encode_extension(ExtensionType::EncryptThenMac, out, |_| {});
         }
         if let Some(ticket) = &self.session_ticket {
             encode_extension(ExtensionType::SessionTicket, out, |b| match ticket {
@@ -260,6 +269,7 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::SCT => out.sct_request = Some(()),
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
+                ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
                 ExtensionType::SessionTicket => {
                     out.session_ticket = Some(if body.any_left() {
                         ClientSessionTicket::Offer(Payload::read(body).into_owned())

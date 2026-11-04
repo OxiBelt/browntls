@@ -178,6 +178,12 @@ pub struct ServerConfig {
     /// Whether TLS 1.2 clients must support the extended master secret (RFC 7627).
     pub require_ems: bool,
 
+    /// Whether a TLS 1.2 CBC cipher suite may be selected for a client that
+    /// did not offer the `encrypt_then_mac` extension (RFC 7366). Off by
+    /// default (RFC 9325 §4.2); such a client then gets an AEAD suite or no
+    /// connection. Irrelevant unless the provider offers a CBC suite.
+    pub allow_mac_then_encrypt: bool,
+
     /// The clock.
     pub time_provider: Arc<dyn TimeProvider>,
 
@@ -368,9 +374,21 @@ pub struct ServerConnectionData {
     pub(super) received_resumption_data: Option<Vec<u8>>,
     pub(super) resumption_data: Vec<u8>,
     pub(super) early_data: EarlyDataState,
+    /// The session cache entry this TLS 1.2 connection resumed or created,
+    /// so a fatal error can forget it (tickets are stateless and cannot be
+    /// recalled).
+    pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
 }
 
-impl SideData for ServerConnectionData {}
+impl SideData for ServerConnectionData {
+    fn on_fatal_error(&mut self, _negotiated_version: Option<ProtocolVersion>) {
+        // RFC 5246 §7.2.2: the session of a connection that failed cannot be
+        // resumed.
+        if let Some((store, id)) = self.tls12_session.take() {
+            store.take(&id);
+        }
+    }
+}
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {

@@ -303,6 +303,8 @@ pub(crate) struct ServerExtensions {
     pub(crate) alpn: Option<ProtocolName>,
     pub(crate) ec_point_formats: Option<Vec<ECPointFormat>>,
     pub(crate) extended_master_secret: Option<()>,
+    /// RFC 7366: an empty `encrypt_then_mac` extension.
+    pub(crate) encrypt_then_mac: Option<()>,
     pub(crate) session_ticket_ack: Option<()>,
     pub(crate) status_request_ack: Option<()>,
     pub(crate) sct_list: Option<Payload<'static>>,
@@ -336,6 +338,10 @@ impl ServerExtensions {
         add(
             self.extended_master_secret.is_some(),
             ExtensionType::ExtendedMasterSecret,
+        );
+        add(
+            self.encrypt_then_mac.is_some(),
+            ExtensionType::EncryptThenMac,
         );
         add(
             self.session_ticket_ack.is_some(),
@@ -394,6 +400,9 @@ impl Codec<'_> for ServerExtensions {
         if self.extended_master_secret.is_some() {
             encode_extension(ExtensionType::ExtendedMasterSecret, out, |_| {});
         }
+        if self.encrypt_then_mac.is_some() {
+            encode_extension(ExtensionType::EncryptThenMac, out, |_| {});
+        }
         if self.session_ticket_ack.is_some() {
             encode_extension(ExtensionType::SessionTicket, out, |_| {});
         }
@@ -446,6 +455,7 @@ impl Codec<'_> for ServerExtensions {
                     out.ec_point_formats = Some(read_nonempty_vec_u8(body, "ECPointFormatList")?);
                 }
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
+                ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
                 ExtensionType::SessionTicket => out.session_ticket_ack = Some(()),
                 ExtensionType::StatusRequest => out.status_request_ack = Some(()),
                 ExtensionType::SCT => out.sct_list = Some(Payload::read(body).into_owned()),

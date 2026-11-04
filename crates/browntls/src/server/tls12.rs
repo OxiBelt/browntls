@@ -10,6 +10,7 @@ use super::hs::{self, NextStateOrError, ServerContext};
 use super::server_conn::{ServerConfig, ServerConnectionData};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
+use crate::crypto::cipher::Tls12MacOrder;
 use crate::crypto::{ActiveKeyExchange, SupportedKxGroup};
 use crate::ct::constant_time_eq;
 use crate::enums::{
@@ -38,12 +39,22 @@ use crate::verify::{DigitallySignedStruct, FinishedMessageVerified};
 /// How many unsolicited ClientHellos (renegotiation attempts) we tolerate.
 const MAX_RENEGOTIATION_REQUESTS: u8 = 16;
 
+/// The MAC order negotiated for a block cipher suite (RFC 7366).
+fn mac_order(using_etm: bool) -> Tls12MacOrder {
+    if using_etm {
+        Tls12MacOrder::EncryptThenMac
+    } else {
+        Tls12MacOrder::MacThenEncrypt
+    }
+}
+
 pub(super) struct CompleteClientHelloHandling {
     pub(super) config: Arc<ServerConfig>,
     pub(super) transcript: HandshakeHash,
     pub(super) session_id: SessionId,
     pub(super) suite: &'static Tls12CipherSuite,
     pub(super) using_ems: bool,
+    pub(super) using_etm: bool,
     pub(super) randoms: ConnectionRandoms,
     pub(super) send_ticket: bool,
     pub(super) cert_types: hs::NegotiatedCertTypes,
@@ -119,6 +130,12 @@ impl CompleteClientHelloHandling {
                 .and_then(|plain| ServerSessionValue::read_bytes(&plain).ok())
             && hs::can_resume(self.suite.into(), &cx.data.sni, self.using_ems, &resume)
         {
+            // The entry stays in the cache for later resumptions unless this
+            // connection fails (RFC 5246 §7.2.2).
+            cx.data.tls12_session = Some((
+                self.config.session_storage.clone(),
+                client_hello.session_id.as_ref().to_vec(),
+            ));
             return self.start_resumption(
                 cx,
                 client_hello,
@@ -148,6 +165,7 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             ocsp.is_some(),
+            false,
         );
         emit_certificate(&mut self.transcript, cx.common, server_key.get_cert());
         if let Some(ocsp) = ocsp {
@@ -173,6 +191,7 @@ impl CompleteClientHelloHandling {
                 session_id: self.session_id,
                 suite: self.suite,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 server_kx: kx,
                 send_ticket: self.send_ticket,
             }))
@@ -184,6 +203,7 @@ impl CompleteClientHelloHandling {
                 session_id: self.session_id,
                 suite: self.suite,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 server_kx: kx,
                 client_cert: None,
                 send_ticket: self.send_ticket,
@@ -204,7 +224,7 @@ impl CompleteClientHelloHandling {
         // RFC 7627 §5.3: a session may not drop the extended master secret.
         if resumedata.extended_ms && !self.using_ems {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
+                AlertDescription::HandshakeFailure,
                 PeerMisbehaved::ResumptionAttemptedWithVariedEms,
             ));
         }
@@ -221,16 +241,22 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             false,
+            true,
         );
 
-        let secrets =
-            ConnectionSecrets::new_resume(self.randoms, self.suite, &resumedata.master_secret.0);
+        let secrets = ConnectionSecrets::new_resume(
+            self.randoms,
+            self.suite,
+            &resumedata.master_secret.0,
+            resumedata.extended_ms,
+        );
         self.config.key_log.log(
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),
         );
-        cx.common.start_encryption_tls12(&secrets, Side::Server);
+        cx.common
+            .start_encryption_tls12(&secrets, Side::Server, mac_order(self.using_etm));
         cx.common.peer_certificates = resumedata.client_cert_chain.clone();
         cx.data.received_resumption_data = Some(resumedata.application_data.0.clone());
         cx.common.handshake_kind = Some(HandshakeKind::Resumed);
@@ -259,11 +285,14 @@ impl CompleteClientHelloHandling {
         client_hello: &ClientHelloPayload,
         secure_renegotiation: bool,
         staple_ocsp: bool,
+        resuming: bool,
     ) {
         let extensions = ServerExtensions {
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),
             extended_master_secret: self.using_ems.then_some(()),
+            // RFC 7366 §2: acknowledged only for a block cipher suite.
+            encrypt_then_mac: self.using_etm.then_some(()),
             // RFC 8422 §5.2: we only send uncompressed points.
             ec_point_formats: client_hello
                 .extensions
@@ -279,7 +308,10 @@ impl CompleteClientHelloHandling {
                 .alpn_protocol
                 .clone()
                 .map(crate::msgs::handshake::ProtocolName::from),
-            server_name_ack: client_hello.sni().map(|_| ()),
+            // RFC 6066 §3: never acknowledged when resuming a session.
+            server_name_ack: (!resuming)
+                .then(|| client_hello.sni().map(|_| ()))
+                .flatten(),
             ..Default::default()
         };
         let sh = Message {
@@ -507,6 +539,7 @@ struct ExpectCertificate {
     session_id: SessionId,
     suite: &'static Tls12CipherSuite,
     using_ems: bool,
+    using_etm: bool,
     server_kx: Box<dyn ActiveKeyExchange>,
     send_ticket: bool,
 }
@@ -521,8 +554,10 @@ impl State<ServerConnectionData> for ExpectCertificate {
         let Some((end_entity, intermediates)) = cert_chain.0.split_first() else {
             // RFC 5246 §7.4.6: an empty list is allowed unless we insist.
             if self.config.verifier.client_auth_mandatory() {
+                // RFC 5246 §7.4.6: a missing mandatory certificate is a
+                // handshake_failure (certificate_required is TLS 1.3 only).
                 return Err(cx.common.send_fatal_alert(
-                    AlertDescription::CertificateRequired,
+                    AlertDescription::HandshakeFailure,
                     Error::NoCertificatesPresented,
                 ));
             }
@@ -534,6 +569,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
                 session_id: self.session_id,
                 suite: self.suite,
                 using_ems: self.using_ems,
+                using_etm: self.using_etm,
                 server_kx: self.server_kx,
                 client_cert: None,
                 send_ticket: self.send_ticket,
@@ -553,6 +589,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
             session_id: self.session_id,
             suite: self.suite,
             using_ems: self.using_ems,
+            using_etm: self.using_etm,
             server_kx: self.server_kx,
             client_cert: Some(cert_chain),
             send_ticket: self.send_ticket,
@@ -567,6 +604,7 @@ struct ExpectClientKx {
     session_id: SessionId,
     suite: &'static Tls12CipherSuite,
     using_ems: bool,
+    using_etm: bool,
     server_kx: Box<dyn ActiveKeyExchange>,
     client_cert: Option<CertificateChain<'static>>,
     send_ticket: bool,
@@ -609,7 +647,8 @@ impl State<ServerConnectionData> for ExpectClientKx {
             &secrets.randoms.client,
             secrets.master_secret(),
         );
-        cx.common.start_encryption_tls12(&secrets, Side::Server);
+        cx.common
+            .start_encryption_tls12(&secrets, Side::Server, mac_order(st.using_etm));
 
         match st.client_cert {
             Some(client_cert) => Ok(Box::new(ExpectCertificateVerify {
@@ -777,11 +816,14 @@ impl State<ServerConnectionData> for ExpectFinished {
                     st.secrets.suite(),
                     st.using_ems,
                 )?;
-                if !st
+                let id = st.session_id.as_ref().to_vec();
+                if st
                     .config
                     .session_storage
-                    .put(st.session_id.as_ref().to_vec(), value.get_encoding())
+                    .put(id.clone(), value.get_encoding())
                 {
+                    cx.data.tls12_session = Some((st.config.session_storage.clone(), id));
+                } else {
                     debug!("session not stored by the session cache");
                 }
             }
@@ -841,8 +883,7 @@ impl State<ServerConnectionData> for ExpectTraffic {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
-        self.secrets.export_keying_material(output, label, context);
-        Ok(())
+        self.secrets.export_keying_material(output, label, context)
     }
 
     fn extract_secrets(&self) -> Result<PartiallyExtractedSecrets, Error> {

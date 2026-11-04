@@ -322,10 +322,16 @@ fn x448_handshakes_in_tls13_and_tls12() {
     init_logging();
     for key_type in [KeyType::Ed25519, KeyType::EcdsaP256, KeyType::Rsa2048] {
         let chain = server_chain(key_type);
+        // RFC 8422 §5.3: in TLS 1.2 the client must list the curve of an
+        // ECDSA certificate too; the server still exchanges keys over X448.
+        let mut client_groups = vec![x448()];
+        if key_type == KeyType::EcdsaP256 {
+            client_groups.push(prov::kx_group::SECP256R1);
+        }
         for v in VERSIONS {
             let client = client_for(
                 v,
-                provider_with_groups(&[x448()]),
+                provider_with_groups(&client_groups),
                 PinnedServerVerifier::new(&chain),
             )
             .with_no_client_auth();
@@ -541,7 +547,7 @@ static MALFORMED: [MalformedX448; 9] = [
 #[test]
 fn malformed_x448_shares_are_rejected() {
     init_logging();
-    let chain = server_chain(KeyType::EcdsaP256);
+    let chain = server_chain(KeyType::Ed25519);
     let invalid = Error::PeerMisbehaved(PeerMisbehaved::InvalidKeyShare);
     for bad in &MALFORMED {
         let malformed: &'static dyn SupportedKxGroup = bad;

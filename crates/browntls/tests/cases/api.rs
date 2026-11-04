@@ -192,6 +192,7 @@ fn key_log_receives_every_tls13_secret() {
     assert!(c.iter().all(|(_, random, _)| random.len() == 32));
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn key_log_receives_the_tls12_master_secret() {
     init_logging();
@@ -319,7 +320,7 @@ fn key_bytes(secrets: &ConnectionTrafficSecrets) -> (Vec<u8>, Vec<u8>) {
 fn extracted_secrets_match_across_the_connection() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
-    for v in [&version::TLS13, &version::TLS12] {
+    for v in browntls::ALL_VERSIONS.iter().copied() {
         let mut client_config = ClientConfig::builder_with_provider(provider())
             .with_protocol_versions(&[v])
             .unwrap()
@@ -418,7 +419,7 @@ fn ocsp_response_is_stapled_in_both_versions() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let ocsp = b"not really an OCSP response, but opaque to TLS".to_vec();
-    for v in [&version::TLS13, &version::TLS12] {
+    for v in browntls::ALL_VERSIONS.iter().copied() {
         let verifier = Arc::new(OcspCapturingVerifier {
             inner: PinnedServerVerifier::new(&chain),
             seen: Mutex::new(None),

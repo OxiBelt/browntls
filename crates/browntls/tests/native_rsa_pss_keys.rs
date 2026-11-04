@@ -91,13 +91,18 @@ fn pss_pss_scheme(hash: HashAlgorithm) -> SignatureScheme {
     }
 }
 
+#[cfg(feature = "tls12")]
 const VERSIONS: [ProtocolVersion; 2] = [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+#[cfg(not(feature = "tls12"))]
+const VERSIONS: [ProtocolVersion; 1] = [ProtocolVersion::TLSv1_3];
 
+#[cfg(feature = "tls12")]
 static TLS12_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS12];
 static TLS13_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS13];
 
 fn versions(v: ProtocolVersion) -> &'static [&'static SupportedProtocolVersion] {
     match v {
+        #[cfg(feature = "tls12")]
         ProtocolVersion::TLSv1_2 => &TLS12_ONLY,
         _ => &TLS13_ONLY,
     }
@@ -639,9 +644,11 @@ fn pss_server_signs_with_every_pss_pss_scheme() {
             "{v:?}"
         );
     }
-    assert_eq!(handshakes, 6);
+    // Three schemes in each enabled version.
+    assert_eq!(handshakes, 3 * VERSIONS.len());
 }
 
+#[cfg(feature = "tls12")]
 #[cfg(feature = "tls12")]
 #[test]
 fn pss_server_signs_with_every_tls12_rsa_suite() {

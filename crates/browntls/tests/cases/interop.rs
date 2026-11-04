@@ -218,13 +218,22 @@ fn r_roots(chain: &Chain) -> Arc<rustls::RootCertStore> {
     Arc::new(roots)
 }
 
+#[cfg(feature = "tls12")]
 static R_TLS12: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS12];
 static R_TLS13: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS13];
+#[cfg(feature = "tls12")]
 static B_TLS12: [&browntls::SupportedProtocolVersion; 1] = [&browntls::version::TLS12];
 static B_TLS13: [&browntls::SupportedProtocolVersion; 1] = [&browntls::version::TLS13];
 
+/// The versions the per-version cases run with (code points).
+#[cfg(feature = "tls12")]
+const VERSIONS: [u16; 2] = [0x0304, 0x0303];
+#[cfg(not(feature = "tls12"))]
+const VERSIONS: [u16; 1] = [0x0304];
+
 fn r_versions(version: u16) -> &'static [&'static rustls::SupportedProtocolVersion] {
     match version {
+        #[cfg(feature = "tls12")]
         0x0303 => &R_TLS12,
         0x0304 => &R_TLS13,
         _ => rustls::ALL_VERSIONS,
@@ -233,6 +242,7 @@ fn r_versions(version: u16) -> &'static [&'static rustls::SupportedProtocolVersi
 
 fn b_versions(version: u16) -> &'static [&'static browntls::SupportedProtocolVersion] {
     match version {
+        #[cfg(feature = "tls12")]
         0x0303 => &B_TLS12,
         0x0304 => &B_TLS13,
         _ => browntls::ALL_VERSIONS,
@@ -522,7 +532,11 @@ fn rustls_client_to_browntls_server_every_suite_group_and_key() {
         }
     }
     // RSA: 3 TLS 1.3 suites and 3 ECDHE_RSA suites, 3 groups each.
-    assert_eq!(rsa_handshakes, if prov::SIGNS_RSA { 18 } else { 0 });
+    let rsa_suites = if cfg!(feature = "tls12") { 6 } else { 3 };
+    assert_eq!(
+        rsa_handshakes,
+        if prov::SIGNS_RSA { 3 * rsa_suites } else { 0 }
+    );
 }
 
 // --------------------------------------------------------- version choice
@@ -553,6 +567,7 @@ fn default_configs_pick_tls13_and_post_quantum_free_group() {
     assert_eq!(server.handshake_kind(), Some(browntls::HandshakeKind::Full));
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn tls12_only_client_accepts_downgrade_sentinel_from_dual_version_server() {
     init_logging();
@@ -574,6 +589,7 @@ fn tls12_only_client_accepts_downgrade_sentinel_from_dual_version_server() {
     round_trip(&mut client, &mut server);
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn version_mismatch_is_a_protocol_version_alert() {
     init_logging();
@@ -669,7 +685,7 @@ fn hello_retry_request_both_directions() {
 fn resumption_browntls_client_rustls_server() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for tickets in [false, true] {
             let client_config = Arc::new(b_client(&chain, version, None, None));
             let mut server_config = r_server(&chain, version, None, None);
@@ -709,7 +725,7 @@ fn resumption_browntls_client_rustls_server() {
 fn resumption_rustls_client_browntls_server() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for tickets in [false, true] {
             let client_config = Arc::new(r_client(&chain, version, None, None));
             let mut server_config = b_server(&chain, version, None, None);
@@ -752,7 +768,7 @@ fn r_connect_client_from(config: Arc<rustls::ClientConfig>) -> rustls::ClientCon
 fn client_auth_browntls_client_rustls_server() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for &key_type in KeyType::SIGNING {
             let client_chain = client_chain(key_type);
             let mut client = b_connect_client(b_client_with_auth(&chain, &client_chain, version));
@@ -782,7 +798,7 @@ fn client_auth_browntls_client_rustls_server() {
 fn client_auth_rustls_client_browntls_server() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for key_type in KeyType::ALL {
             let client_chain = client_chain(key_type);
             let mut client = r_connect_client(r_client_with_auth(&chain, &client_chain, version));
@@ -813,7 +829,7 @@ fn missing_client_certificate_is_rejected_by_both() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let client_chain = client_chain(KeyType::Ed25519);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = b_connect_client(b_client(&chain, version, None, None));
         let mut server = rustls::ServerConnection::new(Arc::new(r_server_with_client_auth(
             &chain,
@@ -857,7 +873,7 @@ fn rustls_rejects_browntls_server_with_unknown_root() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let other = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = r_connect_client(r_client(&other, version, None, None));
         let mut server =
             browntls::ServerConnection::new(Arc::new(b_server(&chain, version, None, None)))
@@ -892,7 +908,7 @@ fn browntls_rejects_unexpected_rustls_server_certificate() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let other = server_chain(KeyType::EcdsaP256);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = b_connect_client(b_client(&other, version, None, None));
         let mut server =
             rustls::ServerConnection::new(Arc::new(r_server(&chain, version, None, None))).unwrap();
@@ -920,7 +936,7 @@ fn browntls_rejects_unexpected_rustls_server_certificate() {
 fn alpn_both_directions() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut cc = b_client(&chain, version, None, None);
         cc.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let mut sc = r_server(&chain, version, None, None);
@@ -972,7 +988,7 @@ fn large_transfers_both_directions() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
     let data: Vec<u8> = (0..100_000u32).map(|i| (i % 253) as u8).collect();
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = b_connect_client(b_client(&chain, version, None, None));
         let mut server =
             rustls::ServerConnection::new(Arc::new(r_server(&chain, version, None, None))).unwrap();
@@ -998,7 +1014,7 @@ fn large_transfers_both_directions() {
 fn close_notify_both_directions() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = b_connect_client(b_client(&chain, version, None, None));
         let mut server =
             rustls::ServerConnection::new(Arc::new(r_server(&chain, version, None, None))).unwrap();
@@ -1022,7 +1038,7 @@ fn close_notify_both_directions() {
 fn exporter_matches_rustls() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         let mut client = b_connect_client(b_client(&chain, version, None, None));
         let mut server =
             rustls::ServerConnection::new(Arc::new(r_server(&chain, version, None, None))).unwrap();

@@ -10,11 +10,19 @@ use browntls::{
 };
 use common::*;
 
+#[cfg(feature = "tls12")]
 static TLS12_ONLY: [&browntls::SupportedProtocolVersion; 1] = [&version::TLS12];
 static TLS13_ONLY: [&browntls::SupportedProtocolVersion; 1] = [&version::TLS13];
 
+/// The versions every case runs with.
+#[cfg(feature = "tls12")]
+const VERSIONS: [ProtocolVersion; 2] = [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+#[cfg(not(feature = "tls12"))]
+const VERSIONS: [ProtocolVersion; 1] = [ProtocolVersion::TLSv1_3];
+
 fn versions(v: ProtocolVersion) -> &'static [&'static browntls::SupportedProtocolVersion] {
     match v {
+        #[cfg(feature = "tls12")]
         ProtocolVersion::TLSv1_2 => &TLS12_ONLY,
         _ => &TLS13_ONLY,
     }
@@ -57,7 +65,7 @@ fn connect(client: ClientConfig, server: ServerConfig) -> (ClientConnection, Ser
 #[test]
 fn server_raw_public_key_every_key_type_and_version() {
     init_logging();
-    for v in [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2] {
+    for v in VERSIONS {
         for &key_type in KeyType::SIGNING {
             let chain = server_chain(key_type);
             let (mut client, mut server) =
@@ -81,7 +89,7 @@ fn server_raw_public_key_every_key_type_and_version() {
 #[test]
 fn mutual_raw_public_keys() {
     init_logging();
-    for v in [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2] {
+    for v in VERSIONS {
         let chain = server_chain(KeyType::EcdsaP256);
         let client_chain = client_chain(KeyType::Ed25519);
         let (mut client, mut server) = connect(
@@ -105,7 +113,7 @@ fn mutual_raw_public_keys() {
 #[test]
 fn server_requiring_raw_keys_refuses_x509_only_client() {
     init_logging();
-    for v in [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2] {
+    for v in VERSIONS {
         let chain = server_chain(KeyType::EcdsaP256);
         let x509_client = ClientConfig::builder_with_provider(provider())
             .with_protocol_versions(versions(v))
@@ -131,7 +139,7 @@ fn server_requiring_raw_keys_refuses_x509_only_client() {
 #[test]
 fn client_requiring_raw_keys_refuses_x509_server() {
     init_logging();
-    for v in [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2] {
+    for v in VERSIONS {
         let chain = server_chain(KeyType::EcdsaP256);
         let (mut client, mut server) = connect(rpk_client(&chain, v, None), server_config(&chain));
         let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server);

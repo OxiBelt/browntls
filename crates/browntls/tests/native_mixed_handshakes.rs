@@ -54,13 +54,18 @@ const DIRECTIONS: [(Side, Side); 2] = [
     (Side::RustCrypto, Side::Native),
 ];
 
+#[cfg(feature = "tls12")]
 const VERSIONS: [ProtocolVersion; 2] = [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+#[cfg(not(feature = "tls12"))]
+const VERSIONS: [ProtocolVersion; 1] = [ProtocolVersion::TLSv1_3];
 
+#[cfg(feature = "tls12")]
 static TLS12_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS12];
 static TLS13_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS13];
 
 fn versions(v: ProtocolVersion) -> &'static [&'static SupportedProtocolVersion] {
     match v {
+        #[cfg(feature = "tls12")]
         ProtocolVersion::TLSv1_2 => &TLS12_ONLY,
         _ => &TLS13_ONLY,
     }
@@ -299,9 +304,15 @@ fn every_suite_group_and_key_type_both_directions() {
             }
         }
     }
-    // Per direction: 3 TLS 1.3 suites x 4 key types x 7 groups,
-    // 3 ECDHE_ECDSA suites x 3 key types x 4 groups, 3 ECDHE_RSA suites x 4 groups.
-    assert_eq!(handshakes, 2 * (3 * 4 * 7 + 3 * 3 * 4 + 3 * 4));
+    // Per direction: 3 TLS 1.3 suites x 4 key types x 7 groups, and with
+    // TLS 1.2 3 ECDHE_ECDSA suites x 3 key types x 4 groups and 3 ECDHE_RSA
+    // suites x 4 groups.
+    let tls12 = if cfg!(feature = "tls12") {
+        3 * 3 * 4 + 3 * 4
+    } else {
+        0
+    };
+    assert_eq!(handshakes, 2 * (3 * 4 * 7 + tls12));
 }
 
 #[test]

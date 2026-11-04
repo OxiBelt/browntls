@@ -50,13 +50,18 @@ const PKCS1: [SignatureScheme; 3] = [
     SignatureScheme::RSA_PKCS1_SHA512,
 ];
 
+#[cfg(feature = "tls12")]
 const VERSIONS: [ProtocolVersion; 2] = [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2];
+#[cfg(not(feature = "tls12"))]
+const VERSIONS: [ProtocolVersion; 1] = [ProtocolVersion::TLSv1_3];
 
+#[cfg(feature = "tls12")]
 static TLS12_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS12];
 static TLS13_ONLY: [&SupportedProtocolVersion; 1] = [&version::TLS13];
 
 fn versions(v: ProtocolVersion) -> &'static [&'static SupportedProtocolVersion] {
     match v {
+        #[cfg(feature = "tls12")]
         ProtocolVersion::TLSv1_2 => &TLS12_ONLY,
         _ => &TLS13_ONLY,
     }
@@ -214,8 +219,9 @@ fn rsa_server_signs_with_every_scheme_and_suite() {
         }
     }
     // 5 TLS 1.3 suites (AES-128-CCM and AES-128-CCM-8 included) x 3 PSS
-    // schemes + 3 ECDHE_RSA suites x 6 schemes
-    assert_eq!(handshakes, 33);
+    // schemes + 3 ECDHE_RSA suites x 6 schemes (with TLS 1.2)
+    let tls12 = if cfg!(feature = "tls12") { 3 * 6 } else { 0 };
+    assert_eq!(handshakes, 5 * 3 + tls12);
 }
 
 #[test]
@@ -263,6 +269,7 @@ fn tls13_rsa_server_refuses_a_pkcs1_only_client() {
     assert!(verifier.seen().is_empty());
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn ecdsa_suites_refuse_an_rsa_certificate() {
     init_logging();
@@ -629,6 +636,7 @@ fn secp384r1mlkem1024_share_carries_its_classical_half() {
     round_trip(&mut client, &mut server);
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn mlkem1024_groups_are_not_used_for_tls12() {
     init_logging();

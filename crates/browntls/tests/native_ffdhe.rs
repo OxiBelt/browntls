@@ -30,8 +30,8 @@ use browntls::crypto::{
 };
 use browntls::{
     AlertDescription, ClientConfig, ClientConnection, Error, HandshakeKind, NamedGroup,
-    PeerIncompatible, PeerMisbehaved, ProtocolVersion, ServerConfig, ServerConnection,
-    SupportedProtocolVersion, version,
+    PeerMisbehaved, ProtocolVersion, ServerConfig, ServerConnection, SupportedProtocolVersion,
+    version,
 };
 use common::*;
 
@@ -45,6 +45,7 @@ fn ffdhe_groups() -> [&'static dyn SupportedKxGroup; 5] {
     ]
 }
 
+#[cfg(feature = "tls12")]
 fn is_ffdhe(name: NamedGroup) -> bool {
     ffdhe_groups().iter().any(|g| g.name() == name)
 }
@@ -544,7 +545,7 @@ fn tls12_server_never_selects_ffdhe() {
     assert_eq!(
         server_res,
         Err(Error::PeerIncompatible(
-            PeerIncompatible::NoKxGroupsInCommon
+            browntls::PeerIncompatible::NoKxGroupsInCommon
         ))
     );
     assert_eq!(
@@ -575,6 +576,28 @@ fn tls12_configurations_need_an_ecdhe_group() {
                 .is_err()
         );
     }
+}
+
+/// A TLS 1.3-only configuration with FFDHE as its only groups is accepted
+/// although the provider also lists TLS 1.2 suites, which need ECDHE: suites
+/// of versions that are not enabled are not checked.
+#[test]
+fn tls13_only_ffdhe_configuration_ignores_tls12_suites() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut provider = prov::default_provider();
+    provider.kx_groups = vec![prov::kx_group::FFDHE2048];
+    let provider = Arc::new(provider);
+    let client = Arc::new(client_with(
+        TLS13,
+        provider.clone(),
+        PinnedServerVerifier::new(&chain),
+    ));
+    let server = Arc::new(server_with(TLS13, &chain, provider));
+    let (mut c, mut s) = connect(&client, &server);
+    do_handshake(&mut c, &mut s).unwrap();
+    assert_group(&c, &s, NamedGroup::FFDHE2048);
+    round_trip(&mut c, &mut s);
 }
 
 /// A TLS 1.2-only client whose groups are all TLS 1.3-only has nothing to put

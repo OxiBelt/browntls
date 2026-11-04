@@ -460,6 +460,7 @@ fn no_common_key_exchange_group() {
     );
 }
 
+#[cfg(feature = "tls12")]
 #[test]
 fn version_mismatch() {
     init_logging();

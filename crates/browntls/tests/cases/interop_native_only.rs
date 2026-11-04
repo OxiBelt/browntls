@@ -40,7 +40,7 @@ fn rsa_matrix() -> Vec<(u16, u16, browntls::SignatureScheme)> {
         }
     }
     // 3 TLS 1.3 suites x 3 + 3 ECDHE_RSA suites x 6
-    assert_eq!(out.len(), 27);
+    assert_eq!(out.len(), if cfg!(feature = "tls12") { 27 } else { 9 });
     out
 }
 
@@ -243,7 +243,7 @@ fn native_rsa_client_auth_to_rustls_server_every_scheme() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let client_chain = client_chain(KeyType::Rsa2048);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for scheme in rsa_schemes(version) {
             let verifier = RustlsClientSchemes::new(r_roots(&client_chain), r_scheme(scheme));
             let server_config = rustls::ServerConfig::builder_with_provider(r_provider(None, None))
@@ -270,7 +270,7 @@ fn rustls_rsa_client_auth_to_native_server_every_scheme() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let client_chain = client_chain(KeyType::Rsa2048);
-    for version in [0x0304u16, 0x0303] {
+    for version in VERSIONS {
         for scheme in rsa_schemes(version) {
             let verifier = SchemeRecordingClientVerifier::new(
                 PinnedClientVerifier::new(&client_chain, true),
@@ -306,7 +306,7 @@ fn natively_signed_chains_interoperate_with_rustls() {
     for alg in native_keys::CERT_ALGS {
         let native_chain = native_keys::server_chain(alg);
         let native_client_chain = native_keys::client_chain(alg);
-        for version in [0x0304u16, 0x0303] {
+        for version in VERSIONS {
             // rustls (webpki) validates the native server's chain.
             let mut client = r_connect_client(r_client(&native_chain, version, None, None));
             let mut server = browntls::ServerConnection::new(Arc::new(b_server(
@@ -379,7 +379,7 @@ fn larger_native_rsa_keys_interoperate_with_rustls() {
             &["localhost"],
             rcgen::ExtendedKeyUsagePurpose::ServerAuth,
         );
-        for version in [0x0304u16, 0x0303] {
+        for version in VERSIONS {
             let mut client = r_connect_client(r_client(&chain, version, None, None));
             let mut server =
                 browntls::ServerConnection::new(Arc::new(b_server(&chain, version, None, None)))

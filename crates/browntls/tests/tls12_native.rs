@@ -8,7 +8,7 @@
 //! This target runs the cases in `cases/tls12.rs` with the native provider;
 //! `tls12.rs` runs them with the RustCrypto provider.
 
-#![cfg(feature = "native")]
+#![cfg(all(feature = "native", feature = "tls12"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[path = "providers/native.rs"]

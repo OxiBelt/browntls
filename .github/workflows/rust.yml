@@ -58,6 +58,10 @@ jobs:
       - name: Clippy (riscv64)
         run: cargo clippy --workspace --all-targets --all-features --locked --target riscv64gc-unknown-linux-gnu -- -D warnings
 
+      # Every target, tests included, must also build without TLS 1.2.
+      - name: Clippy (without tls12)
+        run: cargo clippy -p browntls --all-targets --no-default-features --features std,native,rustcrypto,logging --locked -- -D warnings
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings

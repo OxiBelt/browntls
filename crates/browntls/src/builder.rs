@@ -55,7 +55,9 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
     /// Enables exactly `versions`.
     ///
     /// Fails if the provider has no suite for any enabled version, no key
-    /// exchange groups, or a suite whose key exchange no group can serve.
+    /// exchange groups, or a suite of an enabled version whose key exchange
+    /// no group can serve. Suites of versions that are not enabled are not
+    /// checked: they are never offered or selected.
     pub fn with_protocol_versions(
         self,
         versions: &[&'static versions::SupportedProtocolVersion],
@@ -79,7 +81,12 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
                 supported_kx_algos.push(kx);
             }
         }
-        for cs in &self.provider.cipher_suites {
+        for cs in self
+            .provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| versions.contains(&cs.version()))
+        {
             let cs_kx = cs.key_exchange_algorithms();
             if !cs_kx.iter().any(|kx| supported_kx_algos.contains(kx)) {
                 return Err(Error::General(format!(

@@ -213,9 +213,9 @@ fn rsa_server_signs_with_every_scheme_and_suite() {
             }
         }
     }
-    // 4 TLS 1.3 suites (AES-128-CCM-8 is not a default suite) x 3 PSS
+    // 5 TLS 1.3 suites (AES-128-CCM and AES-128-CCM-8 included) x 3 PSS
     // schemes + 3 ECDHE_RSA suites x 6 schemes
-    assert_eq!(handshakes, 30);
+    assert_eq!(handshakes, 33);
 }
 
 #[test]

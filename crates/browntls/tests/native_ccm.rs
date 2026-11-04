@@ -9,9 +9,9 @@
 //!   resumption; record lengths reflect each suite's tag length;
 //! * tampered, truncated, short and oversized records are rejected with the
 //!   right alerts, during and after the handshake;
-//! * negotiation: default configurations never negotiate CCM_8, and a
-//!   server picks CCM only when the peers share no AES-GCM or
-//!   ChaCha20-Poly1305 suite, whatever the client's order;
+//! * negotiation: both suites are in the defaults, after every AES-GCM and
+//!   ChaCha20-Poly1305 suite, and a server picks them only when the peers
+//!   share none of those, whatever the client's order;
 //! * kernel TLS secret extraction: CCM keys extract, CCM_8 keys fail cleanly;
 //! * the integrity limit (RFC 9147 Appendix B) on forged records that a
 //!   server skips while rejecting 0-RTT data.
@@ -454,46 +454,69 @@ fn negotiate(
 }
 
 #[test]
-fn default_configurations_never_negotiate_ccm_8() {
+fn ccm_8_is_the_last_default_suite() {
     init_logging();
     let defaults = prov::DEFAULT_CIPHER_SUITES;
-    assert!(defaults.contains(&cs::TLS13_AES_128_CCM_SHA256));
-    assert!(!defaults.contains(&cs::TLS13_AES_128_CCM_8_SHA256));
-    assert!(prov::ALL_CIPHER_SUITES.contains(&cs::TLS13_AES_128_CCM_8_SHA256));
+    let ccm = cs::TLS13_AES_128_CCM_SHA256;
+    let ccm_8 = cs::TLS13_AES_128_CCM_8_SHA256;
+    assert_eq!(defaults, prov::ALL_CIPHER_SUITES);
     assert_eq!(prov::default_provider().cipher_suites, defaults);
+    // CCM_8 is the last TLS 1.3 suite, right after CCM.
+    let tls13: Vec<_> = defaults
+        .iter()
+        .filter(|s| s.tls13().is_some())
+        .copied()
+        .collect();
+    assert_eq!(tls13[tls13.len() - 2..], [ccm, ccm_8]);
 
-    let ccm_8 = [cs::TLS13_AES_128_CCM_8_SHA256];
-    let no_suite = Err(Error::PeerIncompatible(
-        PeerIncompatible::NoCipherSuitesInCommon,
-    ));
-    // A default client does not offer CCM_8 ...
-    assert_eq!(negotiate(defaults, &ccm_8, false), no_suite);
-    assert_eq!(negotiate(defaults, &ccm_8, true), no_suite);
-    // ... and a default server does not accept it.
-    assert_eq!(negotiate(&ccm_8, defaults, false), no_suite);
-    assert_eq!(negotiate(&ccm_8, defaults, true), no_suite);
     // Defaults on both sides agree on the most preferred suite.
+    for ignore_client_order in [false, true] {
+        assert_eq!(
+            negotiate(defaults, defaults, ignore_client_order),
+            Ok(CipherSuite::TLS13_AES_256_GCM_SHA384)
+        );
+    }
+    // A default client offers CCM_8 and a default server accepts it, when
+    // the peer has nothing else.
+    for ignore_client_order in [false, true] {
+        assert_eq!(
+            negotiate(defaults, &[ccm_8], ignore_client_order),
+            Ok(CipherSuite::TLS13_AES_128_CCM_8_SHA256)
+        );
+        assert_eq!(
+            negotiate(&[ccm_8], defaults, ignore_client_order),
+            Ok(CipherSuite::TLS13_AES_128_CCM_8_SHA256)
+        );
+    }
+    // A client listing CCM_8 first still gets a preferred suite from a
+    // default server, and CCM ranks before CCM_8 in the server's order.
+    for ignore_client_order in [false, true] {
+        assert_eq!(
+            negotiate(
+                &[ccm_8, cs::TLS13_AES_128_GCM_SHA256],
+                defaults,
+                ignore_client_order
+            ),
+            Ok(CipherSuite::TLS13_AES_128_GCM_SHA256)
+        );
+    }
     assert_eq!(
-        negotiate(defaults, defaults, false),
-        Ok(CipherSuite::TLS13_AES_256_GCM_SHA384)
-    );
-    // With CCM_8 enabled on both sides it still comes last.
-    let all = prov::ALL_CIPHER_SUITES;
-    assert_eq!(
-        negotiate(all, all, true),
-        Ok(CipherSuite::TLS13_AES_256_GCM_SHA384)
-    );
-    assert_eq!(
-        negotiate(
-            all,
-            &[cs::TLS13_AES_128_CCM_SHA256, cs::TLS13_AES_128_CCM_8_SHA256],
-            true
-        ),
+        negotiate(&[ccm_8, ccm], defaults, true),
         Ok(CipherSuite::TLS13_AES_128_CCM_SHA256)
     );
+    // Within the non-preferred tier a default server follows the client.
     assert_eq!(
-        negotiate(&ccm_8, all, false),
+        negotiate(&[ccm_8, ccm], defaults, false),
         Ok(CipherSuite::TLS13_AES_128_CCM_8_SHA256)
+    );
+
+    // An application can still rule CCM_8 out.
+    let without: Vec<_> = defaults.iter().copied().filter(|s| *s != ccm_8).collect();
+    assert_eq!(
+        negotiate(&without, &[ccm_8], false),
+        Err(Error::PeerIncompatible(
+            PeerIncompatible::NoCipherSuitesInCommon
+        ))
     );
 }
 
@@ -513,7 +536,16 @@ fn ccm_is_chosen_only_when_nothing_preferred_is_shared() {
         .filter(|s| s.tls13().is_some())
         .copied()
         .collect();
-    assert_eq!(tls13, [preferred[0], preferred[1], preferred[2], ccm]);
+    assert_eq!(
+        tls13,
+        [
+            preferred[0],
+            preferred[1],
+            preferred[2],
+            ccm,
+            cs::TLS13_AES_128_CCM_8_SHA256
+        ]
+    );
 
     // Nothing preferred is shared: CCM.
     for ignore_client_order in [false, true] {

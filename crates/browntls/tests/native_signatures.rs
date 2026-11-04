@@ -848,10 +848,20 @@ fn mismatched_certificate_and_key_are_detected() {
 
 #[test]
 fn verification_algorithm_lists() {
-    assert_eq!(native::ALL_VERIFICATION_ALGS.len(), 16);
+    // 16, plus RSASSA-PSS keys (without parameters and restricted) for
+    // each of the three `rsa_pss_pss_*` schemes.
+    assert_eq!(native::ALL_VERIFICATION_ALGS.len(), 16 + 6);
+    // The RustCrypto provider's schemes, then the non-preferred tier.
+    let native_schemes = native::SUPPORTED_SIG_ALGS.supported_schemes();
+    let common = rustcrypto::SUPPORTED_SIG_ALGS.supported_schemes();
+    assert_eq!(native_schemes[..common.len()], common);
     assert_eq!(
-        native::SUPPORTED_SIG_ALGS.supported_schemes(),
-        rustcrypto::SUPPORTED_SIG_ALGS.supported_schemes()
+        native_schemes[common.len()..],
+        [
+            S::RSA_PSS_PSS_SHA512,
+            S::RSA_PSS_PSS_SHA384,
+            S::RSA_PSS_PSS_SHA256
+        ]
     );
     assert!(!native::SUPPORTED_SIG_ALGS.fips());
 }

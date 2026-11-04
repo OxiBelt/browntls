@@ -4,8 +4,28 @@
 //! Each algorithm pairs a `SubjectPublicKeyInfo` algorithm identifier with a
 //! signature algorithm identifier, as webpki does. Public keys are the content
 //! of the `subjectPublicKey` BIT STRING: an uncompressed SEC 1 point for ECDSA,
-//! 32 bytes for Ed25519 and a PKCS #1 `RSAPublicKey` for RSA. Every failure,
-//! including a malformed key, is reported as [`InvalidSignature`].
+//! 32 bytes for Ed25519 and a PKCS #1 `RSAPublicKey` for RSA (with either the
+//! `rsaEncryption` or the `id-RSASSA-PSS` algorithm, RFC 4055 §1.2). Every
+//! failure, including a malformed key, is reported as [`InvalidSignature`].
+//!
+//! # RSASSA-PSS public keys
+//!
+//! A key identified by `id-RSASSA-PSS` (TLS `rsa_pss_pss_*`, RFC 9846
+//! §4.3.3) is matched by its exact `AlgorithmIdentifier`, as every key here:
+//!
+//! * without parameters ([`alg_id::RSASSA_PSS`]) by the
+//!   `RSA_PSS_PSS_2048_8192_SHA*` algorithms, which verify RSASSA-PSS with
+//!   any of the three hashes;
+//! * with the parameters of one scheme ([`alg_id::RSASSA_PSS_SHA256_KEY`]
+//!   and the SHA-384 and SHA-512 equivalents) only by the
+//!   `RSA_PSS_PSS_2048_8192_SHA*_RESTRICTED` algorithm with that hash, so a
+//!   restricted key verifies only signatures with its own parameters
+//!   (RFC 4055 §3.3, RFC 9846 §4.3.3).
+//!
+//! Any other parameters match no algorithm and are rejected as unsupported;
+//! `browntls_crypto::rsa::RsaKeyAlgorithm` documents the accepted set. An
+//! `id-RSASSA-PSS` key never matches an RSASSA-PKCS1-v1_5 algorithm, and an
+//! `rsaEncryption` key never matches an `rsa_pss_pss_*` one.
 
 use core::fmt;
 
@@ -163,10 +183,11 @@ enum RsaPadding {
 
 /// RSA with 2048- to 8192-bit moduli: RSASSA-PKCS1-v1_5, or RSASSA-PSS with
 /// MGF1 over the same hash and a salt as long as the digest (RFC 8446
-/// §4.2.3).
+/// §4.2.3), for keys with the `rsaEncryption` or `id-RSASSA-PSS` algorithm.
 pub struct RsaVerify {
     padding: RsaPadding,
     hash: BcHash,
+    public_key_alg_id: AlgorithmIdentifier,
     signature_alg_id: AlgorithmIdentifier,
 }
 
@@ -186,7 +207,7 @@ impl SignatureVerificationAlgorithm for RsaVerify {
     }
 
     fn public_key_alg_id(&self) -> AlgorithmIdentifier {
-        alg_id::RSA_ENCRYPTION
+        self.public_key_alg_id
     }
 
     fn signature_alg_id(&self) -> AlgorithmIdentifier {
@@ -205,10 +226,14 @@ impl fmt::Debug for RsaVerify {
 
 macro_rules! rsa_alg {
     ($(#[$m:meta])* $name:ident, $padding:ident, $hash:ident, $sig:ident) => {
+        rsa_alg!($(#[$m])* $name, $padding, $hash, $sig, RSA_ENCRYPTION);
+    };
+    ($(#[$m:meta])* $name:ident, $padding:ident, $hash:ident, $sig:ident, $pk:ident) => {
         $(#[$m])*
         pub static $name: RsaVerify = RsaVerify {
             padding: RsaPadding::$padding,
             hash: BcHash::$hash,
+            public_key_alg_id: alg_id::$pk,
             signature_alg_id: alg_id::$sig,
         };
     };
@@ -240,6 +265,39 @@ rsa_alg!(
     /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `rsaEncryption`).
     RSA_PSS_2048_8192_SHA512_LEGACY_KEY, Pss, Sha512, RSA_PSS_SHA512
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
+    RSA_PSS_PSS_2048_8192_SHA256, Pss, Sha256, RSA_PSS_SHA256, RSASSA_PSS
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
+    RSA_PSS_PSS_2048_8192_SHA384, Pss, Sha384, RSA_PSS_SHA384, RSASSA_PSS
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
+    RSA_PSS_PSS_2048_8192_SHA512, Pss, Sha512, RSA_PSS_SHA512, RSASSA_PSS
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
+    /// parameters).
+    RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED, Pss, Sha256, RSA_PSS_SHA256, RSASSA_PSS_SHA256_KEY
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
+    /// parameters).
+    RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED, Pss, Sha384, RSA_PSS_SHA384, RSASSA_PSS_SHA384_KEY
+);
+rsa_alg!(
+    /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
+    /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to these
+    /// parameters).
+    RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED, Pss, Sha512, RSA_PSS_SHA512, RSASSA_PSS_SHA512_KEY
 );
 
 #[cfg(test)]
@@ -328,5 +386,85 @@ mod tests {
             RSA_PKCS1_2048_8192_SHA384.signature_alg_id(),
             alg_id::RSA_PKCS1_SHA384
         );
+    }
+
+    /// Every RSASSA-PSS algorithm, with the hash it verifies.
+    fn pss_algs() -> [(&'static RsaVerify, BcHash); 9] {
+        [
+            (&RSA_PSS_2048_8192_SHA256_LEGACY_KEY, BcHash::Sha256),
+            (&RSA_PSS_2048_8192_SHA384_LEGACY_KEY, BcHash::Sha384),
+            (&RSA_PSS_2048_8192_SHA512_LEGACY_KEY, BcHash::Sha512),
+            (&RSA_PSS_PSS_2048_8192_SHA256, BcHash::Sha256),
+            (&RSA_PSS_PSS_2048_8192_SHA384, BcHash::Sha384),
+            (&RSA_PSS_PSS_2048_8192_SHA512, BcHash::Sha512),
+            (&RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED, BcHash::Sha256),
+            (&RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED, BcHash::Sha384),
+            (&RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED, BcHash::Sha512),
+        ]
+    }
+
+    #[test]
+    fn rsa_pss_identifiers_parse_as_their_parameters() {
+        use browntls_crypto::rsa::RsaKeyAlgorithm;
+        // `browntls-crypto`'s RSASSA-PSS-params parser (RFC 4055 §3.1)
+        // reads every identifier as the parameters the algorithm verifies.
+        for (alg, hash) in pss_algs() {
+            assert_eq!(
+                RsaKeyAlgorithm::from_algorithm_identifier(alg.signature_alg_id().as_bytes()),
+                Ok(RsaKeyAlgorithm::RsassaPss(Some(hash))),
+                "{alg:?}"
+            );
+            let key =
+                RsaKeyAlgorithm::from_algorithm_identifier(alg.public_key_alg_id().as_bytes())
+                    .unwrap();
+            assert!(key.allows_pss(hash), "{alg:?}");
+            match key {
+                RsaKeyAlgorithm::RsaEncryption | RsaKeyAlgorithm::RsassaPss(None) => {}
+                // A restricted key's parameters are the signature's.
+                RsaKeyAlgorithm::RsassaPss(Some(restricted)) => {
+                    assert_eq!(restricted, hash);
+                    assert_eq!(alg.public_key_alg_id(), alg.signature_alg_id());
+                }
+            }
+        }
+        assert_eq!(
+            RSA_PSS_PSS_2048_8192_SHA384.public_key_alg_id(),
+            alg_id::RSASSA_PSS
+        );
+        assert_eq!(
+            RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED.public_key_alg_id(),
+            alg_id::RSASSA_PSS_SHA384_KEY
+        );
+        assert_eq!(
+            RSA_PSS_2048_8192_SHA384_LEGACY_KEY.public_key_alg_id(),
+            alg_id::RSA_ENCRYPTION
+        );
+    }
+
+    #[test]
+    fn rsa_pss_verifies_with_both_key_identifiers() {
+        let key = rsa::RsaPrivateKey::generate(2048, &OsRng).unwrap();
+        let mut pk = [0u8; rsa::MAX_MODULUS_BYTES + 32];
+        let len = key.public_key().to_pkcs1_der(&mut pk).unwrap();
+        let pk = &pk[..len];
+        let mut sig = [0u8; 256];
+        for hash in [BcHash::Sha256, BcHash::Sha384, BcHash::Sha512] {
+            key.sign_pss(hash, b"msg", &OsRng, &mut sig).unwrap();
+            for (alg, alg_hash) in pss_algs() {
+                // The key bits are the same RSAPublicKey whatever the SPKI
+                // algorithm; the identifiers decide which keys an
+                // algorithm is offered.
+                assert_eq!(
+                    alg.verify_signature(pk, b"msg", &sig).is_ok(),
+                    alg_hash == hash,
+                    "{alg:?} {hash:?}"
+                );
+                assert!(alg.verify_signature(pk, b"msh", &sig).is_err());
+            }
+            key.sign_pkcs1v15(hash, b"msg", &mut sig).unwrap();
+            for (alg, _) in pss_algs() {
+                assert!(alg.verify_signature(pk, b"msg", &sig).is_err());
+            }
+        }
     }
 }

@@ -278,7 +278,9 @@ pub(crate) static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ECDSA_NISTP256_SHA256,
 ];
 
-/// The RSA schemes acceptable with an ECDHE_RSA suite.
+/// The RSA schemes acceptable with an ECDHE_RSA suite. In TLS 1.2,
+/// RSASSA-PSS is used with RSA cipher suites (RFC 9846 §4.3.3), so the
+/// `rsa_pss_pss_*` schemes of RSASSA-PSS public keys are included, last.
 #[allow(dead_code)] // consumed by the crypto providers, which are optional
 pub(crate) static TLS12_RSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PSS_SHA512,
@@ -287,4 +289,7 @@ pub(crate) static TLS12_RSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::RSA_PKCS1_SHA512,
     SignatureScheme::RSA_PKCS1_SHA384,
     SignatureScheme::RSA_PKCS1_SHA256,
+    SignatureScheme::RSA_PSS_PSS_SHA512,
+    SignatureScheme::RSA_PSS_PSS_SHA384,
+    SignatureScheme::RSA_PSS_PSS_SHA256,
 ];

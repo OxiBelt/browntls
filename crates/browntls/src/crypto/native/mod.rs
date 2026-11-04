@@ -143,7 +143,8 @@ pub struct Native;
 pub static SECURE_RANDOM: &dyn SecureRandom = &Native;
 
 /// Loads ECDSA (P-256, P-384, P-521; PKCS #8 or SEC 1), Ed25519 (PKCS #8)
-/// and RSA (PKCS #8 or PKCS #1) private keys; see [`sign::any_supported_type`].
+/// and RSA (PKCS #8 or PKCS #1; in PKCS #8 also RSASSA-PSS keys) private
+/// keys; see [`sign::any_supported_type`].
 pub static KEY_PROVIDER: &dyn KeyProvider = &Native;
 
 impl SecureRandom for Native {
@@ -232,6 +233,11 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
 
 /// Every signature verification algorithm this provider implements, used
 /// for certificate path signatures.
+///
+/// The non-preferred tier at the end holds the optional algorithms of
+/// RFC 9846 §4.3.3: RSASSA-PSS with RSASSA-PSS public keys
+/// (`rsa_pss_pss_*`, RFC 4055), for keys without parameters and for keys
+/// restricted to one hash.
 pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
     &verify::ECDSA_P256_SHA256,
     &verify::ECDSA_P256_SHA384,
@@ -249,12 +255,20 @@ pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
     &verify::RSA_PKCS1_2048_8192_SHA256,
     &verify::RSA_PKCS1_2048_8192_SHA384,
     &verify::RSA_PKCS1_2048_8192_SHA512,
+    &verify::RSA_PSS_PSS_2048_8192_SHA512,
+    &verify::RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED,
+    &verify::RSA_PSS_PSS_2048_8192_SHA384,
+    &verify::RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED,
+    &verify::RSA_PSS_PSS_2048_8192_SHA256,
+    &verify::RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED,
 ];
 
 /// How each TLS signature scheme maps onto [`ALL_VERIFICATION_ALGS`], in
 /// preference order. An ECDSA scheme names a hash; in TLS 1.2 it does not bind
 /// the curve, so each maps to every curve with that hash (the key's own curve
-/// first).
+/// first). An `rsa_pss_pss_*` scheme maps to the RSASSA-PSS key without
+/// parameters and to the key restricted to the scheme's hash; these schemes
+/// form the non-preferred tier at the end.
 #[allow(clippy::type_complexity)]
 pub static VERIFICATION_ALG_MAPPING: &[(
     SignatureScheme,
@@ -309,6 +323,27 @@ pub static VERIFICATION_ALG_MAPPING: &[(
         SignatureScheme::RSA_PKCS1_SHA256,
         &[&verify::RSA_PKCS1_2048_8192_SHA256],
     ),
+    (
+        SignatureScheme::RSA_PSS_PSS_SHA512,
+        &[
+            &verify::RSA_PSS_PSS_2048_8192_SHA512,
+            &verify::RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED,
+        ],
+    ),
+    (
+        SignatureScheme::RSA_PSS_PSS_SHA384,
+        &[
+            &verify::RSA_PSS_PSS_2048_8192_SHA384,
+            &verify::RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED,
+        ],
+    ),
+    (
+        SignatureScheme::RSA_PSS_PSS_SHA256,
+        &[
+            &verify::RSA_PSS_PSS_2048_8192_SHA256,
+            &verify::RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED,
+        ],
+    ),
 ];
 
 /// The signature verification algorithms and their TLS scheme mapping.
@@ -356,7 +391,16 @@ mod tests {
         {
             assert!(schemes.contains(scheme), "{scheme:?}");
         }
-        assert_eq!(schemes.len(), 10);
+        assert_eq!(schemes.len(), 13);
+        // The RSASSA-PSS public key schemes come last (non-preferred).
+        assert_eq!(
+            schemes[schemes.len() - 3..],
+            [
+                SignatureScheme::RSA_PSS_PSS_SHA512,
+                SignatureScheme::RSA_PSS_PSS_SHA384,
+                SignatureScheme::RSA_PSS_PSS_SHA256,
+            ]
+        );
     }
 
     #[test]

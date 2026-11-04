@@ -20,9 +20,9 @@
 //! | Item | Backing |
 //! |---|---|
 //! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM and ChaCha20-Poly1305 from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha}` |
-//! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, nist, mlkem, ffdhe}` |
-//! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, rsa}` |
-//! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519 and RSA signing keys from `browntls-crypto` |
+//! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, curve448::x448, nist, mlkem, ffdhe}` |
+//! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, curve448::ed448, rsa}` |
+//! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
 //! | [`SECURE_RANDOM`] | `browntls_crypto::rand::OsRng` |
 //! | [`ticketer`] | AES-256-GCM from `browntls_crypto::gcm` |
 //!
@@ -142,9 +142,9 @@ pub struct Native;
 /// The random source: the operating system's (`browntls_crypto::rand::OsRng`).
 pub static SECURE_RANDOM: &dyn SecureRandom = &Native;
 
-/// Loads ECDSA (P-256, P-384, P-521; PKCS #8 or SEC 1), Ed25519 (PKCS #8)
-/// and RSA (PKCS #8 or PKCS #1; in PKCS #8 also RSASSA-PSS keys) private
-/// keys; see [`sign::any_supported_type`].
+/// Loads ECDSA (P-256, P-384, P-521; PKCS #8 or SEC 1), Ed25519 and Ed448
+/// (PKCS #8) and RSA (PKCS #8 or PKCS #1; in PKCS #8 also RSASSA-PSS keys)
+/// private keys; see [`sign::any_supported_type`].
 pub static KEY_PROVIDER: &dyn KeyProvider = &Native;
 
 impl SecureRandom for Native {
@@ -202,7 +202,7 @@ pub mod kx_group {
     pub use super::kx::{
         FFDHE2048, FFDHE3072, FFDHE4096, FFDHE6144, FFDHE8192, MLKEM768, MLKEM1024, SECP256R1,
         SECP256R1MLKEM768, SECP384R1, SECP384R1MLKEM1024, SECP384R1MLKEM1024_CODEPOINT, SECP521R1,
-        X25519, X25519MLKEM768,
+        X448, X25519, X25519MLKEM768,
     };
 }
 
@@ -211,11 +211,11 @@ pub mod kx_group {
 /// otherwise it comes after the elliptic curves.
 ///
 /// The RFC 9846 optional groups follow as a non-preferred tier, behind every
-/// other group: the RFC 7919 finite-field groups FFDHE2048 to FFDHE8192,
+/// other group: X448 (RFC 7748), then the RFC 7919 finite-field groups,
 /// usable for TLS 1.3 only (RFC 10015 §3). A client never sends their key
 /// shares first; a server selects one only when the client sent no key share
-/// for an earlier group and either sent one for the FFDHE group or supports
-/// no earlier group.
+/// for an earlier group and either sent one for the optional group or
+/// supports no earlier group.
 pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     #[cfg(feature = "prefer-post-quantum")]
     kx::X25519MLKEM768,
@@ -224,6 +224,7 @@ pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::SECP384R1,
     #[cfg(not(feature = "prefer-post-quantum"))]
     kx::X25519MLKEM768,
+    kx::X448,
     kx::FFDHE2048,
     kx::FFDHE3072,
     kx::FFDHE4096,
@@ -234,7 +235,7 @@ pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
 /// Every key exchange group this provider implements, in preference order.
 ///
 /// As in [`DEFAULT_KX_GROUPS`], the RFC 9846 optional groups come last as a
-/// non-preferred tier: FFDHE2048 to FFDHE8192 (TLS 1.3 only).
+/// non-preferred tier: X448, then FFDHE2048 to FFDHE8192 (TLS 1.3 only).
 pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::X25519MLKEM768,
     kx::SECP256R1MLKEM768,
@@ -245,6 +246,7 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::SECP256R1,
     kx::SECP384R1,
     kx::SECP521R1,
+    kx::X448,
     kx::FFDHE2048,
     kx::FFDHE3072,
     kx::FFDHE4096,
@@ -256,7 +258,7 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
 /// for certificate path signatures.
 ///
 /// The non-preferred tier at the end holds the optional algorithms of
-/// RFC 9846 §4.3.3: RSASSA-PSS with RSASSA-PSS public keys
+/// RFC 9846 §4.3.3: Ed448, then RSASSA-PSS with RSASSA-PSS public keys
 /// (`rsa_pss_pss_*`, RFC 4055), for keys without parameters and for keys
 /// restricted to one hash.
 pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
@@ -276,6 +278,7 @@ pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
     &verify::RSA_PKCS1_2048_8192_SHA256,
     &verify::RSA_PKCS1_2048_8192_SHA384,
     &verify::RSA_PKCS1_2048_8192_SHA512,
+    &verify::ED448,
     &verify::RSA_PSS_PSS_2048_8192_SHA512,
     &verify::RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED,
     &verify::RSA_PSS_PSS_2048_8192_SHA384,
@@ -287,9 +290,10 @@ pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
 /// How each TLS signature scheme maps onto [`ALL_VERIFICATION_ALGS`], in
 /// preference order. An ECDSA scheme names a hash; in TLS 1.2 it does not bind
 /// the curve, so each maps to every curve with that hash (the key's own curve
-/// first). An `rsa_pss_pss_*` scheme maps to the RSASSA-PSS key without
-/// parameters and to the key restricted to the scheme's hash; these schemes
-/// form the non-preferred tier at the end.
+/// first). The optional RFC 9846 schemes form the non-preferred tier at the
+/// end: ed448, then the `rsa_pss_pss_*` schemes, each mapping to the
+/// RSASSA-PSS key without parameters and to the key restricted to the
+/// scheme's hash.
 #[allow(clippy::type_complexity)]
 pub static VERIFICATION_ALG_MAPPING: &[(
     SignatureScheme,
@@ -344,6 +348,7 @@ pub static VERIFICATION_ALG_MAPPING: &[(
         SignatureScheme::RSA_PKCS1_SHA256,
         &[&verify::RSA_PKCS1_2048_8192_SHA256],
     ),
+    (SignatureScheme::ED448, &[&verify::ED448]),
     (
         SignatureScheme::RSA_PSS_PSS_SHA512,
         &[
@@ -412,16 +417,65 @@ mod tests {
         {
             assert!(schemes.contains(scheme), "{scheme:?}");
         }
-        assert_eq!(schemes.len(), 13);
-        // The RSASSA-PSS public key schemes come last (non-preferred).
+        assert_eq!(schemes.len(), 14);
+        // The optional schemes come last (non-preferred): ed448, then the
+        // RSASSA-PSS public key schemes.
         assert_eq!(
-            schemes[schemes.len() - 3..],
+            schemes[schemes.len() - 4..],
             [
+                SignatureScheme::ED448,
                 SignatureScheme::RSA_PSS_PSS_SHA512,
                 SignatureScheme::RSA_PSS_PSS_SHA384,
                 SignatureScheme::RSA_PSS_PSS_SHA256,
             ]
         );
+    }
+
+    #[test]
+    fn optional_algorithms_are_non_preferred() {
+        // X448, then FFDHE, follow every mandatory and recommended group.
+        for list in [DEFAULT_KX_GROUPS, ALL_KX_GROUPS] {
+            let pos = |n: NamedGroup| list.iter().position(|g| g.name() == n).unwrap();
+            let x448 = pos(NamedGroup::X448);
+            assert!(x448 < pos(NamedGroup::FFDHE2048));
+            for n in [
+                NamedGroup::X25519MLKEM768,
+                NamedGroup::X25519,
+                NamedGroup::secp256r1,
+                NamedGroup::secp384r1,
+            ] {
+                assert!(pos(n) < x448, "{n:?}");
+            }
+        }
+        // ed448 follows every mandatory and recommended scheme.
+        let schemes = SUPPORTED_SIG_ALGS.supported_schemes();
+        let pos = |s: SignatureScheme| schemes.iter().position(|x| *x == s).unwrap();
+        for s in [
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ] {
+            assert!(pos(s) < pos(SignatureScheme::ED448), "{s:?}");
+        }
+        // Identified by key type: the EdDSA verifiers are zero-sized, so
+        // their addresses do not tell them apart.
+        let ed448 = ALL_VERIFICATION_ALGS
+            .iter()
+            .position(|a| a.public_key_alg_id() == browntls_pki::alg_id::ED448)
+            .unwrap();
+        let existing = [
+            browntls_pki::alg_id::ECDSA_P256,
+            browntls_pki::alg_id::ECDSA_P384,
+            browntls_pki::alg_id::ECDSA_P521,
+            browntls_pki::alg_id::ED25519,
+            browntls_pki::alg_id::RSA_ENCRYPTION,
+        ];
+        for (i, alg) in ALL_VERIFICATION_ALGS.iter().enumerate() {
+            if existing.contains(&alg.public_key_alg_id()) {
+                assert!(i < ed448, "{alg:?}");
+            }
+        }
     }
 
     #[test]

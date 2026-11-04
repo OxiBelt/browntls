@@ -60,8 +60,8 @@ pub mod chacha;
 pub mod gcm;
 
 pub mod curve25519;
-pub mod ffdhe;
 pub mod curve448;
+pub mod ffdhe;
 pub mod mlkem;
 pub mod nist;
 pub mod rsa;

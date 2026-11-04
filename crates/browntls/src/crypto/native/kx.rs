@@ -1,13 +1,13 @@
-//! Key exchange: X25519 (RFC 7748), the NIST curves (RFC 8422), ML-KEM
-//! (FIPS 203, draft-ietf-tls-mlkem), the hybrid groups of
+//! Key exchange: X25519 and X448 (RFC 7748), the NIST curves (RFC 8422),
+//! ML-KEM (FIPS 203, draft-ietf-tls-mlkem), the hybrid groups of
 //! draft-ietf-tls-ecdhe-mlkem and the RFC 7919 finite-field groups (TLS 1.3
 //! only).
 //!
 //! Every peer share is validated before use: exact lengths, the uncompressed
 //! point format for NIST curves, full point validation (on the curve, not the
-//! identity), rejection of an all-zero X25519 output (RFC 8446 §7.4.2), the
-//! FIPS 203 §7.2 encapsulation-key check and `1 < Y < p - 1` for FFDHE
-//! (RFC 9846 §4.3.8.1). All failures map to
+//! identity), rejection of an all-zero X25519 or X448 output (RFC 9846
+//! §7.4.2, RFC 8422 §5.11), the FIPS 203 §7.2 encapsulation-key check and
+//! `1 < Y < p - 1` for FFDHE (RFC 9846 §4.3.8.1). All failures map to
 //! [`PeerMisbehaved::InvalidKeyShare`].
 
 use alloc::boxed::Box;
@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
+use browntls_crypto::curve448::x448;
 use browntls_crypto::curve25519::x25519;
 use browntls_crypto::ffdhe;
 use browntls_crypto::mlkem::{self, DecapsulationKey, EncapsulationKey, ParameterSet};
@@ -96,6 +97,64 @@ impl ActiveKeyExchange for X25519Kx {
 
     fn group(&self) -> NamedGroup {
         NamedGroup::X25519
+    }
+}
+
+// ---------------------------------------------------------------------------
+// X448
+
+/// X448 key exchange (non-preferred; TLS 1.3 and TLS 1.2 ECDHE).
+pub static X448: &dyn SupportedKxGroup = &X448_GROUP;
+
+pub(crate) static X448_GROUP: X448Group = X448Group;
+
+/// X448 (RFC 7748 §6.2, RFC 9846 §4.2.8.2 and §7.4.2, RFC 8422 §5.10-5.11):
+/// 56-byte shares in both directions and a 56-byte shared secret, used as
+/// the TLS 1.2 premaster secret unchanged.
+pub(crate) struct X448Group;
+
+impl SupportedKxGroup for X448Group {
+    fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+        let secret = x448::PrivateKey::generate(&OsRng).map_err(keygen_error)?;
+        let pub_key = secret.public_key();
+        Ok(Box::new(X448Kx { secret, pub_key }))
+    }
+
+    fn name(&self) -> NamedGroup {
+        NamedGroup::X448
+    }
+}
+
+impl fmt::Debug for X448Group {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("X448")
+    }
+}
+
+/// The private scalar is zeroised on drop by `browntls-crypto`.
+struct X448Kx {
+    secret: x448::PrivateKey,
+    pub_key: [u8; x448::KEY_LEN],
+}
+
+impl ActiveKeyExchange for X448Kx {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+        let peer: &[u8; x448::KEY_LEN] = peer_pub_key.try_into().map_err(|_| invalid_share())?;
+        // `diffie_hellman` rejects an all-zero output (a small-order peer
+        // point), as RFC 9846 §7.4.2 and RFC 8422 §5.11 require.
+        let shared = self
+            .secret
+            .diffie_hellman(peer)
+            .map_err(|_| invalid_share())?;
+        Ok(shared_secret(shared))
+    }
+
+    fn pub_key(&self) -> &[u8] {
+        &self.pub_key
+    }
+
+    fn group(&self) -> NamedGroup {
+        NamedGroup::X448
     }
 }
 
@@ -666,9 +725,10 @@ impl ActiveKeyExchange for FfdheKx {
 mod tests {
     use super::*;
 
-    fn all() -> [&'static dyn SupportedKxGroup; 9] {
+    fn all() -> [&'static dyn SupportedKxGroup; 10] {
         [
             X25519,
+            X448,
             SECP256R1,
             SECP384R1,
             SECP521R1,
@@ -694,8 +754,9 @@ mod tests {
 
     #[test]
     fn share_and_secret_lengths() {
-        let cases: [(&dyn SupportedKxGroup, usize, usize, usize); 9] = [
+        let cases: [(&dyn SupportedKxGroup, usize, usize, usize); 10] = [
             (X25519, 32, 32, 32),
+            (X448, 56, 56, 56),
             (SECP256R1, 65, 65, 32),
             (SECP384R1, 97, 97, 48),
             (SECP521R1, 133, 133, 66),
@@ -726,8 +787,9 @@ mod tests {
 
     #[test]
     fn version_restrictions() {
-        for group in [X25519, SECP256R1, SECP384R1, SECP521R1] {
+        for group in [X25519, X448, SECP256R1, SECP384R1, SECP521R1] {
             assert!(group.usable_for_version(ProtocolVersion::TLSv1_2));
+            assert!(group.usable_for_version(ProtocolVersion::TLSv1_3));
         }
         for group in [
             MLKEM768,
@@ -803,6 +865,23 @@ mod tests {
             check(X25519, &point);
             check_server(X25519, &point);
         }
+
+        // X448: u = 0, 1, -1 and the non-canonical p and p + 1 have order
+        // dividing 4 (on the curve or its twist) and give an all-zero secret.
+        let mut p448 = [0xffu8; 56];
+        p448[28] = 0xfe;
+        let mut minus_one = p448;
+        minus_one[0] = 0xfe;
+        let mut p448_plus_1 = [0u8; 56];
+        p448_plus_1[28..].fill(0xff);
+        let mut one = [0u8; 56];
+        one[0] = 1;
+        for point in [[0u8; 56], one, minus_one, p448, p448_plus_1] {
+            check(X448, &point);
+            check_server(X448, &point);
+        }
+        // An X25519-sized share is not an X448 share.
+        check(X448, X25519.start().unwrap().pub_key());
 
         // NIST: compressed or hybrid encodings, the point at infinity,
         // coordinates >= p, and points off the curve.

@@ -269,13 +269,15 @@ pub(crate) struct MessageCipherPair {
     pub(crate) dec: Box<dyn MessageDecrypter>,
 }
 
-/// The ECDSA/EdDSA schemes acceptable with an ECDHE_ECDSA suite.
+/// The ECDSA/EdDSA schemes acceptable with an ECDHE_ECDSA suite
+/// (RFC 8422 §5.1.3), ed448 last as a non-preferred scheme.
 #[allow(dead_code)] // consumed by the crypto providers, which are optional
 pub(crate) static TLS12_ECDSA_SCHEMES: &[SignatureScheme] = &[
     SignatureScheme::ED25519,
     SignatureScheme::ECDSA_NISTP521_SHA512,
     SignatureScheme::ECDSA_NISTP384_SHA384,
     SignatureScheme::ECDSA_NISTP256_SHA256,
+    SignatureScheme::ED448,
 ];
 
 /// The RSA schemes acceptable with an ECDHE_RSA suite. In TLS 1.2,

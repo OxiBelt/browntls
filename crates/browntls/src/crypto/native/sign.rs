@@ -1,5 +1,5 @@
-//! Signing keys: ECDSA (P-256, P-384, P-521), Ed25519 and RSA (PKCS #1 v1.5
-//! and PSS), loaded from PKCS #8, SEC 1 or PKCS #1 DER.
+//! Signing keys: ECDSA (P-256, P-384, P-521), Ed25519, Ed448 and RSA
+//! (PKCS #1 v1.5 and PSS), loaded from PKCS #8, SEC 1 or PKCS #1 DER.
 //!
 //! An RSA key's PKCS #8 algorithm decides its TLS schemes (RFC 9846
 //! §4.3.3): an `rsaEncryption` key (and every PKCS #1 key) signs with
@@ -16,6 +16,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug};
 
+use browntls_crypto::curve448::ed448;
 use browntls_crypto::curve25519::ed25519;
 use browntls_crypto::hash::HashAlgorithm as BcHash;
 use browntls_crypto::nist::{p256, p384, p521};
@@ -30,7 +31,7 @@ use crate::error::Error;
 use crate::sync::Arc;
 
 /// Loads any private key this provider can sign with: ECDSA (PKCS #8 or
-/// SEC 1), Ed25519 (PKCS #8) or RSA (PKCS #8 or PKCS #1).
+/// SEC 1), Ed25519 or Ed448 (PKCS #8) or RSA (PKCS #8 or PKCS #1).
 pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
     match der {
         PrivateKeyDer::Sec1(_) => any_ecdsa_type(der),
@@ -39,7 +40,7 @@ pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>
             .or_else(|_| any_eddsa_type(pkcs8))
             .or_else(|_| any_rsa_type(der))
             .map_err(|_| {
-                Error::general("failed to parse PKCS#8 private key as ECDSA, Ed25519 or RSA")
+                Error::general("failed to parse PKCS#8 private key as ECDSA, EdDSA or RSA")
             }),
         _ => Err(Error::general("unsupported private key encoding")),
     }
@@ -59,9 +60,12 @@ pub fn any_ecdsa_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>, Er
     Err(Error::general("failed to parse private key as ECDSA"))
 }
 
-/// Loads an Ed25519 key in PKCS #8 (RFC 8410) form.
+/// Loads an Ed25519 or Ed448 key in PKCS #8 (RFC 8410) form.
 pub fn any_eddsa_type(der: &PrivatePkcs8KeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
-    Ed25519SigningKey::from_pkcs8(der.secret_der()).map(|k| Arc::new(k) as Arc<dyn SigningKey>)
+    if let Ok(key) = Ed25519SigningKey::from_pkcs8(der.secret_der()) {
+        return Ok(Arc::new(key));
+    }
+    Ed448SigningKey::from_pkcs8(der.secret_der()).map(|k| Arc::new(k) as Arc<dyn SigningKey>)
 }
 
 /// Loads an RSA key in PKCS #8 or PKCS #1 form (2048 to 8192 bits). A
@@ -250,6 +254,73 @@ impl Signer for Ed25519Signer {
 impl Debug for Ed25519Signer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ed25519Signer").finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ed448
+
+/// An Ed448 signing key (RFC 8410 `id-Ed448` PKCS #8). It signs with the
+/// `ed448` scheme: PureEdDSA with an empty context (RFC 9846 §4.2.3,
+/// RFC 8422 §5.10).
+pub struct Ed448SigningKey {
+    key: Arc<ed448::SigningKey>,
+    spki: SubjectPublicKeyInfoDer<'static>,
+}
+
+impl Ed448SigningKey {
+    fn from_pkcs8(der: &[u8]) -> Result<Self, Error> {
+        let key = ed448::SigningKey::from_pkcs8_der(der)
+            .map_err(|_| Error::general("invalid PKCS#8 Ed448 key"))?;
+        let spki = public_key_to_spki(&alg_id::ED448, key.verifying_key().as_bytes());
+        Ok(Self {
+            key: Arc::new(key),
+            spki,
+        })
+    }
+}
+
+impl SigningKey for Ed448SigningKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+        offered.contains(&SignatureScheme::ED448).then(|| {
+            Box::new(Ed448Signer {
+                key: self.key.clone(),
+            }) as Box<dyn Signer>
+        })
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        Some(SubjectPublicKeyInfoDer::from_slice(self.spki.as_ref()))
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        SignatureAlgorithm::ED448
+    }
+}
+
+impl Debug for Ed448SigningKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ed448SigningKey").finish_non_exhaustive()
+    }
+}
+
+struct Ed448Signer {
+    key: Arc<ed448::SigningKey>,
+}
+
+impl Signer for Ed448Signer {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(self.key.sign(message).to_vec())
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        SignatureScheme::ED448
+    }
+}
+
+impl Debug for Ed448Signer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ed448Signer").finish_non_exhaustive()
     }
 }
 
@@ -461,6 +532,36 @@ mod tests {
         let (alg, pk) = crate::x509::split_spki(spki.as_ref()).unwrap();
         assert_eq!(alg, alg_id::ED25519.as_bytes());
         assert_eq!(pk, key.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn ed448_key() {
+        let key = ed448::SigningKey::from_seed(&[7u8; 57]);
+        let der = key.to_pkcs8_der();
+        let loaded = any_supported_type(&PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            der.to_vec(),
+        )))
+        .unwrap();
+        assert_eq!(loaded.algorithm(), SignatureAlgorithm::ED448);
+        assert!(loaded.choose_scheme(&[SignatureScheme::ED25519]).is_none());
+        let signer = loaded
+            .choose_scheme(&[SignatureScheme::ED25519, SignatureScheme::ED448])
+            .unwrap();
+        assert_eq!(signer.scheme(), SignatureScheme::ED448);
+        let sig = signer.sign(b"msg").unwrap();
+        assert_eq!(sig, key.sign(b"msg"));
+        let spki = loaded.public_key().unwrap();
+        let (alg, pk) = crate::x509::split_spki(spki.as_ref()).unwrap();
+        assert_eq!(alg, alg_id::ED448.as_bytes());
+        assert_eq!(pk, key.verifying_key().as_bytes());
+        // Also through the EdDSA loader; a truncated key fails.
+        let pkcs8 = PrivatePkcs8KeyDer::from(der.to_vec());
+        assert_eq!(
+            any_eddsa_type(&pkcs8).unwrap().algorithm(),
+            SignatureAlgorithm::ED448
+        );
+        let truncated = PrivatePkcs8KeyDer::from(der[..der.len() - 1].to_vec());
+        assert!(any_eddsa_type(&truncated).is_err());
     }
 
     #[test]

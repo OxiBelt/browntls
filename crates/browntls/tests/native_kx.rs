@@ -375,10 +375,16 @@ fn mlkem_ciphertext_handling_matches() {
 #[test]
 fn default_and_all_groups() {
     let names: Vec<_> = native::DEFAULT_KX_GROUPS.iter().map(|g| g.name()).collect();
+    let pos = |n: NamedGroup| names.iter().position(|x| *x == n).unwrap();
     #[cfg(feature = "prefer-post-quantum")]
     assert_eq!(names[0], NamedGroup::X25519MLKEM768);
+    // Without the feature the hybrid follows the classical groups.
     #[cfg(not(feature = "prefer-post-quantum"))]
-    assert_eq!(names.last(), Some(&NamedGroup::X25519MLKEM768));
-    assert!(names.contains(&NamedGroup::X25519));
-    assert_eq!(native::ALL_KX_GROUPS.len(), 14);
+    assert!(pos(NamedGroup::X25519MLKEM768) > pos(NamedGroup::secp384r1));
+    // The optional RFC 9846 groups (X448, then FFDHE) come after every other
+    // group.
+    assert!(pos(NamedGroup::X25519MLKEM768) < pos(NamedGroup::X448));
+    assert!(pos(NamedGroup::X25519) < pos(NamedGroup::X448));
+    assert!(pos(NamedGroup::X448) < pos(NamedGroup::FFDHE2048));
+    assert_eq!(native::ALL_KX_GROUPS.len(), 15);
 }

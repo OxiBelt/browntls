@@ -4,9 +4,10 @@
 //! Each algorithm pairs a `SubjectPublicKeyInfo` algorithm identifier with a
 //! signature algorithm identifier, as webpki does. Public keys are the content
 //! of the `subjectPublicKey` BIT STRING: an uncompressed SEC 1 point for ECDSA,
-//! 32 bytes for Ed25519 and a PKCS #1 `RSAPublicKey` for RSA (with either the
-//! `rsaEncryption` or the `id-RSASSA-PSS` algorithm, RFC 4055 §1.2). Every
-//! failure, including a malformed key, is reported as [`InvalidSignature`].
+//! 32 bytes for Ed25519, 57 bytes for Ed448 and a PKCS #1 `RSAPublicKey` for
+//! RSA (with either the `rsaEncryption` or the `id-RSASSA-PSS` algorithm,
+//! RFC 4055 §1.2). Every failure, including a malformed key, is reported as
+//! [`InvalidSignature`].
 //!
 //! # RSASSA-PSS public keys
 //!
@@ -29,6 +30,7 @@
 
 use core::fmt;
 
+use browntls_crypto::curve448::ed448;
 use browntls_crypto::curve25519::ed25519;
 use browntls_crypto::hash::HashAlgorithm as BcHash;
 use browntls_crypto::nist::{p256, p384, p521};
@@ -171,6 +173,45 @@ impl SignatureVerificationAlgorithm for Ed25519Verify {
 impl fmt::Debug for Ed25519Verify {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Ed25519Verify")
+    }
+}
+
+/// Ed448 (RFC 8032 §5.2 PureEdDSA with an empty context, RFC 8410 keys and
+/// signatures, RFC 9846 §4.2.3 / RFC 8422 §5.10). Both identifiers are
+/// `id-Ed448` without parameters (RFC 8410 §3, §6).
+///
+/// Verification follows `browntls_crypto::curve448::ed448`: strict point
+/// and scalar decoding, small-order keys rejected, cofactored equation.
+pub struct Ed448Verify;
+
+/// Ed448.
+pub static ED448: Ed448Verify = Ed448Verify;
+
+impl SignatureVerificationAlgorithm for Ed448Verify {
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), InvalidSignature> {
+        let key = ed448::VerifyingKey::from_slice(public_key).map_err(|_| InvalidSignature)?;
+        let sig: &[u8; ed448::SIGNATURE_LEN] =
+            signature.try_into().map_err(|_| InvalidSignature)?;
+        key.verify(message, sig).map_err(|_| InvalidSignature)
+    }
+
+    fn public_key_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ED448
+    }
+
+    fn signature_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ED448
+    }
+}
+
+impl fmt::Debug for Ed448Verify {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ed448Verify")
     }
 }
 
@@ -320,6 +361,42 @@ mod tests {
                 .is_err()
         );
         assert_eq!(ED25519.public_key_alg_id(), alg_id::ED25519);
+    }
+
+    #[test]
+    fn ed448_verifies_and_rejects() {
+        let key = ed448::SigningKey::from_seed(&[3u8; 57]);
+        let sig = key.sign(b"hello");
+        let pk = *key.verifying_key().as_bytes();
+        assert!(ED448.verify_signature(&pk, b"hello", &sig).is_ok());
+        assert!(ED448.verify_signature(&pk, b"hellp", &sig).is_err());
+        assert!(ED448.verify_signature(&pk[..56], b"hello", &sig).is_err());
+        assert!(ED448.verify_signature(&pk, b"hello", &sig[..113]).is_err());
+        let mut long = sig.to_vec();
+        long.push(0);
+        assert!(ED448.verify_signature(&pk, b"hello", &long).is_err());
+        let mut tampered = sig;
+        tampered[100] ^= 1;
+        assert!(ED448.verify_signature(&pk, b"hello", &tampered).is_err());
+        // The identity is a small-order key.
+        let mut identity = [0u8; 57];
+        identity[0] = 1;
+        assert!(ED448.verify_signature(&identity, b"hello", &sig).is_err());
+        // An Ed25519 key or signature is not an Ed448 one.
+        let ed25519_key = ed25519::SigningKey::from_seed(&[3u8; 32]);
+        let ed25519_sig = ed25519_key.sign(b"hello");
+        assert!(
+            ED448
+                .verify_signature(
+                    ed25519_key.verifying_key().as_bytes(),
+                    b"hello",
+                    &ed25519_sig
+                )
+                .is_err()
+        );
+        assert_eq!(ED448.public_key_alg_id(), alg_id::ED448);
+        assert_eq!(ED448.signature_alg_id(), alg_id::ED448);
+        assert_ne!(ED448.public_key_alg_id(), ED25519.public_key_alg_id());
     }
 
     #[test]

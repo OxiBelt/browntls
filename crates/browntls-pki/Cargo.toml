@@ -30,7 +30,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 sha2v11 = { package = "sha2", version = "0.11" }
 rustls-pki-types = "1"
 time = "0.3"
-rand = "0.8"
+rand = "0.10"
 
 [lints]
 workspace = true

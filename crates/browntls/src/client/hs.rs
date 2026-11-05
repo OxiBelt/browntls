@@ -34,6 +34,7 @@ use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{self, Retrieved};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
+use crate::tls13::extensions::{Tls13Message, first_disallowed};
 use crate::tls13::key_schedule::KeyScheduleEarly;
 
 pub(super) type NextState = Box<dyn State<ClientConnectionData>>;
@@ -308,13 +309,18 @@ fn emit_client_hello_for_retry(
     // not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3, RFC 7919
     // §3) or ML-KEM. The list may not be empty (RFC 9846 §4.3.7), so a
     // configuration without such a group fails here instead of sending one.
-    let named_groups: Vec<NamedGroup> = config
+    let mut named_groups: Vec<NamedGroup> = Vec::new();
+    for group in config
         .provider
         .kx_groups
         .iter()
         .filter(|g| supported_versions.iter().any(|v| g.usable_for_version(*v)))
         .map(|g| g.name())
-        .collect();
+    {
+        if !named_groups.contains(&group) {
+            named_groups.push(group);
+        }
+    }
     if named_groups.is_empty() {
         return Err(Error::General(
             "no key exchange group is usable with the enabled protocol versions".into(),
@@ -329,6 +335,32 @@ fn emit_client_hello_for_retry(
             .cipher_suites
             .iter()
             .any(|cs| cs.is_tls12_block_cipher());
+
+    // RFC 9846 §4.3.8: key shares appear in the order of their groups in
+    // supported_groups.
+    let group_position = |group: NamedGroup| {
+        named_groups
+            .iter()
+            .position(|g| *g == group)
+            .unwrap_or(usize::MAX)
+    };
+    let key_shares = key_share.as_ref().map(|ks| {
+        let mut shares = vec![KeyShareEntry::new(ks.group(), ks.pub_key())];
+        // For the first ClientHello (or a HelloRetryRequest that names no
+        // group) a hybrid share's classical half is offered too, for
+        // free, when the provider also supports that group on its own.
+        let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+        if !hrr_named_group
+            && let Some((component_group, component_share)) = ks.hybrid_component()
+            && config
+                .find_kx_group(component_group, ProtocolVersion::TLSv1_3)
+                .is_some()
+        {
+            shares.push(KeyShareEntry::new(component_group, component_share));
+        }
+        shares.sort_by_key(|share| group_position(share.group));
+        shares
+    });
 
     let mut exts = ClientExtensions {
         server_name,
@@ -348,22 +380,7 @@ fn emit_client_hello_for_retry(
         encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),
         psk_modes: supports_tls13.then(|| vec![PskKeyExchangeMode::PSK_DHE_KE]),
-        key_shares: key_share.as_ref().map(|ks| {
-            let mut shares = vec![KeyShareEntry::new(ks.group(), ks.pub_key())];
-            // For the first ClientHello (or a HelloRetryRequest that names no
-            // group) a hybrid share's classical half is offered too, for
-            // free, when the provider also supports that group on its own.
-            let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
-            if !hrr_named_group
-                && let Some((component_group, component_share)) = ks.hybrid_component()
-                && config
-                    .find_kx_group(component_group, ProtocolVersion::TLSv1_3)
-                    .is_some()
-            {
-                shares.push(KeyShareEntry::new(component_group, component_share));
-            }
-            shares
-        }),
+        key_shares,
         cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
         // RFC 7250: raw public keys instead of certificates, in either direction.
         client_certificate_types: config
@@ -401,7 +418,20 @@ fn emit_client_hello_for_retry(
         });
     }
 
-    // RFC 8446 §4.2.11: offer the TLS 1.3 session as a PSK, binder filled in below.
+    // RFC 9846 §4.2.4: after a HelloRetryRequest, a PSK whose hash differs
+    // from that of the cipher suite the server selected cannot be used (its
+    // binder would cover a transcript hashed differently), so it is dropped.
+    if let Some(committed) = committed_suite
+        && let Some(Retrieved {
+            value: ClientSessionValue::Tls13(inner),
+            ..
+        }) = &input.resuming
+        && inner.suite().common.hash_provider.algorithm() != committed.hash_provider().algorithm()
+    {
+        input.resuming = None;
+    }
+
+    // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in below.
     let tls13_session = match &input.resuming {
         Some(retrieved) if supports_tls13 => retrieved.map(|v| match v {
             ClientSessionValue::Tls13(inner) => Some(inner),
@@ -586,7 +616,8 @@ impl State<ClientConnectionData> for ExpectServerHello {
         let config = &self.input.config;
         let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3);
 
-        // RFC 8446 §4.2.1: version negotiation.
+        // RFC 9846 §4.3.1: version negotiation. A supported_versions value
+        // we did not offer, or one below TLS 1.3, is illegal_parameter.
         let version = match server_hello.extensions.supported_versions {
             Some(ProtocolVersion::TLSv1_3) if tls13_supported => ProtocolVersion::TLSv1_3,
             Some(ProtocolVersion::TLSv1_2) => {
@@ -597,8 +628,8 @@ impl State<ClientConnectionData> for ExpectServerHello {
             }
             Some(_) => {
                 return Err(cx.common.send_fatal_alert(
-                    AlertDescription::ProtocolVersion,
-                    PeerIncompatible::ServerDoesNotSupportTls12Or13,
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedUnofferedVersion,
                 ));
             }
             None => match server_hello.legacy_version {
@@ -632,12 +663,14 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        // RFC 9846 §4.2.3: a TLS 1.3 ServerHello carries legacy_version
+        // 0x0303; anything else is a version error (§E.5).
         if version == ProtocolVersion::TLSv1_3
             && server_hello.legacy_version != ProtocolVersion::TLSv1_2
         {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::IllegalHelloRetryRequestWithUnsupportedVersion,
+                AlertDescription::ProtocolVersion,
+                PeerMisbehaved::IllegalServerHelloLegacyVersion,
             ));
         }
 
@@ -659,6 +692,13 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        // RFC 9846 §4.3: in TLS 1.3, a recognised extension that may not
+        // appear in a ServerHello is illegal_parameter, whether or not we
+        // offered it in the ClientHello.
+        if version == ProtocolVersion::TLSv1_3 {
+            tls13::validate_server_hello(cx.common, server_hello)?;
+        }
+
         let received_exts = server_hello.extensions.present_types();
         if self
             .input
@@ -674,8 +714,9 @@ impl State<ClientConnectionData> for ExpectServerHello {
         let suite = config
             .find_cipher_suite(server_hello.cipher_suite)
             .ok_or_else(|| {
+                // RFC 9846 §4.2.3: a cipher suite we did not offer.
                 cx.common.send_fatal_alert(
-                    AlertDescription::HandshakeFailure,
+                    AlertDescription::IllegalParameter,
                     PeerMisbehaved::SelectedUnofferedCipherSuite,
                 )
             })?;
@@ -783,8 +824,20 @@ impl ExpectServerHelloOrHelloRetryRequest {
 
         let config = &self.next.input.config;
 
-        // RFC 8446 §4.1.4: a HelloRetryRequest may only carry extensions we
-        // would understand in a ServerHello.
+        // RFC 9846 §4.3: a recognised extension that may not appear in a
+        // HelloRetryRequest is illegal_parameter; any other extension we
+        // did not offer is unsupported_extension (§4.2.4).
+        if first_disallowed(
+            hrr.extensions.unknown.iter().copied(),
+            Tls13Message::HelloRetryRequest,
+        )
+        .is_some()
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DisallowedHelloRetryRequestExtension,
+            ));
+        }
         if !hrr.extensions.unknown.is_empty() {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,
@@ -797,12 +850,19 @@ impl ExpectServerHelloOrHelloRetryRequest {
                 PeerMisbehaved::IllegalHelloRetryRequestWithNoChanges,
             ));
         }
-        if hrr.extensions.supported_versions != Some(ProtocolVersion::TLSv1_3)
-            || hrr.legacy_version != ProtocolVersion::TLSv1_2
-        {
+        // RFC 9846 §4.2.4: a HelloRetryRequest selects TLS 1.3 through
+        // supported_versions (illegal_parameter otherwise, §4.3.1) and
+        // carries legacy_version 0x0303 (protocol_version otherwise, §E.5).
+        if hrr.extensions.supported_versions != Some(ProtocolVersion::TLSv1_3) {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::IllegalHelloRetryRequestWithUnsupportedVersion,
+            ));
+        }
+        if hrr.legacy_version != ProtocolVersion::TLSv1_2 {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::ProtocolVersion,
+                PeerMisbehaved::IllegalServerHelloLegacyVersion,
             ));
         }
         if hrr.session_id != self.next.input.session_id {

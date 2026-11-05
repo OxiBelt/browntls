@@ -160,6 +160,10 @@ impl CompleteClientHelloHandling {
                 transcript: HandshakeHashOrBuffer::Hash(self.transcript),
                 session_id: SessionId::empty(),
                 done_retry: true,
+                retry_choice: Some(hs::RetryChoice {
+                    suite: self.suite,
+                    group: selected_kxg,
+                }),
                 send_tickets: self.send_tickets,
             });
             // Early data sent behind that first ClientHello is unreadable
@@ -203,6 +207,14 @@ impl CompleteClientHelloHandling {
                         continue;
                     };
                     if self.suite.can_resume_from(prev_suite).is_none() || resume.sni != cx.data.sni
+                    {
+                        continue;
+                    }
+                    // A PSK past the lifetime we announced for it is not
+                    // offered resumption (RFC 9846 §4.7.1).
+                    let now = self.config.current_time()?;
+                    if now.as_secs().saturating_sub(resume.creation_time_sec)
+                        > u64::from(tls13_ticket_lifetime(&self.config))
                     {
                         continue;
                     }
@@ -317,12 +329,28 @@ impl CompleteClientHelloHandling {
             }
         }
 
+        // RFC 9846 §4.3.7: when the group we would most like is not the one
+        // the client's key shares let us use, say which groups we prefer so
+        // the client can do better next time.
+        let our_groups =
+            hs::kx_groups_by_preference(self.config.kx_groups(), ProtocolVersion::TLSv1_3);
+        let most_preferred_mutual = client_hello.named_groups().and_then(|theirs| {
+            our_groups
+                .iter()
+                .find(|g| theirs.contains(&g.name()))
+                .map(|g| g.name())
+        });
+        let supported_groups = (most_preferred_mutual.is_some()
+            && most_preferred_mutual != Some(selected_kxg.name()))
+        .then(|| our_groups.iter().map(|g| g.name()).collect());
+
         emit_encrypted_extensions(
             &mut self.transcript,
             cx,
             client_hello,
             early_data == EarlyDataDecision::Accepted,
             self.cert_types,
+            supported_groups,
         );
 
         let doing_client_auth = if resumedata.is_none() {
@@ -351,7 +379,19 @@ impl CompleteClientHelloHandling {
             cx.common.peer_certificates = resume.client_cert_chain.clone();
         }
 
-        self.send_tickets = self.config.send_tls13_tickets;
+        // RFC 9846 §4.7.1: tickets go only to a client whose ClientHello
+        // carried a suitable psk_key_exchange_modes; psk_dhe_ke is the only
+        // mode we resume with.
+        let client_takes_tickets = client_hello
+            .extensions
+            .psk_modes
+            .as_ref()
+            .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
+        self.send_tickets = if client_takes_tickets {
+            self.config.send_tls13_tickets
+        } else {
+            0
+        };
 
         let key_schedule = emit_finished_tls13(
             &mut self.transcript,
@@ -366,7 +406,16 @@ impl CompleteClientHelloHandling {
         }
 
         if doing_client_auth {
-            let offered_sigschemes = self.config.verifier.supported_verify_schemes();
+            // RFC 9846 §4.5.2: the client's CertificateVerify must use a
+            // scheme from our CertificateRequest, which lists only the
+            // verifier's TLS 1.3 schemes.
+            let offered_sigschemes = self
+                .config
+                .verifier
+                .supported_verify_schemes()
+                .into_iter()
+                .filter(SignatureScheme::supported_in_tls13)
+                .collect();
             Ok(Box::new(ExpectCertificate {
                 config: self.config,
                 transcript: self.transcript,
@@ -597,8 +646,10 @@ fn emit_encrypted_extensions(
     client_hello: &ClientHelloPayload,
     early_data_accepted: bool,
     cert_types: hs::NegotiatedCertTypes,
+    supported_groups: Option<Vec<NamedGroup>>,
 ) {
     let exts = ServerExtensions {
+        supported_groups,
         alpn: cx
             .common
             .alpn_protocol
@@ -805,17 +856,12 @@ impl State<ServerConnectionData> for ExpectCertificate {
         )?;
         self.transcript.add_message(&m);
 
-        // RFC 8446 §4.4.2: the context echoes our (empty) request context.
+        // RFC 9846 §4.5.1: the context echoes our (empty) request context.
+        // The message is well formed, so a mismatch is illegal_parameter.
         if !certp.context.0.is_empty() {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::DecodeError,
-                crate::error::InvalidMessage::InvalidCertRequest,
-            ));
-        }
-        if certp.any_entry_after_first_has_extensions() {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::UnsupportedExtension,
-                PeerMisbehaved::BadCertChainExtensions,
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCertificateRequestContext,
             ));
         }
         // We never request stapled responses or SCTs from clients.
@@ -854,7 +900,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
         self.config
             .verifier
             .verify_client_cert(end_entity, intermediates, now)
-            .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(cx.common, err))?;
+            .map_err(|err| crate::client::tls13::send_cert_path_error_alert(cx.common, err))?;
 
         Ok(Box::new(ExpectCertificateVerify {
             config: self.config,
@@ -923,6 +969,22 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
 }
 
 /// Issues one NewSessionTicket.
+/// How long a TLS 1.3 session record stays usable, in seconds, when the
+/// session cache rather than a ticketer holds it.
+const STATEFUL_TICKET_LIFETIME: u32 = 24 * 60 * 60;
+
+/// The `ticket_lifetime` we announce, and honour on resumption: the
+/// ticketer's for stateless tickets, [`STATEFUL_TICKET_LIFETIME`] for
+/// session-cache lookups, never above seven days (RFC 9846 §4.7.1).
+fn tls13_ticket_lifetime(config: &ServerConfig) -> u32 {
+    let lifetime = if config.ticketer.enabled() {
+        config.ticketer.lifetime()
+    } else {
+        STATEFUL_TICKET_LIFETIME
+    };
+    lifetime.min(crate::msgs::persist::MAX_TICKET_LIFETIME)
+}
+
 fn emit_ticket(
     transcript: &HandshakeHash,
     suite: &'static Tls13CipherSuite,
@@ -930,6 +992,13 @@ fn emit_ticket(
     key_schedule: &KeyScheduleTraffic,
     config: &ServerConfig,
 ) -> Result<(), Error> {
+    // RFC 9846 §4.7.1: a zero lifetime tells the client to discard the
+    // ticket at once, so such a ticket is not worth sending.
+    let lifetime = tls13_ticket_lifetime(config);
+    // RFC 9846 §6.1: nothing follows our close_notify.
+    if lifetime == 0 || cx.common.has_sent_close_notify() {
+        return Ok(());
+    }
     let rng = config.provider.secure_random;
     let nonce = crate::rand::random_vec(rng, 32)?;
     let age_add = crate::rand::random_u32(rng)?;
@@ -965,8 +1034,7 @@ fn emit_ticket(
         return Ok(());
     };
 
-    let mut payload =
-        NewSessionTicketPayloadTls13::new(config.ticketer.lifetime(), age_add, nonce, ticket);
+    let mut payload = NewSessionTicketPayloadTls13::new(lifetime, age_add, nonce, ticket);
     if config.max_early_data_size > 0 {
         if config.ticketer.enabled() {
             // RFC 8446 §8.1: without a server-side session record there is no
@@ -1038,18 +1106,10 @@ impl ExpectTraffic {
         request: KeyUpdateRequest,
     ) -> Result<(), Error> {
         match request {
-            KeyUpdateRequest::UpdateNotRequested => {}
-            KeyUpdateRequest::UpdateRequested => {
-                common.received_key_update_requests =
-                    common.received_key_update_requests.saturating_add(1);
-                if common.received_key_update_requests > MAX_KEY_UPDATE_REQUESTS {
-                    return Err(common.send_fatal_alert(
-                        AlertDescription::UnexpectedMessage,
-                        PeerMisbehaved::TooManyKeyUpdateRequests,
-                    ));
-                }
-                common.send_key_update(KeyUpdateRequest::UpdateNotRequested);
-                self.key_schedule.update_encrypter_and_notify(common);
+            KeyUpdateRequest::UpdateNotRequested | KeyUpdateRequest::UpdateRequested => {
+                // Our response, if one is owed, is sent once this flight is
+                // processed (`ConnectionCore::maybe_send_key_update`).
+                common.received_key_update(request, MAX_KEY_UPDATE_REQUESTS)?;
             }
             _ => {
                 return Err(common.send_fatal_alert(
@@ -1099,8 +1159,12 @@ impl State<ServerConnectionData> for ExpectTraffic {
         self.key_schedule.extract_secrets(Side::Server)
     }
 
-    fn send_key_update_request(&mut self, common: &mut CommonState) -> Result<(), Error> {
-        common.send_key_update(KeyUpdateRequest::UpdateRequested);
+    fn send_key_update(
+        &mut self,
+        common: &mut CommonState,
+        request: KeyUpdateRequest,
+    ) -> Result<(), Error> {
+        common.send_key_update(request);
         self.key_schedule.update_encrypter_and_notify(common);
         Ok(())
     }

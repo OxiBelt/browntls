@@ -175,6 +175,17 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
             match typ {
                 ExtensionType::StatusRequest => status = Some(CertificateStatus::read(body)?),
                 ExtensionType::SCT => sct_list = Some(Payload::read(body)),
+                // RFC 9846 §4.3: a recognised extension that may not
+                // appear in a CertificateEntry is illegal_parameter; any
+                // other one cannot answer anything we sent.
+                other
+                    if crate::tls13::extensions::allowed_in(
+                        other,
+                        crate::tls13::extensions::Tls13Message::Certificate,
+                    ) == Some(false) =>
+                {
+                    return Err(InvalidMessage::DisallowedCertificateExtension);
+                }
                 _ => return Err(InvalidMessage::UnknownCertificateExtension),
             }
             Ok(())
@@ -226,13 +237,6 @@ impl<'a> CertificatePayloadTls13<'a> {
 
     /// Whether any entry other than the first carries extensions (RFC 8446
     /// §4.4.2: only the end entity may have `status_request` or `sct`).
-    pub(crate) fn any_entry_after_first_has_extensions(&self) -> bool {
-        self.entries
-            .iter()
-            .skip(1)
-            .any(|e| e.status.is_some() || e.sct_list.is_some())
-    }
-
     pub(crate) fn end_entity_ocsp(&self) -> Vec<u8> {
         self.entries
             .first()
@@ -446,14 +450,20 @@ mod tests {
         let back = CertificatePayloadTls13::read_bytes(&enc).unwrap();
         assert_eq!(back, msg);
         assert_eq!(back.end_entity_ocsp(), ocsp);
-        assert!(!back.any_entry_after_first_has_extensions());
         assert_eq!(back.into_certificate_chain().0, certs);
     }
 
     #[test]
     fn certificate_entry_rejects_unknown_extension() {
-        // cert [1] with an extension of type 0x0000 (server_name) and empty body
+        // cert [1] with an extension of type 0x0000 (server_name) and empty
+        // body: recognised, but not allowed in a CertificateEntry.
         let bytes = [0, 0, 1, 1, 0, 4, 0, 0, 0, 0];
+        assert_eq!(
+            CertificateEntry::read_bytes(&bytes),
+            Err(InvalidMessage::DisallowedCertificateExtension)
+        );
+        // An extension type this crate does not know.
+        let bytes = [0, 0, 1, 1, 0, 4, 0x12, 0x34, 0, 0];
         assert_eq!(
             CertificateEntry::read_bytes(&bytes),
             Err(InvalidMessage::UnknownCertificateExtension)

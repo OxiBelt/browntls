@@ -6,7 +6,7 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::HashAlgorithm;
 
 enum_builder! {
-    /// The `AlertDescription` TLS protocol enum (RFC 8446 §6).
+    /// The `AlertDescription` TLS protocol enum (RFC 9846 §6).
     #[repr(u8)]
     pub enum AlertDescription {
         CloseNotify => 0x00,
@@ -42,6 +42,8 @@ enum_builder! {
         BadCertificateHashValue => 0x72,
         UnknownPSKIdentity => 0x73,
         CertificateRequired => 0x74,
+        /// RFC 9846 §6.2: an error not covered by a more specific alert.
+        GeneralError => 0x75,
         NoApplicationProtocol => 0x78,
         EncryptedClientHelloRequired => 0x79,
     }

@@ -20,7 +20,7 @@ use crate::log::{debug, trace, warning};
 use crate::msgs::base::{Payload, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
-use crate::msgs::enums::{ExtensionType, KeyUpdateRequest};
+use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload, MAX_CERTIFICATE_SIZE_LIMIT,
     NewSessionTicketPayloadTls13, PresharedKeyBinder, ServerExtensions, ServerHelloPayload,
@@ -31,35 +31,13 @@ use crate::sign::{CertifiedKey, Signer};
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
+use crate::tls13::extensions::{Tls13Message, first_disallowed};
 use crate::tls13::key_schedule::{
     KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake, KeyScheduleTraffic,
 };
 use crate::verify::{
     DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid, ServerCertVerified,
 };
-
-/// Extensions a ServerHello may carry in TLS 1.3 (RFC 8446 §4.1.3).
-static ALLOWED_SERVER_HELLO_EXTENSIONS: &[ExtensionType] = &[
-    ExtensionType::KeyShare,
-    ExtensionType::PreSharedKey,
-    ExtensionType::SupportedVersions,
-];
-
-/// Extensions that must not appear in EncryptedExtensions (RFC 8446 §4.2).
-static DISALLOWED_ENCRYPTED_EXTENSIONS: &[ExtensionType] = &[
-    ExtensionType::KeyShare,
-    ExtensionType::PreSharedKey,
-    ExtensionType::SupportedVersions,
-    ExtensionType::Cookie,
-    ExtensionType::PSKKeyExchangeModes,
-    ExtensionType::ECPointFormats,
-    ExtensionType::ExtendedMasterSecret,
-    ExtensionType::EncryptThenMac,
-    ExtensionType::SessionTicket,
-    ExtensionType::RenegotiationInfo,
-    ExtensionType::StatusRequest,
-    ExtensionType::SCT,
-];
 
 /// How many `update_requested` KeyUpdates we tolerate without sending data.
 const MAX_KEY_UPDATE_REQUESTS: u8 = 8;
@@ -126,17 +104,22 @@ pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {
     *sent = true;
 }
 
-fn validate_server_hello(
+pub(super) fn validate_server_hello(
     common: &mut CommonState,
     server_hello: &ServerHelloPayload,
 ) -> Result<(), Error> {
-    for ext in server_hello.extensions.present_types() {
-        if !ALLOWED_SERVER_HELLO_EXTENSIONS.contains(&ext) {
-            return Err(common.send_fatal_alert(
-                AlertDescription::UnsupportedExtension,
-                PeerMisbehaved::UnexpectedCleartextExtension,
-            ));
-        }
+    // RFC 9846 §4.3: a recognised extension that Table 1 does not allow in
+    // a ServerHello is illegal_parameter.
+    if first_disallowed(
+        server_hello.extensions.present_types(),
+        Tls13Message::ServerHello,
+    )
+    .is_some()
+    {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::UnexpectedCleartextExtension,
+        ));
     }
     Ok(())
 }
@@ -157,8 +140,6 @@ pub(super) fn handle_server_hello(
     mut sent_tls13_fake_ccs: bool,
     alpn_protocols: Vec<Vec<u8>>,
 ) -> NextStateOrError {
-    validate_server_hello(cx.common, server_hello)?;
-
     let their_key_share = server_hello
         .extensions
         .key_share
@@ -304,6 +285,15 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         self.transcript.add_message(&m);
 
         let received = exts.present_types();
+        // RFC 9846 §4.3: a recognised extension that Table 1 does not allow
+        // in EncryptedExtensions is illegal_parameter; checked before the
+        // solicitation check, which would otherwise mask it.
+        if first_disallowed(received.iter().copied(), Tls13Message::EncryptedExtensions).is_some() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DisallowedEncryptedExtension,
+            ));
+        }
         if self
             .hello
             .server_sent_unsolicited_extensions(&received, &[])
@@ -312,14 +302,6 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 AlertDescription::UnsupportedExtension,
                 PeerMisbehaved::UnsolicitedEncryptedExtension,
             ));
-        }
-        for ext in &received {
-            if DISALLOWED_ENCRYPTED_EXTENSIONS.contains(ext) {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::UnsupportedExtension,
-                    PeerMisbehaved::DisallowedEncryptedExtension,
-                ));
-            }
         }
 
         hs::process_alpn_protocol(
@@ -465,17 +447,34 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
         self.transcript.add_message(&m);
         debug!("Got CertificateRequest {:?}", certreq);
 
-        // RFC 8446 §4.3.2: the context is empty during the handshake.
+        // RFC 9846 §4.4.2: the context is empty during the handshake. The
+        // message is well formed, so a non-empty one is illegal_parameter.
         if !certreq.context.0.is_empty() {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::DecodeError,
-                crate::error::InvalidMessage::InvalidCertRequest,
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCertificateRequestContext,
             ));
         }
 
+        // RFC 9846 §4.3: a recognised extension that may not appear in a
+        // CertificateRequest is illegal_parameter.
+        if first_disallowed(
+            certreq.extensions.unknown.iter().copied(),
+            Tls13Message::CertificateRequest,
+        )
+        .is_some()
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DisallowedCertificateRequestExtension,
+            ));
+        }
+
+        // RFC 9846 §4.4.2: signature_algorithms MUST be specified; its
+        // absence is missing_extension (§6.2).
         let Some(sigschemes) = &certreq.extensions.signature_algorithms else {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::HandshakeFailure,
+                AlertDescription::MissingExtension,
                 PeerIncompatible::SignatureAlgorithmsExtensionRequired,
             ));
         };
@@ -595,20 +594,24 @@ impl State<ClientConnectionData> for ExpectCertificate {
         };
         self.transcript.add_message(&m);
 
-        // RFC 8446 §4.4.2: the context is empty for server authentication.
+        // RFC 9846 §4.5.1: the context is empty for server authentication.
+        // The message is well formed, so a non-empty one is illegal_parameter.
         if !cert_chain.context.0.is_empty() {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::DecodeError,
-                crate::error::InvalidMessage::InvalidCertRequest,
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCertificateRequestContext,
             ));
         }
-        if cert_chain.any_entry_after_first_has_extensions() {
+        // RFC 9846 §4.5.1: the server MUST send a non-empty chain.
+        if cert_chain.entries.is_empty() {
             return Err(cx.common.send_fatal_alert(
-                AlertDescription::UnsupportedExtension,
-                PeerMisbehaved::BadCertChainExtensions,
+                AlertDescription::DecodeError,
+                Error::NoCertificatesPresented,
             ));
         }
-        // We never request SCTs, so none may be sent.
+        // We offer status_request, so OCSP responses may come with any entry
+        // (only the end entity's is used). We never offer SCTs, so none may
+        // be sent (RFC 9846 §4.5.1: extensions MUST correspond to ours).
         if cert_chain.entries.iter().any(|e| e.sct_list.is_some()) {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,
@@ -686,7 +689,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                 &self.server_cert.ocsp_response,
                 now,
             )
-            .map_err(|err| send_cert_verify_error_alert(cx.common, err))?;
+            .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
 
         let message = construct_server_verify_message(&handshake_hash);
         let sig_verified = self
@@ -713,6 +716,24 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
 }
 
 /// Picks the alert for a failed certificate or signature check.
+/// Sends the alert for a certificate chain that failed validation.
+///
+/// A signature inside the chain that does not verify, or that uses an
+/// algorithm we do not accept (MD5 and SHA-1 included), is bad_certificate
+/// (RFC 9846 §6.2, §4.5.1): decrypt_error is for handshake signatures
+/// (CertificateVerify), see [`send_cert_verify_error_alert`].
+pub(crate) fn send_cert_path_error_alert(common: &mut CommonState, err: Error) -> Error {
+    match &err {
+        Error::InvalidCertificate(
+            crate::error::CertificateError::BadSignature
+            | crate::error::CertificateError::UnsupportedSignatureAlgorithm,
+        ) => common.send_fatal_alert(AlertDescription::BadCertificate, err),
+        _ => send_cert_verify_error_alert(common, err),
+    }
+}
+
+/// Sends the alert for a failed handshake signature check, or for any other
+/// certificate error.
 pub(crate) fn send_cert_verify_error_alert(common: &mut CommonState, err: Error) -> Error {
     match &err {
         Error::InvalidCertificate(e) => common.send_fatal_alert(e.clone().into(), err),
@@ -932,6 +953,28 @@ impl ExpectTraffic {
         cx: &mut ClientContext<'_>,
         nst: &NewSessionTicketPayloadTls13,
     ) -> Result<(), Error> {
+        // RFC 9846 §4.3: a recognised extension that may not appear in a
+        // NewSessionTicket is illegal_parameter; unrecognised ones are
+        // ignored (§4.7.1).
+        if first_disallowed(
+            nst.exts.unknown.iter().copied(),
+            Tls13Message::NewSessionTicket,
+        )
+        .is_some()
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DisallowedNewSessionTicketExtension,
+            ));
+        }
+
+        // RFC 9846 §4.7.1: a lifetime of zero means the ticket must be
+        // discarded immediately.
+        if nst.lifetime == 0 {
+            debug!("Discarding NewSessionTicket with zero lifetime");
+            return Ok(());
+        }
+
         let secret = self
             .key_schedule
             .resumption_master_secret_and_derive_ticket_psk(self.final_hash.as_ref(), &nst.nonce.0);
@@ -963,19 +1006,10 @@ impl ExpectTraffic {
         request: KeyUpdateRequest,
     ) -> Result<(), Error> {
         match request {
-            KeyUpdateRequest::UpdateNotRequested => {}
-            KeyUpdateRequest::UpdateRequested => {
-                common.received_key_update_requests =
-                    common.received_key_update_requests.saturating_add(1);
-                if common.received_key_update_requests > MAX_KEY_UPDATE_REQUESTS {
-                    return Err(common.send_fatal_alert(
-                        AlertDescription::UnexpectedMessage,
-                        PeerMisbehaved::TooManyKeyUpdateRequests,
-                    ));
-                }
-                // Our own KeyUpdate goes under the current key, then we rotate.
-                common.send_key_update(KeyUpdateRequest::UpdateNotRequested);
-                self.key_schedule.update_encrypter_and_notify(common);
+            KeyUpdateRequest::UpdateNotRequested | KeyUpdateRequest::UpdateRequested => {
+                // Our response, if one is owed, is sent once this flight is
+                // processed (`ConnectionCore::maybe_send_key_update`).
+                common.received_key_update(request, MAX_KEY_UPDATE_REQUESTS)?;
             }
             _ => {
                 return Err(common.send_fatal_alert(
@@ -1029,8 +1063,12 @@ impl State<ClientConnectionData> for ExpectTraffic {
         self.key_schedule.extract_secrets(Side::Client)
     }
 
-    fn send_key_update_request(&mut self, common: &mut CommonState) -> Result<(), Error> {
-        common.send_key_update(KeyUpdateRequest::UpdateRequested);
+    fn send_key_update(
+        &mut self,
+        common: &mut CommonState,
+        request: KeyUpdateRequest,
+    ) -> Result<(), Error> {
+        common.send_key_update(request);
         self.key_schedule.update_encrypter_and_notify(common);
         Ok(())
     }

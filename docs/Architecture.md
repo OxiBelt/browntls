@@ -116,6 +116,75 @@ that ends with a fatal alert forgets its TLS 1.2 session on both sides
 (RFC 5246 §7.2.2), and a TLS 1.2 server honours the client's curves for its
 ECDSA certificate as well as for key exchange (RFC 8422 §5.3).
 
+### TLS 1.3 protocol rules (RFC 9846)
+
+TLS 1.3 follows RFC 9846, which obsoletes RFC 8446; RFC 6066 supplies
+`server_name` and `status_request`. The rules that RFC 9846 tightened, and
+where they live:
+
+- Extensions are checked against RFC 9846 Table 1 (`tls13::extensions`;
+  extensions outside the table follow the TLS 1.3 column of the IANA
+  registry, and TLS 1.2-only ones are allowed in a ClientHello alone). A
+  recognised extension in a message that may not carry it is
+  `illegal_parameter`; one that answers nothing we sent is
+  `unsupported_extension`. This covers ServerHello, HelloRetryRequest,
+  EncryptedExtensions, CertificateRequest, CertificateEntry and
+  NewSessionTicket.
+- Versions: a ClientHello with `supported_versions` and a TLS 1.3
+  ServerHello or HelloRetryRequest must carry `legacy_version` 0x0303
+  (`protocol_version` otherwise); a `supported_versions` value the client did
+  not offer, or below TLS 1.3, is `illegal_parameter`.
+- HelloRetryRequest: the server remembers the cipher suite and group it
+  selected; the second ClientHello must carry exactly one key share, for that
+  group, and still offer that suite (`illegal_parameter`). After a
+  HelloRetryRequest the client drops a PSK whose hash differs from the
+  selected suite's.
+- KeyUpdate (`CommonState::key_update_to_send`, `ConnectionCore::
+  maybe_send_key_update`): the answer to `update_requested` is sent once,
+  after the received flight is processed and before any further application
+  data, however many requests arrived; a side that asked does not ask again
+  until a KeyUpdate from the peer arrives (a refresh then rotates only its own
+  key); no more than 2^48-1 key updates are sent, after which a peer's request
+  is ignored and the public `refresh_traffic_keys` fails. A write that reaches
+  the confidentiality limit rotates the key before the write returns; when
+  the key cannot be rotated yet (a server's half-RTT data before the client's
+  Finished), the record layer takes no more data until it can, and plaintext
+  buffered before the handshake stays buffered across the rotation. 0-RTT
+  data, which cannot be rekeyed, stops short of the limit. No KeyUpdate (and
+  no ticket) is sent after our own `close_notify` (§6.1). The limit is not
+  enforced on received records. A peer that keeps requesting updates without
+  sending application data in between is cut off after eight requests, a
+  local resource bound.
+- Record layer: a protected `change_cipher_spec` record, or one whose value
+  is not 0x01, is `unexpected_message`.
+- Alerts: `general_error` (117) exists; `user_canceled` is ignored at either
+  level in TLS 1.3 (the peer must follow it with `close_notify`), within the
+  same bound as TLS 1.2 warning alerts; every other alert except
+  `close_notify` ends the connection whatever its level.
+- Tickets: a server sends NewSessionTicket only when the ClientHello offered
+  `psk_dhe_ke`, announces a lifetime of at most seven days (one day for
+  session-cache tickets, the ticketer's otherwise), sends no ticket when that
+  lifetime would be zero, and does not resume a PSK older than it. A client
+  discards a ticket with a zero lifetime.
+- Signatures: in TLS 1.3 an ECDSA scheme binds its curve (a P-384 key
+  cannot verify `ecdsa_secp256r1_sha256`); a client's CertificateVerify must
+  use a scheme from the server's CertificateRequest list. A signature inside
+  the certificate chain that fails, or uses an algorithm not accepted (MD5,
+  SHA-1), is `bad_certificate`; `decrypt_error` is kept for handshake
+  signatures.
+- Server certificates: an empty Certificate message is `decode_error` when it
+  arrives; a non-empty `certificate_request_context` is `illegal_parameter`;
+  OCSP responses may come with any entry (only the end entity's is used).
+- Key shares come in `supported_groups` order, and a server that would have
+  preferred a group other than the one the client's shares allowed lists its
+  groups in EncryptedExtensions (RFC 9846 §4.3.7). Key shares are generated
+  per connection and never reused.
+
+Not implemented: post-handshake client authentication, the early exporter,
+stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
+(not "Recommended" in RFC 9846 Table 1; `record_size_limit` and the local
+`max_fragment_size` setting cover the use case).
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |

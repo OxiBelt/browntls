@@ -590,7 +590,7 @@ impl State<ClientConnectionData> for ExpectServerDone {
                 &st.server_cert.ocsp_response,
                 now,
             )
-            .map_err(|err| tls13::send_cert_verify_error_alert(cx.common, err))?;
+            .map_err(|err| tls13::send_cert_path_error_alert(cx.common, err))?;
 
         // 2. Verify the signature over the key exchange parameters
         //    (RFC 5246 §7.4.3: client_random || server_random || params).

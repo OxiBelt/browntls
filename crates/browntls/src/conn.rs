@@ -13,6 +13,7 @@ use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader as CodecReader;
 use crate::msgs::deframer::{Deframed, DeframerVecBuffer, MessageDeframer};
+use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
@@ -41,8 +42,14 @@ pub(crate) trait State<Data>: Send + Sync {
         Err(Error::HandshakeNotComplete)
     }
 
-    /// Sends a KeyUpdate requesting the peer to update too (TLS 1.3).
-    fn send_key_update_request(&mut self, _common: &mut CommonState) -> Result<(), Error> {
+    /// Sends a KeyUpdate carrying `request` under the current write key,
+    /// then rotates to the next one (TLS 1.3). The caller has already
+    /// applied the RFC 9846 §4.7.3 sending rules.
+    fn send_key_update(
+        &mut self,
+        _common: &mut CommonState,
+        _request: KeyUpdateRequest,
+    ) -> Result<(), Error> {
         Err(Error::HandshakeNotComplete)
     }
 
@@ -57,7 +64,10 @@ pub(crate) struct Context<'a, Data> {
 }
 
 /// Per-side connection data.
-pub trait SideData: Debug {
+///
+/// `Send + Sync` so that a [`Writer`], which borrows the whole connection,
+/// stays `Send + Sync` like the connection itself.
+pub trait SideData: Debug + Send + Sync {
     /// Called once when the connection fails for good, with the version
     /// negotiated so far.
     ///
@@ -202,10 +212,7 @@ impl<Data: SideData> ConnectionCore<Data> {
 
         self.state = Ok(state);
 
-        if self.common_state.refresh_traffic_keys_pending {
-            self.common_state.refresh_traffic_keys_pending = false;
-            self.refresh_traffic_keys()?;
-        }
+        self.maybe_send_key_update()?;
 
         Ok(self.common_state.current_io_state())
     }
@@ -347,9 +354,69 @@ impl<Data: SideData> ConnectionCore<Data> {
         })
     }
 
+    /// The public key refresh: rotates our write key and asks the peer to
+    /// rotate theirs, unless an earlier request of ours is still unanswered
+    /// (then only our key rotates). Fails once the RFC 9846 §4.7.3 epoch
+    /// limit is reached.
     pub(crate) fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
+        let st = match &mut self.state {
+            Ok(st) => st,
+            Err(e) => return Err(e.clone()),
+        };
+        // RFC 9846 §6.1: nothing follows our close_notify.
+        if self.common_state.has_sent_close_notify() {
+            return Ok(());
+        }
+        let Some(request) = self
+            .common_state
+            .key_update_to_send(KeyUpdateRequest::UpdateRequested)
+        else {
+            return Err(Error::EncryptError);
+        };
+        st.send_key_update(&mut self.common_state, request)?;
+        self.common_state.refresh_traffic_keys_pending = false;
+        self.common_state.flush_plaintext();
+        Ok(())
+    }
+
+    /// Sends the KeyUpdate that is due, if any: the single response owed to
+    /// the peer's `update_requested` (RFC 9846 §4.7.3), or the refresh that
+    /// the confidentiality limit asked for (RFC 9846 §5.5). Neither needs the
+    /// peer to update its own key.
+    ///
+    /// At the epoch limit nothing is sent: the peer's flag is ignored as
+    /// RFC 9846 §4.7.3 recommends, and a pending refresh turns into closure
+    /// when the confidentiality limit is hit.
+    ///
+    /// Nothing is sent after our close_notify (RFC 9846 §6.1). A refresh
+    /// that comes due before our state can send a KeyUpdate (a server's
+    /// half-RTT data) stays pending until the handshake completes.
+    pub(crate) fn maybe_send_key_update(&mut self) -> Result<(), Error> {
+        let common = &mut self.common_state;
+        if !common.key_update_owed && !common.refresh_traffic_keys_pending {
+            return Ok(());
+        }
+        if common.has_sent_close_notify() {
+            common.key_update_owed = false;
+            common.refresh_traffic_keys_pending = false;
+            return Ok(());
+        }
+        let Some(request) = common.key_update_to_send(KeyUpdateRequest::UpdateNotRequested) else {
+            common.key_update_owed = false;
+            common.refresh_traffic_keys_pending = false;
+            return Ok(());
+        };
         match &mut self.state {
-            Ok(st) => st.send_key_update_request(&mut self.common_state),
+            Ok(st) => match st.send_key_update(common, request) {
+                Ok(()) => {
+                    common.refresh_traffic_keys_pending = false;
+                    // Plaintext held back for the refresh can go now.
+                    common.flush_plaintext();
+                    Ok(())
+                }
+                Err(Error::HandshakeNotComplete) => Ok(()),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e.clone()),
         }
     }
@@ -503,7 +570,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Plaintext to send to the peer.
     pub fn writer(&mut self) -> Writer<'_> {
         Writer {
-            common: &mut self.core.common_state,
+            sink: &mut self.core,
         }
     }
 
@@ -654,26 +721,57 @@ impl Debug for Reader<'_> {
 /// buffer limit) and sent once it does.
 #[cfg(feature = "std")]
 pub struct Writer<'a> {
-    common: &'a mut CommonState,
+    sink: &'a mut (dyn PlaintextSink + Send + Sync),
+}
+
+/// Where a [`Writer`] puts plaintext.
+#[cfg(feature = "std")]
+trait PlaintextSink {
+    fn write_plain(
+        &mut self,
+        payload: crate::msgs::message::OutboundChunks<'_>,
+    ) -> std::io::Result<usize>;
+}
+
+#[cfg(feature = "std")]
+impl<Data: SideData> PlaintextSink for ConnectionCore<Data> {
+    fn write_plain(
+        &mut self,
+        payload: crate::msgs::message::OutboundChunks<'_>,
+    ) -> std::io::Result<usize> {
+        if self.common_state.encrypt_failed {
+            return Err(std::io::Error::other("record encryption failed"));
+        }
+        let mut len = self
+            .common_state
+            .send_plain(payload, crate::common_state::Limit::Yes);
+        // A write that reached the confidentiality limit rotates the key
+        // right away, so later writes go out under the next key instead of
+        // being refused (RFC 9846 §5.5). A write the record layer held back
+        // for the refresh is retried once under the new key. Errors are left
+        // for `process_new_packets` to report: the bytes taken are queued.
+        if self.common_state.refresh_traffic_keys_pending {
+            let _ = self.maybe_send_key_update();
+            if len == 0 && !self.common_state.refresh_traffic_keys_pending {
+                len = self
+                    .common_state
+                    .send_plain(payload, crate::common_state::Limit::Yes);
+            }
+        }
+        Ok(len)
+    }
 }
 
 #[cfg(feature = "std")]
 impl std::io::Write for Writer<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.common.encrypt_failed {
-            return Err(std::io::Error::other("record encryption failed"));
-        }
-        Ok(self
-            .common
-            .send_plain(buf.into(), crate::common_state::Limit::Yes))
+        self.sink.write_plain(buf.into())
     }
 
     fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
         let slices: alloc::vec::Vec<&[u8]> = bufs.iter().map(|s| &**s).collect();
         let chunks = crate::msgs::message::OutboundChunks::new(&slices);
-        Ok(self
-            .common
-            .send_plain(chunks, crate::common_state::Limit::Yes))
+        self.sink.write_plain(chunks)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

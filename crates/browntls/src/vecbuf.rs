@@ -54,6 +54,13 @@ impl ChunkVecBuffer {
         len
     }
 
+    /// Puts `bytes` back at the front of the queue (undoing a `pop`).
+    pub(crate) fn prepend(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.chunks.push_front(bytes);
+        }
+    }
+
     /// Removes and returns the first chunk.
     pub(crate) fn pop(&mut self) -> Option<Vec<u8>> {
         self.chunks.pop_front()

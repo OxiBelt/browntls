@@ -1,5 +1,6 @@
 //! TLS 1.3 cipher suites and key schedule.
 
+pub(crate) mod extensions;
 pub(crate) mod key_schedule;
 
 use core::fmt;

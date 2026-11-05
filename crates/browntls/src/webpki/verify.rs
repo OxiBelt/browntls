@@ -163,9 +163,29 @@ pub fn verify_tls13_signature(
     if !dss.scheme.supported_in_tls13() {
         return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
     }
-    let possible_algs = supported_schemes.convert_scheme(dss.scheme)?;
+    let possible_algs = tls13_algs(dss.scheme, supported_schemes.convert_scheme(dss.scheme)?);
     let cert = ParsedCertificate::try_from(cert)?;
-    verify_sig_using_any_alg(&cert, possible_algs, msg, dss.signature())
+    verify_sig_using_any_alg(&cert, &possible_algs, msg, dss.signature())
+}
+
+/// RFC 9846 §4.3.3: in TLS 1.3 an ECDSA scheme names the curve as well as
+/// the hash ("ecdsa_secp256r1_sha256" needs a P-256 key), unlike TLS 1.2
+/// where any curve may be paired with any hash. So of the algorithms mapped
+/// to an ECDSA scheme only those for its own curve may verify.
+fn tls13_algs(
+    scheme: SignatureScheme,
+    algs: &[&'static dyn SignatureVerificationAlgorithm],
+) -> Vec<&'static dyn SignatureVerificationAlgorithm> {
+    let curve = match scheme {
+        SignatureScheme::ECDSA_NISTP256_SHA256 => Some(browntls_pki::alg_id::ECDSA_P256),
+        SignatureScheme::ECDSA_NISTP384_SHA384 => Some(browntls_pki::alg_id::ECDSA_P384),
+        SignatureScheme::ECDSA_NISTP521_SHA512 => Some(browntls_pki::alg_id::ECDSA_P521),
+        _ => None,
+    };
+    algs.iter()
+        .copied()
+        .filter(|alg| curve.is_none_or(|curve| alg.public_key_alg_id() == curve))
+        .collect()
 }
 
 /// Verifies a TLS 1.3 handshake signature with a bare `SubjectPublicKeyInfo`
@@ -181,7 +201,7 @@ pub fn verify_tls13_signature_with_raw_key(
     }
     verify_sig_with_spki(
         spki.as_ref(),
-        supported_schemes.convert_scheme(dss.scheme)?,
+        &tls13_algs(dss.scheme, supported_schemes.convert_scheme(dss.scheme)?),
         msg,
         dss.signature(),
     )
@@ -295,5 +315,43 @@ mod tests {
             verify_tls13_signature(&[], &CertificateDer::from_slice(&[]), &dss, &ALGS).unwrap_err(),
             Error::PeerMisbehaved(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme)
         );
+    }
+
+    /// RFC 9846 §4.3.3: in TLS 1.3 each ECDSA scheme is verified only with
+    /// its own curve, while TLS 1.2 keeps every curve the provider maps.
+    fn check_tls13_ecdsa_curve_binding(algs: &WebPkiSupportedAlgorithms) {
+        use browntls_pki::alg_id;
+        for (scheme, curve) in [
+            (SignatureScheme::ECDSA_NISTP256_SHA256, alg_id::ECDSA_P256),
+            (SignatureScheme::ECDSA_NISTP384_SHA384, alg_id::ECDSA_P384),
+            (SignatureScheme::ECDSA_NISTP521_SHA512, alg_id::ECDSA_P521),
+        ] {
+            let Ok(mapped) = algs.convert_scheme(scheme) else {
+                continue;
+            };
+            assert!(!mapped.is_empty(), "{scheme:?}");
+            let bound = tls13_algs(scheme, mapped);
+            assert_eq!(bound.len(), 1, "{scheme:?}");
+            assert_eq!(bound[0].public_key_alg_id(), curve, "{scheme:?}");
+        }
+        // Schemes without a curve are left alone.
+        if let Ok(mapped) = algs.convert_scheme(SignatureScheme::ED25519) {
+            assert_eq!(
+                tls13_algs(SignatureScheme::ED25519, mapped).len(),
+                mapped.len()
+            );
+        }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn tls13_ecdsa_curve_binding_native() {
+        check_tls13_ecdsa_curve_binding(&crate::crypto::native::SUPPORTED_SIG_ALGS);
+    }
+
+    #[cfg(feature = "rustcrypto")]
+    #[test]
+    fn tls13_ecdsa_curve_binding_rustcrypto() {
+        check_tls13_ecdsa_curve_binding(&crate::crypto::rustcrypto::SUPPORTED_SIG_ALGS);
     }
 }

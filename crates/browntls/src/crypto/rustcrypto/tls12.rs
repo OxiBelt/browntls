@@ -13,7 +13,8 @@ use crate::crypto::KeyExchangeAlgorithm;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, KeyBlockShape, MessageDecrypter,
     MessageEncrypter, NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage,
-    PrefixedPayload, Tls12AeadAlgorithm, UnsupportedOperationError, make_tls12_aad,
+    PrefixedPayload, Tls12AeadAlgorithm, Tls12RecordProtection, UnsupportedOperationError,
+    make_tls12_aad,
 };
 use crate::crypto::tls12::PrfUsingHmac;
 use crate::enums::CipherSuite;
@@ -38,7 +39,7 @@ pub static TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_ECDSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA256),
-        aead_alg: &CHACHA20_POLY1305,
+        record: Tls12RecordProtection::Aead(&CHACHA20_POLY1305),
     });
 
 /// `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256`.
@@ -52,7 +53,7 @@ pub static TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_RSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA256),
-        aead_alg: &CHACHA20_POLY1305,
+        record: Tls12RecordProtection::Aead(&CHACHA20_POLY1305),
     });
 
 /// `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
@@ -66,7 +67,7 @@ pub static TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_RSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA256),
-        aead_alg: &AES_128_GCM,
+        record: Tls12RecordProtection::Aead(&AES_128_GCM),
     });
 
 /// `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`.
@@ -80,7 +81,7 @@ pub static TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_RSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA384),
-        aead_alg: &AES_256_GCM,
+        record: Tls12RecordProtection::Aead(&AES_256_GCM),
     });
 
 /// `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`.
@@ -94,7 +95,7 @@ pub static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_ECDSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA256),
-        aead_alg: &AES_128_GCM,
+        record: Tls12RecordProtection::Aead(&AES_128_GCM),
     });
 
 /// `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`.
@@ -108,7 +109,7 @@ pub static TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: SupportedCipherSuite =
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_ECDSA_SCHEMES,
         prf_provider: &PrfUsingHmac(&hmac::HMAC_SHA384),
-        aead_alg: &AES_256_GCM,
+        record: Tls12RecordProtection::Aead(&AES_256_GCM),
     });
 
 /// AES-GCM in TLS 1.2: a 4-byte fixed IV plus an 8-byte explicit per-record nonce.
@@ -160,6 +161,7 @@ impl<A: TlsAead> Tls12AeadAlgorithm for Gcm<A> {
 
     fn key_block_shape(&self) -> KeyBlockShape {
         KeyBlockShape {
+            mac_key_len: 0,
             enc_key_len: A::key_size(),
             fixed_iv_len: GCM_FIXED_IV_LEN,
             explicit_nonce_len: GCM_EXPLICIT_NONCE_LEN,
@@ -282,6 +284,7 @@ impl Tls12AeadAlgorithm for ChaCha {
 
     fn key_block_shape(&self) -> KeyBlockShape {
         KeyBlockShape {
+            mac_key_len: 0,
             enc_key_len: 32,
             fixed_iv_len: NONCE_LEN,
             explicit_nonce_len: 0,

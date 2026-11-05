@@ -323,7 +323,11 @@ impl Codec<'_> for CertificateRequestPayload {
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        // RFC 5246 §7.4.4: certificate_types<1..2^8-1>.
         let certtypes = read_vec_u8(r)?;
+        if certtypes.is_empty() {
+            return Err(InvalidMessage::IllegalEmptyValue);
+        }
         let sigschemes = read_vec_u16::<SignatureScheme>(r)?;
         if sigschemes.is_empty() {
             return Err(InvalidMessage::NoSignatureSchemes);

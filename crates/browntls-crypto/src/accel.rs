@@ -335,6 +335,8 @@ impl fmt::Display for Uses {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Algorithm {
+    /// SHA-1 compression (HMAC-SHA1 for TLS 1.2 CBC cipher suites).
+    Sha1,
     /// SHA-224/SHA-256 compression.
     Sha256,
     /// SHA-384/SHA-512 compression.
@@ -363,7 +365,8 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Every algorithm family, in reporting order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
+        Self::Sha1,
         Self::Sha256,
         Self::Sha512,
         Self::Keccak,
@@ -380,18 +383,19 @@ impl Algorithm {
 
     const fn index(self) -> usize {
         match self {
-            Self::Sha256 => 0,
-            Self::Sha512 => 1,
-            Self::Keccak => 2,
-            Self::KeccakX4 => 3,
-            Self::Aes => 4,
-            Self::Ghash => 5,
-            Self::ChaCha20 => 6,
-            Self::Poly1305 => 7,
-            Self::X25519 => 8,
-            Self::P256 => 9,
-            Self::Rsa => 10,
-            Self::MlKem => 11,
+            Self::Sha1 => 0,
+            Self::Sha256 => 1,
+            Self::Sha512 => 2,
+            Self::Keccak => 3,
+            Self::KeccakX4 => 4,
+            Self::Aes => 5,
+            Self::Ghash => 6,
+            Self::ChaCha20 => 7,
+            Self::Poly1305 => 8,
+            Self::X25519 => 9,
+            Self::P256 => 10,
+            Self::Rsa => 11,
+            Self::MlKem => 12,
         }
     }
 
@@ -399,6 +403,7 @@ impl Algorithm {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Sha1 => "SHA-1",
             Self::Sha256 => "SHA-256",
             Self::Sha512 => "SHA-512",
             Self::Keccak => "Keccak",
@@ -480,6 +485,7 @@ fn status_of<B: Backends>(policy: Policy) -> AlgorithmStatus {
 macro_rules! for_family {
     ($alg:expr, $f:ident $(, $arg:expr)*) => {
         match $alg {
+            Algorithm::Sha1 => $f::<crate::hash::Sha1Backend>($($arg),*),
             Algorithm::Sha256 => $f::<crate::hash::Sha256Backend>($($arg),*),
             Algorithm::Sha512 => $f::<crate::hash::Sha512Backend>($($arg),*),
             Algorithm::Keccak => $f::<crate::hash::KeccakBackend>($($arg),*),
@@ -507,7 +513,7 @@ const NIBBLE: u64 = 0xf;
 
 #[inline]
 const fn shift(alg: Algorithm) -> u32 {
-    // `index` < 12, so the shift is below 48.
+    // `index` < 13, so the shift is below 52.
     #[allow(clippy::cast_possible_truncation)]
     {
         4 * alg.index() as u32
@@ -706,7 +712,7 @@ mod tests {
             }
             assert_eq!(simd.name().parse::<Acceleration>(), Ok(simd));
         }
-        assert!(word >> 48 == 0, "only 48 bits are used");
+        assert!(word >> 52 == 0, "only 52 bits are used");
         assert_eq!("PREFERED".parse(), Ok(Acceleration::Preferred));
         assert!("fast".parse::<Acceleration>().is_err());
         for (i, a) in Algorithm::ALL.iter().enumerate() {

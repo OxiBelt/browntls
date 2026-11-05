@@ -15,7 +15,8 @@ use crate::crypto::KeyExchangeAlgorithm;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, KeyBlockShape, MessageDecrypter,
     MessageEncrypter, NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage,
-    PrefixedPayload, Tls12AeadAlgorithm, UnsupportedOperationError, make_tls12_aad,
+    PrefixedPayload, Tls12AeadAlgorithm, Tls12RecordProtection, UnsupportedOperationError,
+    make_tls12_aad,
 };
 use crate::enums::CipherSuite;
 use crate::error::Error;
@@ -40,7 +41,7 @@ macro_rules! tls12_suite {
             kx: KeyExchangeAlgorithm::ECDHE,
             sign: $sign,
             prf_provider: &prf::$prf,
-            aead_alg: &$aead,
+            record: Tls12RecordProtection::Aead(&$aead),
         });
     };
 }
@@ -165,6 +166,7 @@ impl<A: Aead + 'static> Tls12AeadAlgorithm for Gcm<A> {
 
     fn key_block_shape(&self) -> KeyBlockShape {
         KeyBlockShape {
+            mac_key_len: 0,
             enc_key_len: A::KEY_LEN,
             fixed_iv_len: GCM_FIXED_IV_LEN,
             explicit_nonce_len: GCM_EXPLICIT_NONCE_LEN,
@@ -287,6 +289,7 @@ impl Tls12AeadAlgorithm for ChaCha {
 
     fn key_block_shape(&self) -> KeyBlockShape {
         KeyBlockShape {
+            mac_key_len: 0,
             enc_key_len: ChaCha20Poly1305::KEY_LEN,
             fixed_iv_len: NONCE_LEN,
             explicit_nonce_len: 0,

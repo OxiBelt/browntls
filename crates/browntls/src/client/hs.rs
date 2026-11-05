@@ -321,6 +321,15 @@ fn emit_client_hello_for_retry(
         ));
     }
 
+    // RFC 7366 §2: ask for Encrypt-then-MAC whenever a block cipher suite
+    // is on offer; the server answers only if it selects one.
+    let offers_block_cipher = supports_tls12
+        && config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.is_tls12_block_cipher());
+
     let mut exts = ClientExtensions {
         server_name,
         named_groups: Some(named_groups),
@@ -336,6 +345,7 @@ fn emit_client_hello_for_retry(
         }),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
         extended_master_secret: supports_tls12.then_some(()),
+        encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),
         psk_modes: supports_tls13.then(|| vec![PskKeyExchangeMode::PSK_DHE_KE]),
         key_shares: key_share.as_ref().map(|ks| {
@@ -743,6 +753,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
                     server_name: self.input.server_name,
                     randoms,
                     using_ems: server_hello.extensions.extended_master_secret.is_some(),
+                    using_etm: server_hello.extensions.encrypt_then_mac.is_some(),
                     transcript,
                     hello: self.input.hello,
                     alpn_protocols: self.input.alpn_protocols,

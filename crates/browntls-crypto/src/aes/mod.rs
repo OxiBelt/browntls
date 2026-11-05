@@ -1,8 +1,10 @@
 //! AES-128 and AES-256 block encryption (FIPS 197).
 //!
-//! Only the forward cipher is provided: TLS and QUIC use AES exclusively in
-//! counter-based modes (GCM) and for QUIC header protection, none of which
-//! need the inverse cipher.
+//! The public block types provide only the forward cipher, which is all that
+//! the counter-based modes (GCM, CCM) and QUIC header protection need. The
+//! inverse cipher exists for CBC mode ([`crate::cbc`], TLS 1.2 CBC suites)
+//! and is reached only through it; its per-backend key schedules are
+//! described in the `dec` submodule.
 //!
 //! Backends, selected once at key setup from [`crate::cpu::features`]:
 //!
@@ -23,8 +25,11 @@
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+mod dec;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
+#[cfg(target_arch = "riscv64")]
+mod riscv64_cbc;
 mod soft;
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod x86;
@@ -32,6 +37,8 @@ mod x86;
 mod x86_vaes;
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 pub(crate) mod x86_vaes512;
+
+pub(crate) use dec::DecKey;
 
 use crate::Error;
 use crate::cpu::features;

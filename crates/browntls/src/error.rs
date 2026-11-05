@@ -179,6 +179,8 @@ impl From<InvalidMessage> for AlertDescription {
             InvalidMessage::PreSharedKeyIsNotFinalExtension
             | InvalidMessage::DuplicateExtension(_) => Self::IllegalParameter,
             InvalidMessage::UnknownHelloRetryRequestExtension => Self::UnsupportedExtension,
+            // RFC 5246 §6, RFC 8446 §5: an unknown record type.
+            InvalidMessage::InvalidContentType => Self::UnexpectedMessage,
             _ => Self::DecodeError,
         }
     }
@@ -195,6 +197,8 @@ pub enum PeerMisbehaved {
     DisallowedEncryptedExtension,
     DuplicateClientHelloExtensions,
     DuplicateEncryptedExtensions,
+    EncryptThenMacWithAeadCipherSuite,
+    InappropriateFallback,
     DuplicateHelloRetryRequestExtensions,
     DuplicateNewSessionTicketExtensions,
     DuplicateServerHelloExtensions,
@@ -278,6 +282,7 @@ impl From<PeerMisbehaved> for Error {
 #[derive(Debug, PartialEq, Clone)]
 pub enum PeerIncompatible {
     EcPointsExtensionRequired,
+    EncryptThenMacExtensionRequired,
     ExtendedMasterSecretExtensionRequired,
     IncorrectCertificateTypeExtension,
     KeyShareExtensionRequired,
@@ -288,6 +293,7 @@ pub enum PeerIncompatible {
     NoKxGroupsInCommon,
     NoSignatureSchemesInCommon,
     NullCompressionRequired,
+    SecureRenegotiationExtensionRequired,
     ServerDoesNotSupportTls12Or13,
     ServerSentHelloRetryRequestWithUnknownExtension,
     ServerTlsVersionIsDisabledByOurConfig,

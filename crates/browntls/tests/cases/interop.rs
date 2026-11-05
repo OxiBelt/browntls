@@ -272,6 +272,45 @@ fn r_provider(suite: Option<u16>, group: Option<u16>) -> Arc<rustls::crypto::Cry
     Arc::new(provider)
 }
 
+/// A rustls provider offering exactly `groups`, in that order.
+fn r_provider_with_groups(
+    suite: Option<u16>,
+    groups: &[u16],
+) -> Arc<rustls::crypto::CryptoProvider> {
+    let mut provider = Arc::unwrap_or_clone(r_provider(suite, None));
+    provider.kx_groups = groups
+        .iter()
+        .map(|group| {
+            provider
+                .kx_groups
+                .iter()
+                .copied()
+                .find(|g| u16::from(g.name()) == *group)
+                .unwrap_or_else(|| panic!("rustls lacks group {group:#06x}"))
+        })
+        .collect();
+    Arc::new(provider)
+}
+
+/// `group` first, plus the curve of a `key_type` ECDSA certificate for TLS
+/// 1.2: RFC 8422 §5.3 forbids a server from using an ECDSA certificate on a
+/// curve the client did not list in `supported_groups`.
+fn client_groups(group: u16, version: u16, key_type: KeyType) -> Vec<u16> {
+    let mut groups = vec![group];
+    let cert_curve = match key_type {
+        KeyType::EcdsaP256 => Some(0x0017),
+        KeyType::EcdsaP384 => Some(0x0018),
+        _ => None,
+    };
+    if version == 0x0303
+        && let Some(curve) = cert_curve
+        && curve != group
+    {
+        groups.push(curve);
+    }
+    groups
+}
+
 fn b_provider(suite: Option<u16>, group: Option<u16>) -> Arc<browntls::crypto::CryptoProvider> {
     let mut provider = prov::default_provider();
     if let Some(suite) = suite {
@@ -500,10 +539,22 @@ fn rustls_client_to_browntls_server_every_suite_group_and_key() {
         for &key_type in keys.iter().filter(|k| KeyType::SIGNING.contains(k)) {
             let chain = server_chain(key_type);
             for &group in COMMON_GROUPS {
-                let mut client =
-                    r_connect_client(r_client(&chain, version, Some(suite), Some(group)));
+                // The server exchanges keys over `group` only; the client
+                // also lists the certificate's curve where RFC 8422 §5.3
+                // requires it.
+                let client_config = rustls::ClientConfig::builder_with_provider(
+                    r_provider_with_groups(Some(suite), &client_groups(group, version, key_type)),
+                )
+                .with_protocol_versions(r_versions(version))
+                .unwrap()
+                .with_root_certificates(r_roots(&chain))
+                .with_no_client_auth();
+                let mut client = r_connect_client(client_config);
                 let mut server = browntls::ServerConnection::new(Arc::new(b_server(
-                    &chain, version, None, None,
+                    &chain,
+                    version,
+                    None,
+                    Some(group),
                 )))
                 .unwrap();
                 let (c, s) = handshake(&mut client, &mut server);
@@ -856,12 +907,17 @@ fn missing_client_certificate_is_rejected_by_both() {
             s,
             Err(format!("{:?}", browntls::Error::NoCertificatesPresented))
         );
+        // certificate_required is TLS 1.3 only (RFC 8446 §6.2); TLS 1.2
+        // answers a missing mandatory certificate with handshake_failure
+        // (RFC 5246 §7.4.6).
+        let expected = if version == 0x0304 {
+            rustls::AlertDescription::CertificateRequired
+        } else {
+            rustls::AlertDescription::HandshakeFailure
+        };
         assert_eq!(
             c,
-            Err(format!(
-                "{:?}",
-                rustls::Error::AlertReceived(rustls::AlertDescription::CertificateRequired)
-            ))
+            Err(format!("{:?}", rustls::Error::AlertReceived(expected)))
         );
     }
 }

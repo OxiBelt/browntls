@@ -6,7 +6,9 @@ use core::fmt;
 use crate::crypto::cipher::{InboundOpaqueMessage, MessageDecrypter, MessageEncrypter};
 use crate::error::Error;
 use crate::log::trace;
-use crate::msgs::message::{InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage};
+use crate::msgs::message::{
+    InboundPlainMessage, MAX_PLAINTEXT_LEN, OutboundOpaqueMessage, OutboundPlainMessage,
+};
 
 /// Sequence numbers are 64 bits; we stop a little short of the limit so that a
 /// close_notify can still be sent (RFC 8446 §5.5).
@@ -78,6 +80,11 @@ impl RecordLayer {
         encr: InboundOpaqueMessage<'a>,
     ) -> Result<Option<Decrypted<'a>>, Error> {
         if self.decrypt_state != DirectionState::Active {
+            // RFC 5246 §6.2.1 / RFC 8446 §5.1: an unprotected record carries
+            // at most 2^14 bytes; the ciphertext allowance does not apply.
+            if encr.payload.len() > MAX_PLAINTEXT_LEN {
+                return Err(Error::PeerSentOversizedRecord);
+            }
             return Ok(Some(Decrypted {
                 want_close_before_decrypt: false,
                 plaintext: encr.into_plain_message(),

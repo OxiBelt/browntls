@@ -82,14 +82,118 @@ impl fmt::Display for UnsupportedOperationError {
 impl core::error::Error for UnsupportedOperationError {}
 
 /// How a TLS 1.2 key block is split (RFC 5246 §6.3).
+///
+/// The key block is `client_write_MAC_key || server_write_MAC_key ||
+/// client_write_key || server_write_key || client_write_IV ||
+/// server_write_IV`, followed (for AEADs with an explicit nonce) by the
+/// per-connection seeds of the explicit nonces.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyBlockShape {
+    /// The length of each MAC key (0 for AEADs).
+    pub mac_key_len: usize,
     /// The length of each write key.
     pub enc_key_len: usize,
-    /// The length of each fixed IV.
+    /// The length of each fixed IV (0 for block ciphers, whose IV is
+    /// explicit in every record).
     pub fixed_iv_len: usize,
-    /// The length of the explicit per-record nonce (0 for ChaCha20-Poly1305).
+    /// The length of the explicit per-record nonce (0 for ChaCha20-Poly1305
+    /// and block ciphers).
     pub explicit_nonce_len: usize,
+}
+
+impl KeyBlockShape {
+    /// The total key block length.
+    pub fn total_len(&self) -> usize {
+        (self.mac_key_len + self.enc_key_len + self.fixed_iv_len + self.explicit_nonce_len) * 2
+    }
+}
+
+/// The order of encryption and MAC for a TLS 1.2 block cipher suite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tls12MacOrder {
+    /// `encrypt(data || MAC || padding)` (RFC 5246 §6.2.3.2). Its padding
+    /// check is a known timing side channel (Lucky Thirteen); the receiver
+    /// has to process every record in time independent of the padding.
+    MacThenEncrypt,
+    /// `encrypt(data || padding) || MAC` (RFC 7366), negotiated with the
+    /// `encrypt_then_mac` extension. RFC 9325 §4.2 says a CBC suite should
+    /// not be used without it.
+    EncryptThenMac,
+}
+
+/// A block cipher with an HMAC usable with TLS 1.2 (`GenericBlockCipher`,
+/// RFC 5246 §6.2.3.2), in either MAC order.
+///
+/// The explicit per-record IV is the implementation's responsibility: it
+/// must be unpredictable (RFC 5246 §6.2.3.2).
+pub trait Tls12BlockCipherAlgorithm: Send + Sync + 'static {
+    /// Creates a record encrypter from the write MAC key and write key.
+    fn encrypter(
+        &self,
+        mac_key: &[u8],
+        key: AeadKey,
+        order: Tls12MacOrder,
+    ) -> Box<dyn MessageEncrypter>;
+
+    /// Creates a record decrypter from the read MAC key and read key.
+    fn decrypter(
+        &self,
+        mac_key: &[u8],
+        key: AeadKey,
+        order: Tls12MacOrder,
+    ) -> Box<dyn MessageDecrypter>;
+
+    /// How the key block is split for this algorithm (`fixed_iv_len` and
+    /// `explicit_nonce_len` are zero).
+    fn key_block_shape(&self) -> KeyBlockShape;
+
+    /// Whether the implementation is FIPS validated.
+    fn fips(&self) -> bool {
+        false
+    }
+}
+
+/// The record protection of a TLS 1.2 cipher suite (RFC 5246 §6.2.3).
+#[derive(Clone, Copy)]
+pub enum Tls12RecordProtection {
+    /// `GenericAEADCipher` (RFC 5246 §6.2.3.3).
+    Aead(&'static dyn Tls12AeadAlgorithm),
+    /// `GenericBlockCipher` (RFC 5246 §6.2.3.2), with or without
+    /// Encrypt-then-MAC (RFC 7366). `GenericStreamCipher` suites are not
+    /// supported (RC4 is prohibited by RFC 7465).
+    BlockCipher(&'static dyn Tls12BlockCipherAlgorithm),
+}
+
+impl Tls12RecordProtection {
+    /// How the key block is split.
+    pub fn key_block_shape(&self) -> KeyBlockShape {
+        match self {
+            Self::Aead(alg) => alg.key_block_shape(),
+            Self::BlockCipher(alg) => alg.key_block_shape(),
+        }
+    }
+
+    /// Whether this is a block cipher, to which `encrypt_then_mac` applies.
+    pub fn is_block_cipher(&self) -> bool {
+        matches!(self, Self::BlockCipher(_))
+    }
+
+    /// Whether the implementation is FIPS validated.
+    pub fn fips(&self) -> bool {
+        match self {
+            Self::Aead(alg) => alg.fips(),
+            Self::BlockCipher(alg) => alg.fips(),
+        }
+    }
+}
+
+impl fmt::Debug for Tls12RecordProtection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Aead(_) => "Tls12RecordProtection::Aead",
+            Self::BlockCipher(_) => "Tls12RecordProtection::BlockCipher",
+        })
+    }
 }
 
 /// Decrypts records.

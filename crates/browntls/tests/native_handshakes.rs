@@ -219,8 +219,8 @@ fn rsa_server_signs_with_every_scheme_and_suite() {
         }
     }
     // 5 TLS 1.3 suites (AES-128-CCM and AES-128-CCM-8 included) x 3 PSS
-    // schemes + 3 ECDHE_RSA suites x 6 schemes (with TLS 1.2)
-    let tls12 = if cfg!(feature = "tls12") { 3 * 6 } else { 0 };
+    // schemes + 7 ECDHE_RSA suites (3 AEAD, 4 CBC) x 6 schemes (with TLS 1.2)
+    let tls12 = if cfg!(feature = "tls12") { 7 * 6 } else { 0 };
     assert_eq!(handshakes, 5 * 3 + tls12);
 }
 
@@ -441,7 +441,10 @@ fn p521_raw_public_keys_sign_in_both_directions() {
     init_logging();
     let server_key = native_keys::P521RawKey::generate();
     let client_key = native_keys::P521RawKey::generate();
-    let provider = prov::default_provider();
+    // Every group, so the client lists secp521r1 for the server's P-521
+    // key in TLS 1.2 (RFC 8422 §5.3).
+    let mut provider = prov::default_provider();
+    provider.kx_groups = prov::ALL_KX_GROUPS.to_vec();
     let p521 = [SignatureScheme::ECDSA_NISTP521_SHA512];
     for v in VERSIONS {
         let server_verifier = SchemeRecordingServerVerifier::new(
@@ -640,7 +643,7 @@ fn secp384r1mlkem1024_share_carries_its_classical_half() {
 #[test]
 fn mlkem1024_groups_are_not_used_for_tls12() {
     init_logging();
-    let chain = server_chain(KeyType::EcdsaP256);
+    let chain = server_chain(KeyType::Ed25519);
     let mut client_groups = mlkem1024_groups().to_vec();
     client_groups.push(prov::kx_group::SECP384R1);
     let (mut client, mut server) = connect(

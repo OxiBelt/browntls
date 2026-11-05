@@ -338,17 +338,79 @@ struct Case {
     /// `-groups` value.
     openssl_group: &'static str,
     key: KeyType,
+    /// How Encrypt-then-MAC (RFC 7366) is handled for a CBC suite.
+    etm: Etm,
+}
+
+/// The Encrypt-then-MAC variants of a CBC case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Etm {
+    /// Both sides offer the extension (the default); AEAD suites too.
+    Negotiated,
+    /// OpenSSL has the extension disabled and browntls allows
+    /// MAC-then-encrypt: the handshake uses the RFC 5246 construction.
+    #[cfg_attr(not(feature = "tls12"), allow(dead_code))]
+    DisabledAllowed,
+    /// OpenSSL has the extension disabled and browntls keeps its default:
+    /// the handshake must fail.
+    #[cfg_attr(not(feature = "tls12"), allow(dead_code))]
+    DisabledRefused,
+}
+
+/// An OpenSSL configuration file that disables Encrypt-then-MAC for every
+/// `SSL_CTX` of the process (`OPENSSL_CONF`), next to the PKI files.
+fn no_etm_conf(pki: &Pki) -> String {
+    let path = pki.path("no-etm.cnf");
+    std::fs::write(
+        &path,
+        "openssl_conf = openssl_init\n\n[openssl_init]\nssl_conf = ssl_sect\n\n\
+         [ssl_sect]\nsystem_default = system_default_sect\n\n[system_default_sect]\n\
+         Options = -EncryptThenMac\n",
+    )
+    .unwrap();
+    path
 }
 
 impl Case {
     fn name(&self) -> String {
         format!(
-            "{:?} {:?} {:?} {:?}",
+            "{:?} {:?} {:?} {:?} {:?}",
             self.version.version,
             self.suite.suite(),
             self.group.name(),
-            self.key
+            self.key,
+            self.etm
         )
+    }
+
+    /// The environment for the OpenSSL process.
+    fn openssl_env(&self, pki: &Pki) -> Vec<(&'static str, String)> {
+        match self.etm {
+            Etm::Negotiated => Vec::new(),
+            Etm::DisabledAllowed | Etm::DisabledRefused => {
+                vec![("OPENSSL_CONF", no_etm_conf(pki))]
+            }
+        }
+    }
+
+    /// Whether browntls may use MAC-then-encrypt.
+    fn allow_mac_then_encrypt(&self) -> bool {
+        self.etm == Etm::DisabledAllowed
+    }
+
+    /// Turns the outcome of a run into the verdict for this case: a case
+    /// that must fail passes when the handshake failed.
+    fn verdict(&self, result: Result<(), String>) -> Result<(), String> {
+        match (self.etm, result) {
+            (Etm::DisabledRefused, Ok(())) => {
+                Err("handshake succeeded without encrypt_then_mac".into())
+            }
+            (Etm::DisabledRefused, Err(e)) => {
+                eprintln!("  refused as expected: {}", e.lines().next().unwrap_or(""));
+                Ok(())
+            }
+            (_, result) => result,
+        }
     }
 
     fn openssl_args(&self) -> Vec<&'static str> {
@@ -409,6 +471,7 @@ fn cases() -> Vec<Case> {
         extra_groups: Vec::new(),
         openssl_group,
         key,
+        etm: Etm::Negotiated,
     };
     let mut cases = vec![
         tls13(
@@ -510,6 +573,7 @@ fn cases() -> Vec<Case> {
             extra_groups: Vec::new(),
             openssl_group,
             key,
+            etm: Etm::Negotiated,
         };
         cases.extend([
             // In TLS 1.2 OpenSSL also requires the certificate's curve to be
@@ -576,6 +640,96 @@ fn cases() -> Vec<Case> {
                 KeyType::RsaPssSha256DefaultSalt,
             ),
         ]);
+        // The CBC suites (RFC 5246 §6.2.3.2, RFC 5289, RFC 8422) with
+        // Encrypt-then-MAC (RFC 7366), which OpenSSL negotiates by default.
+        cases.extend([
+            Case {
+                extra_groups: vec![kx::SECP256R1],
+                ..tls12(
+                    cs::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+                    "ECDHE-ECDSA-AES128-SHA256",
+                    kx::X25519,
+                    "X25519:P-256",
+                    KeyType::EcdsaP256,
+                )
+            },
+            tls12(
+                cs::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+                "ECDHE-ECDSA-AES256-SHA384",
+                kx::SECP384R1,
+                "P-384",
+                KeyType::EcdsaP384,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+                "ECDHE-RSA-AES128-SHA256",
+                kx::SECP256R1,
+                "P-256",
+                KeyType::Rsa2048,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+                "ECDHE-RSA-AES256-SHA384",
+                kx::X25519,
+                "X25519",
+                KeyType::Rsa2048,
+            ),
+            Case {
+                extra_groups: vec![kx::SECP256R1],
+                ..tls12(
+                    cs::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+                    "ECDHE-ECDSA-AES128-SHA",
+                    kx::X25519,
+                    "X25519:P-256",
+                    KeyType::EcdsaP256,
+                )
+            },
+            tls12(
+                cs::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+                "ECDHE-ECDSA-AES256-SHA",
+                kx::SECP384R1,
+                "P-384",
+                KeyType::EcdsaP384,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+                "ECDHE-RSA-AES128-SHA",
+                kx::X25519,
+                "X25519",
+                KeyType::Rsa2048,
+            ),
+            tls12(
+                cs::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+                "ECDHE-RSA-AES256-SHA",
+                kx::SECP256R1,
+                "P-256",
+                KeyType::Rsa2048,
+            ),
+        ]);
+        // Without Encrypt-then-MAC on the OpenSSL side (RFC 5246
+        // MAC-then-encrypt): refused by default, used when allowed.
+        for etm in [Etm::DisabledRefused, Etm::DisabledAllowed] {
+            cases.push(Case {
+                etm,
+                ..tls12(
+                    cs::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+                    "ECDHE-RSA-AES128-SHA256",
+                    kx::X25519,
+                    "X25519",
+                    KeyType::Rsa2048,
+                )
+            });
+            cases.push(Case {
+                etm,
+                ..tls12(
+                    cs::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+                    "ECDHE-RSA-AES256-SHA",
+                    kx::SECP256R1,
+                    "P-256",
+                    KeyType::Rsa2048,
+                )
+            });
+        }
     }
     cases
 }
@@ -652,6 +806,7 @@ fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(),
     }
     let mut child = Command::new(openssl)
         .args(&args)
+        .envs(case.openssl_env(&pki))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -686,7 +841,7 @@ fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(),
             .with_protocol_versions(&[case.version])
             .map_err(|e| e.to_string())?
             .with_root_certificates(pki.roots());
-        let config = if client_auth {
+        let mut config = if client_auth {
             let (chain, key) = pki.chain("client");
             builder
                 .with_client_auth_cert(chain, key)
@@ -694,6 +849,7 @@ fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(),
         } else {
             builder.with_no_client_auth()
         };
+        config.allow_mac_then_encrypt = case.allow_mac_then_encrypt();
         let conn =
             ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap())
                 .map_err(|e| e.to_string())?;
@@ -714,7 +870,9 @@ fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(),
         Ok(())
     })();
     let (_, out, err) = finish(child, Some(rx));
-    result.map_err(|e| format!("{e}\ns_server stdout:\n{out}\ns_server stderr:\n{err}"))
+    case.verdict(
+        result.map_err(|e| format!("{e}\ns_server stdout:\n{out}\ns_server stderr:\n{err}")),
+    )
 }
 
 /// `openssl s_client` against a browntls server that answers each line with
@@ -742,6 +900,7 @@ fn openssl_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(), 
     }
     let mut child = Command::new(openssl)
         .args(&args)
+        .envs(case.openssl_env(&pki))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -783,9 +942,10 @@ fn openssl_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(), 
             builder.with_no_client_auth()
         };
         let (chain, key) = pki.chain("server");
-        let config = builder
+        let mut config = builder
             .with_single_cert(chain, key)
             .map_err(|e| e.to_string())?;
+        config.allow_mac_then_encrypt = case.allow_mac_then_encrypt();
         let conn = ServerConnection::new(Arc::new(config)).map_err(|e| e.to_string())?;
         let mut tls = StreamOwned::new(conn, sock);
         let line = read_line(&mut tls).map_err(|e| format!("read: {e}"))?;
@@ -804,12 +964,13 @@ fn openssl_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(), 
     })();
     drop(stdin);
     let (_, out, err) = finish(child, None);
-    result?;
-    if out.contains(&format!("browntls:{PING}")) {
-        Ok(())
-    } else {
-        Err(format!("s_client stdout:\n{out}\ns_client stderr:\n{err}"))
-    }
+    case.verdict(result.and_then(|()| {
+        if out.contains(&format!("browntls:{PING}")) {
+            Ok(())
+        } else {
+            Err(format!("s_client stdout:\n{out}\ns_client stderr:\n{err}"))
+        }
+    }))
 }
 
 /// Runs `f` for every case with and without client authentication and

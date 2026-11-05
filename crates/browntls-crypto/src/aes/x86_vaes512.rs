@@ -53,6 +53,13 @@ impl Key {
         // SSE4.1 support.
         unsafe { ctr32_xor_impl(&self.rk, ctr, in_out) }
     }
+
+    /// CBC encryption is serial, so it runs on the XMM code.
+    pub(crate) fn cbc_encrypt(&self, iv: &[u8; 16], blocks: &mut [[u8; 16]]) {
+        // SAFETY: `Key::new` verified AES-NI and SSE4.1 support (among
+        // others).
+        unsafe { x86::cbc_encrypt_impl(&self.rk, iv, blocks) }
+    }
 }
 
 /// Calls `$f::<N, ...>($args)` with `N` the register count `$regs` (1 to 8)

@@ -1,9 +1,12 @@
-//! Portable constant-time AES encryption.
+//! Portable constant-time AES encryption and decryption.
 //!
 //! A 64-bit bitsliced implementation that processes four blocks in parallel,
 //! following the construction of BearSSL's `aes_ct64` (Thomas Pornin). The
 //! S-box is the Boyar–Peralta 113-gate circuit, ShiftRows and MixColumns are
 //! fixed bit permutations and XORs, and the key schedule uses the same S-box.
+//! The inverse S-box wraps the forward circuit in the inverse affine map, and
+//! decryption uses the standard (not the equivalent) inverse cipher, so both
+//! directions share one bitsliced key schedule.
 //! There are no table lookups and no secret-dependent branches; every
 //! operation is a 64-bit logical or constant-shift instruction.
 //!
@@ -67,40 +70,69 @@ impl Key {
 
     /// Encrypts up to four blocks in parallel.
     fn encrypt4(&self, blocks: &mut [[u8; 16]; 4]) {
-        let mut q = [0u64; 8];
-        for (i, block) in blocks.iter().enumerate() {
-            let (a, b) = interleave_in(&words(block));
-            q[i] = a;
-            q[i + 4] = b;
-        }
-        ortho(&mut q);
+        let mut q = load4(blocks);
         bitslice_encrypt(self.rounds, &self.skey, &mut q);
-        ortho(&mut q);
-        for (i, block) in blocks.iter_mut().enumerate() {
-            let w = interleave_out(q[i], q[i + 4]);
-            for (chunk, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(w) {
-                *chunk = word.to_le_bytes();
-            }
-        }
-        // The bitsliced state holds the output blocks (keystream, CBC-MAC
-        // chaining values).
-        zeroize_u64(&mut q);
+        store4(&mut q, blocks);
     }
 
     /// Encrypts every block in place.
     pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; 16]]) {
+        self.for_each4(blocks, Self::encrypt4);
+    }
+
+    /// Decrypts up to four blocks in parallel.
+    fn decrypt4(&self, blocks: &mut [[u8; 16]; 4]) {
+        let mut q = load4(blocks);
+        bitslice_decrypt(self.rounds, &self.skey, &mut q);
+        store4(&mut q, blocks);
+    }
+
+    /// Decrypts every block in place.
+    pub(crate) fn decrypt_blocks(&self, blocks: &mut [[u8; 16]]) {
+        self.for_each4(blocks, Self::decrypt4);
+    }
+
+    /// Applies `f` to groups of four blocks, padding the last group.
+    fn for_each4(&self, blocks: &mut [[u8; 16]], f: fn(&Self, &mut [[u8; 16]; 4])) {
         let (chunks, rest) = blocks.as_chunks_mut::<4>();
         for chunk in chunks {
-            self.encrypt4(chunk);
+            f(self, chunk);
         }
         if !rest.is_empty() {
             let mut tmp = [[0u8; 16]; 4];
             tmp[..rest.len()].copy_from_slice(rest);
-            self.encrypt4(&mut tmp);
+            f(self, &mut tmp);
             rest.copy_from_slice(&tmp[..rest.len()]);
             crate::zeroize::zeroize_bytes(tmp.as_flattened_mut());
         }
     }
+}
+
+/// Loads four blocks into bitsliced form.
+#[inline]
+fn load4(blocks: &[[u8; 16]; 4]) -> [u64; 8] {
+    let mut q = [0u64; 8];
+    for (i, block) in blocks.iter().enumerate() {
+        let (a, b) = interleave_in(&words(block));
+        q[i] = a;
+        q[i + 4] = b;
+    }
+    ortho(&mut q);
+    q
+}
+
+/// Stores the bitsliced state into four blocks and wipes it (it holds
+/// keystream, CBC-MAC chaining values or plaintext).
+#[inline]
+fn store4(q: &mut [u64; 8], blocks: &mut [[u8; 16]; 4]) {
+    ortho(q);
+    for (i, block) in blocks.iter_mut().enumerate() {
+        let w = interleave_out(q[i], q[i + 4]);
+        for (chunk, word) in block.as_chunks_mut::<4>().0.iter_mut().zip(w) {
+            *chunk = word.to_le_bytes();
+        }
+    }
+    zeroize_u64(q);
 }
 
 /// Standard AES key expansion (FIPS 197 §5.2) producing `4 * (rounds + 1)`
@@ -457,6 +489,121 @@ fn bitslice_encrypt(rounds: usize, skey: &[u64], q: &mut [u64; 8]) {
     add_round_key(q, &skey[8 * rounds..8 * rounds + 8]);
 }
 
+/// Bitsliced inverse S-box: the inverse affine map `T(y) = A^-1(y ^ 0x63)`,
+/// the forward S-box, then `T` again, since
+/// `T(S(T(y))) = T(A(inv(T(y))) ^ 0x63) = inv(A^-1(y ^ 0x63)) = S^-1(y)`.
+#[inline]
+fn inv_sbox(q: &mut [u64; 8]) {
+    inv_affine(q);
+    sbox(q);
+    inv_affine(q);
+}
+
+/// `T(y) = A^-1(y ^ 0x63)`: complement bits 0, 1, 5 and 6, then output bit
+/// `i` is the XOR of input bits `i + 2`, `i + 5` and `i + 7` (mod 8).
+#[inline]
+fn inv_affine(q: &mut [u64; 8]) {
+    let q0 = !q[0];
+    let q1 = !q[1];
+    let q2 = q[2];
+    let q3 = q[3];
+    let q4 = q[4];
+    let q5 = !q[5];
+    let q6 = !q[6];
+    let q7 = q[7];
+    q[7] = q1 ^ q4 ^ q6;
+    q[6] = q0 ^ q3 ^ q5;
+    q[5] = q7 ^ q2 ^ q4;
+    q[4] = q6 ^ q1 ^ q3;
+    q[3] = q5 ^ q0 ^ q2;
+    q[2] = q4 ^ q7 ^ q1;
+    q[1] = q3 ^ q6 ^ q0;
+    q[0] = q2 ^ q5 ^ q7;
+}
+
+#[inline]
+fn inv_shift_rows(q: &mut [u64; 8]) {
+    for x in q.iter_mut() {
+        let v = *x;
+        *x = (v & 0x0000_0000_0000_FFFF)
+            | ((v & 0x0000_0000_0FFF_0000) << 4)
+            | ((v & 0x0000_0000_F000_0000) >> 12)
+            | ((v & 0x0000_00FF_0000_0000) << 8)
+            | ((v & 0x0000_FF00_0000_0000) >> 8)
+            | ((v & 0x000F_0000_0000_0000) << 12)
+            | ((v & 0xFFF0_0000_0000_0000) >> 4);
+    }
+}
+
+/// InvMixColumns: multiplication of every column by
+/// `{0e, 0b, 0d, 09}` in bitsliced form (rows are 16-bit lanes, so
+/// `rotate_right(16)` and `rotate_right(32)` move to the next and the
+/// opposite row).
+#[inline]
+fn inv_mix_columns(q: &mut [u64; 8]) {
+    let [q0, q1, q2, q3, q4, q5, q6, q7] = *q;
+    let r0 = q0.rotate_right(16);
+    let r1 = q1.rotate_right(16);
+    let r2 = q2.rotate_right(16);
+    let r3 = q3.rotate_right(16);
+    let r4 = q4.rotate_right(16);
+    let r5 = q5.rotate_right(16);
+    let r6 = q6.rotate_right(16);
+    let r7 = q7.rotate_right(16);
+
+    q[0] = q5 ^ q6 ^ q7 ^ r0 ^ r5 ^ r7 ^ (q0 ^ q5 ^ q6 ^ r0 ^ r5).rotate_right(32);
+    q[1] = q0 ^ q5 ^ r0 ^ r1 ^ r5 ^ r6 ^ r7 ^ (q1 ^ q5 ^ q7 ^ r1 ^ r5 ^ r6).rotate_right(32);
+    q[2] = q0 ^ q1 ^ q6 ^ r1 ^ r2 ^ r6 ^ r7 ^ (q0 ^ q2 ^ q6 ^ r2 ^ r6 ^ r7).rotate_right(32);
+    q[3] = q0
+        ^ q1
+        ^ q2
+        ^ q5
+        ^ q6
+        ^ r0
+        ^ r2
+        ^ r3
+        ^ r5
+        ^ (q0 ^ q1 ^ q3 ^ q5 ^ q6 ^ q7 ^ r0 ^ r3 ^ r5 ^ r7).rotate_right(32);
+    q[4] = q1
+        ^ q2
+        ^ q3
+        ^ q5
+        ^ r1
+        ^ r3
+        ^ r4
+        ^ r5
+        ^ r6
+        ^ r7
+        ^ (q1 ^ q2 ^ q4 ^ q5 ^ q7 ^ r1 ^ r4 ^ r5 ^ r6).rotate_right(32);
+    q[5] = q2
+        ^ q3
+        ^ q4
+        ^ q6
+        ^ r2
+        ^ r4
+        ^ r5
+        ^ r6
+        ^ r7
+        ^ (q2 ^ q3 ^ q5 ^ q6 ^ r2 ^ r5 ^ r6 ^ r7).rotate_right(32);
+    q[6] =
+        q3 ^ q4 ^ q5 ^ q7 ^ r3 ^ r5 ^ r6 ^ r7 ^ (q3 ^ q4 ^ q6 ^ q7 ^ r3 ^ r6 ^ r7).rotate_right(32);
+    q[7] = q4 ^ q5 ^ q6 ^ r4 ^ r6 ^ r7 ^ (q4 ^ q5 ^ q7 ^ r4 ^ r7).rotate_right(32);
+}
+
+/// The inverse cipher (FIPS 197 §5.3) on the encryption key schedule.
+fn bitslice_decrypt(rounds: usize, skey: &[u64], q: &mut [u64; 8]) {
+    add_round_key(q, &skey[8 * rounds..8 * rounds + 8]);
+    for u in (1..rounds).rev() {
+        inv_shift_rows(q);
+        inv_sbox(q);
+        add_round_key(q, &skey[8 * u..8 * u + 8]);
+        inv_mix_columns(q);
+    }
+    inv_shift_rows(q);
+    inv_sbox(q);
+    add_round_key(q, &skey[..8]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +616,39 @@ mod tests {
         }
         // SubWord acts byte-wise.
         assert_eq!(sub_word(0x0053_ff01), 0x63ed_167c);
+    }
+
+    #[test]
+    fn inv_sbox_inverts_sbox() {
+        // All 256 byte values, four per word, eight words per state.
+        let mut q = [0u64; 8];
+        for (i, w) in q.iter_mut().enumerate() {
+            for j in 0..8u64 {
+                *w |= ((8 * i as u64 + j) * 4) << (8 * j);
+            }
+        }
+        for offset in 0..4u64 {
+            let mut x: [u64; 8] = core::array::from_fn(|i| q[i] + offset * 0x0101_0101_0101_0101);
+            let orig = x;
+            ortho(&mut x);
+            sbox(&mut x);
+            inv_sbox(&mut x);
+            ortho(&mut x);
+            assert_eq!(x, orig);
+        }
+    }
+
+    #[test]
+    fn inv_round_functions_invert_forward_ones() {
+        let orig: [u64; 8] =
+            core::array::from_fn(|i| (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let mut q = orig;
+        shift_rows(&mut q);
+        inv_shift_rows(&mut q);
+        assert_eq!(q, orig);
+        mix_columns(&mut q);
+        inv_mix_columns(&mut q);
+        assert_eq!(q, orig);
     }
 
     #[test]

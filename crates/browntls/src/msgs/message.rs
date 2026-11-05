@@ -155,6 +155,11 @@ impl PrefixedPayload {
         self.0.truncate(HEADER_SIZE + len);
     }
 
+    /// Resizes the payload to `len` bytes, zero-filling any new bytes.
+    pub fn resize(&mut self, len: usize) {
+        self.0.resize(HEADER_SIZE + len, 0);
+    }
+
     /// The payload length (excluding the header).
     pub fn len(&self) -> usize {
         self.0.len() - HEADER_SIZE

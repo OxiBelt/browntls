@@ -19,7 +19,7 @@
 //!
 //! | Item | Backing |
 //! |---|---|
-//! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM, ChaCha20-Poly1305 and AES-CCM from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha, ccm}` |
+//! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM, ChaCha20-Poly1305 and AES-CCM from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha, ccm}`; TLS 1.2 AES-CBC with HMAC-SHA1/SHA-256/SHA-384 from `browntls_crypto::{cbc, tls_cbc}` |
 //! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, curve448::x448, nist, mlkem, ffdhe}` |
 //! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, curve448::ed448, rsa}` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
@@ -97,6 +97,8 @@ pub(crate) mod ccm;
 pub(crate) mod kx;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
+#[cfg(feature = "tls12")]
+pub(crate) mod tls12_cbc;
 pub(crate) mod tls13;
 
 /// The provider with [`DEFAULT_CIPHER_SUITES`], [`DEFAULT_KX_GROUPS`],
@@ -174,13 +176,23 @@ impl KeyProvider for Native {
 /// failed authentications (RFC 9147 Appendix B.3), and its keys cannot be
 /// exported for kernel TLS. Remove it from the provider's `cipher_suites` to
 /// rule it out.
+///
+/// The TLS 1.2 list ends with its own non-preferred tier: the ECDHE AES-CBC
+/// suites of RFC 5246, RFC 5289 and RFC 8422 (`GenericBlockCipher`), which
+/// a browntls peer uses only with the `encrypt_then_mac` extension
+/// (RFC 7366) unless `allow_mac_then_encrypt` is set, and only when no AEAD
+/// suite is shared. Their keys cannot be exported for kernel TLS. Remove them
+/// from the provider's `cipher_suites` to rule them out.
 pub static DEFAULT_CIPHER_SUITES: &[SupportedCipherSuite] = ALL_CIPHER_SUITES;
 
 /// Every cipher suite this provider implements, in preference order.
 ///
 /// The TLS 1.3 suites of RFC 9846's optional, non-preferred tier,
 /// `TLS13_AES_128_CCM_SHA256` and `TLS13_AES_128_CCM_8_SHA256`, follow every
-/// AES-GCM and ChaCha20-Poly1305 suite.
+/// AES-GCM and ChaCha20-Poly1305 suite. The TLS 1.2 AES-CBC suites follow
+/// every TLS 1.2 AEAD suite: HMAC-SHA256/SHA384 suites first, then the
+/// HMAC-SHA1 suites (SHA-1 is used as an HMAC only, never for signatures;
+/// RFC 9155).
 pub static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     tls13::TLS13_AES_256_GCM_SHA384,
     tls13::TLS13_AES_128_GCM_SHA256,
@@ -199,6 +211,22 @@ pub static ALL_CIPHER_SUITES: &[SupportedCipherSuite] = &[
     tls12::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     #[cfg(feature = "tls12")]
     tls12::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    #[cfg(feature = "tls12")]
+    tls12_cbc::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
 ];
 
 /// The individual cipher suites.
@@ -208,6 +236,13 @@ pub mod cipher_suite {
         TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
         TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    };
+    #[cfg(feature = "tls12")]
+    pub use super::tls12_cbc::{
+        TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+        TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+        TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+        TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA, TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
     };
     pub use super::tls13::{
         TLS13_AES_128_CCM_8_SHA256, TLS13_AES_128_CCM_SHA256, TLS13_AES_128_GCM_SHA256,

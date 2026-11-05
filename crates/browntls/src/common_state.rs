@@ -33,6 +33,10 @@ const MAX_MIDDLEBOX_CCS: u8 = 2;
 /// How many consecutive warning alerts we tolerate.
 const MAX_WARNING_ALERTS: u8 = 4;
 
+/// How many HelloRequests a client ignores during its own handshake before
+/// treating the server as misbehaving (RFC 5246 §7.4.1.1).
+const MAX_IGNORED_HELLO_REQUESTS: u8 = 4;
+
 /// Which side of the connection this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -144,6 +148,7 @@ pub struct CommonState {
     pub(crate) has_received_close_notify: bool,
     pub(crate) has_seen_eof: bool,
     pub(crate) received_middlebox_ccs: u8,
+    pub(crate) ignored_hello_requests: u8,
     pub(crate) received_warning_alerts: u8,
     pub(crate) received_key_update_requests: u8,
     pub(crate) refresh_traffic_keys_pending: bool,
@@ -175,6 +180,7 @@ impl CommonState {
             has_received_close_notify: false,
             has_seen_eof: false,
             received_middlebox_ccs: 0,
+            ignored_hello_requests: 0,
             received_warning_alerts: 0,
             received_key_update_requests: 0,
             refresh_traffic_keys_pending: false,
@@ -391,8 +397,13 @@ impl CommonState {
         }
 
         // TLS 1.3 removed warning alerts: every other alert is fatal
-        // regardless of its level (RFC 8446 §6).
-        if alert.level == AlertLevel::Warning && !self.is_tls13() {
+        // regardless of its level (RFC 8446 §6). In TLS 1.2 most alerts are
+        // fatal by definition whatever level the peer wrote (RFC 5246
+        // §7.2.2), and only the rest may be shrugged off as warnings.
+        if alert.level == AlertLevel::Warning
+            && !self.is_tls13()
+            && !is_always_fatal(alert.description)
+        {
             self.received_warning_alerts += 1;
             if self.received_warning_alerts > MAX_WARNING_ALERTS {
                 return Err(self.send_fatal_alert(
@@ -411,6 +422,20 @@ impl CommonState {
         }
 
         Err(Error::AlertReceived(alert.description))
+    }
+
+    /// Ignores a HelloRequest that arrives while the client is already
+    /// handshaking (RFC 5246 §7.4.1.1), within reason.
+    pub(crate) fn process_hello_request_during_handshake(&mut self) -> Result<(), Error> {
+        if self.ignored_hello_requests >= MAX_IGNORED_HELLO_REQUESTS {
+            return Err(self.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::TooManyRenegotiationRequests,
+            ));
+        }
+        self.ignored_hello_requests += 1;
+        trace!("Ignoring HelloRequest during handshake");
+        Ok(())
     }
 
     /// Accepts an unprotected TLS 1.3 ChangeCipherSpec during the handshake.
@@ -438,8 +463,9 @@ impl CommonState {
         &mut self,
         secrets: &crate::tls12::ConnectionSecrets,
         side: Side,
+        order: crate::crypto::cipher::Tls12MacOrder,
     ) {
-        let pair = secrets.make_cipher_pair(side);
+        let pair = secrets.make_cipher_pair(side, order);
         self.record_layer
             .prepare_message_encrypter(pair.enc, secrets.suite().common.confidentiality_limit);
         self.record_layer.prepare_message_decrypter(pair.dec);
@@ -540,4 +566,29 @@ impl fmt::Debug for CommonState {
             .field("handshake_kind", &self.handshake_kind)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether RFC 5246 §7.2.2 defines `desc` as always fatal, so a warning
+/// level on it is the peer's mistake, not a reason to carry on.
+fn is_always_fatal(desc: AlertDescription) -> bool {
+    matches!(
+        desc,
+        AlertDescription::UnexpectedMessage
+            | AlertDescription::BadRecordMac
+            | AlertDescription::DecryptionFailed
+            | AlertDescription::RecordOverflow
+            | AlertDescription::DecompressionFailure
+            | AlertDescription::HandshakeFailure
+            | AlertDescription::IllegalParameter
+            | AlertDescription::UnknownCA
+            | AlertDescription::AccessDenied
+            | AlertDescription::DecodeError
+            | AlertDescription::DecryptError
+            | AlertDescription::ExportRestriction
+            | AlertDescription::ProtocolVersion
+            | AlertDescription::InsufficientSecurity
+            | AlertDescription::InternalError
+            | AlertDescription::InappropriateFallback
+            | AlertDescription::UnsupportedExtension
+    )
 }

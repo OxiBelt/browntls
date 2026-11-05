@@ -108,6 +108,16 @@ impl Side {
         group: Option<NamedGroup>,
         key: Option<KeyType>,
     ) -> Arc<CryptoProvider> {
+        self.provider_with_groups(suite, group.map(|g| vec![g]), key)
+    }
+
+    /// Like [`Self::provider`], offering `groups` in that order.
+    fn provider_with_groups(
+        self,
+        suite: Option<CipherSuite>,
+        groups: Option<Vec<NamedGroup>>,
+        key: Option<KeyType>,
+    ) -> Arc<CryptoProvider> {
         let mut provider = self.default_provider();
         if let Some(suite) = suite {
             provider.cipher_suites = self
@@ -118,14 +128,17 @@ impl Side {
                 .collect();
             assert_eq!(provider.cipher_suites.len(), 1, "{self:?} {suite:?}");
         }
-        if let Some(group) = group {
-            provider.kx_groups = self
-                .groups()
+        if let Some(groups) = groups {
+            provider.kx_groups = groups
                 .iter()
-                .filter(|g| g.name() == group)
-                .copied()
+                .map(|group| {
+                    *self
+                        .groups()
+                        .iter()
+                        .find(|g| g.name() == *group)
+                        .unwrap_or_else(|| panic!("{self:?} lacks {group:?}"))
+                })
                 .collect();
-            assert_eq!(provider.kx_groups.len(), 1, "{self:?} {group:?}");
         }
         if self == Side::RustCrypto && key == Some(KeyType::Rsa2048) {
             provider.key_provider = native::KEY_PROVIDER;
@@ -234,7 +247,7 @@ fn common_groups_cover_every_rustcrypto_group() {
         ]
     );
     // The providers implement the same suites, except the native-only
-    // AES-CCM suites.
+    // AES-CCM and TLS 1.2 CBC suites.
     let names =
         |suites: &[SupportedCipherSuite]| suites.iter().map(|s| s.suite()).collect::<Vec<_>>();
     assert_eq!(names(&common_suites()), names(Side::RustCrypto.suites()));
@@ -246,7 +259,15 @@ fn common_groups_cover_every_rustcrypto_group() {
         native_only,
         [
             CipherSuite::TLS13_AES_128_CCM_SHA256,
-            CipherSuite::TLS13_AES_128_CCM_8_SHA256
+            CipherSuite::TLS13_AES_128_CCM_8_SHA256,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
         ]
     );
 }
@@ -265,10 +286,29 @@ fn every_suite_group_and_key_type_both_directions() {
                 for group in common_groups(v) {
                     let what =
                         format!("{client_side:?}->{server_side:?} {suite:?} {group:?} {key:?}");
+                    // RFC 8422 §5.3: in TLS 1.2 the client also lists the
+                    // curve of an ECDSA certificate; the server exchanges
+                    // keys over `group` only.
+                    let mut client_groups = vec![group];
+                    let cert_curve = match key {
+                        KeyType::EcdsaP256 => Some(NamedGroup::secp256r1),
+                        KeyType::EcdsaP384 => Some(NamedGroup::secp384r1),
+                        _ => None,
+                    };
+                    if v == ProtocolVersion::TLSv1_2
+                        && let Some(curve) = cert_curve
+                        && curve != group
+                    {
+                        client_groups.push(curve);
+                    }
                     let client = client_config(
                         client_side,
                         v,
-                        client_side.provider(Some(suite.suite()), Some(group), None),
+                        client_side.provider_with_groups(
+                            Some(suite.suite()),
+                            Some(client_groups),
+                            None,
+                        ),
                         chain,
                     );
                     let server = server_config(
@@ -464,7 +504,13 @@ fn p521_raw_public_keys_both_directions() {
     for (client_side, server_side) in DIRECTIONS {
         for v in VERSIONS {
             let what = format!("{client_side:?}->{server_side:?} {v:?}");
-            let client_provider = client_side.provider(None, None, None);
+            // Every common group, so the client lists secp521r1 for the
+            // server's P-521 key in TLS 1.2 (RFC 8422 §5.3).
+            let client_provider = client_side.provider_with_groups(
+                None,
+                Some(common_groups(ProtocolVersion::TLSv1_2)),
+                None,
+            );
             let server_provider = server_side.provider(None, None, None);
             let client = ClientConfig::builder_with_provider(client_provider.clone())
                 .with_protocol_versions(versions(v))

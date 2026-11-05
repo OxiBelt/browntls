@@ -1,6 +1,10 @@
 //! x86-64 VAES backend: two blocks per YMM register, eight registers
 //! (sixteen blocks) per iteration. Tails use the XMM AES-NI helpers, which
 //! are inlined here and therefore VEX-encoded (no SSE/AVX transition).
+//!
+//! CBC decryption runs sixteen blocks per iteration with `vaesdec` on the
+//! AES-NI inverse key schedule; the ZMM backend uses it too. CBC encryption
+//! is serial and uses the XMM code.
 #![allow(unsafe_code)]
 
 use core::arch::x86_64::*;
@@ -36,6 +40,41 @@ impl Key {
     pub(crate) fn ctr32_xor(&self, ctr: &[u8; 16], in_out: &mut [u8]) {
         // SAFETY: `Key::new` verified VAES, AVX2, AES-NI and SSE4.1 support.
         unsafe { ctr32_xor_impl(&self.rk, ctr, in_out) }
+    }
+
+    pub(crate) fn cbc_encrypt(&self, iv: &[u8; 16], blocks: &mut [[u8; 16]]) {
+        // SAFETY: `Key::new` verified AES-NI and SSE4.1 support (among
+        // others).
+        unsafe { x86::cbc_encrypt_impl(&self.rk, iv, blocks) }
+    }
+}
+
+/// Decryption round keys for the VAES backends (the AES-NI inverse key
+/// schedule).
+///
+/// A value can only be constructed by [`DecKey::new`], which checks that
+/// VAES, AVX2, AES-NI and SSE4.1 are present; this invariant makes the
+/// `#[target_feature]` calls below sound.
+pub(crate) struct DecKey {
+    inner: x86::DecKey,
+}
+
+impl DecKey {
+    pub(crate) fn new(rk: &RoundKeys) -> Self {
+        let f = features();
+        assert!(
+            f.x86_vaes() && f.x86_avx2() && f.x86_aes() && f.x86_sse41(),
+            "VAES backend selected without CPU support"
+        );
+        Self {
+            inner: x86::DecKey::new(rk),
+        }
+    }
+
+    pub(crate) fn cbc_decrypt(&self, iv: &[u8; 16], blocks: &mut [[u8; 16]]) {
+        // SAFETY: `DecKey::new` verified VAES, AVX2, AES-NI and SSE4.1
+        // support.
+        unsafe { cbc_decrypt_impl(&self.inner.dk, iv, blocks) }
     }
 }
 
@@ -76,6 +115,52 @@ fn encrypt16(keys: &[__m256i; 15], rounds: usize, b: &mut [__m256i; 8]) {
     for x in b.iter_mut() {
         *x = _mm256_aesenclast_epi128(*x, keys[rounds]);
     }
+}
+
+/// Decrypts sixteen blocks (two per register) with the equivalent inverse
+/// cipher, interleaving the rounds.
+#[inline]
+#[target_feature(enable = "vaes,avx2,aes,sse4.1")]
+fn decrypt16(dk: &[__m256i; 15], rounds: usize, b: &mut [__m256i; 8]) {
+    for x in b.iter_mut() {
+        *x = _mm256_xor_si256(*x, dk[0]);
+    }
+    for k in &dk[1..rounds] {
+        for x in b.iter_mut() {
+            *x = _mm256_aesdec_epi128(*x, *k);
+        }
+    }
+    for x in b.iter_mut() {
+        *x = _mm256_aesdeclast_epi128(*x, dk[rounds]);
+    }
+}
+
+/// CBC decryption, sixteen blocks per iteration. The block preceding each
+/// register's pair is assembled from the ciphertext registers with
+/// `vperm2i128`, so the group is read completely before it is written.
+#[target_feature(enable = "vaes,avx2,aes,sse4.1")]
+fn cbc_decrypt_impl(dk: &RoundKeys, iv: &[u8; 16], blocks: &mut [[u8; 16]]) {
+    let keys = x86::load_keys(dk);
+    let keys256 = load_keys256(&keys);
+    // The high lane holds the ciphertext block preceding the next group.
+    let mut last = _mm256_broadcastsi128_si256(x86::load(iv));
+    let (groups, rest) = blocks.as_chunks_mut::<16>();
+    for g in groups {
+        let pairs = g.as_chunks_mut::<2>().0;
+        let c: [__m256i; 8] = core::array::from_fn(|i| load256(&pairs[i]));
+        let mut b = c;
+        decrypt16(&keys256, dk.rounds, &mut b);
+        let mut prev = last;
+        for (dst, (x, ci)) in pairs.iter_mut().zip(b.iter().zip(&c)) {
+            // (high lane of the previous register, low lane of this one).
+            let p = _mm256_permute2x128_si256::<0x21>(prev, *ci);
+            store256(dst, _mm256_xor_si256(*x, p));
+            prev = *ci;
+        }
+        last = c[7];
+    }
+    let prev = _mm256_extracti128_si256::<1>(last);
+    x86::cbc_decrypt_xmm(&keys, dk.rounds, prev, rest);
 }
 
 #[target_feature(enable = "vaes,avx2,aes,sse4.1")]

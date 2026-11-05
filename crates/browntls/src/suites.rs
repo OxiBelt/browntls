@@ -110,6 +110,16 @@ impl SupportedCipherSuite {
         }
     }
 
+    /// Whether this is a TLS 1.2 block cipher suite, to which
+    /// `encrypt_then_mac` (RFC 7366) applies.
+    pub fn is_tls12_block_cipher(&self) -> bool {
+        match self {
+            #[cfg(feature = "tls12")]
+            Self::Tls12(inner) => inner.record.is_block_cipher(),
+            Self::Tls13(_) => false,
+        }
+    }
+
     pub(crate) fn key_exchange_algorithms(&self) -> &[KeyExchangeAlgorithm] {
         match self {
             #[cfg(feature = "tls12")]

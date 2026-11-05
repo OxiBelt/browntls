@@ -26,12 +26,15 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Independent implementations used only as differential-test oracles.
+sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.12"
 shake = "0.1"
 hmac = "0.13"
 hkdf = "0.13"
+aes = "0.9"
 aes-gcm = "0.11"
+cbc = "0.2"
 ccm = "0.6"
 chacha20poly1305 = "0.11"
 x25519-dalek = { version = "3", features = ["static_secrets"] }

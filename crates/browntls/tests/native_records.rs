@@ -30,7 +30,9 @@ fn random_vec(len: usize) -> Vec<u8> {
 /// Each native suite with the RustCrypto suite of the same code point. The
 /// RustCrypto provider implements every native suite except the AES-CCM
 /// ones, whose primitive is compared with the RustCrypto `ccm` crate in
-/// `browntls-crypto`'s tests instead.
+/// `browntls-crypto`'s tests instead, and the TLS 1.2 CBC suites, whose
+/// record transform is compared with RustCrypto `aes`, `cbc`, `hmac`, `sha1`
+/// and `sha2` there (`tests/tls_cbc.rs`).
 fn suite_pairs() -> Vec<(SupportedCipherSuite, SupportedCipherSuite)> {
     let pairs: Vec<_> = native::ALL_CIPHER_SUITES
         .iter()
@@ -40,11 +42,12 @@ fn suite_pairs() -> Vec<(SupportedCipherSuite, SupportedCipherSuite)> {
                 .find(|r| r.suite() == n.suite());
             if r.is_none() {
                 assert!(
-                    matches!(
-                        n.suite(),
-                        browntls::CipherSuite::TLS13_AES_128_CCM_SHA256
-                            | browntls::CipherSuite::TLS13_AES_128_CCM_8_SHA256
-                    ),
+                    n.is_tls12_block_cipher()
+                        || matches!(
+                            n.suite(),
+                            browntls::CipherSuite::TLS13_AES_128_CCM_SHA256
+                                | browntls::CipherSuite::TLS13_AES_128_CCM_8_SHA256
+                        ),
                     "RustCrypto lacks {n:?}"
                 );
             }
@@ -217,6 +220,7 @@ mod tls12 {
     use super::*;
     use browntls::Tls12CipherSuite;
     use browntls::crypto::SupportedKxGroup;
+    use browntls::crypto::cipher::{Tls12AeadAlgorithm, Tls12RecordProtection};
 
     fn pairs() -> Vec<(&'static Tls12CipherSuite, &'static Tls12CipherSuite)> {
         suite_pairs()
@@ -228,12 +232,20 @@ mod tls12 {
             .collect()
     }
 
+    /// The AEAD of a suite (every suite both providers share is an AEAD).
+    fn aead(suite: &'static Tls12CipherSuite) -> &'static dyn Tls12AeadAlgorithm {
+        match suite.record {
+            Tls12RecordProtection::Aead(alg) => alg,
+            Tls12RecordProtection::BlockCipher(_) => panic!("not an AEAD suite"),
+        }
+    }
+
     #[test]
     fn records_are_identical_and_interoperate() {
         let pairs = pairs();
         assert_eq!(pairs.len(), 6);
         for (n, r) in pairs {
-            let (n, r) = (n.aead_alg, r.aead_alg);
+            let (n, r) = (aead(n), aead(r));
             let shape = n.key_block_shape();
             let r_shape = r.key_block_shape();
             assert_eq!(
@@ -278,7 +290,7 @@ mod tls12 {
     #[test]
     fn rejects_tampering_across_providers() {
         for (n, r) in pairs() {
-            let (n, r) = (n.aead_alg, r.aead_alg);
+            let (n, r) = (aead(n), aead(r));
             let shape = n.key_block_shape();
             let key: [u8; 32] = random();
             let k = || AeadKey::from(key).with_length_for_test(shape.enc_key_len);
@@ -317,13 +329,13 @@ mod tls12 {
     #[test]
     fn extracted_keys_match() {
         for (n, r) in pairs() {
-            let shape = n.aead_alg.key_block_shape();
+            let shape = aead(n).key_block_shape();
             let key: [u8; 32] = random();
             let iv = random_vec(shape.fixed_iv_len);
             let explicit = random_vec(shape.explicit_nonce_len);
             let k = || AeadKey::from(key).with_length_for_test(shape.enc_key_len);
-            let a = n.aead_alg.extract_keys(k(), &iv, &explicit).unwrap();
-            let b = r.aead_alg.extract_keys(k(), &iv, &explicit).unwrap();
+            let a = aead(n).extract_keys(k(), &iv, &explicit).unwrap();
+            let b = aead(r).extract_keys(k(), &iv, &explicit).unwrap();
             assert_eq!(secrets(&a), secrets(&b));
             let mut full_iv = iv.clone();
             full_iv.extend_from_slice(&explicit);

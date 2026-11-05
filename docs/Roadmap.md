@@ -25,7 +25,7 @@ intent.
 | FFDHE (RFC 7919 groups, TLS 1.3 only) | done | ffdhe2048-8192 with RFC 7919 short exponents over the RSA constant-time Montgomery exponentiation; non-preferred groups of the native provider, ffdhe2048-4096 in the defaults and ffdhe6144/8192 opt-in (server cost); OpenSSL 3 interop suite |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
-| TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels) and TLS 1.2 (ECDHE suites, EMS, session ID and ticket resumption, client auth, renegotiation refused); interoperability tested against rustls 0.23 in both directions |
+| TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels) and TLS 1.2 (ECDHE AEAD and AES-CBC suites, Encrypt-then-MAC (RFC 7366) negotiated and required by default, constant-time MAC-then-encrypt as an opt-in, EMS, session ID and ticket resumption, client auth, renegotiation refused and `renegotiation_info` required of servers (RFC 9325 §3.5)); RSA and finite-field DH key exchange left out (RFC 10015); interoperability tested against rustls 0.23 in both directions |
 | Crypto provider mount point, RustCrypto provider | done | rustls 0.23-shaped traits; RustCrypto provider verifies RSA but does not sign with it (advisory) |
 | Native provider (`browntls-crypto`) | done | All suites, X25519/NIST/ML-KEM and hybrid groups, ECDSA/Ed25519/RSA signing and verification, AEAD tickets; the RFC 9846 optional algorithms (AES-CCM, X448, FFDHE, Ed448, `rsa_pss_pss_*`) as a non-preferred tier (see [Architecture](Architecture.md#algorithm-tiers-native-provider)); byte-identical records to the RustCrypto provider. All handshake, API and rustls interop suites run on both providers; native adds RSA, ML-KEM-1024 and mixed-provider handshakes |
 
@@ -90,6 +90,18 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
 - The AES-NI and VAES backends leave a copy of round key 0 (the AES key
   itself) in dead stack memory after each call; the portable backend and the
   CCM, X448, Ed448 and FFDHE code wipe their secret intermediates.
-- A TLS 1.2 server does not take the client's supported groups into account
-  when it chooses an ECDSA certificate (RFC 8422 §5.1.1); OpenSSL clients
-  then abort with an illegal-parameter alert.
+- The TLS 1.2 CBC record transform (`browntls_crypto::tls_cbc`), AES-CBC and
+  SHA-1 were written by one engineer each and had no independent review yet.
+  The constant-time MAC-then-encrypt path (the Lucky Thirteen countermeasure,
+  only used when a configuration allows MAC-then-encrypt) rests on
+  construction and source review, not on statistical timing tests or
+  generated-code inspection. The CBC suites exist only in the native
+  provider.
+- Known deviations from RFC 5246 in the TLS 1.2 implementation, all shared
+  with TLS 1.3 and deliberate: a received `close_notify` is not answered with
+  one (the application decides when to close); a fatal alert is sent on its
+  own, not coalesced with pending records; handshake messages are capped at
+  64 KiB (RFC 5246 allows 2^24 - 1); resumption without
+  `extended_master_secret` is accepted, as RFC 7627 §5.3 allows, instead of
+  being refused; and renegotiation is never performed (a HelloRequest after
+  the handshake is answered with `no_renegotiation`, RFC 5746 §4.2).

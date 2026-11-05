@@ -73,6 +73,7 @@ negotiated when a peer shares nothing earlier.
 | Kind | Preferred (default order) | Non-preferred tier (default) | Opt-in only (`ALL_*` lists) |
 |---|---|---|---|
 | TLS 1.3 suites | AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 | AES-128-CCM, then AES-128-CCM-8 (64-bit tag; no kernel TLS export) | |
+| TLS 1.2 suites | ECDHE with AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 (ECDSA and RSA) | ECDHE AES-CBC: AES-256-CBC-SHA384, AES-128-CBC-SHA256, then AES-256-CBC-SHA, AES-128-CBC-SHA (ECDSA and RSA; RFC 5289, RFC 8422); Encrypt-then-MAC only by default; no kernel TLS export | |
 | Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
 | Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
 
@@ -87,6 +88,33 @@ records have failed authentication under the client handshake key (RFC 9147
 Appendix B.3), including the client's own early-data records.
 
 The RustCrypto provider does not implement the non-preferred tier.
+
+### TLS 1.2 record protection
+
+TLS 1.2 suites are either `GenericAEADCipher` or `GenericBlockCipher`
+(RFC 5246 §6.2.3); `Tls12RecordProtection` names which, and the key block
+(RFC 5246 §6.3) is split accordingly (`KeyBlockShape`). Stream ciphers (RC4,
+RFC 7465) and the RSA and finite-field Diffie-Hellman key exchanges that
+RFC 10015 prohibits in TLS 1.2 are not implemented.
+
+For the CBC suites the client sends `encrypt_then_mac` (RFC 7366) whenever a
+CBC suite is on offer, and the server acknowledges it only when it selects a
+CBC suite. By default neither side uses a CBC suite without it (RFC 9325 §4.2):
+a server with `allow_mac_then_encrypt` unset does not select a CBC suite for
+a client that did not offer the extension, and a client with it unset refuses
+a CBC suite the server selected without acknowledging it. The MAC-then-encrypt
+transform is implemented, for the opt-in, in time independent of the padding
+(`browntls_crypto::tls_cbc`): a fixed number of hash compressions per record
+length and a constant-time padding check, the Lucky Thirteen countermeasure.
+SHA-1 exists only as the HMAC of the `*_CBC_SHA` suites; no signature uses it
+(RFC 9155). The explicit per-record IV comes from the operating system.
+
+A TLS 1.2 client also requires the server to acknowledge
+`renegotiation_info` (RFC 5746) unless `require_secure_renegotiation` is
+cleared (RFC 9325 §3.5), and neither side ever renegotiates. A connection
+that ends with a fatal alert forgets its TLS 1.2 session on both sides
+(RFC 5246 §7.2.2), and a TLS 1.2 server honours the client's curves for its
+ECDSA certificate as well as for key exchange (RFC 8422 §5.3).
 
 ### Cargo features (`browntls`)
 
@@ -106,9 +134,11 @@ reference for testing, plus accelerated backends selected at run time.
 
 | Family | x86-64 | aarch64 | riscv64 |
 |---|---|---|---|
+| SHA-1 (HMAC-SHA1 for TLS 1.2 `*_CBC_SHA` suites only, never signatures) | SHA-NI | FEAT_SHA1 | Zbb scalar |
 | SHA-2 | SHA-NI | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
 | SHA-3 / SHAKE | AVX2 multi-lane | NEON, FEAT_SHA3 | RVV |
 | AES-GCM | AES-NI + PCLMULQDQ, VAES + VPCLMULQDQ (YMM, and ZMM with a fused CTR+GHASH loop) | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
+| AES decryption (CBC) | AES-NI, VAES (YMM) | FEAT_AES | Zvkned, Zknd |
 | ChaCha20-Poly1305 | AVX2, AVX-512 | NEON | RVV |
 | X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
 | X448 / Ed448 | portable 64-bit | portable 64-bit | portable 64-bit |
@@ -120,6 +150,21 @@ reference for testing, plus accelerated backends selected at run time.
 AES-CCM (TLS 1.3 `TLS_AES_128_CCM_SHA256` and `TLS_AES_128_CCM_8_SHA256`) runs
 on the AES backends of this table: counter mode uses each backend's
 pipelined keystream, and CBC-MAC encrypts one block at a time.
+
+AES-CBC without padding (`browntls_crypto::cbc`, for the TLS 1.2 CBC suites
+with AES-128 and AES-256) also follows the AES backend selection and
+acceleration policy. Encryption is serial and encrypts one block at a time;
+decryption pipelines eight blocks per iteration (AES-NI, FEAT_AES), sixteen
+(VAES, also on the AVX-512 tier) or `VLEN/32` (Zvkned). The portable inverse
+cipher is bitsliced like the forward one. The scalar riscv64 tier decrypts
+with Zknd when present and with the portable code on Zkne-only CPUs.
+
+`browntls_crypto::tls_cbc` implements the TLS 1.2 CBC record transform
+(RFC 5246 MAC-then-encrypt and RFC 7366 encrypt-then-MAC, with HMAC-SHA1,
+HMAC-SHA256 or HMAC-SHA384) over a `CbcBlockCipher` trait. For
+MAC-then-encrypt, the padding check and the record MAC are constant time with
+respect to the padding (the Lucky Thirteen countermeasure): the number of hash
+compressions depends only on the record length.
 
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
@@ -163,7 +208,7 @@ schedule (AVX2 with BMI2) use both.
 
 At run time, `browntls_crypto::accel` (re-exported as
 `browntls::crypto::native::accel`) holds a process-wide `Policy` per
-algorithm family (SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
+algorithm family (SHA-1, SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
 ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM) with one level per kind:
 
 | Level | Behaviour for that kind |

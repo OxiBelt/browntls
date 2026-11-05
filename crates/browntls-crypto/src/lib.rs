@@ -6,9 +6,11 @@
 //!
 //! | Family | x86-64 (baseline x86-64-v3) | aarch64 | riscv64 |
 //! |---|---|---|---|
+//! | SHA-1 (HMAC-SHA1 for TLS 1.2 CBC suites only) | SHA-NI | SHA1 | Zbb |
 //! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
 //! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
 //! | AES / GHASH (GCM; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
+//! | AES decryption (CBC) | AES-NI, VAES | AES | Zvkned, Zknd |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
 //! | X448 / Ed448 | 64-bit | 64-bit | 64-bit |
@@ -16,6 +18,10 @@
 //! | RSA | 64-bit Montgomery, BMI2/ADX | 64-bit Montgomery | 64-bit Montgomery |
 //! | FFDHE | 64-bit Montgomery, BMI2/ADX (RSA kernels) | 64-bit Montgomery | 64-bit Montgomery |
 //! | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
+//!
+//! [`tls_cbc`] implements the TLS 1.2 CBC record transform (MAC-then-encrypt
+//! with a Lucky Thirteen-resistant constant-time check, and encrypt-then-MAC)
+//! over a caller-supplied block cipher.
 //!
 //! The crate is `no_std` and allocation-free by default; `std` adds runtime
 //! feature detection on aarch64. Unsafe code is denied crate-wide and allowed
@@ -51,11 +57,13 @@ pub mod hash;
 pub mod hkdf;
 pub mod hmac;
 pub mod tls12_prf;
+pub mod tls_cbc;
 
 pub mod der;
 
 pub mod aead;
 pub mod aes;
+pub mod cbc;
 pub mod ccm;
 pub mod chacha;
 pub mod gcm;

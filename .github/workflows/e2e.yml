@@ -12,9 +12,6 @@ on:
     - cron: '17 4 * * 1'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -28,6 +25,8 @@ jobs:
     name: Generate E2E matrices
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       images: ${{ steps.matrix.outputs.images }}
       e2e: ${{ steps.matrix.outputs.e2e }}
@@ -55,6 +54,8 @@ jobs:
     needs: matrix
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.images) }}
@@ -85,6 +86,8 @@ jobs:
       - image
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.e2e) }}

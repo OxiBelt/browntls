@@ -163,8 +163,11 @@ pub enum InvalidMessage {
     PreSharedKeyIsNotFinalExtension,
     /// A HelloRetryRequest carried an extension that is not permitted there.
     UnknownHelloRetryRequestExtension,
-    /// A certificate entry carried an unexpected extension.
+    /// A certificate entry carried an extension we did not solicit.
     UnknownCertificateExtension,
+    /// A certificate entry carried a recognised extension that RFC 9846
+    /// §4.3 does not allow there.
+    DisallowedCertificateExtension,
 }
 
 impl From<InvalidMessage> for Error {
@@ -179,8 +182,15 @@ impl From<InvalidMessage> for AlertDescription {
             InvalidMessage::PreSharedKeyIsNotFinalExtension
             | InvalidMessage::DuplicateExtension(_) => Self::IllegalParameter,
             InvalidMessage::UnknownHelloRetryRequestExtension => Self::UnsupportedExtension,
+            // RFC 9846 §4.3: recognised but not allowed in the message.
+            InvalidMessage::DisallowedCertificateExtension => Self::IllegalParameter,
+            // RFC 9846 §4.3: a response to an extension we never sent.
+            InvalidMessage::UnknownCertificateExtension => Self::UnsupportedExtension,
             // RFC 5246 §6, RFC 8446 §5: an unknown record type.
             InvalidMessage::InvalidContentType => Self::UnexpectedMessage,
+            // RFC 9846 §5: a change_cipher_spec record whose value is not
+            // 0x01 MUST abort the handshake with unexpected_message.
+            InvalidMessage::InvalidCcs => Self::UnexpectedMessage,
             _ => Self::DecodeError,
         }
     }
@@ -192,9 +202,11 @@ impl From<InvalidMessage> for AlertDescription {
 #[derive(Debug, PartialEq, Clone)]
 pub enum PeerMisbehaved {
     AttemptedDowngradeToTls12WhenTls13IsSupported,
-    BadCertChainExtensions,
     CipherSuiteDifferedOnRetry,
+    DisallowedCertificateRequestExtension,
     DisallowedEncryptedExtension,
+    DisallowedHelloRetryRequestExtension,
+    DisallowedNewSessionTicketExtension,
     DuplicateClientHelloExtensions,
     DuplicateEncryptedExtensions,
     EncryptThenMacWithAeadCipherSuite,
@@ -214,7 +226,11 @@ pub enum PeerMisbehaved {
     IllegalHelloRetryRequestWithUnofferedNamedGroup,
     IllegalHelloRetryRequestWithUnsupportedVersion,
     IllegalHelloRetryRequestWithWrongSessionId,
+    IllegalCertificateRequestContext,
+    IllegalClientHelloLegacyVersion,
     IllegalMiddleboxChangeCipherSpec,
+    IllegalProtectedChangeCipherSpec,
+    IllegalServerHelloLegacyVersion,
     IllegalTlsInnerPlaintext,
     IncorrectBinder,
     InvalidCertCompression,
@@ -250,6 +266,7 @@ pub enum PeerMisbehaved {
     SelectedUnofferedCompression,
     SelectedUnofferedKxGroup,
     SelectedUnofferedPsk,
+    SelectedUnofferedVersion,
     SelectedUnusableCipherSuiteForVersion,
     ServerEchoedCompatibilitySessionId,
     ServerHelloMustOfferUncompressedEcPoints,
@@ -651,6 +668,30 @@ mod tests {
         assert_eq!(
             AlertDescription::from(CertificateError::Revoked),
             AlertDescription::CertificateRevoked
+        );
+        // RFC 9846 §5: a change_cipher_spec value other than 0x01.
+        assert_eq!(
+            AlertDescription::from(InvalidMessage::InvalidCcs),
+            AlertDescription::UnexpectedMessage
+        );
+        // RFC 9846 §4.3: recognised but not allowed, versus unsolicited.
+        assert_eq!(
+            AlertDescription::from(InvalidMessage::DisallowedCertificateExtension),
+            AlertDescription::IllegalParameter
+        );
+        assert_eq!(
+            AlertDescription::from(InvalidMessage::UnknownCertificateExtension),
+            AlertDescription::UnsupportedExtension
+        );
+    }
+
+    #[test]
+    fn general_error_code_point() {
+        // RFC 9846 §6.2 / IANA: general_error(117).
+        assert_eq!(u8::from(AlertDescription::GeneralError), 117);
+        assert_eq!(
+            AlertDescription::from(117u8),
+            AlertDescription::GeneralError
         );
     }
 

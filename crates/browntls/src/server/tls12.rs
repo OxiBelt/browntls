@@ -580,7 +580,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
         self.config
             .verifier
             .verify_client_cert(end_entity, intermediates, now)
-            .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(cx.common, err))?;
+            .map_err(|err| crate::client::tls13::send_cert_path_error_alert(cx.common, err))?;
 
         Ok(Box::new(ExpectClientKx {
             config: self.config,

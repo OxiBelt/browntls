@@ -229,7 +229,7 @@ impl MessageDeframer {
             let body = &mut buffer.filled_mut()[HEADER_SIZE..record_len];
             let msg = InboundOpaqueMessage::new(header.typ, header.version, body);
 
-            // RFC 8446 §5: a TLS 1.3 peer may send an unprotected
+            // RFC 9846 §5: a TLS 1.3 peer may send an unprotected
             // ChangeCipherSpec for middlebox compatibility while we already
             // decrypt. It is not a ciphertext, so bypass the record cipher.
             let passthrough_ccs = header.typ == ContentType::ChangeCipherSpec
@@ -264,6 +264,15 @@ impl MessageDeframer {
                 plaintext,
             } = decrypted;
             let typ = plaintext.typ;
+            // RFC 9846 §5: a protected change_cipher_spec record MUST abort
+            // the handshake with unexpected_message.
+            if typ == ContentType::ChangeCipherSpec
+                && !passthrough_ccs
+                && negotiated_version == Some(ProtocolVersion::TLSv1_3)
+                && record_layer.is_decrypting()
+            {
+                return Err(PeerMisbehaved::IllegalProtectedChangeCipherSpec.into());
+            }
             let version = plaintext.version;
             let payload = plaintext.payload;
             let start = (payload.as_ptr() as usize).wrapping_sub(base);
@@ -385,6 +394,51 @@ mod tests {
         v.extend((payload.len() as u16).to_be_bytes());
         v.extend_from_slice(payload);
         v
+    }
+
+    /// "Decrypts" by unpadding the TLS 1.3 inner plaintext as is.
+    struct Tls13Identity;
+
+    impl crate::crypto::cipher::MessageDecrypter for Tls13Identity {
+        fn decrypt<'a>(
+            &mut self,
+            msg: InboundOpaqueMessage<'a>,
+            _seq: u64,
+        ) -> Result<crate::msgs::message::InboundPlainMessage<'a>, Error> {
+            msg.into_tls13_unpadded_message()
+        }
+    }
+
+    fn pop_one_tls13_decrypting(record: &[u8]) -> Result<Option<Deframed>, Error> {
+        let mut buffer = DeframerVecBuffer::default();
+        let mut rl = RecordLayer::new();
+        rl.set_message_decrypter(alloc::boxed::Box::new(Tls13Identity));
+        let mut d = MessageDeframer::default();
+        buffer.extend_from_slice(record).unwrap();
+        d.pop(&mut rl, Some(ProtocolVersion::TLSv1_3), &mut buffer)
+    }
+
+    #[test]
+    fn rejects_protected_change_cipher_spec() {
+        // RFC 9846 §5: an application_data record whose inner content type
+        // is change_cipher_spec (0x14).
+        let record = [0x17, 3, 3, 0, 2, 0x01, 0x14];
+        assert_eq!(
+            pop_one_tls13_decrypting(&record).err(),
+            Some(PeerMisbehaved::IllegalProtectedChangeCipherSpec.into())
+        );
+    }
+
+    #[test]
+    fn passes_unprotected_change_cipher_spec_through() {
+        let record = [0x14, 3, 3, 0, 1, 0x01];
+        assert!(matches!(
+            pop_one_tls13_decrypting(&record),
+            Ok(Some(Deframed::Record {
+                typ: ContentType::ChangeCipherSpec,
+                ..
+            }))
+        ));
     }
 
     #[test]

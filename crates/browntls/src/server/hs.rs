@@ -80,7 +80,17 @@ pub(super) struct ExpectClientHello {
     pub(super) transcript: HandshakeHashOrBuffer,
     pub(super) session_id: SessionId,
     pub(super) done_retry: bool,
+    /// What our HelloRetryRequest selected, which the second ClientHello
+    /// must follow (RFC 9846 §4.1.4).
+    pub(super) retry_choice: Option<RetryChoice>,
     pub(super) send_tickets: usize,
+}
+
+/// The cipher suite and key exchange group a HelloRetryRequest selected.
+#[derive(Clone, Copy)]
+pub(super) struct RetryChoice {
+    pub(super) suite: &'static crate::tls13::Tls13CipherSuite,
+    pub(super) group: &'static dyn SupportedKxGroup,
 }
 
 impl ExpectClientHello {
@@ -94,6 +104,7 @@ impl ExpectClientHello {
             transcript: HandshakeHashOrBuffer::Buffer(transcript_buffer),
             session_id: SessionId::empty(),
             done_retry: false,
+            retry_choice: None,
             send_tickets: 0,
         }
     }
@@ -110,8 +121,17 @@ impl ExpectClientHello {
         let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3);
         let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2);
 
-        // RFC 8446 §4.2.1: version negotiation.
+        // RFC 9846 §4.3.1: version negotiation.
         let version = if let Some(versions) = &client_hello.extensions.supported_versions {
+            // RFC 9846 §4.1.2: a ClientHello with supported_versions carries
+            // legacy_version 0x0303; a server receiving any other value
+            // MUST abort with protocol_version.
+            if client_hello.client_version != ProtocolVersion::TLSv1_2 {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::ProtocolVersion,
+                    PeerMisbehaved::IllegalClientHelloLegacyVersion,
+                ));
+            }
             if versions.contains(&ProtocolVersion::TLSv1_3) && tls13_enabled {
                 ProtocolVersion::TLSv1_3
             } else if !versions.contains(&ProtocolVersion::TLSv1_2) || !tls12_enabled {
@@ -285,12 +305,38 @@ impl ExpectClientHello {
                 PeerIncompatible::UncompressedEcPointsRequired,
             ));
         }
-        let selected_kxg = choose_kx_group(
-            self.config.kx_groups(),
-            client_groups,
-            client_hello,
-            version,
-        )
+        // RFC 9846 §4.1.4: after a HelloRetryRequest, the second
+        // ClientHello answers it with TLS 1.3, a single key share for the
+        // group it selected, and still offers the cipher suite it selected.
+        if let Some(choice) = &self.retry_choice {
+            let single_share_for_group = client_hello
+                .key_shares()
+                .is_some_and(|shares| shares.len() == 1 && shares[0].group == choice.group.name());
+            if version != ProtocolVersion::TLSv1_3 || !single_share_for_group {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::RefusedToFollowHelloRetryRequest,
+                ));
+            }
+            if !client_hello
+                .cipher_suites
+                .contains(&choice.suite.common.suite)
+            {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::CipherSuiteDifferedOnRetry,
+                ));
+            }
+        }
+        let selected_kxg = match &self.retry_choice {
+            Some(choice) => Some(choice.group),
+            None => choose_kx_group(
+                self.config.kx_groups(),
+                client_groups,
+                client_hello,
+                version,
+            ),
+        }
         .ok_or_else(|| {
             cx.common.send_fatal_alert(
                 AlertDescription::HandshakeFailure,
@@ -336,30 +382,47 @@ impl ExpectClientHello {
         // Preferred suites first, then the non-preferred tier (RFC 9846
         // optional suites); within a tier, the client's order unless
         // `ignore_client_order`.
-        let suite = [false, true]
+        let retry_suite = self
+            .retry_choice
+            .map(|choice| SupportedCipherSuite::Tls13(choice.suite));
+        let suite = retry_suite
             .into_iter()
-            .find_map(|non_preferred| {
-                let tier: Vec<SupportedCipherSuite> = suitable
-                    .iter()
-                    .copied()
-                    .filter(|s| s.suite().is_non_preferred() == non_preferred)
-                    .collect();
-                if self.config.ignore_client_order {
-                    tier.iter()
-                        .copied()
-                        .find(|s| client_hello.cipher_suites.contains(&s.suite()))
-                } else {
-                    client_hello
-                        .cipher_suites
-                        .iter()
-                        .find_map(|offered| tier.iter().copied().find(|s| s.suite() == *offered))
+            .find(|s| suitable.contains(s))
+            .or_else(|| {
+                // The HelloRetryRequest's suite is no longer usable: the
+                // retry changed what the suite choice depends on.
+                if retry_suite.is_some() {
+                    return None;
                 }
+                [false, true].into_iter().find_map(|non_preferred| {
+                    let tier: Vec<SupportedCipherSuite> = suitable
+                        .iter()
+                        .copied()
+                        .filter(|s| s.suite().is_non_preferred() == non_preferred)
+                        .collect();
+                    if self.config.ignore_client_order {
+                        tier.iter()
+                            .copied()
+                            .find(|s| client_hello.cipher_suites.contains(&s.suite()))
+                    } else {
+                        client_hello.cipher_suites.iter().find_map(|offered| {
+                            tier.iter().copied().find(|s| s.suite() == *offered)
+                        })
+                    }
+                })
             })
             .ok_or_else(|| {
-                cx.common.send_fatal_alert(
-                    AlertDescription::HandshakeFailure,
-                    PeerIncompatible::NoCipherSuitesInCommon,
-                )
+                if retry_suite.is_some() {
+                    cx.common.send_fatal_alert(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::CipherSuiteDifferedOnRetry,
+                    )
+                } else {
+                    cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        PeerIncompatible::NoCipherSuitesInCommon,
+                    )
+                }
             })?;
         debug!("decided upon suite {:?}", suite.suite());
         cx.common.suite = Some(suite);
@@ -500,6 +563,22 @@ fn choose_kx_group(
         }
     }
     None
+}
+
+/// Our groups usable with `version`, in preference order: the preferred
+/// tier, then the non-preferred one, each in configuration order.
+pub(super) fn kx_groups_by_preference(
+    ours: &[&'static dyn SupportedKxGroup],
+    version: ProtocolVersion,
+) -> Vec<&'static dyn SupportedKxGroup> {
+    [false, true]
+        .into_iter()
+        .flat_map(|non_preferred| {
+            ours.iter().copied().filter(move |g| {
+                g.usable_for_version(version) && g.name().is_non_preferred() == non_preferred
+            })
+        })
+        .collect()
 }
 
 impl State<ServerConnectionData> for ExpectClientHello {

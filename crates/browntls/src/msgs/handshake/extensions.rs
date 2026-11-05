@@ -316,6 +316,9 @@ pub(crate) struct ServerExtensions {
     pub(crate) transport_parameters: Option<Payload<'static>>,
     pub(crate) client_certificate_type: Option<CertificateType>,
     pub(crate) server_certificate_type: Option<CertificateType>,
+    /// TLS 1.3 EncryptedExtensions only: the server's groups, in preference
+    /// order (RFC 9846 §4.3.7). Informational for the client.
+    pub(crate) supported_groups: Option<Vec<NamedGroup>>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
 }
@@ -374,6 +377,10 @@ impl ServerExtensions {
         add(
             self.server_certificate_type.is_some(),
             ExtensionType::ServerCertificateType,
+        );
+        add(
+            self.supported_groups.is_some(),
+            ExtensionType::EllipticCurves,
         );
         out.extend(self.unknown.iter().copied());
         out
@@ -436,6 +443,11 @@ impl Codec<'_> for ServerExtensions {
         if let Some(ct) = &self.server_certificate_type {
             encode_extension(ExtensionType::ServerCertificateType, out, |b| ct.encode(b));
         }
+        if let Some(groups) = &self.supported_groups {
+            encode_extension(ExtensionType::EllipticCurves, out, |b| {
+                crate::msgs::codec::encode_vec_u16(b, groups)
+            });
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -476,6 +488,12 @@ impl Codec<'_> for ServerExtensions {
                 }
                 ExtensionType::ServerCertificateType => {
                     out.server_certificate_type = Some(CertificateType::read(body)?);
+                }
+                ExtensionType::EllipticCurves => {
+                    out.supported_groups = Some(crate::msgs::codec::read_nonempty_vec_u16(
+                        body,
+                        "NamedGroups",
+                    )?);
                 }
                 other => {
                     out.unknown.push(other);

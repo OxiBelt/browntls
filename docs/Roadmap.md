@@ -25,7 +25,7 @@ intent.
 | FFDHE (RFC 7919 groups, TLS 1.3 only) | done | ffdhe2048-8192 with RFC 7919 short exponents over the RSA constant-time Montgomery exponentiation; non-preferred groups of the native provider, ffdhe2048-4096 in the defaults and ffdhe6144/8192 opt-in (server cost); OpenSSL 3 interop suite |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
-| TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels) and TLS 1.2 (ECDHE AEAD and AES-CBC suites, Encrypt-then-MAC (RFC 7366) negotiated and required by default, constant-time MAC-then-encrypt as an opt-in, EMS, session ID and ticket resumption, client auth, renegotiation refused and `renegotiation_info` required of servers (RFC 9325 §3.5)); RSA and finite-field DH key exchange left out (RFC 10015); interoperability tested against rustls 0.23 in both directions |
+| TLS record layer and handshake (1.2, 1.3) | done | TLS 1.3 to RFC 9846 (HRR, PSK resumption, client auth, KeyUpdate, downgrade sentinels; the RFC 9846 rules on extensions per message, versions, HelloRetryRequest, KeyUpdate, alerts, tickets and ECDSA curves, see [Architecture](Architecture.md#tls-13-protocol-rules-rfc-9846)) and TLS 1.2 (ECDHE AEAD and AES-CBC suites, Encrypt-then-MAC (RFC 7366) negotiated and required by default, constant-time MAC-then-encrypt as an opt-in, EMS, session ID and ticket resumption, client auth, renegotiation refused and `renegotiation_info` required of servers (RFC 9325 §3.5)); RSA and finite-field DH key exchange left out (RFC 10015); interoperability tested against rustls 0.23 in both directions |
 | Crypto provider mount point, RustCrypto provider | done | rustls 0.23-shaped traits; RustCrypto provider verifies RSA but does not sign with it (advisory) |
 | Native provider (`browntls-crypto`) | done | All suites, X25519/NIST/ML-KEM and hybrid groups, ECDSA/Ed25519/RSA signing and verification, AEAD tickets; the RFC 9846 optional algorithms (AES-CCM, X448, FFDHE, Ed448, `rsa_pss_pss_*`) as a non-preferred tier (see [Architecture](Architecture.md#algorithm-tiers-native-provider)); byte-identical records to the RustCrypto provider. All handshake, API and rustls interop suites run on both providers; native adds RSA, ML-KEM-1024 and mixed-provider handshakes |
 
@@ -105,3 +105,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   `extended_master_secret` is accepted, as RFC 7627 §5.3 allows, instead of
   being refused; and renegotiation is never performed (a HelloRequest after
   the handshake is answered with `no_renegotiation`, RFC 5746 §4.2).
+- Known deviations from RFC 9846 in the TLS 1.3 implementation, deliberate:
+  a peer that sends more than eight `update_requested` KeyUpdates without
+  application data in between is cut off with `unexpected_message` (a local
+  resource bound); `user_canceled` counts towards the same bound as TLS 1.2
+  warning alerts; post-handshake client authentication, the early exporter
+  and stateless HelloRetryRequest cookies are not implemented, and the
+  RFC 6066 `max_fragment_length` extension is not offered or accepted.

@@ -27,11 +27,15 @@ pub(crate) const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
 pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// How many unprotected ChangeCipherSpec records a TLS 1.3 peer may send
-/// during the handshake (RFC 8446 appendix D.4).
+/// during the handshake (RFC 9846 appendix E.4).
 const MAX_MIDDLEBOX_CCS: u8 = 2;
 
 /// How many consecutive warning alerts we tolerate.
 const MAX_WARNING_ALERTS: u8 = 4;
+
+/// RFC 9846 §4.7.3: a sender MUST NOT let the number of key updates (the
+/// key epoch) exceed 2^48-1. Receivers do not enforce this on the peer.
+pub(crate) const MAX_KEY_UPDATES: u64 = (1 << 48) - 1;
 
 /// How many HelloRequests a client ignores during its own handshake before
 /// treating the server as misbehaving (RFC 5246 §7.4.1.1).
@@ -152,6 +156,15 @@ pub struct CommonState {
     pub(crate) received_warning_alerts: u8,
     pub(crate) received_key_update_requests: u8,
     pub(crate) refresh_traffic_keys_pending: bool,
+    /// The peer sent `update_requested`; one KeyUpdate of ours is owed
+    /// before our next application data record (RFC 9846 §4.7.3).
+    pub(crate) key_update_owed: bool,
+    /// We sent `update_requested` and have not received a KeyUpdate since,
+    /// so we must not send another `update_requested` (RFC 9846 §4.7.3).
+    pub(crate) key_update_request_outstanding: bool,
+    /// How many KeyUpdates we have sent (our write key epoch past the
+    /// initial application traffic secret).
+    pub(crate) sent_key_updates: u64,
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
@@ -184,6 +197,9 @@ impl CommonState {
             received_warning_alerts: 0,
             received_key_update_requests: 0,
             refresh_traffic_keys_pending: false,
+            key_update_owed: false,
+            key_update_request_outstanding: false,
+            sent_key_updates: 0,
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
@@ -321,8 +337,15 @@ impl CommonState {
         match self.record_layer.pre_encrypt_action(fragments as u64) {
             PreEncryptAction::Nothing => {}
             PreEncryptAction::RefreshOrClose => {
-                if self.is_tls13() {
-                    // RFC 8446 §5.5: refresh keys before the limit is reached.
+                if self.early_traffic {
+                    // RFC 9846 §5.5: early data cannot be rekeyed, and MUST
+                    // NOT exceed the limit; leave the rest for 1-RTT.
+                    return 0;
+                } else if self.is_tls13() {
+                    // RFC 9846 §5.5: refresh keys before the limit is
+                    // reached. The refresh happens as soon as this write
+                    // returns; the configured limit sits well below the
+                    // RFC's figure, leaving room for this write's records.
                     self.refresh_traffic_keys_pending = true;
                 } else {
                     // TLS 1.2 has no key update; the connection must end.
@@ -331,7 +354,9 @@ impl CommonState {
                 }
             }
             PreEncryptAction::Refuse => {
-                self.send_close_notify();
+                if !self.early_traffic {
+                    self.send_close_notify();
+                }
                 return 0;
             }
         }
@@ -389,7 +414,7 @@ impl CommonState {
         self.send_msg(m, encrypt);
     }
 
-    /// Handles an incoming alert (RFC 8446 §6).
+    /// Handles an incoming alert (RFC 9846 §6).
     pub(crate) fn process_alert(&mut self, alert: &AlertMessagePayload) -> Result<(), Error> {
         if alert.description == AlertDescription::CloseNotify {
             self.has_received_close_notify = true;
@@ -397,7 +422,7 @@ impl CommonState {
         }
 
         // TLS 1.3 removed warning alerts: every other alert is fatal
-        // regardless of its level (RFC 8446 §6). In TLS 1.2 most alerts are
+        // regardless of its level (RFC 9846 §6). In TLS 1.2 most alerts are
         // fatal by definition whatever level the peer wrote (RFC 5246
         // §7.2.2), and only the rest may be shrugged off as warnings.
         if alert.level == AlertLevel::Warning
@@ -415,9 +440,21 @@ impl CommonState {
             return Ok(());
         }
 
-        if alert.level == AlertLevel::Warning && alert.description == AlertDescription::UserCanceled
+        // RFC 9846 §6.1: user_canceled is a closure alert that MUST be
+        // followed by close_notify, and receivers SHOULD keep reading until
+        // that close_notify arrives. In TLS 1.3 the alert level carries no
+        // meaning (§6), so the alert is ignored whatever level it arrived
+        // with; in TLS 1.2 only a warning-level user_canceled is benign.
+        if alert.description == AlertDescription::UserCanceled
+            && (self.is_tls13() || alert.level == AlertLevel::Warning)
         {
-            // RFC 8446 §6.1: user_canceled is informational and followed by close_notify.
+            self.received_warning_alerts += 1;
+            if self.received_warning_alerts > MAX_WARNING_ALERTS {
+                return Err(self.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::TooManyWarningAlertsReceived,
+                ));
+            }
             return Ok(());
         }
 
@@ -534,10 +571,67 @@ impl CommonState {
     }
 
     /// Queues a TLS 1.3 KeyUpdate message to be encrypted under the *current*
-    /// key before the caller rotates to the next one.
+    /// key before the caller rotates to the next one, and records it.
+    ///
+    /// Callers go through [`Self::key_update_to_send`] first, which applies
+    /// the RFC 9846 §4.7.3 sending rules.
     pub(crate) fn send_key_update(&mut self, request: KeyUpdateRequest) {
         let m = Message::build_key_update(request);
         self.send_msg_encrypt(m.into());
+        self.sent_key_updates += 1;
+        // Any KeyUpdate of ours moves our write key on, which is what an
+        // owed response would have done.
+        self.key_update_owed = false;
+        if request == KeyUpdateRequest::UpdateRequested {
+            self.key_update_request_outstanding = true;
+        }
+    }
+
+    /// Applies the RFC 9846 §4.7.3 sending rules to a wanted KeyUpdate.
+    ///
+    /// Returns `None` when no further KeyUpdate may be sent because the
+    /// epoch limit (2^48-1 key updates) was reached. `update_requested` is
+    /// downgraded to `update_not_requested` while an earlier request of ours
+    /// has not been answered by any KeyUpdate from the peer.
+    pub(crate) fn key_update_to_send(&self, wanted: KeyUpdateRequest) -> Option<KeyUpdateRequest> {
+        if self.sent_key_updates >= MAX_KEY_UPDATES {
+            return None;
+        }
+        match wanted {
+            KeyUpdateRequest::UpdateRequested if self.key_update_request_outstanding => {
+                Some(KeyUpdateRequest::UpdateNotRequested)
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Records a KeyUpdate received from the peer (after its validation).
+    ///
+    /// Returns an error when the peer keeps requesting updates without
+    /// sending application data in between: a local resource bound, not an
+    /// RFC 9846 rule.
+    pub(crate) fn received_key_update(
+        &mut self,
+        request: KeyUpdateRequest,
+        max_requests: u8,
+    ) -> Result<(), Error> {
+        // Any KeyUpdate from the peer lifts the ban on sending another
+        // `update_requested` of ours.
+        self.key_update_request_outstanding = false;
+        if request == KeyUpdateRequest::UpdateRequested {
+            self.received_key_update_requests = self.received_key_update_requests.saturating_add(1);
+            if self.received_key_update_requests > max_requests {
+                return Err(self.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::TooManyKeyUpdateRequests,
+                ));
+            }
+            // Answered once, after this flight is processed and before any
+            // further application data: several requests received while we
+            // were silent get a single response (RFC 9846 §4.7.3).
+            self.key_update_owed = true;
+        }
+        Ok(())
     }
 
     pub(crate) fn missing_extension(&mut self, why: PeerMisbehaved) -> Error {
@@ -591,4 +685,114 @@ fn is_always_fatal(desc: AlertDescription) -> bool {
             | AlertDescription::InappropriateFallback
             | AlertDescription::UnsupportedExtension
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tls13_state() -> CommonState {
+        let mut common = CommonState::new(Side::Client);
+        common.negotiated_version = Some(ProtocolVersion::TLSv1_3);
+        common
+    }
+
+    fn alert(level: AlertLevel, description: AlertDescription) -> AlertMessagePayload {
+        AlertMessagePayload { level, description }
+    }
+
+    #[test]
+    fn tls13_user_canceled_is_ignored_at_any_level() {
+        // RFC 9846 §6.1: the receiver keeps reading until close_notify; the
+        // level carries no meaning in TLS 1.3 (§6).
+        let mut common = tls13_state();
+        for level in [AlertLevel::Warning, AlertLevel::Fatal] {
+            assert_eq!(
+                common.process_alert(&alert(level, AlertDescription::UserCanceled)),
+                Ok(())
+            );
+        }
+        assert!(!common.has_received_close_notify);
+        assert_eq!(
+            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::CloseNotify)),
+            Ok(())
+        );
+        assert!(common.has_received_close_notify);
+    }
+
+    #[test]
+    fn repeated_user_canceled_is_bounded() {
+        let mut common = tls13_state();
+        let user_canceled = alert(AlertLevel::Warning, AlertDescription::UserCanceled);
+        for _ in 0..MAX_WARNING_ALERTS {
+            assert_eq!(common.process_alert(&user_canceled), Ok(()));
+        }
+        assert_eq!(
+            common.process_alert(&user_canceled),
+            Err(PeerMisbehaved::TooManyWarningAlertsReceived.into())
+        );
+    }
+
+    #[test]
+    fn tls13_error_alerts_are_fatal_at_warning_level() {
+        let mut common = tls13_state();
+        assert_eq!(
+            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::GeneralError)),
+            Err(Error::AlertReceived(AlertDescription::GeneralError))
+        );
+    }
+
+    #[test]
+    fn key_update_request_not_repeated_until_peer_updates() {
+        // RFC 9846 §4.7.3: until a KeyUpdate arrives from the peer, the
+        // sender MUST NOT send another update_requested.
+        let mut common = tls13_state();
+        let requested = KeyUpdateRequest::UpdateRequested;
+        assert_eq!(common.key_update_to_send(requested), Some(requested));
+        common.key_update_request_outstanding = true;
+        assert_eq!(
+            common.key_update_to_send(requested),
+            Some(KeyUpdateRequest::UpdateNotRequested)
+        );
+        common
+            .received_key_update(KeyUpdateRequest::UpdateNotRequested, 8)
+            .unwrap();
+        assert_eq!(common.key_update_to_send(requested), Some(requested));
+    }
+
+    #[test]
+    fn key_updates_stop_at_the_epoch_limit() {
+        // RFC 9846 §4.7.3: no more than 2^48-1 key updates are sent; at the
+        // limit a peer's update_requested is ignored.
+        let mut common = tls13_state();
+        common.sent_key_updates = MAX_KEY_UPDATES - 1;
+        assert!(
+            common
+                .key_update_to_send(KeyUpdateRequest::UpdateNotRequested)
+                .is_some()
+        );
+        common.sent_key_updates = MAX_KEY_UPDATES;
+        assert_eq!(
+            common.key_update_to_send(KeyUpdateRequest::UpdateNotRequested),
+            None
+        );
+        assert_eq!(MAX_KEY_UPDATES, (1u64 << 48) - 1);
+    }
+
+    #[test]
+    fn several_requests_owe_one_response() {
+        let mut common = tls13_state();
+        for _ in 0..3 {
+            common
+                .received_key_update(KeyUpdateRequest::UpdateRequested, 8)
+                .unwrap();
+        }
+        assert!(common.key_update_owed);
+        // Sending any KeyUpdate pays the debt. Without a record encrypter
+        // the message is dropped, but the bookkeeping is what is checked.
+        common.send_key_update(KeyUpdateRequest::UpdateNotRequested);
+        assert!(!common.key_update_owed);
+        assert_eq!(common.sent_key_updates, 1);
+        assert!(!common.key_update_request_outstanding);
+    }
 }

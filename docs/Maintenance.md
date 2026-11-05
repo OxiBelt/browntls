@@ -2,8 +2,9 @@
 
 ## Current baseline
 
-browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`)
-described in [Architecture](Architecture.md), with no published releases. The
+browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
+and the unpublished test tool `browntls-e2e`) described in
+[Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
 
@@ -14,7 +15,10 @@ They do not import its proxy, WAF, image, or beta-promotion contracts.
 ## Routine maintenance
 
 Review dependency and GitHub Actions updates weekly. Dependabot covers GitHub
-Actions and the Cargo workspace. Review generated changes before merging; there
+Actions, the Cargo workspace, and the digest-pinned base images of the
+[Docker end-to-end](../tests/e2e/README.md) peers. Those peers install the
+distribution's current OpenSSL and GnuTLS packages when built, so their exact
+versions can change between runs; each job summary records them. Review generated changes before merging; there
 is no automatic merge policy.
 
 Run repository checks for every change. Review weekly scheduled failures, update

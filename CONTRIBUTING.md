@@ -9,8 +9,8 @@ agent orientation and [Architecture](docs/Architecture.md) the design.
 
 Root documents describe the project and its policies. Rust crates live in
 `crates/`, technical documentation in `docs/`, cross-testing and CI helpers in
-`scripts/`, portable repository checks in `tests/scripts/`, and GitHub
-automation in `.github/`. Do not create empty runtime directories to imply an
+`scripts/`, portable repository checks in `tests/scripts/`, the Docker
+end-to-end harness in `tests/e2e/`, and GitHub automation in `.github/`. Do not create empty runtime directories to imply an
 architecture.
 
 Use repository-relative paths in documentation and contribution descriptions.
@@ -69,7 +69,19 @@ Accelerated backends for other CPUs are exercised under QEMU user-mode
 emulation with `scripts/cross-test.sh <profile> -p browntls-crypto`; the script
 header lists the profiles and the Ubuntu packages it needs. CI additionally
 runs native aarch64 and riscv64 jobs, `no_std` builds and `cargo deny`.
-There are no Docker or Kubernetes test gates.
+
+The Docker end-to-end matrix runs browntls against OpenSSL, GnuTLS and itself
+in separate containers for x86-64-v3, aarch64 and riscv64 (natively and under
+QEMU with vector crypto). It needs Docker and the musl target of the
+architecture; see [Docker end-to-end tests](tests/e2e/README.md):
+
+```sh
+python3 -B -m unittest discover -s tests/e2e -p 'test_*.py'
+python3 tests/e2e/e2e.py build --arch amd64
+python3 tests/e2e/e2e.py run --arch amd64 --suite openssl
+```
+
+There are no Kubernetes test gates.
 
 ## Commit messages and signatures
 
@@ -146,7 +158,7 @@ Generate test certificates, keys, configurations, and logs per run in temporary
 directories. Clean them up on failure where practical. Do not commit real secrets,
 generated private keys, build artifacts, or security scan evidence.
 
-When Docker or Kubernetes integration is introduced, make checks reproducible
+Docker checks, and Kubernetes checks if introduced, must be reproducible
 locally and in CI. Rootful and rootless Docker may be used where available;
 do not assume that both exist. Account for remote-daemon mount paths, use
 run-specific names or labels, and clean up only resources created by the run.

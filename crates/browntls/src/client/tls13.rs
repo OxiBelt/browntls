@@ -720,7 +720,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
 ///
 /// A signature inside the chain that does not verify, or that uses an
 /// algorithm we do not accept (MD5 and SHA-1 included), is bad_certificate
-/// (RFC 9846 §6.2, §4.5.2.2): decrypt_error is for handshake signatures
+/// (RFC 9846 §6.2, §4.5.1): decrypt_error is for handshake signatures
 /// (CertificateVerify), see [`send_cert_verify_error_alert`].
 pub(crate) fn send_cert_path_error_alert(common: &mut CommonState, err: Error) -> Error {
     match &err {

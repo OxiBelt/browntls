@@ -81,7 +81,7 @@ pub(super) struct ExpectClientHello {
     pub(super) session_id: SessionId,
     pub(super) done_retry: bool,
     /// What our HelloRetryRequest selected, which the second ClientHello
-    /// must follow (RFC 9846 §4.1.4).
+    /// must follow (RFC 9846 §4.2.4).
     pub(super) retry_choice: Option<RetryChoice>,
     pub(super) send_tickets: usize,
 }
@@ -123,10 +123,12 @@ impl ExpectClientHello {
 
         // RFC 9846 §4.3.1: version negotiation.
         let version = if let Some(versions) = &client_hello.extensions.supported_versions {
-            // RFC 9846 §4.1.2: a ClientHello with supported_versions carries
-            // legacy_version 0x0303; a server receiving any other value
-            // MUST abort with protocol_version.
-            if client_hello.client_version != ProtocolVersion::TLSv1_2 {
+            // RFC 9846 §4.2.2: a TLS 1.3 ClientHello carries legacy_version
+            // 0x0303; a server receiving any other value MUST abort with
+            // protocol_version.
+            if versions.contains(&ProtocolVersion::TLSv1_3)
+                && client_hello.client_version != ProtocolVersion::TLSv1_2
+            {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::ProtocolVersion,
                     PeerMisbehaved::IllegalClientHelloLegacyVersion,
@@ -305,7 +307,7 @@ impl ExpectClientHello {
                 PeerIncompatible::UncompressedEcPointsRequired,
             ));
         }
-        // RFC 9846 §4.1.4: after a HelloRetryRequest, the second
+        // RFC 9846 §4.2.4: after a HelloRetryRequest, the second
         // ClientHello answers it with TLS 1.3, a single key share for the
         // group it selected, and still offers the cipher suite it selected.
         if let Some(choice) = &self.retry_choice {

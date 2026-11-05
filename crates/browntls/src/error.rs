@@ -202,6 +202,9 @@ impl From<InvalidMessage> for AlertDescription {
 #[derive(Debug, PartialEq, Clone)]
 pub enum PeerMisbehaved {
     AttemptedDowngradeToTls12WhenTls13IsSupported,
+    /// No longer produced: OCSP responses are accepted on any certificate
+    /// entry (RFC 9846 §4.5.1).
+    BadCertChainExtensions,
     CipherSuiteDifferedOnRetry,
     DisallowedCertificateRequestExtension,
     DisallowedEncryptedExtension,

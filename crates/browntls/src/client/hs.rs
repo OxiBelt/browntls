@@ -418,7 +418,7 @@ fn emit_client_hello_for_retry(
         });
     }
 
-    // RFC 9846 §4.1.4: after a HelloRetryRequest, a PSK whose hash differs
+    // RFC 9846 §4.2.4: after a HelloRetryRequest, a PSK whose hash differs
     // from that of the cipher suite the server selected cannot be used (its
     // binder would cover a transcript hashed differently), so it is dropped.
     if let Some(committed) = committed_suite
@@ -663,7 +663,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
-        // RFC 9846 §4.1.3: a TLS 1.3 ServerHello carries legacy_version
+        // RFC 9846 §4.2.3: a TLS 1.3 ServerHello carries legacy_version
         // 0x0303; anything else is a version error (§E.5).
         if version == ProtocolVersion::TLSv1_3
             && server_hello.legacy_version != ProtocolVersion::TLSv1_2
@@ -714,7 +714,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
         let suite = config
             .find_cipher_suite(server_hello.cipher_suite)
             .ok_or_else(|| {
-                // RFC 9846 §4.1.3: a cipher suite we did not offer.
+                // RFC 9846 §4.2.3: a cipher suite we did not offer.
                 cx.common.send_fatal_alert(
                     AlertDescription::IllegalParameter,
                     PeerMisbehaved::SelectedUnofferedCipherSuite,
@@ -826,7 +826,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
 
         // RFC 9846 §4.3: a recognised extension that may not appear in a
         // HelloRetryRequest is illegal_parameter; any other extension we
-        // did not offer is unsupported_extension (§4.1.4).
+        // did not offer is unsupported_extension (§4.2.4).
         if first_disallowed(
             hrr.extensions.unknown.iter().copied(),
             Tls13Message::HelloRetryRequest,
@@ -850,7 +850,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
                 PeerMisbehaved::IllegalHelloRetryRequestWithNoChanges,
             ));
         }
-        // RFC 9846 §4.1.4: a HelloRetryRequest selects TLS 1.3 through
+        // RFC 9846 §4.2.4: a HelloRetryRequest selects TLS 1.3 through
         // supported_versions (illegal_parameter otherwise, §4.3.1) and
         // carries legacy_version 0x0303 (protocol_version otherwise, §E.5).
         if hrr.extensions.supported_versions != Some(ProtocolVersion::TLSv1_3) {

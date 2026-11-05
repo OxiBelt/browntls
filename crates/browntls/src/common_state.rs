@@ -278,7 +278,7 @@ impl CommonState {
         self.sent_close_notify = true;
     }
 
-    fn has_sent_close_notify(&self) -> bool {
+    pub(crate) fn has_sent_close_notify(&self) -> bool {
         self.sent_close_notify
     }
 
@@ -354,9 +354,16 @@ impl CommonState {
                 }
             }
             PreEncryptAction::Refuse => {
-                if !self.early_traffic {
-                    self.send_close_notify();
+                if self.early_traffic {
+                    return 0;
                 }
+                // TLS 1.3 waits for the key refresh instead of closing,
+                // unless no refresh is possible any more (RFC 9846 §4.7.3).
+                if self.is_tls13() && self.sent_key_updates < MAX_KEY_UPDATES {
+                    self.refresh_traffic_keys_pending = true;
+                    return 0;
+                }
+                self.send_close_notify();
                 return 0;
             }
         }
@@ -534,12 +541,19 @@ impl CommonState {
         self.start_outgoing_traffic();
     }
 
-    fn flush_plaintext(&mut self) {
+    /// Sends plaintext buffered before application data could flow. What
+    /// the record layer does not take (a key refresh is due first) stays
+    /// buffered and goes out after the refresh.
+    pub(crate) fn flush_plaintext(&mut self) {
         if !self.may_send_application_data {
             return;
         }
         while let Some(buf) = self.sendable_plaintext.pop() {
-            self.send_appdata_encrypt(buf.as_slice().into(), Limit::No);
+            let sent = self.send_appdata_encrypt(buf.as_slice().into(), Limit::No);
+            if sent < buf.len() {
+                self.sendable_plaintext.prepend(buf[sent..].to_vec());
+                break;
+            }
         }
     }
 

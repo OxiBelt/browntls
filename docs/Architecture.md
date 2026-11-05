@@ -146,8 +146,12 @@ where they live:
   until a KeyUpdate from the peer arrives (a refresh then rotates only its own
   key); no more than 2^48-1 key updates are sent, after which a peer's request
   is ignored and the public `refresh_traffic_keys` fails. A write that reaches
-  the confidentiality limit rotates the key before the write returns; 0-RTT
-  data, which cannot be rekeyed, stops short of the limit. The limit is not
+  the confidentiality limit rotates the key before the write returns; when
+  the key cannot be rotated yet (a server's half-RTT data before the client's
+  Finished), the record layer takes no more data until it can, and plaintext
+  buffered before the handshake stays buffered across the rotation. 0-RTT
+  data, which cannot be rekeyed, stops short of the limit. No KeyUpdate (and
+  no ticket) is sent after our own `close_notify` (§6.1). The limit is not
   enforced on received records. A peer that keeps requesting updates without
   sending application data in between is cut off after eight requests, a
   local resource bound.

@@ -406,7 +406,7 @@ impl CompleteClientHelloHandling {
         }
 
         if doing_client_auth {
-            // RFC 9846 §4.5.3: the client's CertificateVerify must use a
+            // RFC 9846 §4.5.2: the client's CertificateVerify must use a
             // scheme from our CertificateRequest, which lists only the
             // verifier's TLS 1.3 schemes.
             let offered_sigschemes = self
@@ -995,7 +995,8 @@ fn emit_ticket(
     // RFC 9846 §4.7.1: a zero lifetime tells the client to discard the
     // ticket at once, so such a ticket is not worth sending.
     let lifetime = tls13_ticket_lifetime(config);
-    if lifetime == 0 {
+    // RFC 9846 §6.1: nothing follows our close_notify.
+    if lifetime == 0 || cx.common.has_sent_close_notify() {
         return Ok(());
     }
     let rng = config.provider.secure_random;

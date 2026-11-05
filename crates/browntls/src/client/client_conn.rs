@@ -534,11 +534,15 @@ impl ClientConnection {
         let Some(take) = self.inner.core.data.early_data.check_write(data.len()) else {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         };
-        Ok(self
+        let sent = self
             .inner
             .core
             .common_state
-            .send_early_plaintext(&data[..take]))
+            .send_early_plaintext(&data[..take]);
+        // Give back budget the record layer did not use (RFC 9846 §5.5:
+        // early data stops short of the key usage limit).
+        self.inner.core.data.early_data.left += take - sent;
+        Ok(sent)
     }
 
     /// Whether the connection only uses FIPS-validated components.

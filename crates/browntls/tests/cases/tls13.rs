@@ -978,7 +978,7 @@ fn retry_must_keep_the_cipher_suite_the_hello_retry_request_chose() {
         out.extend(record);
     }
     feed(&mut server, &out);
-    // RFC 9846 §4.1.4: the server MUST negotiate the same suite.
+    // RFC 9846 §4.2.4: the server MUST negotiate the same suite.
     assert_eq!(
         server.process_new_packets(),
         Err(Error::PeerMisbehaved(
@@ -1004,7 +1004,7 @@ fn client_hello_with_supported_versions_needs_legacy_version_tls12() {
     assert_eq!(ch[9..11], [3, 3]);
     ch[10] = 1;
     feed(&mut server, &ch);
-    // RFC 9846 §4.1.2: anything but 0x0303 is protocol_version.
+    // RFC 9846 §4.2.2: anything but 0x0303 is protocol_version.
     assert!(matches!(
         server.process_new_packets(),
         Err(Error::PeerMisbehaved(
@@ -1155,7 +1155,7 @@ fn client_reaction_to_edited_server_hello(
 #[test]
 fn server_hello_legacy_version_must_be_tls12() {
     init_logging();
-    // RFC 9846 §4.1.3: legacy_version other than 0x0303 is protocol_version.
+    // RFC 9846 §4.2.3: legacy_version other than 0x0303 is protocol_version.
     let (result, alert) = client_reaction_to_edited_server_hello(|sh| {
         assert_eq!(sh[9..11], [3, 3]);
         sh[10] = 4;
@@ -1172,7 +1172,7 @@ fn server_hello_legacy_version_must_be_tls12() {
 #[test]
 fn server_hello_with_unoffered_cipher_suite_is_illegal_parameter() {
     init_logging();
-    // RFC 9846 §4.1.3: a cipher suite the client did not offer.
+    // RFC 9846 §4.2.3: a cipher suite the client did not offer.
     let (result, alert) = client_reaction_to_edited_server_hello(|sh| {
         let at = 5 + 4 + 2 + 32 + 1 + usize::from(sh[5 + 4 + 2 + 32]);
         sh[at..at + 2].copy_from_slice(&[0xfe, 0xfe]);
@@ -1184,4 +1184,133 @@ fn server_hello_with_unoffered_cipher_suite_is_illegal_parameter() {
         ))
     );
     assert_eq!(alert, u8::from(AlertDescription::IllegalParameter));
+}
+
+#[test]
+fn writer_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<browntls::Writer<'static>>();
+}
+
+/// TLS_AES_128_GCM_SHA256 with a confidentiality limit of `limit` records.
+fn suite_with_limit(limit: u64) -> browntls::SupportedCipherSuite {
+    let orig = prov::cipher_suite::TLS13_AES_128_GCM_SHA256
+        .tls13()
+        .unwrap();
+    let suite: &'static browntls::Tls13CipherSuite =
+        Box::leak(Box::new(browntls::Tls13CipherSuite {
+            common: browntls::CipherSuiteCommon {
+                suite: orig.common.suite,
+                hash_provider: orig.common.hash_provider,
+                confidentiality_limit: limit,
+            },
+            hkdf_provider: orig.hkdf_provider,
+            aead_alg: orig.aead_alg,
+        }));
+    browntls::SupportedCipherSuite::Tls13(suite)
+}
+
+fn limited_pair(limit: u64, half_rtt: bool) -> (ClientConnection, ServerConnection) {
+    let chain = server_chain(KeyType::Ed25519);
+    let suite = suite_with_limit(limit);
+    let client_config = tls13_only_client(&chain, Some(&[suite]), None);
+    let mut provider = prov::default_provider();
+    provider.cipher_suites = vec![suite];
+    let mut server_config = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    server_config.send_half_rtt_data = half_rtt;
+    connect(client_config, server_config)
+}
+
+fn read_all<A: browntls::SideData>(conn: &mut browntls::ConnectionCommon<A>) -> Vec<u8> {
+    let mut got = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut conn.reader(), &mut got);
+    got
+}
+
+#[test]
+fn writes_past_the_confidentiality_limit_rotate_keys() {
+    use std::io::Write;
+    init_logging();
+    // RFC 9846 §5.5: update keys before the limit is reached.
+    let (mut client, mut server) = limited_pair(4, false);
+    do_handshake(&mut client, &mut server).unwrap();
+    for i in 0..20u8 {
+        assert_eq!(client.writer().write(&[i]).unwrap(), 1, "write {i}");
+    }
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    assert_eq!(read_all(&mut server), (0..20u8).collect::<Vec<_>>());
+    // and the server can still answer under its own (also limited) key
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(
+        send_and_receive(&mut server, &mut client, b"still here"),
+        b"still here"
+    );
+}
+
+#[test]
+fn plaintext_buffered_before_the_handshake_survives_the_limit() {
+    use std::io::Write;
+    init_logging();
+    let (mut client, mut server) = limited_pair(4, false);
+    for i in 0..8u8 {
+        assert_eq!(client.writer().write(&[i]).unwrap(), 1);
+    }
+    do_handshake(&mut client, &mut server).unwrap();
+    for _ in 0..4 {
+        transfer(&mut client, &mut server);
+        server.process_new_packets().unwrap();
+        transfer(&mut server, &mut client);
+        client.process_new_packets().unwrap();
+    }
+    assert_eq!(read_all(&mut server), (0..8u8).collect::<Vec<_>>());
+}
+
+#[test]
+fn half_rtt_data_at_the_limit_waits_for_the_handshake() {
+    use std::io::Write;
+    init_logging();
+    // The server cannot send a KeyUpdate before it has the client's
+    // Finished, so writes past the limit are held back, not failed, and the
+    // connection is not closed.
+    let (mut client, mut server) = limited_pair(4, true);
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    assert!(server.is_handshaking());
+    let mut taken = Vec::new();
+    for i in 0..8u8 {
+        if server.writer().write(&[i]).unwrap() == 1 {
+            taken.push(i);
+        }
+    }
+    assert!(!taken.is_empty() && taken.len() < 8);
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    let state = client.process_new_packets().unwrap();
+    assert!(!state.peer_has_closed());
+    assert_eq!(read_all(&mut client), taken);
+    assert_eq!(
+        send_and_receive(&mut server, &mut client, b"after the refresh"),
+        b"after the refresh"
+    );
+}
+
+#[test]
+fn no_key_update_after_our_close_notify() {
+    init_logging();
+    // RFC 9846 §6.1: nothing is sent after close_notify, not even the
+    // KeyUpdate the peer asked for.
+    let (mut client, mut server) = established();
+    client.send_close_notify();
+    let _ = take_tls(&mut client);
+    server.refresh_traffic_keys().unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert!(!client.wants_write());
 }

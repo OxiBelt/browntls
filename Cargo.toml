@@ -4,6 +4,7 @@ members = [
   "crates/browntls-crypto",
   "crates/browntls-pki",
   "crates/browntls",
+  "crates/browntls-e2e",
 ]
 
 [workspace.package]

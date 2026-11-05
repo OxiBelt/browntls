@@ -1,0 +1,19 @@
+[package]
+name = "browntls-e2e"
+description = "Command-line TLS peer used by the Docker end-to-end test matrix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "browntls-e2e"
+path = "src/main.rs"
+
+[dependencies]
+browntls = { path = "../browntls", default-features = false, features = ["std", "native", "tls12", "prefer-post-quantum"] }
+
+[lints]
+workspace = true

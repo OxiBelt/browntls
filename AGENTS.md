@@ -21,9 +21,12 @@ Current layout:
   crate permitted to contain `unsafe`, confined to backend modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
+- `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
+  (test tooling, not published).
 - `docs/`: technical and maintenance documentation.
 - `scripts/`: QEMU cross-testing and CI helpers.
 - `tests/scripts/`: portable repository checks and their regression tests.
+- `tests/e2e/`: Docker end-to-end interoperability matrix and its harness tests.
 - `.github/`: workflows, contribution templates, and update automation.
 
 ## Working principles

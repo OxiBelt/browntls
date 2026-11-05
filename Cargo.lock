@@ -207,6 +207,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "browntls-e2e"
+version = "0.1.0-dev"
+dependencies = [
+ "browntls",
+]
+
+[[package]]
 name = "browntls-pki"
 version = "0.1.0-dev"
 dependencies = [

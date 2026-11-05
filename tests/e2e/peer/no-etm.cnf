@@ -1,0 +1,12 @@
+# OPENSSL_CONF for peers that must not negotiate Encrypt-then-MAC (RFC 7366),
+# so that TLS 1.2 CBC suites use the RFC 5246 MAC-then-encrypt construction.
+openssl_conf = openssl_init
+
+[openssl_init]
+ssl_conf = ssl_sect
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+Options = -EncryptThenMac

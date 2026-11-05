@@ -1,0 +1,138 @@
+name: Docker E2E
+
+# Interoperability of the browntls client and server with OpenSSL, GnuTLS and
+# browntls itself, each in its own container on a Docker network, for every
+# target architecture. tests/e2e/e2e.py defines the matrix, the scenarios and
+# the checks; tests/e2e/README.md explains how to run them locally.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  matrix:
+    name: Generate E2E matrices
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      images: ${{ steps.matrix.outputs.images }}
+      e2e: ${{ steps.matrix.outputs.e2e }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the harness
+        run: python3 -B -m unittest discover -s tests/e2e -p 'test_*.py'
+
+      - name: Generate matrices
+        id: matrix
+        run: |
+          {
+            echo "images=$(python3 -B tests/e2e/e2e.py matrix images)"
+            echo "e2e=$(python3 -B tests/e2e/e2e.py matrix e2e)"
+          } >> "${GITHUB_OUTPUT}"
+
+  # Every image is cross-compiled on x86-64 (static musl binaries linked by
+  # rust-lld), which is much faster than building on the RISC-V runners.
+  image:
+    name: E2E image (${{ matrix.label }})
+    needs: matrix
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.images) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh "${{ matrix.rust_target }}"
+
+      - name: Build image
+        run: python3 -B tests/e2e/e2e.py build --arch "${{ matrix.arch }}" --save "${RUNNER_TEMP}/browntls-e2e-${{ matrix.arch }}.tar"
+
+      - name: Upload image
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browntls-e2e-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/browntls-e2e-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    name: E2E ${{ matrix.label }} vs ${{ matrix.description }}
+    needs:
+      - matrix
+      - image
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.e2e) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report runner
+        run: |
+          uname -m
+          grep -m1 -E '^(model name|flags|Features|isa|uarch)' /proc/cpuinfo || true
+          docker version --format 'Docker {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})'
+
+      - name: Set up QEMU user-mode emulation
+        if: matrix.emulated
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          # tonistiigi/binfmt source revision e29e7d72c9672c8c8bf846655ab149b50e1a62bd
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: riscv64
+          cache-image: false
+
+      - name: Download image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browntls-e2e-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/browntls-e2e-image
+
+      - name: Load image
+        run: docker load --input "${RUNNER_TEMP}/browntls-e2e-image/browntls-e2e-${{ matrix.arch }}.tar"
+
+      - name: Run scenarios
+        run: |
+          python3 -B tests/e2e/e2e.py run \
+            --arch "${{ matrix.arch }}" \
+            --suite "${{ matrix.suite }}" \
+            --artifact-dir "${RUNNER_TEMP}/browntls-e2e-logs"
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browntls-e2e-logs-${{ matrix.arch }}-${{ matrix.suite }}
+          path: ${{ runner.temp }}/browntls-e2e-logs
+          if-no-files-found: ignore
+          retention-days: 7

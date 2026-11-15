@@ -32,11 +32,12 @@ use std::time::{Duration, Instant};
 use browntls_crypto::accel::{self, Acceleration, Policy};
 use browntls_crypto::aead::Aead;
 use browntls_crypto::chacha::ChaCha20Poly1305;
+use browntls_crypto::curve448::{ed448, x448};
 use browntls_crypto::curve25519::{ed25519, x25519};
 use browntls_crypto::gcm::{Aes128Gcm, Aes256Gcm};
 use browntls_crypto::hash::{HashAlgorithm, HashFunction, Sha3_256, Sha256, Sha512};
 use browntls_crypto::mlkem::{DecapsulationKey, MlKem768};
-use browntls_crypto::nist::{p256, p384};
+use browntls_crypto::nist::{p256, p384, p521};
 use browntls_crypto::rand::OsRng;
 use browntls_crypto::rsa::RsaPrivateKey;
 
@@ -101,6 +102,16 @@ fn hash<H: HashFunction>(name: &str, budget: Duration) {
         });
         bytes_line(name, len, r);
     }
+}
+
+/// A fixed in-range private scalar for a NIST curve: `byte` repeated, with
+/// the top byte cleared for P-521 (whose order is below `2^521`).
+fn scalar<const N: usize>(byte: u8) -> [u8; N] {
+    let mut k = [byte; N];
+    if N == 66 {
+        k[0] = 0;
+    }
+    k
 }
 
 /// Algorithms selected with `--only` (comma-separated names); all if unset.
@@ -196,15 +207,47 @@ fn main() {
         );
     }
 
+    if wanted("X448") {
+        // X448: one Diffie-Hellman derivation (as `openssl speed ecdhx448`).
+        let peer = x448::x448_base(&[9; 56]);
+        ops_line(
+            "X448",
+            "derive",
+            rate(budget, || {
+                black_box(x448::x448(black_box(&[7; 56]), &peer));
+            }),
+        );
+    }
+
+    if wanted("Ed448") {
+        // Ed448 over a 20-byte message (as `openssl speed ed448`).
+        let ed = ed448::SigningKey::from_seed(&[4; 57]);
+        let sig = ed.sign(&msg);
+        let vk = ed.verifying_key();
+        ops_line(
+            "Ed448",
+            "sign",
+            rate(budget, || {
+                black_box(ed.sign(&msg));
+            }),
+        );
+        ops_line(
+            "Ed448",
+            "verify",
+            rate(budget, || vk.verify(&msg, &sig).unwrap()),
+        );
+    }
+
     // ECDSA over a pre-hashed digest and ECDH (as `openssl speed ecdsapN` /
     // `ecdhpN`).
     macro_rules! nist {
         ($m:ident, $name:literal, $hash:expr, $digest_len:literal) => {{
             if wanted($name) {
-                let sk = $m::SecretKey::from_bytes(&[5; $m::FIELD_LEN]).unwrap();
+                let sk = $m::SecretKey::from_bytes(&scalar::<{ $m::FIELD_LEN }>(5)).unwrap();
                 let pk = sk.public_key();
-                let signer =
-                    $m::SigningKey::new($m::SecretKey::from_bytes(&[6; $m::FIELD_LEN]).unwrap());
+                let signer = $m::SigningKey::new(
+                    $m::SecretKey::from_bytes(&scalar::<{ $m::FIELD_LEN }>(6)).unwrap(),
+                );
                 let vk = signer.verifying_key();
                 let digest = [0x33u8; $digest_len];
                 let sig = signer.sign_prehashed($hash, &digest, Some(&OsRng)).unwrap();
@@ -222,7 +265,7 @@ fn main() {
                         $m::verify_prehashed(&vk, &digest, sig.as_der()).unwrap();
                     }),
                 );
-                let other = $m::SecretKey::from_bytes(&[8; $m::FIELD_LEN]).unwrap();
+                let other = $m::SecretKey::from_bytes(&scalar::<{ $m::FIELD_LEN }>(8)).unwrap();
                 ops_line(
                     $name,
                     "ecdh",
@@ -235,6 +278,7 @@ fn main() {
     }
     nist!(p256, "P-256", HashAlgorithm::Sha256, 32);
     nist!(p384, "P-384", HashAlgorithm::Sha384, 48);
+    nist!(p521, "P-521", HashAlgorithm::Sha512, 64);
 
     // RSA PKCS #1 v1.5 with SHA-256 (as `openssl speed rsaN`).
     for bits in [2048usize, 3072] {

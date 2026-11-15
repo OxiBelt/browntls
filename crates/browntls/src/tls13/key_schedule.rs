@@ -263,7 +263,9 @@ impl KeyScheduleEarly {
         );
         match common.side {
             Side::Client => self.ks.set_encrypter(&secret, common),
-            Side::Server => self.ks.set_decrypter(&secret, common),
+            Side::Server => common
+                .record_layer
+                .set_early_data_decrypter(self.ks.derive_decrypter(&secret)),
         }
     }
 

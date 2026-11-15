@@ -18,7 +18,8 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
-use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup};
+use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup, PskKeyExchangeMode};
+use crate::msgs::grease::is_grease_u16;
 use crate::msgs::handshake::{ClientHelloPayload, HandshakePayload, Random, SessionId};
 use crate::msgs::message::Message;
 use crate::msgs::persist::ServerSessionValue;
@@ -175,7 +176,13 @@ impl ExpectClientHello {
                 .extensions
                 .supported_versions
                 .as_ref()
-                .and_then(|versions| versions.iter().map(|v| u16::from(*v)).max())
+                .and_then(|versions| {
+                    versions
+                        .iter()
+                        .map(|v| u16::from(*v))
+                        .filter(|v| !is_grease_u16(*v))
+                        .max()
+                })
                 .unwrap_or_else(|| u16::from(client_hello.client_version));
             let our_max = if tls13_enabled {
                 ProtocolVersion::TLSv1_3
@@ -213,6 +220,21 @@ impl ExpectClientHello {
                 AlertDescription::UnsupportedExtension,
                 PeerMisbehaved::OfferedEarlyDataWithOldProtocolVersion,
             ));
+        }
+
+        // RFC 8449: once we answer the client's record_size_limit (in the
+        // TLS 1.3 EncryptedExtensions or the TLS 1.2 ServerHello), each
+        // side's protected records respect the other's limit. This runs
+        // again for a second ClientHello.
+        if let (Some(ours), Some(theirs)) = (
+            record_size_limit_ack(&self.config, client_hello, version),
+            client_hello.extensions.record_size_limit,
+        ) {
+            cx.common.apply_record_size_limits(
+                ours,
+                theirs,
+                version == ProtocolVersion::TLSv1_3,
+            )?;
         }
 
         // Choose the certificate.
@@ -500,6 +522,57 @@ impl ExpectClientHello {
                 )
             }
         }
+    }
+}
+
+/// The `record_size_limit` to send for `version` (RFC 8449 §4): our
+/// configured value, clamped to the protocol maximum, when the client sent
+/// the extension and the configuration has one.
+pub(super) fn record_size_limit_ack(
+    config: &ServerConfig,
+    client_hello: &ClientHelloPayload,
+    version: ProtocolVersion,
+) -> Option<u16> {
+    client_hello.extensions.record_size_limit?;
+    let max = crate::common_state::max_record_size_limit(version == ProtocolVersion::TLSv1_3);
+    config.record_size_limit.map(|limit| limit.min(max))
+}
+
+/// How many TLS 1.3 tickets to send, and the RFC 9149 `expected_count` to
+/// announce in EncryptedExtensions when the client sent `ticket_request`.
+///
+/// RFC 9846 §4.7.1: tickets go only to a client whose ClientHello carried a
+/// suitable `psk_key_exchange_modes`; `psk_dhe_ke` is the only mode we
+/// resume with. RFC 9149 §3: no more tickets than the client asked for, for
+/// a resumed session (`resumption_count`) or a new one
+/// (`new_session_count`, also when we declined the offered PSK), and never
+/// more than `send_tls13_tickets`, our own maximum.
+pub(super) fn tls13_tickets_to_send(
+    config: &ServerConfig,
+    client_hello: &ClientHelloPayload,
+    resumed: bool,
+) -> (usize, Option<u8>) {
+    let client_takes_tickets = client_hello
+        .extensions
+        .psk_modes
+        .as_ref()
+        .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
+    let ours = if client_takes_tickets {
+        config.send_tls13_tickets
+    } else {
+        0
+    };
+    match client_hello.extensions.ticket_request {
+        Some(request) => {
+            let wanted = match resumed {
+                true => request.resumption_count,
+                false => request.new_session_count,
+            };
+            let count = ours.min(usize::from(wanted));
+            // `count` is at most `wanted`, a u8.
+            (count, u8::try_from(count).ok())
+        }
+        None => (ours, None),
     }
 }
 

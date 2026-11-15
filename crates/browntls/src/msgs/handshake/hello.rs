@@ -4,9 +4,9 @@ use alloc::vec::Vec;
 
 use super::extensions::{encode_extension, read_extensions};
 use super::{
-    CertificateStatusRequest, ClientSessionTicket, DistinguishedName, HandshakePayload,
-    KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random, ServerExtensions,
-    ServerNamePayload, SessionId, read_payload,
+    CertificateStatusRequest, ClientSessionTicket, ClientTicketRequest, DistinguishedName,
+    HandshakePayload, KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random,
+    ServerExtensions, ServerNamePayload, SessionId, read_payload,
 };
 use crate::enums::{
     CertificateCompressionAlgorithm, CertificateType, CipherSuite, HandshakeType, ProtocolVersion,
@@ -54,6 +54,21 @@ pub(crate) struct ClientExtensions {
     pub(crate) client_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) server_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) transport_parameters: Option<Payload<'static>>,
+    /// RFC 8449: the largest record we are willing to receive.
+    pub(crate) record_size_limit: Option<u16>,
+    /// RFC 9149: how many TLS 1.3 tickets we would like.
+    pub(crate) ticket_request: Option<ClientTicketRequest>,
+    /// RFC 8701: an empty GREASE extension of this type, encoded first.
+    /// Never part of `present_types`.
+    pub(crate) grease_first: Option<u16>,
+    /// RFC 8701: a one-byte GREASE extension of this type, encoded after
+    /// every other extension but `padding` and `pre_shared_key`. Never part
+    /// of `present_types`.
+    pub(crate) grease_last: Option<u16>,
+    /// RFC 7685: the length of the all-zero `padding` body, encoded just
+    /// before `pre_shared_key`. Never part of `present_types`: a server
+    /// must not echo it.
+    pub(crate) padding: Option<usize>,
     /// Extension types present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
     /// Always encoded last (RFC 8446 §4.2.11).
@@ -133,6 +148,11 @@ impl ClientExtensions {
             self.transport_parameters.is_some(),
             ExtensionType::TransportParameters,
         );
+        add(
+            self.record_size_limit.is_some(),
+            ExtensionType::RecordSizeLimit,
+        );
+        add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
         for unknown in &self.unknown {
             add(true, *unknown);
         }
@@ -145,6 +165,9 @@ impl Codec<'_> for ClientExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        if let Some(grease) = self.grease_first {
+            encode_extension(ExtensionType::Unknown(grease), out, |_| {});
+        }
         if let Some(sn) = &self.server_name {
             encode_extension(ExtensionType::ServerName, out, |b| sn.encode(b));
         }
@@ -236,6 +259,22 @@ impl Codec<'_> for ClientExtensions {
         if let Some(tp) = &self.transport_parameters {
             encode_extension(ExtensionType::TransportParameters, out, |b| tp.encode(b));
         }
+        if let Some(limit) = self.record_size_limit {
+            encode_extension(ExtensionType::RecordSizeLimit, out, |b| limit.encode(b));
+        }
+        if let Some(request) = &self.ticket_request {
+            encode_extension(ExtensionType::TicketRequest, out, |b| request.encode(b));
+        }
+        if let Some(grease) = self.grease_last {
+            // RFC 8701 §3: the second GREASE extension is not empty.
+            encode_extension(ExtensionType::Unknown(grease), out, |b| b.push(0));
+        }
+        if let Some(len) = self.padding {
+            // RFC 7685 §3: the body is all zeros.
+            encode_extension(ExtensionType::Padding, out, |b| {
+                b.resize(b.len() + len, 0);
+            });
+        }
         if let Some(psk) = &self.preshared_key {
             encode_extension(ExtensionType::PreSharedKey, out, |b| psk.encode(b));
         }
@@ -317,6 +356,16 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::TransportParameters | ExtensionType::TransportParametersDraft => {
                     out.transport_parameters = Some(Payload::read(body).into_owned());
+                }
+                ExtensionType::RecordSizeLimit => {
+                    out.record_size_limit = Some(u16::read(body)?);
+                }
+                ExtensionType::TicketRequest => {
+                    out.ticket_request = Some(ClientTicketRequest::read(body)?);
+                }
+                ExtensionType::Padding => {
+                    // RFC 7685 §3: the server ignores the content.
+                    out.padding = Some(body.rest().len());
                 }
                 ExtensionType::PreSharedKey => {
                     out.preshared_key = Some(PresharedKeyOffer::read(body)?);
@@ -724,6 +773,53 @@ mod tests {
         let truncated = msg.encoding_for_binder_signing();
         assert_eq!(truncated.len(), enc.len() - (2 + 33));
         assert_eq!(&enc[..truncated.len()], &truncated[..]);
+    }
+
+    #[test]
+    fn client_hello_with_later_rfc_extensions() {
+        let mut ch = sample_client_hello();
+        ch.extensions.record_size_limit = Some(16_385);
+        ch.extensions.ticket_request = Some(ClientTicketRequest {
+            new_session_count: 2,
+            resumption_count: 1,
+        });
+        ch.extensions.grease_first = Some(0x1a1a);
+        ch.extensions.grease_last = Some(0x2a2a);
+        ch.extensions.padding = Some(7);
+        let enc = ch.get_encoding();
+        let back = ClientHelloPayload::read_bytes(&enc).unwrap();
+        assert_eq!(back.extensions.record_size_limit, Some(16_385));
+        assert_eq!(back.extensions.ticket_request, ch.extensions.ticket_request);
+        assert_eq!(back.extensions.padding, Some(7));
+        // GREASE extensions read back as unknown ones, in order.
+        assert_eq!(
+            back.extensions.unknown,
+            [
+                ExtensionType::Unknown(0x1a1a),
+                ExtensionType::Unknown(0x2a2a)
+            ]
+        );
+        assert_eq!(back.extensions.preshared_key, ch.extensions.preshared_key);
+        // Neither GREASE nor padding counts as offered.
+        let offered = ch.extensions.present_types();
+        assert!(offered.contains(&ExtensionType::RecordSizeLimit));
+        assert!(offered.contains(&ExtensionType::TicketRequest));
+        assert!(!offered.contains(&ExtensionType::Padding));
+        assert!(
+            !offered
+                .iter()
+                .any(|t| matches!(t, ExtensionType::Unknown(_)))
+        );
+        // The padding body is zeros, followed only by pre_shared_key.
+        let psk_len = 4 + ch
+            .extensions
+            .preshared_key
+            .as_ref()
+            .unwrap()
+            .get_encoding()
+            .len();
+        let padding = &enc[enc.len() - psk_len - 11..enc.len() - psk_len];
+        assert_eq!(padding, [0, 0x15, 0, 7, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

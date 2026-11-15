@@ -82,6 +82,9 @@ pub enum Error {
     /// `max_fragment_size` is outside the allowed range.
     BadMaxFragmentSize,
 
+    /// A configured `record_size_limit` is below 64 (RFC 8449 §4).
+    BadRecordSizeLimit,
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -233,6 +236,8 @@ pub enum PeerMisbehaved {
     IllegalClientHelloLegacyVersion,
     IllegalMiddleboxChangeCipherSpec,
     IllegalProtectedChangeCipherSpec,
+    /// A `record_size_limit` below 64 (RFC 8449 §4).
+    IllegalRecordSizeLimit,
     IllegalServerHelloLegacyVersion,
     IllegalTlsInnerPlaintext,
     IncorrectBinder,
@@ -584,6 +589,9 @@ impl fmt::Display for Error {
             Self::FailedToGetRandomBytes => f.write_str("failed to get random bytes"),
             Self::BadMaxFragmentSize => {
                 f.write_str("the supplied max_fragment_size was too small or large")
+            }
+            Self::BadRecordSizeLimit => {
+                f.write_str("the supplied record_size_limit was smaller than 64")
             }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),

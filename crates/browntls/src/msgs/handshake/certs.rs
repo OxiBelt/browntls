@@ -6,6 +6,7 @@ use browntls_pki::CertificateDer;
 
 use super::extensions::{encode_extension, read_extensions};
 use super::{DistinguishedName, MAX_CERTIFICATE_SIZE_LIMIT};
+use crate::delegated_credential::DelegatedCredential;
 use crate::enums::{CertificateCompressionAlgorithm, SignatureScheme};
 use crate::error::InvalidMessage;
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
@@ -135,6 +136,8 @@ pub(crate) struct CertificateEntry<'a> {
     pub(crate) cert: CertificateDer<'a>,
     pub(crate) status: Option<CertificateStatus<'a>>,
     pub(crate) sct_list: Option<Payload<'a>>,
+    /// RFC 9345 §4.1.1: only meaningful on the end-entity entry.
+    pub(crate) delegated_credential: Option<DelegatedCredential>,
 }
 
 impl<'a> CertificateEntry<'a> {
@@ -143,6 +146,7 @@ impl<'a> CertificateEntry<'a> {
             cert,
             status: None,
             sct_list: None,
+            delegated_credential: None,
         }
     }
 
@@ -151,6 +155,7 @@ impl<'a> CertificateEntry<'a> {
             cert: self.cert.into_owned(),
             status: self.status.map(CertificateStatus::into_owned),
             sct_list: self.sct_list.map(Payload::into_owned),
+            delegated_credential: self.delegated_credential,
         }
     }
 }
@@ -165,16 +170,26 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         if let Some(scts) = &self.sct_list {
             encode_extension(ExtensionType::SCT, list.buf, |b| scts.encode(b));
         }
+        if let Some(dc) = &self.delegated_credential {
+            encode_extension(ExtensionType::DelegatedCredential, list.buf, |b| {
+                dc.encode(b)
+            });
+        }
     }
 
     fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
         let cert = CertificateDer::read(r)?;
         let mut status = None;
         let mut sct_list = None;
+        let mut delegated_credential = None;
         read_extensions(r, |typ, body| {
             match typ {
                 ExtensionType::StatusRequest => status = Some(CertificateStatus::read(body)?),
                 ExtensionType::SCT => sct_list = Some(Payload::read(body)),
+                // Whether we offered it is checked by the handshake.
+                ExtensionType::DelegatedCredential => {
+                    delegated_credential = Some(DelegatedCredential::read(body)?);
+                }
                 // RFC 9846 §4.3: a recognised extension that may not
                 // appear in a CertificateEntry is illegal_parameter; any
                 // other one cannot answer anything we sent.
@@ -194,6 +209,7 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
             cert,
             status,
             sct_list,
+            delegated_credential,
         })
     }
 }
@@ -243,6 +259,22 @@ impl<'a> CertificatePayloadTls13<'a> {
             .and_then(|e| e.status.as_ref())
             .map(|s| s.ocsp_response.0.bytes().to_vec())
             .unwrap_or_default()
+    }
+
+    /// The end entity's delegated credential (RFC 9345), if any.
+    pub(crate) fn end_entity_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.entries
+            .first()
+            .and_then(|e| e.delegated_credential.as_ref())
+    }
+
+    /// Whether an entry other than the end entity's carries a delegated
+    /// credential (RFC 9345 §4.1.1).
+    pub(crate) fn delegated_credential_on_non_end_entity(&self) -> bool {
+        self.entries
+            .iter()
+            .skip(1)
+            .any(|e| e.delegated_credential.is_some())
     }
 
     pub(crate) fn into_certificate_chain(self) -> CertificateChain<'a> {
@@ -353,6 +385,9 @@ pub(crate) struct CertificateRequestExtensions {
     pub(crate) authorities: Option<Vec<DistinguishedName>>,
     pub(crate) certificate_compression: Option<Vec<CertificateCompressionAlgorithm>>,
     pub(crate) unknown: Vec<ExtensionType>,
+    /// RFC 9345 §4.1.2: the schemes the server accepts for a client's
+    /// delegated credential.
+    pub(crate) delegated_credential: Option<Vec<SignatureScheme>>,
 }
 
 impl Codec<'_> for CertificateRequestExtensions {
@@ -379,6 +414,11 @@ impl Codec<'_> for CertificateRequestExtensions {
                 encode_vec_u8(b, algs)
             });
         }
+        if let Some(schemes) = &self.delegated_credential {
+            encode_extension(ExtensionType::DelegatedCredential, out, |b| {
+                encode_vec_u16(b, schemes)
+            });
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -401,6 +441,10 @@ impl Codec<'_> for CertificateRequestExtensions {
                         body,
                         "CertificateCompressionAlgorithms",
                     )?);
+                }
+                ExtensionType::DelegatedCredential => {
+                    out.delegated_credential =
+                        Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
                 }
                 other => {
                     out.unknown.push(other);

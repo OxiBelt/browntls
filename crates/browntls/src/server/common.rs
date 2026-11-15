@@ -2,13 +2,16 @@
 
 use browntls_pki::CertificateDer;
 
+use crate::delegated_credential::DelegatedCredentialKey;
 use crate::sign::{CertifiedKey, SigningKey};
+use crate::sync::Arc;
 
 /// The certificate and key chosen for this connection.
 pub(super) struct ActiveCertifiedKey<'a> {
     cert: &'a [CertificateDer<'static>],
     key: &'a dyn SigningKey,
     ocsp: Option<&'a [u8]>,
+    delegated_credentials: &'a [Arc<DelegatedCredentialKey>],
 }
 
 impl<'a> ActiveCertifiedKey<'a> {
@@ -17,6 +20,7 @@ impl<'a> ActiveCertifiedKey<'a> {
             cert: &certkey.cert,
             key: &*certkey.key,
             ocsp: certkey.ocsp.as_deref(),
+            delegated_credentials: &certkey.delegated_credentials,
         }
     }
 
@@ -30,5 +34,9 @@ impl<'a> ActiveCertifiedKey<'a> {
 
     pub(super) fn get_ocsp(&self) -> Option<&'a [u8]> {
         self.ocsp
+    }
+
+    pub(super) fn get_delegated_credentials(&self) -> &'a [Arc<DelegatedCredentialKey>] {
+        self.delegated_credentials
     }
 }

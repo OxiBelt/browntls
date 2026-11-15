@@ -403,6 +403,11 @@ fn emit_client_hello_for_retry(
         ..Default::default()
     };
 
+    // RFC 9345 §4.1.1: offer to accept a delegated credential (TLS 1.3 only).
+    if supports_tls13 && config.enable_delegated_credentials {
+        exts.delegated_credential = Some(tls13::delegated_credential_schemes(config));
+    }
+
     #[cfg(feature = "tls12")]
     if supports_tls12
         && config.resumption.tls12_resumption == super::Tls12Resumption::SessionIdOrTickets

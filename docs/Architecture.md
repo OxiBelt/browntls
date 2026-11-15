@@ -185,6 +185,45 @@ stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
 (not "Recommended" in RFC 9846 Table 1; `record_size_limit` and the local
 `max_fragment_size` setting cover the use case).
 
+### Delegated credentials (RFC 9345)
+
+`browntls::delegated_credential` holds the `DelegatedCredential` codec,
+signing (`DelegatedCredential::issue`) and validation; the native provider
+adds `crypto::native::delegated_credential::generate`, which creates an
+ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
+certificate's key sign the credential. A credential is attached to a
+`CertifiedKey` with `with_delegated_credential`, which checks that the
+certificate carries the `DelegationUsage` extension
+(1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
+`digitalSignature` key usage, and that the key matches the credential's
+public key.
+
+- Server: when the ClientHello carries `delegated_credential` and a
+  credential is unexpired, has at most seven days left, uses a
+  `dc_cert_verify_algorithm` the client listed and is signed with a scheme
+  in its `signature_algorithms`, the credential goes on the end-entity
+  CertificateEntry and its key signs CertificateVerify. Otherwise the
+  certificate key signs, as before. Never with raw public keys or TLS 1.2.
+- Client: off unless `ClientConfig::enable_delegated_credentials`. The
+  chain is verified as usual; then the credential is validated (offered
+  schemes, not expired, at most seven days left and not beyond the
+  certificate's `notAfter`, CertificateVerify scheme equal to
+  `dc_cert_verify_algorithm`, `DelegationUsage` and `digitalSignature`,
+  signature by the certificate key) and CertificateVerify is verified with
+  its key through
+  `ServerCertVerifier::verify_tls13_signature_with_delegated_key` (the
+  default implementation refuses). `ClientConnection::delegated_credential`
+  returns the credential used.
+- Alerts (§4.1.3): an invalid credential is `illegal_parameter`; one the
+  client did not ask for is `unexpected_message`; one on an entry other than
+  the end entity's is `illegal_parameter`; a CertificateVerify that fails
+  under the credential's key gets the same alert as one that fails under a
+  certificate key (`decrypt_error` for a bad signature).
+- Not implemented: client credentials (the extension is parsed in
+  CertificateRequest but never sent, and a client never presents one).
+  No other implementation the project tests against supports delegated
+  credentials, so the tests are browntls to browntls only.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |

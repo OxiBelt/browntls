@@ -7,6 +7,7 @@ use core::fmt::Debug;
 use browntls_pki::{AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
 
 use super::CryptoProvider;
+use crate::delegated_credential::{DelegatedCredential, DelegatedCredentialKey};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::{Error, InconsistentKeys};
 use crate::sync::Arc;
@@ -46,6 +47,11 @@ pub struct CertifiedKey {
 
     /// A stapled OCSP response for the end entity, if any.
     pub ocsp: Option<Vec<u8>>,
+
+    /// Delegated credentials for the end entity (RFC 9345), most preferred
+    /// first. A TLS 1.3 server sends the first one the client accepts and
+    /// signs CertificateVerify with its key; otherwise `key` signs.
+    pub delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
 }
 
 impl CertifiedKey {
@@ -69,7 +75,20 @@ impl CertifiedKey {
             cert,
             key,
             ocsp: None,
+            delegated_credentials: Vec::new(),
         }
+    }
+
+    /// Adds a delegated credential for the end entity, with its private
+    /// `key` (RFC 9345). See [`DelegatedCredentialKey::new`] for the checks.
+    pub fn with_delegated_credential(
+        mut self,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        let dc = DelegatedCredentialKey::new(self.end_entity_cert()?, credential, key)?;
+        self.delegated_credentials.push(Arc::new(dc));
+        Ok(self)
     }
 
     /// Checks that the key's public half matches the end-entity certificate.

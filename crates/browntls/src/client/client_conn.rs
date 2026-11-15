@@ -13,6 +13,7 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
+use crate::delegated_credential::DelegatedCredential;
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::key_log::KeyLog;
@@ -133,6 +134,17 @@ pub struct ClientConfig {
 
     /// Decompressors to offer for the server's certificate (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    /// Whether to accept a TLS 1.3 server authenticating with a delegated
+    /// credential (RFC 9345). When set, the ClientHello carries the
+    /// `delegated_credential` extension listing the verifier's TLS 1.3
+    /// schemes, and a credential the server sends is checked (certificate
+    /// `DelegationUsage`, the signature by the certificate key, at most
+    /// seven days of validity) before its key verifies CertificateVerify.
+    /// The verifier must implement
+    /// [`ServerCertVerifier::verify_tls13_signature_with_delegated_key`].
+    /// Off by default.
+    pub enable_delegated_credentials: bool,
 
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
@@ -428,6 +440,8 @@ pub struct ClientConnectionData {
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
     server_name: ServerName<'static>,
+    /// The delegated credential the server authenticated with (RFC 9345).
+    pub(super) delegated_credential: Option<DelegatedCredential>,
 }
 
 impl ClientConnectionData {
@@ -437,6 +451,7 @@ impl ClientConnectionData {
             early_data: EarlyData::new(),
             session_store,
             server_name,
+            delegated_credential: None,
         }
     }
 }
@@ -503,6 +518,13 @@ impl ClientConnection {
     /// How many TLS 1.3 tickets the server has sent so far.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.core.data.tls13_tickets_received
+    }
+
+    /// The delegated credential (RFC 9345) the server authenticated with,
+    /// once its CertificateVerify has been verified with the credential's
+    /// key; `None` when the server signed with its certificate key.
+    pub fn delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.inner.core.data.delegated_credential.as_ref()
     }
 
     /// A writer for TLS 1.3 0-RTT ("early") data, while that is possible.

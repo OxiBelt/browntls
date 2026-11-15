@@ -36,6 +36,7 @@ intent.
 | 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
+| Delegated credentials (RFC 9345), server side in TLS 1.3: issuing with the native provider, `DelegationUsage` parsing, client validation with the RFC 9345 alerts; tests on both providers (`crates/browntls/tests/delegated_credentials*.rs`), browntls to browntls only. Client credentials not implemented | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
 | Fuzzing targets for codecs, PKI and handshake state | planned |
@@ -112,3 +113,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   warning alerts; post-handshake client authentication, the early exporter
   and stateless HelloRetryRequest cookies are not implemented, and the
   RFC 6066 `max_fragment_length` extension is not offered or accepted.
+- Delegated credentials (RFC 9345) have no interoperability evidence: no
+  implementation the project tests against (OpenSSL 3, rustls) supports
+  them. A server does not check a
+  credential's signature when it is attached, so a credential issued for
+  another certificate is only rejected by the peer. Verifiers that do not
+  override `verify_tls13_signature_with_delegated_key` refuse credentials.

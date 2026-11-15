@@ -64,6 +64,10 @@ pub(crate) fn allowed_in(ext: ExtensionType, msg: Tls13Message) -> Option<bool> 
         E::SCT => &[ClientHello, CertificateRequest, Certificate],
         E::TransportParametersDraft => &[ClientHello, EncryptedExtensions],
 
+        // Defined by RFCs outside RFC 9846; IANA registry TLS 1.3 column.
+        // RFC 9345 §4.1.1.
+        E::DelegatedCredential => &[ClientHello, CertificateRequest, Certificate],
+
         // Defined for TLS 1.2 and earlier only ("-" in the TLS 1.3 column).
         E::ClientCertificateUrl
         | E::TrustedCAKeys
@@ -148,6 +152,28 @@ mod tests {
             allowed_in(ExtensionType::Unknown(0x1234), EncryptedExtensions),
             None
         );
+    }
+
+    #[test]
+    fn delegated_credential() {
+        use Tls13Message::*;
+        for msg in [ClientHello, CertificateRequest, Certificate] {
+            assert_eq!(
+                allowed_in(ExtensionType::DelegatedCredential, msg),
+                Some(true)
+            );
+        }
+        for msg in [
+            ServerHello,
+            HelloRetryRequest,
+            EncryptedExtensions,
+            NewSessionTicket,
+        ] {
+            assert_eq!(
+                allowed_in(ExtensionType::DelegatedCredential, msg),
+                Some(false)
+            );
+        }
     }
 
     #[test]

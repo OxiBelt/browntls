@@ -64,6 +64,7 @@ pub mod compress;
 mod conn;
 pub mod crypto;
 mod ct;
+pub mod delegated_credential;
 mod enums;
 mod error;
 mod hash_hs;

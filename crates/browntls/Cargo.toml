@@ -21,6 +21,8 @@ prefer-post-quantum = []
 zlib = ["dep:miniz_oxide"]
 brotli = ["std", "dep:brotli"]
 zstd = ["dep:ruzstd"]
+# Unstable entry points for the fuzz targets in `fuzz/`; not a supported API.
+fuzzing = ["std"]
 # The built-in provider backed by `browntls-crypto`.
 native = ["dep:browntls-crypto"]
 # A provider backed by the RustCrypto crates (used by the test-suite).

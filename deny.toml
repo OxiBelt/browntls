@@ -29,6 +29,12 @@ allow = [
   "Unicode-3.0",
 ]
 
+# The cargo-fuzz project (`fuzz/`, checked with this file as well) links
+# LLVM's libFuzzer through `libfuzzer-sys`. Development tooling only.
+exceptions = [
+  { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

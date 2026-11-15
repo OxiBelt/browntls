@@ -38,7 +38,7 @@ intent.
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | done: optional features `zlib` (`miniz_oxide`), `brotli` (`brotli`) and `zstd` (`ruzstd`, single compression level), default lists when enabled; both directions in TLS 1.3 (client certificates included); declared length bounded by a 64 KiB cap and a configurable limit and enforced exactly; unit and handshake tests on both providers and across them. zlib and Brotli interoperate with rustls 0.23 (zlib-rs, brotli) in both roles and both directions; Zstandard has no second implementation in the test suite, and nothing is tested against OpenSSL (the OpenSSL 3.0 command-line tool of the interop suite has no certificate compression; OpenSSL 3.2 and later do) |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
-| Fuzzing targets for codecs, PKI and handshake state | planned |
+| Fuzzing targets for codecs, PKI and handshake state | done: eight cargo-fuzz targets in `fuzz/` (handshake messages, deframer, certificate decompression, X.509 path validation, PEM, CRLs, client and server connections with a genuine in-process peer and identity TLS 1.3 record protection); built and run over generated seeds in CI on the stable toolchain. Fuzzing itself is manual: the only campaign so far ran each target for 60 seconds from the generated seeds when the targets were added (nightly 1.102, libFuzzer with AddressSanitizer, x86-64; between 3.5 thousand executions for the connection targets and 4.5 million for `pki_crl`) and found no crash, which is evidence of little beyond the harnesses working |
 | Kernel integration design | planned |
 
 ## Governance gaps
@@ -46,7 +46,12 @@ intent.
 These requirements from [Maintenance](Maintenance.md) are not yet met:
 
 - `cargo vet` admission with real audits for every dependency.
-- Fuzzing of DER, PEM, X.509 and TLS message parsers and of protocol state.
+- Continuous fuzzing. The targets in `fuzz/` exist and are run by hand; no
+  service runs them, no corpus is kept between runs, and CI only smoke-tests
+  the harnesses. The connection targets do not reach states behind a
+  Finished or CertificateVerify they would have to forge, TLS 1.2 after
+  ChangeCipherSpec, or the RustCrypto provider; `browntls-crypto` primitives
+  have no fuzz target.
 - `cargo vet` audits are also missing for the optional compression crates
   (`miniz_oxide`, `brotli`, `ruzstd` and their dependencies), which parse
   peer data when their features are enabled; `ruzstd` contains `unsafe`.

@@ -45,9 +45,21 @@ CI, QEMU and native multi-architecture test jobs, `no_std` builds, and
 binary. `cargo deny` reads the same RustSec database as `cargo audit`; a
 separate `cargo audit` job is not added because no upstream-published checksum
 is available for its release binaries. Outstanding items are tracked in the
-[roadmap](Roadmap.md#governance-gaps): `cargo vet` admission, fuzzing of
-parsers and protocol state, and named independent review of `unsafe` code and
-cryptography.
+[roadmap](Roadmap.md#governance-gaps): `cargo vet` admission, continuous
+fuzzing, and named independent review of `unsafe` code and cryptography.
+
+### Independent manifests and lockfiles
+
+| Manifest | Lockfile | Checked by |
+|---|---|---|
+| `Cargo.toml` (workspace) | `Cargo.lock` | Every Rust CI job with `--locked`; `cargo deny` |
+| `fuzz/Cargo.toml` (cargo-fuzz project, outside the workspace) | `fuzz/Cargo.lock` | The stable fuzz-harness CI job with `--locked`; `cargo deny` with the same `deny.toml` |
+
+Dependabot covers both. The fuzz project's extra dependencies (`libfuzzer-sys`
+and its build-time `cc`, `arbitrary`, `rcgen`) are development tooling:
+`safe-to-run` is the bar once `cargo vet` is adopted. `libfuzzer-sys` carries
+LLVM's libFuzzer (C++, NCSA licence), which `deny.toml` admits for that crate
+only.
 
 ### Optional compression dependencies
 
@@ -61,8 +73,20 @@ unused FFI module; `ruzstd` contains `unsafe` in its decoder ring buffer. They
 parse peer-controlled data during the handshake, so they are runtime
 dependencies (`safe-to-deploy`), are reached only when a feature is enabled,
 and run under the length limits described in
-[Architecture](Architecture.md#certificate-compression-rfc-8879). None has a
-`cargo vet` audit yet.
+[Architecture](Architecture.md#certificate-compression-rfc-8879) and under the
+`cert_decompress` fuzz target. None has a `cargo vet` audit yet.
+
+### Fuzzing
+
+[`fuzz/`](../fuzz/README.md) holds cargo-fuzz targets for the handshake
+message codecs, the record deframer, certificate decompression, PEM, X.509
+path validation, CRLs and the client and server connections. CI builds them
+with the pinned stable toolchain and runs each harness over generated seeds;
+it does not fuzz. Campaigns are run by hand with a nightly toolchain and
+recorded with the change they support: revision, toolchain, targets, duration
+and outcome. A crash is handled as a potential vulnerability under
+[SECURITY.md](../SECURITY.md); inputs and reports go to the private evidence
+repository below, never to public issues, logs or CI artifacts.
 
 The original prerequisites, which remain the bar for each new crate or
 boundary:

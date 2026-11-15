@@ -1,0 +1,95 @@
+# cargo-fuzz project for browntls. It is not a member of the workspace: it
+# has its own lockfile and is built with `cargo fuzz` (nightly) or checked
+# with the pinned stable toolchain. See README.md.
+[package]
+name = "browntls-fuzz"
+description = "Fuzz targets for the browntls codecs, PKI and handshake state machines"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli", "zstd"] }
+browntls-pki = { path = "../crates/browntls-pki" }
+libfuzzer-sys = "0.4"
+# Certificates and keys for the connection targets, generated at start-up
+# (no private keys are committed).
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+# `cargo fuzz` passes `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+debug = "line-tables-only"
+
+[[bin]]
+name = "handshake_message"
+path = "fuzz_targets/handshake_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deframer"
+path = "fuzz_targets/deframer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client"
+path = "fuzz_targets/client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server"
+path = "fuzz_targets/server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pki_cert"
+path = "fuzz_targets/pki_cert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pki_pem"
+path = "fuzz_targets/pki_pem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pki_crl"
+path = "fuzz_targets/pki_crl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cert_decompress"
+path = "fuzz_targets/cert_decompress.rs"
+test = false
+doc = false
+bench = false

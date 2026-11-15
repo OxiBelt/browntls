@@ -185,6 +185,58 @@ stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
 (not "Recommended" in RFC 9846 Table 1; `record_size_limit` and the local
 `max_fragment_size` setting cover the use case).
 
+### Encrypted Client Hello (RFC 9849)
+
+`browntls::ech` implements ECH in shared mode on top of the HPKE traits in
+`crypto::hpke` (`Hpke`, `HpkeSealer`, `HpkeOpener`); the native provider
+implements them in `crypto::native::hpke` for every `browntls_crypto::hpke`
+suite. The RustCrypto provider has no HPKE, so ECH needs the native provider
+or another implementation of the traits.
+
+- Client (`ClientConfig::ech_mode`): `EchConfig::new` picks the first
+  configuration in an `ECHConfigList` with RFC 9849's version, no unknown
+  mandatory extension, a public name that is an LDH host name not ending in a
+  numeric or `0x` label, and a cipher suite the given HPKE suites cover. The
+  handshake state machine builds the inner ClientHello (TLS 1.3 only, an
+  `inner` ECH extension, no TLS 1.2 session and no 0-RTT), then
+  `ech::client` seals it into the outer one: a fresh random, the public name
+  as SNI, no ALPN, a GREASE `pre_shared_key` mirroring the inner PSK, the
+  longest run of extensions identical in both replaced by
+  `ech_outer_extensions`, and the §6.1.3 padding. Both transcripts are kept
+  until the ServerHello (or the HelloRetryRequest's ECH extension) shows
+  whether the server confirmed acceptance; on rejection the handshake
+  continues with the outer hello, authenticates the public name, answers a
+  CertificateRequest with an empty Certificate, and after Finished sends
+  `ech_required` and fails with `Error::RejectedEch`, which carries the
+  retry configurations. A HelloRetryRequest that confirmed acceptance
+  followed by a ServerHello that does not is `illegal_parameter`. GREASE
+  (`EchMode::Grease`) sends a random `config_id`, a real `enc` and a payload
+  sized like a padded inner hello, and ignores the server's ECH answers.
+- Server (`ServerConfig::ech`, `EchServerConfig`): keys are matched by
+  `config_id` (several keys may share one) and trial-decrypted; the inner
+  hello is rebuilt in linear time (one cursor into the outer extensions;
+  missing, repeated, out-of-order or ECH references, and non-zero padding,
+  are `illegal_parameter`), must carry an `inner` ECH extension and offer
+  nothing below TLS 1.3, and replaces the outer ClientHello for the rest of
+  the handshake (also through `Acceptor`, using the configuration passed to
+  `Accepted::into_connection`). The ServerHello random and, after a
+  HelloRetryRequest, its ECH extension carry the acceptance confirmations.
+  The second ClientHello must repeat the `config_id` and cipher suite with an
+  empty `enc` and decrypt with the same HPKE context (`missing_extension`,
+  `illegal_parameter`, `decrypt_error`). An extension that does not decrypt
+  (GREASE included) leaves the outer hello in use; EncryptedExtensions then
+  carries the server's `ECHConfigList` as retry configurations, and a
+  HelloRetryRequest carries 8 random bytes in place of a confirmation. An
+  `ech_outer_extensions` extension, or an ECH extension of type `inner` or of
+  an unknown type, in a ClientHello as received is `illegal_parameter`.
+- `ech::svcb` reads the `ech` SvcParam (RFC 9848) from SVCB/HTTPS record
+  data or its Base64 presentation form; the crate does no DNS lookups.
+
+Not implemented: split mode (a client-facing server forwarding to a back-end
+server), trial decryption with every key regardless of `config_id`, the
+optional check of the outer SNI against the public name, and ECH with DTLS or
+QUIC.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |
@@ -330,7 +382,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are

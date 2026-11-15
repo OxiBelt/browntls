@@ -87,6 +87,14 @@ pub enum Error {
 
     /// An error from a provider or other extension point.
     Other(OtherError),
+
+    /// The server rejected Encrypted Client Hello (RFC 9849 §6.1.6).
+    ///
+    /// The handshake with the server's public name completed, so the
+    /// rejection is authentic, but the connection is not usable: the client
+    /// sent `ech_required`. The error carries the server's retry
+    /// configurations, if any, for a new connection.
+    RejectedEch(crate::ech::RejectedEch),
 }
 
 /// Reasons a private key and certificate may not go together.
@@ -168,6 +176,8 @@ pub enum InvalidMessage {
     /// A certificate entry carried a recognised extension that RFC 9846
     /// §4.3 does not allow there.
     DisallowedCertificateExtension,
+    /// A malformed `ECHConfigList` or `ECHConfig` (RFC 9849 §4).
+    InvalidEchConfig,
 }
 
 impl From<InvalidMessage> for Error {
@@ -218,6 +228,25 @@ pub enum PeerMisbehaved {
     DuplicateNewSessionTicketExtensions,
     DuplicateServerHelloExtensions,
     DuplicateServerNameTypes,
+    /// The second ClientHello changed the ECH configuration, cipher suite
+    /// or `enc` (RFC 9849 §7.1.1).
+    EchChangedOnRetry,
+    /// The second ClientHello's ECH payload did not decrypt (RFC 9849 §7.1.1).
+    EchDecryptionFailedOnRetry,
+    /// An `ech_outer_extensions` extension in a ClientHello as sent, or one
+    /// referencing outer extensions illegally (RFC 9849 §5.1).
+    IllegalEchOuterExtensions,
+    /// A decrypted ClientHelloInner without an `inner` ECH extension, or
+    /// one offering TLS 1.2 (RFC 9849 §7.1).
+    IllegalEchInnerClientHello,
+    /// An ECH extension of type `inner` or an unknown type in a
+    /// ClientHello as sent (RFC 9849 §7).
+    IllegalEchClientHelloType,
+    /// Non-zero padding after an EncodedClientHelloInner (RFC 9849 §5.1).
+    IllegalEchPadding,
+    /// The HelloRetryRequest confirmed ECH but the ServerHello did not
+    /// (RFC 9849 §6.1.5).
+    EchAcceptanceVariedAfterRetry,
     EarlyDataAttemptedInSecondClientHello,
     EarlyDataExtensionWithoutResumption,
     EarlyDataOfferedWithVariedCipherSuite,
@@ -243,6 +272,9 @@ pub enum PeerMisbehaved {
     KeyUpdateReceivedInQuicConnection,
     MessageInterleavedWithHandshakeMessage,
     MissingBinderInPskExtension,
+    /// The first ClientHello offered ECH and the server accepted it, but
+    /// the second carries no ECH extension (RFC 9849 §7.1.1).
+    MissingEchExtensionInSecondClientHello,
     MissingKeyShare,
     MissingPskExtensionInSecondClientHello,
     MissingPskModesExtension,
@@ -284,6 +316,9 @@ pub enum PeerMisbehaved {
     TooMuchEarlyDataReceived,
     UnexpectedCleartextExtension,
     UnsolicitedCertExtension,
+    /// An ECH extension in a HelloRetryRequest when we sent none, or ECH
+    /// retry configurations after the server accepted ECH (RFC 9849 §5).
+    UnsolicitedEchExtension,
     UnsolicitedEncryptedExtension,
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
@@ -588,6 +623,15 @@ impl fmt::Display for Error {
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),
             Self::Other(err) => write!(f, "other error: {err}"),
+            Self::RejectedEch(r) => write!(
+                f,
+                "server rejected encrypted client hello ({})",
+                if r.can_retry() {
+                    "retry configurations available"
+                } else {
+                    "no usable retry configurations"
+                }
+            ),
         }
     }
 }

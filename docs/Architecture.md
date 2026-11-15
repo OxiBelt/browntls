@@ -458,6 +458,44 @@ RFC 9257 guidance and what browntls enforces:
   extension comes right before `pre_shared_key`, which stays last, and is
   sized with the binders in place. A server ignores its content.
 
+### Connection APIs
+
+Both APIs drive the same handshake state machines through
+`ConnectionCore` (`conn.rs`), which deframes and processes one unit at a
+time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
+
+- Buffered (`std`): `ClientConnection`/`ServerConnection` own a receive
+  buffer (`DeframerVecBuffer`, at most one maximum-size record),
+  queue received plaintext and outgoing records, and offer `read_tls`,
+  `write_tls`, `reader()` and `writer()`.
+- Unbuffered (`unbuffered.rs`, no `std` needed):
+  `UnbufferedClientConnection`/`UnbufferedServerConnection`.
+  `process_tls_records(&mut incoming)` parses records from the front of the
+  caller's buffer (`DeframerSliceBuffer`), decrypts them in place and
+  returns a `ConnectionState` plus the number of bytes to discard.
+  Application data (and a server's accepted 0-RTT data) is returned as a
+  slice of the caller's buffer, one record per call: the state machine still
+  judges every record, but `CommonState::take_received_plaintext` and the
+  server's early-data store only flag it instead of copying it.
+  `WriteTraffic::encrypt` encrypts into a caller buffer after checking the
+  whole size first (`InsufficientSize` carries the exact requirement, and
+  nothing is consumed); a KeyUpdate that is due (an answer to the peer, or
+  the RFC 9846 §5.5 refresh) is written into the same buffer in order. At
+  the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
+  `EncryptExhausted`, and a server's half-RTT data fails with the temporary
+  `KeyUpdateAwaitsHandshake` until the client's Finished arrives, instead of
+  being held back. Should a provider's record turn out longer than its
+  `encrypted_payload_len` promised, a KeyUpdate that no longer fits stays
+  queued for `EncodeTlsData`, and data records already sequenced are never
+  withdrawn.
+  Handshake messages, alerts and KeyUpdates produced by the state machine
+  are queued as encoded records until `EncodeTlsData::encode` copies them
+  out; that queue and the handshake joiner are bounded by the protocol, not
+  by application data. After a fatal error the alert is offered through
+  `EncodeTlsData` first, then the error is returned on every call. A client
+  writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
+  after its ClientHello.
+
 ### Delegated credentials (RFC 9345)
 
 `browntls::delegated_credential` holds the `DelegatedCredential` codec,
@@ -551,7 +589,7 @@ a random 32-byte context.
 
 | Feature | Default | Effect |
 |---|---|---|
-| `std` | yes | I/O helpers (`Stream`, `KeyLogFile`), default session caches, system time |
+| `std` | yes | Buffered connections and I/O helpers (`Stream`, `KeyLogFile`), default session caches, system time; the unbuffered API needs only `alloc` |
 | `native` | yes | Provider backed by `browntls-crypto` |
 | `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
 | `tls12` | yes | TLS 1.2 support |

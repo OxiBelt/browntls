@@ -294,11 +294,31 @@ impl RecordLayer {
 
     /// Decides whether sending `add` more records is allowed under the limits.
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
-        match self.write_seq.saturating_add(add) {
+        self.pre_encrypt_action_at(self.write_seq, add)
+    }
+
+    /// What [`Self::pre_encrypt_action`] will answer once the write key has
+    /// been replaced by a KeyUpdate (same suite, sequence number zero).
+    pub(crate) fn pre_encrypt_action_after_key_update(&self, add: u64) -> PreEncryptAction {
+        self.pre_encrypt_action_at(0, add)
+    }
+
+    /// The length of a protected record body carrying `payload_len` bytes
+    /// under the current write key (the payload itself while unprotected).
+    pub(crate) fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        if self.encrypt_state == DirectionState::Active {
+            self.message_encrypter.encrypted_payload_len(payload_len)
+        } else {
+            payload_len
+        }
+    }
+
+    fn pre_encrypt_action_at(&self, write_seq: u64, add: u64) -> PreEncryptAction {
+        match write_seq.saturating_add(add) {
             v if v >= SEQ_SOFT_LIMIT => PreEncryptAction::Refuse,
             // This write reaches or crosses the limit: refresh (TLS 1.3) or
             // close (TLS 1.2) now, also when it spans several records.
-            v if v >= self.confidentiality_limit && self.write_seq < self.confidentiality_limit => {
+            v if v >= self.confidentiality_limit && write_seq < self.confidentiality_limit => {
                 PreEncryptAction::RefreshOrClose
             }
             // The limit was reached by an earlier write whose refresh has

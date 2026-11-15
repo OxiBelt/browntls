@@ -195,6 +195,45 @@ stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
 | `tls12` | yes | TLS 1.2 support |
 | `logging` | yes | `log` crate diagnostics |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
+| `zlib` | no | zlib certificate compression (RFC 8879), `miniz_oxide` |
+| `brotli` | no | Brotli certificate compression (RFC 8879), `brotli`; enables `std` |
+| `zstd` | no | Zstandard certificate compression (RFC 8879), `ruzstd` |
+
+### Certificate compression (RFC 8879)
+
+`browntls::compress` defines the `CertCompressor` and `CertDecompressor`
+traits and, behind the `zlib`, `brotli` and `zstd` features, one built-in
+pair per RFC 8879 algorithm (`compress::ZLIB`, `BROTLI`, `ZSTD`). Enabled
+built-ins are the default compressor and decompressor lists of new client and
+server configurations, in the order Brotli, zlib, Zstandard; without those
+features the lists are empty and the extension is neither offered nor
+accepted. Compression applies to TLS 1.3 only, in both directions: a server
+compresses its Certificate with its first compressor the ClientHello offered,
+a client its own with the first one the CertificateRequest offered, and a
+compressed message that would not be smaller is sent uncompressed. Servers
+cache compressed messages (`CompressionCache`).
+
+On receipt (`compress::receive_compressed_certificate`, used by both sides):
+
+- an algorithm that was not offered is `illegal_parameter`;
+- `uncompressed_length` must be non-zero and at most the configuration's
+  `cert_decompression_limit`, itself capped at 64 KiB
+  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the limit for an
+  uncompressed Certificate message); the codec already rejects a length above
+  that cap with `decode_error`, anything else over a limit is
+  `bad_certificate`, in both cases before any decompression;
+- the output buffer is allocated once at the declared length and the
+  decompressor must fill it exactly: shorter, longer, truncated or trailing
+  input is `bad_certificate` (RFC 8879 §4), as is a decompressed message that
+  is not a well-formed Certificate.
+
+The built-in decompressors write into that buffer only. Their working memory
+beyond it is bounded by the format, not by the peer: none for zlib (the
+buffer is the window), at most a 16 MiB window for Brotli (large-window
+streams are refused) and at most an 8 MiB window plus one 128 KiB block for
+Zstandard (one frame, no dictionary; frames declaring a larger window or
+another content size are refused before decoding). Zstandard compression
+uses the single level `ruzstd` implements.
 
 ## Primitive backends
 
@@ -307,8 +346,9 @@ entropy from the optional `getrandom` crate feature.
   (`rust-version`). Toolchain upgrades are explicit changes.
 - `Cargo.lock` is committed and CI builds with `--locked`.
 - Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`
-  (optional) and the RustCrypto crates (only with `rustcrypto`) for
-  `browntls`. Independent implementations (RustCrypto, rustls with ring,
+  (optional), the RustCrypto crates (only with `rustcrypto`) and the
+  pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
+  with `zlib`, `brotli`, `zstd`) for `browntls`. Independent implementations (RustCrypto, rustls with ring,
   rcgen) are dev-dependencies used as test oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.

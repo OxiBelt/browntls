@@ -10,12 +10,17 @@ publish.workspace = true
 
 [features]
 default = ["std", "native", "tls12", "logging", "prefer-post-quantum"]
-std = ["alloc", "browntls-pki/std", "browntls-crypto?/std"]
+std = ["alloc", "browntls-pki/std", "browntls-crypto?/std", "ruzstd?/std"]
 alloc = []
 tls12 = []
 logging = ["dep:log"]
 # Orders X25519MLKEM768 first in the default key-exchange group list.
 prefer-post-quantum = []
+# Built-in certificate compression (RFC 8879), one feature per algorithm.
+# Each enabled algorithm joins the default compressor and decompressor lists.
+zlib = ["dep:miniz_oxide"]
+brotli = ["std", "dep:brotli"]
+zstd = ["dep:ruzstd"]
 # The built-in provider backed by `browntls-crypto`.
 native = ["dep:browntls-crypto"]
 # A provider backed by the RustCrypto crates (used by the test-suite).
@@ -41,6 +46,10 @@ browntls-pki = { workspace = true, features = ["alloc"] }
 browntls-crypto = { workspace = true, optional = true }
 log = { version = "0.4", optional = true }
 
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"], optional = true }
+brotli = { version = "9", default-features = false, features = ["std"], optional = true }
+ruzstd = { version = "0.9", default-features = false, optional = true }
+
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
 sha2 = { version = "0.11", default-features = false, features = ["oid"], optional = true }
@@ -61,7 +70,9 @@ zeroize = { version = "1", default-features = false, features = ["alloc"], optio
 [dev-dependencies]
 hex = "0.4"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# `brotli` and `zlib`: an independent RFC 8879 implementation for the built-in
+# certificate compressors to interoperate with.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging", "brotli", "zlib"] }
 rustls-pki-types = "1"
 rsa = { version = "0.10.0-rc.19", default-features = false, features = ["std", "encoding", "sha2", "getrandom"] }
 rand_core = "0.10"

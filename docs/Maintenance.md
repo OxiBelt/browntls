@@ -49,6 +49,21 @@ is available for its release binaries. Outstanding items are tracked in the
 parsers and protocol state, and named independent review of `unsafe` code and
 cryptography.
 
+### Optional compression dependencies
+
+The `zlib`, `brotli` and `zstd` features of `browntls` pull in `miniz_oxide`
+(with `adler2`), `brotli` (with `brotli-decompressor`, `alloc-no-stdlib`,
+`alloc-stdlib`) and `ruzstd`. All are pure Rust from crates.io, have no build
+script and no native code, and carry licences already on the allow list. As
+used here, `miniz_oxide`, `adler2`, `brotli-decompressor` and the two `alloc-*`
+crates forbid `unsafe`, and the `brotli` encoder has none outside its
+unused FFI module; `ruzstd` contains `unsafe` in its decoder ring buffer. They
+parse peer-controlled data during the handshake, so they are runtime
+dependencies (`safe-to-deploy`), are reached only when a feature is enabled,
+and run under the length limits described in
+[Architecture](Architecture.md#certificate-compression-rfc-8879). None has a
+`cargo vet` audit yet.
+
 The original prerequisites, which remain the bar for each new crate or
 boundary:
 

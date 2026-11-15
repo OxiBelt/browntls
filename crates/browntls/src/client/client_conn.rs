@@ -134,6 +134,13 @@ pub struct ClientConfig {
     /// Decompressors to offer for the server's certificate (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// The largest `uncompressed_length` accepted in a peer's
+    /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`], which also applies
+    /// to larger values. A message declaring more is refused with
+    /// `bad_certificate` before anything is decompressed.
+    pub cert_decompression_limit: usize,
+
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,

@@ -68,6 +68,7 @@ mod conn;
 pub mod crypto;
 mod ct;
 pub mod delegated_credential;
+pub mod ech;
 mod enums;
 mod error;
 pub mod exported_authenticator;

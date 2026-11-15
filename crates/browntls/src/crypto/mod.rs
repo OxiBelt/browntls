@@ -29,6 +29,7 @@ use crate::versions::SupportedProtocolVersion;
 pub mod cipher;
 pub mod hash;
 pub mod hmac;
+pub mod hpke;
 pub(crate) mod signer;
 #[cfg(feature = "tls12")]
 pub mod tls12;

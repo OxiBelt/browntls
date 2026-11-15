@@ -151,6 +151,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             tls13_ticket_request: None,
             enable_grease: false,
             client_hello_padding: super::ClientHelloPadding::default(),
+            ech_mode: None,
         }
     }
 }

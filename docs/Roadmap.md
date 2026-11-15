@@ -37,7 +37,8 @@ intent.
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
-| Unbuffered API, QUIC, Encrypted Client Hello | planned |
+| Unbuffered API (`browntls::unbuffered`, `UnbufferedClientConnection`, `UnbufferedServerConnection`; also without `std`): TLS 1.2 and 1.3, both sides, in-place decryption in the caller's buffer, encryption into the caller's buffer with exact size errors, resumption, 0-RTT, KeyUpdate including the confidentiality-limit refresh, `close_notify`; tested against buffered browntls peers, itself and rustls 0.23 on both providers, with whole and byte-by-byte input (`tests/cases/unbuffered.rs`) | done |
+| QUIC, Encrypted Client Hello | planned |
 | Fuzzing targets for codecs, PKI and handshake state | planned |
 | Kernel integration design | planned |
 

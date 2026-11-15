@@ -18,15 +18,15 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warning};
-use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
+use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, KeyUpdateRequest, NamedGroup, PskKeyExchangeMode};
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
-    ClientHelloPayload, CompressedCertificatePayload, HandshakeMessagePayload, HandshakePayload,
-    HelloRetryRequest, HelloRetryRequestExtensions, KeyShareEntry, NewSessionTicketPayloadTls13,
-    ServerExtensions, ServerHelloPayload, SessionId,
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
+    HelloRetryRequestExtensions, KeyShareEntry, NewSessionTicketPayloadTls13, ServerExtensions,
+    ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
@@ -755,13 +755,10 @@ fn certificate_request_message(
         extensions: CertificateRequestExtensions {
             signature_algorithms: Some(schemes),
             authorities: (!authorities.is_empty()).then(|| authorities.to_vec()),
-            certificate_compression: (!config.cert_decompressors.is_empty()).then(|| {
-                config
-                    .cert_decompressors
-                    .iter()
-                    .map(|d| d.algorithm())
-                    .collect()
-            }),
+            certificate_compression: crate::compress::offered_cert_compression(
+                &config.cert_decompressors,
+                config.cert_decompression_limit,
+            ),
             ..Default::default()
         },
     };
@@ -789,37 +786,23 @@ fn emit_certificate_tls13(
     let cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
-    let compressor = client_hello
-        .extensions
-        .certificate_compression
-        .as_ref()
-        .and_then(|offered| {
-            config
-                .cert_compressors
-                .iter()
-                .find(|c| offered.contains(&c.algorithm()))
-        });
-    if let Some(compressor) = compressor {
-        let encoded = cert_body.get_encoding();
-        if let Ok(compressed) = config
-            .cert_compression_cache
-            .compression_for(*compressor, &encoded)
-            && let Ok(uncompressed_len) = u32::try_from(encoded.len())
-        {
-            let m = Message {
-                version: ProtocolVersion::TLSv1_3,
-                payload: MessagePayload::handshake(HandshakeMessagePayload(
-                    HandshakePayload::CompressedCertificate(CompressedCertificatePayload {
-                        alg: compressor.algorithm(),
-                        uncompressed_len,
-                        compressed: PayloadU24(Payload::new(compressed)),
-                    }),
-                )),
-            };
-            transcript.add_message(&m);
-            common.send_msg(m, true);
-            return;
-        }
+    if let Some(offered) = &client_hello.extensions.certificate_compression
+        && let Some(compressed) = crate::compress::compress_certificate(
+            &config.cert_compressors,
+            &config.cert_compression_cache,
+            offered,
+            &cert_body.get_encoding(),
+        )
+    {
+        let m = Message {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::CompressedCertificate(compressed),
+            )),
+        };
+        transcript.add_message(&m);
+        common.send_msg(m, true);
+        return;
     }
 
     let m = Message {
@@ -902,14 +885,33 @@ struct ExpectCertificate {
 
 impl State<ServerConnectionData> for ExpectCertificate {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
-        let certp = require_handshake_msg!(
-            m,
-            HandshakeType::Certificate,
-            HandshakePayload::CertificateTls13
-        )?;
+        // RFC 8879 §4: the client may compress with an algorithm that our
+        // CertificateRequest offered.
+        let certp: CertificatePayloadTls13<'static> = match &m.payload {
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::CertificateTls13(chain)),
+                ..
+            } => chain.clone().into_owned(),
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::CompressedCertificate(compressed)),
+                ..
+            } => crate::compress::receive_compressed_certificate(
+                cx.common,
+                &self.config.cert_decompressors,
+                self.config.cert_decompression_limit,
+                compressed,
+            )?,
+            payload => {
+                return Err(crate::check::inappropriate_handshake_message(
+                    payload,
+                    &[ContentType::Handshake],
+                    &[HandshakeType::Certificate],
+                ));
+            }
+        };
         self.transcript.add_message(&m);
 
-        let Some(client_cert) = check_client_certificate(cx.common, &self.config, certp, &[])?
+        let Some(client_cert) = check_client_certificate(cx.common, &self.config, &certp, &[])?
         else {
             debug!("client auth requested but no certificate supplied");
             return Ok(Box::new(ExpectFinished {
@@ -1318,6 +1320,21 @@ impl PostHandshakeAuth {
                     None => ClientAuthStage::Finished(None),
                 }
             }
+            // RFC 8879 §4: our CertificateRequest offers the same
+            // compression algorithms as in the handshake.
+            (ClientAuthStage::Certificate, HandshakePayload::CompressedCertificate(compressed)) => {
+                let certp = crate::compress::receive_compressed_certificate(
+                    cx.common,
+                    &self.config.cert_decompressors,
+                    self.config.cert_decompression_limit,
+                    compressed,
+                )?;
+                pending.transcript.add_message(m);
+                match check_client_certificate(cx.common, &self.config, &certp, &pending.context)? {
+                    Some(chain) => ClientAuthStage::CertificateVerify(chain),
+                    None => ClientAuthStage::Finished(None),
+                }
+            }
             (
                 ClientAuthStage::CertificateVerify(chain),
                 HandshakePayload::CertificateVerify(sig),
@@ -1424,6 +1441,7 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 parsed:
                     HandshakeMessagePayload(
                         HandshakePayload::CertificateTls13(_)
+                        | HandshakePayload::CompressedCertificate(_)
                         | HandshakePayload::CertificateVerify(_)
                         | HandshakePayload::Finished(_),
                     ),

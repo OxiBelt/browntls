@@ -146,6 +146,17 @@ pub struct ClientConfig {
     /// Decompressors to offer for the server's certificate (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// The largest `uncompressed_length` accepted in a peer's
+    /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
+    /// applies to larger values: a message declaring more than 64 KiB does
+    /// not parse and ends the connection with `decode_error`. A message
+    /// declaring more than this limit is refused with `bad_certificate`
+    /// before anything is decompressed. Zero turns reception off: the
+    /// `compress_certificate` extension is then not sent, whatever
+    /// `cert_decompressors` holds.
+    pub cert_decompression_limit: usize,
+
     /// The `record_size_limit` to announce (RFC 8449): the largest record
     /// plaintext we accept, counting the content type in TLS 1.3. `None`
     /// sends no extension, and then the server's limit is not learnt

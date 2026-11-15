@@ -1,11 +1,12 @@
 //! Turning bytes from the transport into records and complete handshake messages.
 //!
-//! [`DeframerVecBuffer`] holds raw bytes from the peer. [`MessageDeframer::pop`]
-//! parses one record header at a time, decrypts the record in place with the
-//! [`RecordLayer`], and either hands back a non-handshake record (as a range
-//! into the buffer, discarded by the caller once processed) or appends
-//! handshake fragments to an internal joiner until a whole handshake message
-//! is available.
+//! [`DeframerVecBuffer`] holds raw bytes from the peer for the buffered API;
+//! [`DeframerSliceBuffer`] wraps the caller's own buffer for the unbuffered
+//! API. [`MessageDeframer::pop`] parses one record header at a time, decrypts
+//! the record in place with the [`RecordLayer`], and either hands back a
+//! non-handshake record (as a range into the buffer, discarded by the caller
+//! once processed) or appends handshake fragments to an internal joiner until
+//! a whole handshake message is available.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -23,6 +24,23 @@ use crate::record_layer::RecordLayer;
 /// one maximum-size record plus its header.
 const MAX_BUFFER: usize = MAX_WIRE_SIZE + HEADER_SIZE;
 
+/// Received TLS bytes the deframer parses and decrypts in place.
+pub(crate) trait DeframerBuffer {
+    /// The bytes available for parsing.
+    fn filled(&self) -> &[u8];
+
+    /// The same bytes, writable for in-place decryption.
+    fn filled_mut(&mut self) -> &mut [u8];
+
+    /// Marks the first `taken` bytes of [`Self::filled`] as consumed.
+    fn discard(&mut self, taken: usize);
+
+    /// Where [`Self::filled`] starts in the underlying storage. A range into
+    /// `filled()` plus this offset stays valid for the storage after later
+    /// discards (always zero for buffers that move data on discard).
+    fn position(&self) -> usize;
+}
+
 /// Raw bytes received from the peer and not yet consumed.
 #[derive(Default, Debug)]
 pub(crate) struct DeframerVecBuffer {
@@ -31,28 +49,9 @@ pub(crate) struct DeframerVecBuffer {
 }
 
 impl DeframerVecBuffer {
-    /// The bytes available for parsing.
-    pub(crate) fn filled(&self) -> &[u8] {
-        &self.buf[..self.used]
-    }
-
-    pub(crate) fn filled_mut(&mut self) -> &mut [u8] {
-        &mut self.buf[..self.used]
-    }
-
     /// Whether any unconsumed bytes remain.
     pub(crate) fn has_pending(&self) -> bool {
         self.used > 0
-    }
-
-    /// Drops the first `taken` bytes.
-    pub(crate) fn discard(&mut self, taken: usize) {
-        let taken = taken.min(self.used);
-        if taken == 0 {
-            return;
-        }
-        self.buf.copy_within(taken..self.used, 0);
-        self.used -= taken;
     }
 
     /// Appends `bytes`, failing if the buffer limit would be exceeded.
@@ -82,6 +81,76 @@ impl DeframerVecBuffer {
         let n = rd.read(&mut self.buf[self.used..])?;
         self.used += n;
         Ok(n)
+    }
+}
+
+impl DeframerBuffer for DeframerVecBuffer {
+    fn filled(&self) -> &[u8] {
+        &self.buf[..self.used]
+    }
+
+    fn filled_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[..self.used]
+    }
+
+    /// Drops the first `taken` bytes, moving the rest to the front.
+    fn discard(&mut self, taken: usize) {
+        let taken = taken.min(self.used);
+        if taken == 0 {
+            return;
+        }
+        self.buf.copy_within(taken..self.used, 0);
+        self.used -= taken;
+    }
+
+    fn position(&self) -> usize {
+        0
+    }
+}
+
+/// The caller's buffer of received TLS bytes (unbuffered API).
+///
+/// Nothing is moved: consumed bytes are only counted, and the caller removes
+/// them from the front of its buffer once it has handled the result. Records
+/// are decrypted in place, so every record that was decrypted must also be
+/// counted as consumed before the buffer is handed back.
+#[derive(Debug)]
+pub(crate) struct DeframerSliceBuffer<'a> {
+    buf: &'a mut [u8],
+    discarded: usize,
+}
+
+impl<'a> DeframerSliceBuffer<'a> {
+    pub(crate) fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, discarded: 0 }
+    }
+
+    /// How many bytes from the front of the caller's buffer are consumed.
+    pub(crate) fn discarded(&self) -> usize {
+        self.discarded
+    }
+
+    /// Ends the borrow, returning the caller's whole buffer.
+    pub(crate) fn into_inner(self) -> &'a mut [u8] {
+        self.buf
+    }
+}
+
+impl DeframerBuffer for DeframerSliceBuffer<'_> {
+    fn filled(&self) -> &[u8] {
+        &self.buf[self.discarded..]
+    }
+
+    fn filled_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[self.discarded..]
+    }
+
+    fn discard(&mut self, taken: usize) {
+        self.discarded += taken.min(self.buf.len() - self.discarded);
+    }
+
+    fn position(&self) -> usize {
+        self.discarded
     }
 }
 
@@ -179,7 +248,7 @@ impl MessageDeframer {
         &mut self,
         record_layer: &mut RecordLayer,
         negotiated_version: Option<ProtocolVersion>,
-        buffer: &mut DeframerVecBuffer,
+        buffer: &mut impl DeframerBuffer,
     ) -> Result<Option<Deframed>, Error> {
         if let Some(err) = &self.last_error {
             return Err(err.clone());
@@ -194,7 +263,7 @@ impl MessageDeframer {
         &mut self,
         record_layer: &mut RecordLayer,
         negotiated_version: Option<ProtocolVersion>,
-        buffer: &mut DeframerVecBuffer,
+        buffer: &mut impl DeframerBuffer,
     ) -> Result<Option<Deframed>, Error> {
         loop {
             if let Some(len) = self.joiner.complete_message_len() {
@@ -416,6 +485,55 @@ mod tests {
         let mut d = MessageDeframer::default();
         buffer.extend_from_slice(record).unwrap();
         d.pop(&mut rl, Some(ProtocolVersion::TLSv1_3), &mut buffer)
+    }
+
+    /// Fails records whose first byte is 0xEE (as undecryptable early data
+    /// would), unpads the rest as TLS 1.3 inner plaintext.
+    struct FailMarked;
+
+    impl crate::crypto::cipher::MessageDecrypter for FailMarked {
+        fn decrypt<'a>(
+            &mut self,
+            msg: InboundOpaqueMessage<'a>,
+            _seq: u64,
+        ) -> Result<crate::msgs::message::InboundPlainMessage<'a>, Error> {
+            if msg.payload.first() == Some(&0xee) {
+                return Err(Error::DecryptError);
+            }
+            msg.into_tls13_unpadded_message()
+        }
+    }
+
+    #[test]
+    fn slice_buffer_ranges_survive_dropped_records() {
+        // A rejected 0-RTT record is dropped inside `pop` before the next
+        // record is returned: its range must still locate the plaintext in
+        // the caller's buffer once offset by `position()`.
+        let mut data = alloc::vec![0x17, 3, 3, 0, 3, 0xee, 0xee, 0xee];
+        data.extend([0x17, 3, 3, 0, 4, b'a', b'b', b'c', 0x17]);
+        let mut rl = RecordLayer::new();
+        rl.set_message_decrypter_with_trial_decryption(alloc::boxed::Box::new(FailMarked), 100);
+        let mut d = MessageDeframer::default();
+        let mut buffer = DeframerSliceBuffer::new(&mut data);
+        let Some(Deframed::Record {
+            plaintext,
+            consumed,
+            ..
+        }) = d
+            .pop(&mut rl, Some(ProtocolVersion::TLSv1_3), &mut buffer)
+            .unwrap()
+        else {
+            panic!("expected a record");
+        };
+        let position = buffer.position();
+        assert_eq!(position, 8, "the dropped record was discarded");
+        buffer.discard(consumed);
+        assert_eq!(buffer.discarded(), 17);
+        let all = buffer.into_inner();
+        assert_eq!(
+            &all[position + plaintext.start..position + plaintext.end],
+            b"abc"
+        );
     }
 
     #[test]

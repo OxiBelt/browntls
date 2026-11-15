@@ -168,6 +168,12 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
+    /// Driven by the unbuffered API: received application data stays in the
+    /// caller's buffer instead of being copied into `received_plaintext`.
+    pub(crate) unbuffered: bool,
+    /// Unbuffered only: the record just processed was application data the
+    /// state machine accepted, left in place for the caller.
+    pub(crate) app_data_in_place: bool,
 }
 
 impl CommonState {
@@ -203,6 +209,8 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
+            unbuffered: false,
+            app_data_in_place: false,
         }
     }
 
@@ -284,6 +292,11 @@ impl CommonState {
 
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
         self.message_fragmenter.set_max_fragment_size(new)
+    }
+
+    /// The largest plaintext fragment we put in one record.
+    pub(crate) fn max_fragment_len(&self) -> usize {
+        self.message_fragmenter.max_fragment_len()
     }
 
     pub(crate) fn current_io_state(&self) -> IoState {
@@ -495,8 +508,14 @@ impl CommonState {
         Ok(())
     }
 
-    /// Buffers received application data for the application.
+    /// Buffers received application data for the application, or, for an
+    /// unbuffered connection, notes that the record's plaintext is to be
+    /// handed to the caller where it was decrypted.
     pub(crate) fn take_received_plaintext(&mut self, bytes: Payload<'_>) {
+        if self.unbuffered {
+            self.app_data_in_place = true;
+            return;
+        }
         self.received_plaintext.append(bytes.into_vec());
     }
 

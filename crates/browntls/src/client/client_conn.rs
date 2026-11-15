@@ -441,6 +441,23 @@ impl ClientConnectionData {
     }
 }
 
+impl ClientConnectionData {
+    /// Whether 0-RTT data may still be written (unbuffered API).
+    pub(crate) fn early_data_writable(&self) -> bool {
+        self.early_data.is_enabled()
+    }
+
+    /// How many more bytes of 0-RTT data the ticket allows.
+    pub(crate) fn early_data_left(&self) -> usize {
+        self.early_data.left
+    }
+
+    /// Charges `len` bytes (at most [`Self::early_data_left`]) of sent 0-RTT data.
+    pub(crate) fn charge_early_data(&mut self, len: usize) {
+        self.early_data.left = self.early_data.left.saturating_sub(len);
+    }
+}
+
 impl SideData for ClientConnectionData {
     fn on_fatal_error(&mut self, negotiated_version: Option<ProtocolVersion>) {
         // RFC 5246 §7.2.2: the session of a connection that failed cannot be
@@ -617,5 +634,80 @@ impl core::ops::DerefMut for ClientConnection {
 impl From<ClientConnection> for crate::conn::Connection {
     fn from(conn: ClientConnection) -> Self {
         Self::Client(conn)
+    }
+}
+
+/// A client-side TLS connection driven by the caller's buffers; see
+/// [`crate::unbuffered`].
+///
+/// Available without `std`. The ClientHello is queued by [`Self::new`], so
+/// the first `process_tls_records` (with no input) offers it for encoding.
+pub struct UnbufferedClientConnection {
+    inner: crate::unbuffered::UnbufferedConnectionCommon<ClientConnectionData>,
+}
+
+impl UnbufferedClientConnection {
+    /// Starts a connection to `name` with `config`.
+    pub fn new(config: Arc<ClientConfig>, name: ServerName<'static>) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_alpn(config, name, alpn)
+    }
+
+    /// Like [`Self::new`] with ALPN protocols overriding the configuration's.
+    pub fn new_with_alpn(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
+                config,
+                name,
+                alpn_protocols,
+            )?),
+        })
+    }
+
+    /// How many TLS 1.3 tickets the server has sent so far.
+    pub fn tls13_tickets_received(&self) -> u32 {
+        self.inner.core.data.tls13_tickets_received
+    }
+
+    /// Whether the server accepted the 0-RTT data offered.
+    ///
+    /// Meaningful once the handshake has finished.
+    pub fn is_early_data_accepted(&self) -> bool {
+        self.inner.core.data.early_data.is_accepted()
+    }
+
+    /// Whether the connection only uses FIPS-validated components.
+    pub fn fips(&self) -> bool {
+        self.inner.core.common_state.fips()
+    }
+
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
+        self.inner.dangerous_extract_secrets()
+    }
+}
+
+impl fmt::Debug for UnbufferedClientConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnbufferedClientConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for UnbufferedClientConnection {
+    type Target = crate::unbuffered::UnbufferedConnectionCommon<ClientConnectionData>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for UnbufferedClientConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }

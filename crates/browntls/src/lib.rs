@@ -12,14 +12,17 @@
 //! * [`client`] / [`server`]: configuration ([`ClientConfig`], [`ServerConfig`])
 //!   and connections ([`ClientConnection`], [`ServerConnection`]).
 //! * [`ConnectionCommon`]: the buffered connection API shared by both sides.
+//! * [`unbuffered`]: the caller-buffer-driven API
+//!   ([`client::UnbufferedClientConnection`],
+//!   [`server::UnbufferedServerConnection`]), also available without `std`.
 //! * [`Error`] and its sub-enums describe every failure the library reports.
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-// Without `std` the buffered connections are absent and nothing drives the
-// handshake state machines yet (the unbuffered API is not implemented), so
-// most of the protocol code is unreachable in that configuration.  Without
+// Without `std` the buffered connections are absent and only the unbuffered
+// API drives the handshake state machines, so the buffered-only helpers are
+// unreachable in that configuration.  Without
 // `tls12` the TLS 1.2 message types, which are compiled unconditionally to
 // keep the wire-format module uniform, have no users.  The all-features build
 // is the one that must be free of dead code.
@@ -82,6 +85,7 @@ pub mod ticketer;
 #[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
+pub mod unbuffered;
 mod vecbuf;
 mod verify;
 mod versions;
@@ -132,7 +136,7 @@ pub mod client {
     pub use builder::WantsClientCert;
     pub use client_conn::{
         ClientConfig, ClientConnectionData, ClientSessionStore, ResolvesClientCert, Resumption,
-        Tls12Resumption,
+        Tls12Resumption, UnbufferedClientConnection,
     };
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};
@@ -179,7 +183,7 @@ pub mod server {
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
         ClientHello, ProducesTickets, ResolvesServerCert, ServerConfig, ServerConnectionData,
-        StoresServerSessions,
+        StoresServerSessions, UnbufferedServerConnection,
     };
 
     pub use crate::verify::NoClientAuth;

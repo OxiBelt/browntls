@@ -297,11 +297,12 @@ impl TimeProvider for NoTime {
 
 /// Where 0-RTT stands on a server connection.
 #[derive(Default)]
-pub(super) enum EarlyDataState {
+enum EarlyDataKind {
     /// No decision yet.
     #[default]
     New,
-    /// Accepted: `received` holds the data, `left` what may still arrive.
+    /// Accepted: `received` holds the data (buffered API only), `left` what
+    /// may still arrive.
     Accepted {
         received: ChunkVecBuffer,
         left: usize,
@@ -310,32 +311,53 @@ pub(super) enum EarlyDataState {
     Rejected,
 }
 
+/// The server's 0-RTT bookkeeping.
+#[derive(Default)]
+pub(super) struct EarlyDataState {
+    kind: EarlyDataKind,
+    /// Unbuffered API: accepted early data stays in the caller's buffer.
+    in_place: bool,
+    /// Unbuffered API: the record just processed was accepted early data.
+    in_place_pending: bool,
+}
+
 impl EarlyDataState {
     pub(super) fn reject(&mut self) {
-        *self = Self::Rejected;
+        self.kind = EarlyDataKind::Rejected;
     }
 
     pub(super) fn accept(&mut self, max_size: usize) {
-        *self = Self::Accepted {
+        self.kind = EarlyDataKind::Accepted {
             received: ChunkVecBuffer::new(Some(max_size)),
             left: max_size,
         };
     }
 
     pub(super) fn was_accepted(&self) -> bool {
-        matches!(self, Self::Accepted { .. })
+        matches!(self.kind, EarlyDataKind::Accepted { .. })
     }
 
     pub(super) fn was_rejected(&self) -> bool {
-        matches!(self, Self::Rejected)
+        matches!(self.kind, EarlyDataKind::Rejected)
     }
 
     /// Stores early data; `false` if it exceeds what was announced.
+    ///
+    /// With the unbuffered API nothing is copied: the record stays where it
+    /// was decrypted and only the budget is charged.
     pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
-        let Self::Accepted { received, left } = self else {
+        let EarlyDataKind::Accepted { received, left } = &mut self.kind else {
             return false;
         };
         let available = bytes.len();
+        if self.in_place {
+            if available > *left {
+                return false;
+            }
+            *left -= available;
+            self.in_place_pending = true;
+            return true;
+        }
         if received.apply_limit(available) != available || available > *left {
             return false;
         }
@@ -344,10 +366,15 @@ impl EarlyDataState {
         true
     }
 
+    /// Unbuffered API: leave accepted early data in the caller's buffer.
+    fn set_in_place(&mut self) {
+        self.in_place = true;
+    }
+
     #[cfg(feature = "std")]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Accepted { received, .. } => Ok(received.read(buf)),
+        match &mut self.kind {
+            EarlyDataKind::Accepted { received, .. } => Ok(received.read(buf)),
             _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
         }
     }
@@ -355,14 +382,14 @@ impl EarlyDataState {
 
 impl fmt::Debug for EarlyDataState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::New => f.write_str("EarlyDataState::New"),
-            Self::Accepted { received, left } => f
+        match &self.kind {
+            EarlyDataKind::New => f.write_str("EarlyDataState::New"),
+            EarlyDataKind::Accepted { received, left } => f
                 .debug_struct("EarlyDataState::Accepted")
                 .field("received", &received.len())
                 .field("left", left)
                 .finish(),
-            Self::Rejected => f.write_str("EarlyDataState::Rejected"),
+            EarlyDataKind::Rejected => f.write_str("EarlyDataState::Rejected"),
         }
     }
 }
@@ -388,6 +415,10 @@ impl SideData for ServerConnectionData {
             store.take(&id);
         }
     }
+
+    fn take_early_data_in_place(&mut self) -> bool {
+        core::mem::take(&mut self.early_data.in_place_pending)
+    }
 }
 
 impl ConnectionCore<ServerConnectionData> {
@@ -401,6 +432,82 @@ impl ConnectionCore<ServerConnectionData> {
             ServerConnectionData::default(),
             common,
         ))
+    }
+}
+
+/// A server-side TLS connection driven by the caller's buffers; see
+/// [`crate::unbuffered`].
+///
+/// Available without `std`. Accepted 0-RTT data is reported as
+/// [`ConnectionState::ReadEarlyData`](crate::unbuffered::ConnectionState::ReadEarlyData)
+/// records, in place, and is replayable by an attacker (see
+/// [`ServerConfig::max_early_data_size`]).
+pub struct UnbufferedServerConnection {
+    inner: crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>,
+}
+
+impl UnbufferedServerConnection {
+    /// Prepares to accept a connection with `config`.
+    pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        let mut core = ConnectionCore::for_server(config)?;
+        core.data.early_data.set_in_place();
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(core),
+        })
+    }
+
+    /// The server name the client indicated, once its ClientHello was processed.
+    pub fn server_name(&self) -> Option<&str> {
+        self.inner.core.data.sni.as_ref().map(|n| n.as_ref())
+    }
+
+    /// Application data stored with a resumed session, once resumed.
+    pub fn received_resumption_data(&self) -> Option<&[u8]> {
+        self.inner.core.data.received_resumption_data.as_deref()
+    }
+
+    /// Application data to store with the session for later resumption.
+    ///
+    /// Call before the handshake completes; it is written into the tickets.
+    pub fn set_resumption_data(&mut self, data: &[u8]) {
+        self.inner.core.data.resumption_data = data.to_vec();
+    }
+
+    /// Refuses any 0-RTT data on this connection; effective only before the
+    /// ClientHello has been processed.
+    pub fn reject_early_data(&mut self) {
+        self.inner.core.data.early_data.reject();
+    }
+
+    /// Whether the connection only uses FIPS-validated components.
+    pub fn fips(&self) -> bool {
+        self.inner.core.common_state.fips()
+    }
+
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
+        self.inner.dangerous_extract_secrets()
+    }
+}
+
+impl fmt::Debug for UnbufferedServerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnbufferedServerConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for UnbufferedServerConnection {
+    type Target = crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for UnbufferedServerConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 

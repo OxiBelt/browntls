@@ -4,16 +4,19 @@
 // authentication, stateless HelloRetryRequest cookies, the early exporter)
 // and the RFC 9266 `tls-exporter` channel binding.
 
+use std::io::Read;
 use std::sync::Arc;
 
 use browntls::client::ResolvesClientCert;
+use browntls::crypto::cipher::{MessageEncrypter, OutboundChunks, OutboundPlainMessage};
 use browntls::pki_types::UnixTime;
 use browntls::server::{PostHandshakeAuthStatus, ProducesTickets};
 use browntls::sign::CertifiedKey;
 use browntls::time_provider::TimeProvider;
 use browntls::{
-    AlertDescription, ClientConfig, ClientConnection, Error, HandshakeKind, NamedGroup,
-    PeerMisbehaved, ServerConfig, ServerConnection, SignatureScheme, version,
+    AlertDescription, ClientConfig, ClientConnection, ConnectionTrafficSecrets, ContentType, Error,
+    HandshakeKind, NamedGroup, PeerMisbehaved, ProtocolVersion, ServerConfig, ServerConnection,
+    SignatureScheme, version,
 };
 use common::*;
 
@@ -351,6 +354,125 @@ fn post_handshake_auth_needs_the_client_offer() {
     assert!(!server.post_handshake_auth_offered());
 }
 
+/// The server side of a finished TLS 1.3 connection, driven by the test:
+/// its traffic keys are extracted so the test can send what a browntls
+/// server never would.
+struct ForgedServer {
+    encrypter: Box<dyn MessageEncrypter>,
+    seq: u64,
+}
+
+impl ForgedServer {
+    fn connect(client: ClientConfig, server_chain: &Chain) -> (ClientConnection, Self) {
+        let mut server_config = server_config(server_chain);
+        server_config.enable_secret_extraction = true;
+        let mut client = ClientConnection::new(Arc::new(client), server_name()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+        handshake(&mut client, &mut server);
+        let suite = client.negotiated_cipher_suite().unwrap().tls13().unwrap();
+        let (seq, secrets) = server.dangerous_extract_secrets().unwrap().tx;
+        let (key, iv) = match secrets {
+            ConnectionTrafficSecrets::Aes128Gcm { key, iv }
+            | ConnectionTrafficSecrets::Aes256Gcm { key, iv }
+            | ConnectionTrafficSecrets::Chacha20Poly1305 { key, iv } => (key, iv),
+            _ => panic!("unexpected suite"),
+        };
+        let encrypter = suite.aead_alg.encrypter(key, iv);
+        (client, Self { encrypter, seq })
+    }
+
+    fn record(&mut self, typ: ContentType, payload: &[u8]) -> Vec<u8> {
+        let msg = OutboundPlainMessage {
+            typ,
+            version: ProtocolVersion::TLSv1_2,
+            payload: OutboundChunks::Single(payload),
+        };
+        let wire = self.encrypter.encrypt(msg, self.seq).unwrap().encode();
+        self.seq += 1;
+        wire
+    }
+
+    /// A CertificateRequest (RFC 9846 §4.4.2) with `context`, asking for
+    /// ECDSA P-256 or Ed25519 signatures.
+    fn certificate_request(&mut self, context: &[u8]) -> Vec<u8> {
+        let mut body = vec![u8::try_from(context.len()).unwrap()];
+        body.extend_from_slice(context);
+        // extensions: signature_algorithms [ecdsa_secp256r1_sha256, ed25519]
+        body.extend_from_slice(&[0, 10, 0, 13, 0, 6, 0, 4, 0x04, 0x03, 0x08, 0x07]);
+        let mut message = vec![13, 0, 0, u8::try_from(body.len()).unwrap()];
+        message.extend_from_slice(&body);
+        self.record(ContentType::Handshake, &message)
+    }
+}
+
+/// A client offering post-handshake authentication to a [`ForgedServer`]
+/// with the returned chain.
+fn forged_pha_client() -> (ClientConfig, Chain) {
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let config = pha_client(&server_chain, &client_chain(KeyType::EcdsaP256));
+    (config, server_chain)
+}
+
+#[test]
+fn unsolicited_post_handshake_certificate_request_is_unexpected() {
+    init_logging();
+    let (mut config, chain) = forged_pha_client();
+    config.enable_post_handshake_auth = false;
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    feed(&mut client, &server.certificate_request(&[1; 32]));
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest)
+    );
+    assert_eq!(client.post_handshake_auth_responses(), 0);
+}
+
+#[test]
+fn post_handshake_certificate_request_needs_a_context() {
+    init_logging();
+    let (config, chain) = forged_pha_client();
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    feed(&mut client, &server.certificate_request(&[]));
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::IllegalCertificateRequestContext)
+    );
+    assert_eq!(client.post_handshake_auth_responses(), 0);
+}
+
+#[test]
+fn client_bounds_certificate_requests_without_application_data() {
+    init_logging();
+    let (config, chain) = forged_pha_client();
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    // Eight requests are answered, application data resets the count, and
+    // eight more are answered too.
+    for i in 0..8u8 {
+        feed(&mut client, &server.certificate_request(&[i; 8]));
+    }
+    feed(
+        &mut client,
+        &server.record(ContentType::ApplicationData, b"data"),
+    );
+    for i in 8..16u8 {
+        feed(&mut client, &server.certificate_request(&[i; 8]));
+    }
+    client.process_new_packets().unwrap();
+    assert_eq!(client.post_handshake_auth_responses(), 16);
+    let mut data = [0u8; 4];
+    client.reader().read_exact(&mut data).unwrap();
+    assert_eq!(&data, b"data");
+    take_tls(&mut client);
+
+    // A ninth request in a row is refused.
+    feed(&mut client, &server.certificate_request(&[0xff; 8]));
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::TooManyPostHandshakeCertificateRequests)
+    );
+    assert_eq!(client.post_handshake_auth_responses(), 16);
+}
+
 #[test]
 fn post_handshake_auth_is_refused_before_the_handshake_and_without_a_verifier() {
     init_logging();
@@ -390,10 +512,7 @@ fn post_handshake_auth_is_tls13_only() {
         pha_server(&server_chain, &client_chain, false, true),
     );
     do_handshake(&mut client, &mut server).unwrap();
-    assert_eq!(
-        server.protocol_version(),
-        Some(browntls::ProtocolVersion::TLSv1_2)
-    );
+    assert_eq!(server.protocol_version(), Some(ProtocolVersion::TLSv1_2));
     // TLS 1.2 authenticated the client in the handshake.
     assert!(server.peer_certificates().is_some());
     assert!(server.request_client_auth().is_err());
@@ -721,6 +840,37 @@ fn change_cipher_spec_before_a_first_client_hello_is_unexpected() {
 // ---------------------------------------------------- exporters
 
 #[test]
+fn cookie_sealer_must_not_be_the_ticketer() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut config = server_config(&chain);
+    config.ticketer = sealer();
+    config.hello_retry_cookies = Some(config.ticketer.clone());
+    let config = Arc::new(config);
+    assert!(matches!(
+        ServerConnection::new(config.clone()),
+        Err(Error::General(_))
+    ));
+
+    // The Acceptor path refuses it too.
+    let mut client = retrying_client(&chain);
+    let mut acceptor = browntls::server::Acceptor::default();
+    let flight = take_tls(&mut client);
+    acceptor.read_tls(&mut &flight[..]).unwrap();
+    let accepted = acceptor.accept().unwrap().unwrap();
+    assert!(matches!(
+        accepted.into_connection(config),
+        Err((Error::General(_), _))
+    ));
+
+    // A separate sealer is fine.
+    let mut config = server_config(&chain);
+    config.ticketer = sealer();
+    config.hello_retry_cookies = Some(sealer());
+    ServerConnection::new(Arc::new(config)).unwrap();
+}
+
+#[test]
 fn tls_exporter_channel_binding_tls13() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
@@ -757,10 +907,7 @@ fn tls_exporter_channel_binding_tls12_with_extended_master_secret() {
         .with_no_client_auth();
     let (mut client, mut server) = connect(client_config, server_config(&chain));
     do_handshake(&mut client, &mut server).unwrap();
-    assert_eq!(
-        client.protocol_version(),
-        Some(browntls::ProtocolVersion::TLSv1_2)
-    );
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
     let binding = client.tls_exporter_channel_binding().unwrap();
     assert_eq!(binding, server.tls_exporter_channel_binding().unwrap());
     // RFC 5705: in TLS 1.2 an empty context differs from no context.

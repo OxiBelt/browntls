@@ -43,6 +43,11 @@ use crate::verify::{
 /// How many `update_requested` KeyUpdates we tolerate without sending data.
 const MAX_KEY_UPDATE_REQUESTS: u8 = 8;
 
+/// How many post-handshake CertificateRequests we answer while the server
+/// sends no application data: each answer costs a signature, so this is a
+/// local resource bound, not an RFC 9846 rule.
+const MAX_POST_HANDSHAKE_AUTH_REQUESTS: u8 = 8;
+
 /// Computes the real PSK binder (RFC 8446 §4.2.11.2) and writes it into the
 /// ClientHello, returning the early key schedule for the offered PSK.
 pub(super) fn fill_in_psk_binder(
@@ -951,6 +956,7 @@ impl State<ClientConnectionData> for ExpectFinished {
             // Resumption secrets derive from the transcript through our Finished.
             final_hash: st.transcript.current_hash(),
             post_handshake_transcript,
+            post_handshake_requests_since_data: 0,
             key_schedule,
             _cert_verified: st.cert_verified,
             _sig_verified: st.sig_verified,
@@ -967,6 +973,9 @@ struct ExpectTraffic {
     /// The transcript through our Finished, when we offered
     /// `post_handshake_auth`.
     post_handshake_transcript: Option<HandshakeHash>,
+    /// CertificateRequests answered since the server last sent
+    /// application data; see [`MAX_POST_HANDSHAKE_AUTH_REQUESTS`].
+    post_handshake_requests_since_data: u8,
     key_schedule: KeyScheduleTraffic,
     _cert_verified: ServerCertVerified,
     _sig_verified: HandshakeSignatureValid,
@@ -1043,12 +1052,31 @@ impl ExpectTraffic {
                 PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest,
             ));
         };
+        // RFC 9846 §4.4.2: a post-handshake CertificateRequest needs a
+        // non-empty context, which makes each answer distinct.
+        if certreq.context.0.is_empty() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCertificateRequestContext,
+            ));
+        }
         let sigschemes = certificate_request_sigschemes(cx.common, certreq)?;
 
         // RFC 9846 §6.1: nothing follows our close_notify.
         if cx.common.has_sent_close_notify() {
             debug!("Ignoring CertificateRequest after our close_notify");
             return Ok(());
+        }
+
+        // Each answer costs a signature: refuse a server that keeps
+        // asking without sending application data in between.
+        self.post_handshake_requests_since_data =
+            self.post_handshake_requests_since_data.saturating_add(1);
+        if self.post_handshake_requests_since_data > MAX_POST_HANDSHAKE_AUTH_REQUESTS {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::TooManyPostHandshakeCertificateRequests,
+            ));
         }
 
         // Handshake Context: ClientHello ... client Finished +
@@ -1119,6 +1147,7 @@ impl State<ClientConnectionData> for ExpectTraffic {
         match m.payload {
             MessagePayload::ApplicationData(payload) => {
                 cx.common.received_key_update_requests = 0;
+                self.post_handshake_requests_since_data = 0;
                 cx.common.take_received_plaintext(payload);
             }
             MessagePayload::Handshake {

@@ -288,6 +288,7 @@ pub enum PeerMisbehaved {
     SignedHandshakeWithUnadvertisedSigScheme,
     TooManyEmptyFragments,
     TooManyKeyUpdateRequests,
+    TooManyPostHandshakeCertificateRequests,
     TooManyRenegotiationRequests,
     TooManyWarningAlertsReceived,
     TooMuchEarlyDataReceived,

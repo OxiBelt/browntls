@@ -87,6 +87,7 @@ pub mod aead;
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;
+pub mod hpke;
 #[cfg(feature = "tls12")]
 pub mod prf;
 pub mod sign;

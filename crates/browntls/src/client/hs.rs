@@ -16,6 +16,8 @@ use crate::common_state::ConnectionRandoms;
 use crate::common_state::{CommonState, HandshakeKind, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
+use crate::ech::client::{ClientEch, EchOffer};
+use crate::ech::{self, EchMode, EchStatus};
 use crate::enums::{AlertDescription, CertificateType, CipherSuite, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
@@ -200,6 +202,23 @@ pub(super) struct ClientHelloInput {
     pub(super) session_id: SessionId,
     pub(super) server_name: ServerName<'static>,
     pub(super) alpn_protocols: Vec<Vec<u8>>,
+    /// Encrypted Client Hello, while the server has not decided. With a
+    /// real offer, the hello this input builds is the inner one.
+    pub(super) ech: Option<ClientEch>,
+}
+
+impl ClientHelloInput {
+    /// Continues with the outer ClientHello after the server rejected ECH
+    /// (RFC 9849 §6.1.6): its random, the public name (which the server
+    /// certificate is checked against), its extensions, no ALPN and no
+    /// resumption.
+    fn switch_to_outer(&mut self, offer: &EchOffer) {
+        self.random = offer.outer_random;
+        self.server_name = ServerName::DnsName(offer.config.public_name().clone());
+        self.hello.sent_extensions = offer.outer_sent_extensions.clone();
+        self.alpn_protocols = Vec::new();
+        self.resuming = None;
+    }
 }
 
 /// Builds and sends the first ClientHello.
@@ -255,6 +274,38 @@ pub(super) fn start_handshake(
         inner.session_id = session_id;
     }
 
+    // RFC 9849 §6.1: an ECH offer needs TLS 1.3, and may not resume a
+    // TLS 1.2 session.
+    let ech = match &config.ech_mode {
+        Some(EchMode::Enable(ech_config)) => {
+            if !supports_tls13 {
+                return Err(Error::general(
+                    "Encrypted Client Hello requires TLS 1.3 to be enabled",
+                ));
+            }
+            #[cfg(feature = "tls12")]
+            if matches!(
+                &resuming,
+                Some(Retrieved {
+                    value: ClientSessionValue::Tls12(_),
+                    ..
+                })
+            ) {
+                resuming = None;
+            }
+            Some(ClientEch::offer(
+                ech_config,
+                config.provider.secure_random,
+                config.client_auth_cert_resolver.has_certs(),
+            )?)
+        }
+        Some(EchMode::Grease(grease)) => Some(ClientEch::GreasePending(grease.clone())),
+        None => None,
+    };
+    if let Some(ech) = &ech {
+        cx.data.ech_status = ech.initial_status();
+    }
+
     let random = Random::new(config.provider.secure_random)?;
     let input = ClientHelloInput {
         config,
@@ -265,6 +316,7 @@ pub(super) fn start_handshake(
         session_id,
         server_name,
         alpn_protocols,
+        ech,
     };
     emit_client_hello_for_retry(
         transcript_buffer,
@@ -290,12 +342,20 @@ fn emit_client_hello_for_retry(
 ) -> NextStateOrError {
     let config = &input.config;
     let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
-    let supports_tls12 = config.supports_version(ProtocolVersion::TLSv1_2);
+    // RFC 9849 §6.1: with ECH, both ClientHellos offer TLS 1.3 only.
+    let ech_tls13_only = input
+        .ech
+        .as_ref()
+        .is_some_and(ClientEch::restricts_to_tls13);
+    let supports_tls12 = config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
+    let offers_version = |v: ProtocolVersion| {
+        config.supports_version(v) && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+    };
 
     let supported_versions: Vec<ProtocolVersion> =
         [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]
             .into_iter()
-            .filter(|v| config.supports_version(*v))
+            .filter(|v| offers_version(*v))
             .collect();
 
     let server_name = match (&input.server_name, config.enable_sni) {
@@ -444,7 +504,11 @@ fn emit_client_hello_for_retry(
         // RFC 8446 §4.2.10: offer 0-RTT when the ticket and configuration
         // allow it, but never in the second ClientHello of a retry.
         let max_early_data_size = resuming.max_early_data_size();
-        if config.enable_early_data && max_early_data_size > 0 && retryreq.is_none() {
+        if config.enable_early_data
+            && max_early_data_size > 0
+            && retryreq.is_none()
+            && !ech_tls13_only
+        {
             cx.data.early_data.enable(max_early_data_size as usize);
             exts.early_data = Some(());
         }
@@ -461,11 +525,21 @@ fn emit_client_hello_for_retry(
         .provider
         .cipher_suites
         .iter()
-        .filter(|cs| config.supports_version(cs.version().version))
+        .filter(|cs| offers_version(cs.version().version))
         .map(|cs| cs.suite())
         .collect();
-    // RFC 5746 §3.3: signal secure renegotiation support (we never renegotiate).
-    cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    // RFC 5746 §3.3: signal secure renegotiation support (we never
+    // renegotiate); a TLS 1.3-only hello has nothing to signal.
+    if supports_tls12 || !ech_tls13_only {
+        cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    }
+
+    if let Some(ech) = &mut input.ech {
+        // Everything but the extensions: version, random, an empty
+        // session ID, the suites and the compression methods.
+        let other_len = 2 + 32 + 1 + 2 + 2 * cipher_suites.len() + 2;
+        ech.prepare(&mut exts, other_len, config.provider.secure_random)?;
+    }
 
     input.hello.sent_extensions = exts.present_types();
     input.hello.offered_sigschemes = offered_sigschemes;
@@ -497,9 +571,33 @@ fn emit_client_hello_for_retry(
         payload: MessagePayload::handshake(hmp),
     };
 
+    // RFC 9849 §6.1.1: with a real ECH offer, `ch` is the inner hello: it
+    // goes into our transcript, sealed into the outer hello that is sent.
+    let outer = match (&mut input.ech, &ch.payload) {
+        (
+            Some(ClientEch::Offer(offer)),
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::ClientHello(inner)),
+                ..
+            },
+        ) => {
+            let outer =
+                offer.seal_outer(inner, retryreq.is_some(), config.provider.secure_random)?;
+            let outer = Message {
+                version: ch.version,
+                payload: MessagePayload::handshake(HandshakeMessagePayload(
+                    HandshakePayload::ClientHello(outer),
+                )),
+            };
+            offer.outer_transcript.add_message(&outer);
+            Some(outer)
+        }
+        _ => None,
+    };
+
     trace!("Sending ClientHello {:#?}", ch);
     transcript_buffer.add_message(&ch);
-    cx.common.send_msg(ch, false);
+    cx.common.send_msg(outer.unwrap_or(ch), false);
 
     // With 0-RTT offered, the early traffic key derives from the ClientHello
     // alone, so early data can go out right behind it.
@@ -663,6 +761,21 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        // RFC 9849 §6.1: an ECH offer (and what follows its rejection at a
+        // HelloRetryRequest) offers TLS 1.3 only.
+        if version == ProtocolVersion::TLSv1_2
+            && self
+                .input
+                .ech
+                .as_ref()
+                .is_some_and(ClientEch::restricts_to_tls13)
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::ProtocolVersion,
+                PeerMisbehaved::SelectedUnofferedVersion,
+            ));
+        }
+
         // RFC 9846 §4.2.3: a TLS 1.3 ServerHello carries legacy_version
         // 0x0303; anything else is a version error (§E.5).
         if version == ProtocolVersion::TLSv1_3
@@ -740,6 +853,40 @@ impl State<ClientConnectionData> for ExpectServerHello {
         cx.common.suite = Some(suite);
         if cx.common.handshake_kind.is_none() {
             cx.common.handshake_kind = Some(HandshakeKind::Full);
+        }
+
+        // RFC 9849 §6.1.4: the ServerHello's random says whether the server
+        // took the inner hello; if not, the handshake continues with the
+        // outer one.
+        match self.input.ech.take() {
+            Some(ClientEch::Offer(offer)) => {
+                let accepted = match suite {
+                    SupportedCipherSuite::Tls13(suite) => ech::client::server_hello_accepts(
+                        &self.transcript_buffer,
+                        suite,
+                        &self.input.random,
+                        handshake_bytes(&m),
+                    ),
+                    #[cfg(feature = "tls12")]
+                    SupportedCipherSuite::Tls12(_) => false,
+                };
+                if accepted {
+                    cx.data.ech_status = EchStatus::Accepted;
+                } else if offer.accepted_at_retry {
+                    // §6.1.5: the HelloRetryRequest confirmed acceptance.
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::EchAcceptanceVariedAfterRetry,
+                    ));
+                } else {
+                    debug!("Server rejected ECH");
+                    cx.data.ech_status = EchStatus::Rejected;
+                    self.input.switch_to_outer(&offer);
+                    self.transcript_buffer = offer.outer_transcript;
+                    self.early_key_schedule = None;
+                }
+            }
+            other => self.input.ech = other,
         }
 
         let mut transcript = self.transcript_buffer.start_hash(suite.hash_provider());
@@ -931,6 +1078,50 @@ impl ExpectServerHelloOrHelloRetryRequest {
             .transcript_buffer
             .start_hash(suite.hash_provider());
         let mut transcript_buffer = transcript.into_hrr_buffer();
+
+        // RFC 9849 §6.1.4: an ECH extension in the HelloRetryRequest
+        // confirms (or, not matching, rejects) our offer. A GREASE offer
+        // ignores it; without an offer it is unsolicited.
+        match self.next.input.ech.take() {
+            Some(ClientEch::Offer(mut offer)) => {
+                let accepted = match suite {
+                    SupportedCipherSuite::Tls13(suite) => {
+                        hrr.extensions.encrypted_client_hello.is_some()
+                            && ech::client::retry_request_accepts(
+                                &transcript_buffer,
+                                suite,
+                                &self.next.input.random,
+                                handshake_bytes(&m),
+                            )
+                    }
+                    #[cfg(feature = "tls12")]
+                    SupportedCipherSuite::Tls12(_) => false,
+                };
+                if accepted {
+                    offer.accepted_at_retry = true;
+                    self.next.input.ech = Some(ClientEch::Offer(offer));
+                } else {
+                    debug!("Server rejected ECH in HelloRetryRequest");
+                    cx.data.ech_status = EchStatus::Rejected;
+                    self.next.input.switch_to_outer(&offer);
+                    transcript_buffer = offer
+                        .outer_transcript
+                        .start_hash(suite.hash_provider())
+                        .into_hrr_buffer();
+                    self.next.input.ech = Some(ClientEch::RejectedAtRetry {
+                        outer_ext: offer.first_outer_ext.clone(),
+                        public_name: offer.config.public_name().clone(),
+                    });
+                }
+            }
+            None if hrr.extensions.encrypted_client_hello.is_some() => {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::UnsupportedExtension,
+                    PeerMisbehaved::UnsolicitedEchExtension,
+                ));
+            }
+            other => self.next.input.ech = other,
+        }
         transcript_buffer.add_message(&m);
 
         // RFC 8446 §4.2.10: early data is not possible after a HelloRetryRequest.
@@ -972,6 +1163,14 @@ impl State<ClientConnectionData> for ExpectServerHelloOrHelloRetryRequest {
                 ],
             )),
         }
+    }
+}
+
+/// The encoding of a handshake message, header included.
+fn handshake_bytes<'a>(m: &'a Message<'_>) -> &'a [u8] {
+    match &m.payload {
+        MessagePayload::Handshake { encoded, .. } => encoded.bytes(),
+        _ => &[],
     }
 }
 

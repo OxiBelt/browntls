@@ -585,6 +585,18 @@ pub(super) fn kx_groups_by_preference(
 
 impl State<ServerConnectionData> for ExpectClientHello {
     fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 9849 §7.1: decide on ECH before anything else; an accepted
+        // offer replaces the ClientHello with the inner one.
+        let m = match crate::ech::server::process_client_hello(
+            self.config.ech.as_deref(),
+            &mut cx.data.ech,
+            cx.common,
+            &m,
+            self.done_retry,
+        )? {
+            Some(inner) => inner,
+            None => m,
+        };
         let (client_hello, sig_schemes) = process_client_hello(&m, self.done_retry, cx)?;
         self.with_certified_key(sig_schemes, client_hello, &m, cx)
     }

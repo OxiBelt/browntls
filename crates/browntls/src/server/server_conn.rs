@@ -196,6 +196,11 @@ pub struct ServerConfig {
     /// Decompressors for client certificates (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// Encrypted Client Hello keys (RFC 9849); `None` (the default)
+    /// ignores ECH. The certificate resolver must also hold a certificate
+    /// for each key's public name, so clients can authenticate a rejection.
+    pub ech: Option<Arc<crate::ech::EchServerConfig>>,
+
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
@@ -378,6 +383,8 @@ pub struct ServerConnectionData {
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
+    /// What was decided about Encrypted Client Hello.
+    pub(crate) ech: crate::ech::server::ServerEch,
 }
 
 impl SideData for ServerConnectionData {
@@ -493,6 +500,14 @@ impl ServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// What was decided about Encrypted Client Hello. With
+    /// [`EchStatus::Accepted`](crate::ech::EchStatus::Accepted), the
+    /// handshake used the client's encrypted ClientHello, and
+    /// [`Self::server_name`] is the name it carried.
+    pub fn ech_status(&self) -> crate::ech::EchStatus {
+        self.inner.core.data.ech.status()
     }
 
     /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].
@@ -694,14 +709,32 @@ impl Accepted {
         self.connection.enable_secret_extraction = config.enable_secret_extraction;
         self.connection.fips = config.fips();
 
-        let state = hs::ExpectClientHello::new(config);
         let mut cx = crate::conn::Context {
             common: &mut self.connection.core.common_state,
             data: &mut self.connection.core.data,
         };
-        let payload = Self::client_hello_payload(&self.message);
-        let new = match state.with_certified_key(self.sig_schemes, payload, &self.message, &mut cx)
-        {
+        // RFC 9849 §7.1: with ECH keys in `config`, an encrypted ClientHello
+        // replaces the one the acceptor saw.
+        let inner = match crate::ech::server::process_client_hello(
+            config.ech.as_deref(),
+            &mut cx.data.ech,
+            cx.common,
+            &self.message,
+            false,
+        ) {
+            Ok(inner) => inner,
+            Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
+        };
+        let (message, sig_schemes) = match inner {
+            Some(inner) => match hs::process_client_hello(&inner, false, &mut cx) {
+                Ok((_, sig_schemes)) => (inner, sig_schemes),
+                Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
+            },
+            None => (self.message, self.sig_schemes),
+        };
+        let state = hs::ExpectClientHello::new(config);
+        let payload = Self::client_hello_payload(&message);
+        let new = match state.with_certified_key(sig_schemes, payload, &message, &mut cx) {
             Ok(new) => new,
             Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
         };

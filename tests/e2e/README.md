@@ -58,7 +58,12 @@ allows it, with browntls as server against the peer's client:
   with Encrypt-then-MAC;
 - a TLS 1.2 CBC peer without Encrypt-then-MAC: browntls must refuse it by
   default (and fail for that reason), and must complete the handshake when
-  `allow_mac_then_encrypt` is set.
+  `allow_mac_then_encrypt` is set;
+- the optional extensions in TLS 1.3 (also with resumption) and TLS 1.2: a
+  `record_size_limit` of 512 (RFC 8449) on the browntls side, which a peer
+  implementing it (GnuTLS) must respect, and, as a browntls client, GREASE
+  values (RFC 8701), `ticket_request` (RFC 9149) and a ClientHello padded to
+  1024 bytes (RFC 7685).
 
 For every connection the harness checks the protocol version, cipher suite,
 key exchange group and handshake kind the browntls side reports, the

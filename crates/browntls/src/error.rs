@@ -82,6 +82,9 @@ pub enum Error {
     /// `max_fragment_size` is outside the allowed range.
     BadMaxFragmentSize,
 
+    /// A configured `record_size_limit` is below 64 (RFC 8449 §4).
+    BadRecordSizeLimit,
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -240,16 +243,27 @@ pub enum PeerMisbehaved {
     IllegalClientHelloLegacyVersion,
     IllegalMiddleboxChangeCipherSpec,
     IllegalProtectedChangeCipherSpec,
+    /// A `record_size_limit` below 64 (RFC 8449 §4).
+    IllegalRecordSizeLimit,
     IllegalServerHelloLegacyVersion,
     IllegalTlsInnerPlaintext,
     IncorrectBinder,
     InvalidCertCompression,
+    /// A second ClientHello carried a cookie that is not one we issued, or
+    /// no longer valid (RFC 9846 §4.3.2).
+    InvalidHelloRetryRequestCookie,
     InvalidMaxEarlyDataSize,
     InvalidKeyShare,
     KeyEpochWithPendingFragment,
     KeyUpdateReceivedInQuicConnection,
     MessageInterleavedWithHandshakeMessage,
+    /// Another message came between the messages of a post-handshake
+    /// authentication response (RFC 9846 §4.7.2).
+    MessageInterleavedWithPostHandshakeAuthentication,
     MissingBinderInPskExtension,
+    /// A second ClientHello did not echo our HelloRetryRequest's cookie
+    /// (RFC 9846 §4.3.2).
+    MissingCookieInSecondClientHello,
     MissingKeyShare,
     MissingPskExtensionInSecondClientHello,
     MissingPskModesExtension,
@@ -287,6 +301,7 @@ pub enum PeerMisbehaved {
     SignedHandshakeWithUnadvertisedSigScheme,
     TooManyEmptyFragments,
     TooManyKeyUpdateRequests,
+    TooManyPostHandshakeCertificateRequests,
     TooManyRenegotiationRequests,
     TooManyWarningAlertsReceived,
     TooMuchEarlyDataReceived,
@@ -294,6 +309,9 @@ pub enum PeerMisbehaved {
     UnsolicitedCertExtension,
     UnsolicitedDelegatedCredential,
     UnsolicitedEncryptedExtension,
+    /// A post-handshake CertificateRequest reached a client that did not
+    /// offer `post_handshake_auth` (RFC 9846 §4.7.2).
+    UnsolicitedPostHandshakeCertificateRequest,
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
@@ -593,6 +611,9 @@ impl fmt::Display for Error {
             Self::FailedToGetRandomBytes => f.write_str("failed to get random bytes"),
             Self::BadMaxFragmentSize => {
                 f.write_str("the supplied max_fragment_size was too small or large")
+            }
+            Self::BadRecordSizeLimit => {
+                f.write_str("the supplied record_size_limit was smaller than 64")
             }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),

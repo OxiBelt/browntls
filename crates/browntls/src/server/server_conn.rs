@@ -175,6 +175,39 @@ pub struct ServerConfig {
     /// How many TLS 1.3 tickets to send after a handshake.
     pub send_tls13_tickets: usize,
 
+    /// Whether TLS 1.3 client authentication is left out of the handshake
+    /// when the client offered `post_handshake_auth`, for the application
+    /// to request later with [`ServerConnection::request_client_auth`]
+    /// (RFC 9846 §4.7.2). Off by default.
+    ///
+    /// A client that did not offer `post_handshake_auth`, and every TLS 1.2
+    /// client, is still asked during the handshake when the client
+    /// certificate verifier offers client authentication. With this on,
+    /// such a handshake completes without a client certificate even if the
+    /// verifier makes it mandatory: the application must request one and
+    /// check [`ServerConnection::post_handshake_auth_status`] before it
+    /// trusts the client. RFC 8740 forbids post-handshake authentication
+    /// over HTTP/2; the library leaves that decision to the application.
+    pub request_client_auth_after_handshake: bool,
+
+    /// Seals the cookie sent in TLS 1.3 HelloRetryRequests (RFC 9846
+    /// §4.3.2), which makes the retry stateless; `None` (the default) sends
+    /// no cookie.
+    ///
+    /// The cookie carries, encrypted and authenticated, the hash of the
+    /// first ClientHello and the parameters the HelloRetryRequest chose, so
+    /// a fresh [`ServerConnection`] (or [`Acceptor`]) whose first message is
+    /// the second ClientHello can complete the handshake without the state
+    /// of the connection that sent the HelloRetryRequest. Use a dedicated
+    /// sealer with its own key, never the [`Self::ticketer`] instance: the
+    /// plaintext is domain-separated from tickets, but a separate key keeps
+    /// the two kinds of token apart outright. Creating a connection with
+    /// the very same `Arc` here and in [`Self::ticketer`] fails; a
+    /// separate sealer that shares the ticketer's key cannot be detected.
+    /// A cookie is accepted for 60 seconds and only while the sealer still
+    /// holds its key.
+    pub hello_retry_cookies: Option<Arc<dyn ProducesTickets>>,
+
     /// Whether TLS 1.2 clients must support the extended master secret (RFC 7627).
     pub require_ems: bool,
 
@@ -195,6 +228,19 @@ pub struct ServerConfig {
 
     /// Decompressors for client certificates (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    /// The `record_size_limit` to answer a client's with (RFC 8449): the
+    /// largest record plaintext we accept, counting the content type in TLS
+    /// 1.3. `None` ignores the client's extension, so its limit is not
+    /// respected either. A value above the protocol maximum (2^14 + 1 for
+    /// TLS 1.3, 2^14 for TLS 1.2) is lowered to it; a value below 64 makes
+    /// connection creation fail with [`Error::BadRecordSizeLimit`].
+    ///
+    /// Defaults to `Some(16385)`: no restriction of our own, but a client
+    /// that announces a smaller limit has its limit respected. Records we
+    /// send are limited by the client's limit and by `max_fragment_size`,
+    /// whichever is smaller.
+    pub record_size_limit: Option<u16>,
 
     pub(super) versions: EnabledVersions,
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,
@@ -270,6 +316,18 @@ impl ServerConfig {
             .iter()
             .copied()
             .find(|s| s.suite() == suite)
+    }
+
+    /// Refuses a configuration whose HelloRetryRequest cookie sealer is
+    /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
+    /// leaves the cookie format to the server; the key split is ours).
+    pub(super) fn check_cookie_sealer(&self) -> Result<(), Error> {
+        match &self.hello_retry_cookies {
+            Some(sealer) if Arc::ptr_eq(sealer, &self.ticketer) => Err(Error::General(
+                "hello_retry_cookies must not be the ticketer: give cookies their own key".into(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     pub(super) fn current_time(&self) -> Result<UnixTime, Error> {
@@ -380,6 +438,28 @@ pub struct ServerConnectionData {
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
     /// State for exported authenticators (RFC 9261).
     pub(crate) authenticators: crate::exported_authenticator::ServerAuthenticatorState,
+    /// Whether the TLS 1.3 ClientHello offered `post_handshake_auth`.
+    pub(super) post_handshake_auth_offered: bool,
+    /// The most recent post-handshake client authentication, if any.
+    pub(super) post_handshake_auth: Option<PostHandshakeAuthStatus>,
+}
+
+/// Where the most recent post-handshake client authentication (RFC 9846
+/// §4.7.2) stands; see [`ServerConnection::request_client_auth`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostHandshakeAuthStatus {
+    /// The CertificateRequest is sent; the client has not completed its
+    /// answer yet.
+    Requested,
+    /// The client presented a certificate that the client certificate
+    /// verifier accepted, proved possession of its key and sent a valid
+    /// Finished; `peer_certificates` now returns this certificate.
+    Authenticated,
+    /// The client answered with an empty Certificate and the verifier does
+    /// not make client authentication mandatory. `peer_certificates` is
+    /// unchanged.
+    Declined,
 }
 
 impl SideData for ServerConnectionData {
@@ -394,8 +474,10 @@ impl SideData for ServerConnectionData {
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        config.check_cookie_sealer()?;
         let mut common = CommonState::new(Side::Server);
         common.set_max_fragment_size(config.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common.enable_secret_extraction = config.enable_secret_extraction;
         common.fips = config.fips();
         Ok(Self::new(
@@ -495,6 +577,54 @@ impl ServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// Whether the client offered TLS 1.3 post-handshake authentication
+    /// (`post_handshake_auth`, RFC 9846 §4.3.6), once its ClientHello has
+    /// been processed.
+    pub fn post_handshake_auth_offered(&self) -> bool {
+        self.inner.core.data.post_handshake_auth_offered
+    }
+
+    /// Asks the client for a certificate after the handshake (RFC 9846
+    /// §4.7.2): queues a CertificateRequest with a fresh, unpredictable
+    /// `certificate_request_context`.
+    ///
+    /// Requires a completed TLS 1.3 handshake with a client that offered
+    /// `post_handshake_auth`, a client certificate verifier that offers
+    /// client authentication, and no request still unanswered. The answer
+    /// arrives through [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
+    /// and is checked with the configured verifier: follow it with
+    /// [`Self::post_handshake_auth_status`]. A client may take its time and
+    /// send application data first; a certificate the verifier refuses, a
+    /// bad signature or Finished, a missing certificate when the verifier
+    /// makes it mandatory, or messages interleaved with the answer end the
+    /// connection with the corresponding alert.
+    pub fn request_client_auth(&mut self) -> Result<(), Error> {
+        let core = &mut self.inner.core;
+        if core.common_state.is_handshaking() {
+            return Err(Error::HandshakeNotComplete);
+        }
+        if !core.common_state.is_tls13() {
+            return Err(Error::General(
+                "post-handshake client authentication requires TLS 1.3".into(),
+            ));
+        }
+        let state = match &mut core.state {
+            Ok(state) => state,
+            Err(err) => return Err(err.clone()),
+        };
+        let mut cx = crate::conn::Context {
+            common: &mut core.common_state,
+            data: &mut core.data,
+        };
+        state.request_client_auth(&mut cx)
+    }
+
+    /// The state of the most recent [`Self::request_client_auth`], or
+    /// `None` if none was made.
+    pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
+        self.inner.core.data.post_handshake_auth
     }
 
     /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].
@@ -687,9 +817,15 @@ impl Accepted {
         mut self,
         config: Arc<ServerConfig>,
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = self
-            .connection
-            .set_max_fragment_size(config.max_fragment_size)
+        if let Err(err) = config
+            .check_cookie_sealer()
+            .and_then(|()| {
+                self.connection
+                    .set_max_fragment_size(config.max_fragment_size)
+            })
+            .and_then(|()| {
+                crate::common_state::check_record_size_limit_config(config.record_size_limit)
+            })
         {
             return Err((err, AcceptedAlert::from(self.connection)));
         }

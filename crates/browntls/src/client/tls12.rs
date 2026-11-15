@@ -113,9 +113,11 @@ impl CompleteServerHelloHandling {
                 PeerMisbehaved::ServerHelloMustOfferUncompressedEcPoints,
             ));
         }
-        // TLS 1.3-only extensions may not appear in a TLS 1.2 ServerHello.
+        // TLS 1.3-only extensions may not appear in a TLS 1.2 ServerHello
+        // (RFC 9149 defines `ticket_request` for TLS 1.3 only).
         if server_hello.extensions.key_share.is_some()
             || server_hello.extensions.pre_shared_key.is_some()
+            || server_hello.extensions.ticket_request.is_some()
         {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,
@@ -133,6 +135,13 @@ impl CompleteServerHelloHandling {
             &self.config,
             server_hello.extensions.client_certificate_type,
             server_hello.extensions.server_certificate_type,
+        )?;
+        // RFC 8449 §4: in TLS 1.2 the server's limit comes in the ServerHello.
+        hs::process_record_size_limit(
+            cx.common,
+            &self.hello,
+            server_hello.extensions.record_size_limit,
+            false,
         )?;
 
         if self.config.require_ems && !self.using_ems {

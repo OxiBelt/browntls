@@ -179,4 +179,37 @@ mod tests {
         let sealed = sealer.encrypt(&relabelled).unwrap();
         assert_eq!(RetryCookie::open(&sealer, &sealed, 1_000), None);
     }
+
+    /// Cookie and ticket plaintexts cannot be mistaken for each other, even
+    /// under one key: a ticket (`ServerSessionValue`) starts with its 0 or 1
+    /// SNI flag, a cookie with its label.
+    #[test]
+    fn cookie_and_ticket_plaintexts_are_disjoint() {
+        use browntls_pki::{DnsName, UnixTime};
+
+        use crate::enums::ProtocolVersion;
+        use crate::msgs::persist::ServerSessionValue;
+
+        assert!(COOKIE_LABEL[0] > 1);
+        let cookie = sample().encode().unwrap();
+        assert!(ServerSessionValue::read_bytes(&cookie).is_err());
+
+        let name = DnsName::try_from("example.com").unwrap();
+        for sni in [None, Some(&name)] {
+            let ticket = ServerSessionValue::new(
+                sni,
+                ProtocolVersion::TLSv1_3,
+                CipherSuite::TLS13_AES_128_GCM_SHA256,
+                &[1; 32],
+                None,
+                None,
+                alloc::vec![],
+                UnixTime::since_unix_epoch(core::time::Duration::from_secs(1_000)),
+                0,
+            )
+            .get_encoding();
+            assert!(ticket[0] <= 1);
+            assert_eq!(RetryCookie::decode(&ticket), None);
+        }
+    }
 }

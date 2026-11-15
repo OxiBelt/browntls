@@ -167,7 +167,16 @@ impl ExpectClientHello {
         client_hello: &ClientHelloPayload,
         cx: &mut ServerContext<'_>,
     ) -> Result<(), Error> {
-        let now = self.config.current_time()?.as_secs();
+        // Without a clock the cookie cannot be checked: fail closed, with
+        // an explicit alert also on the Acceptor path.
+        let now = match self.config.current_time() {
+            Ok(now) => now.as_secs(),
+            Err(err) => {
+                return Err(cx
+                    .common
+                    .send_fatal_alert(AlertDescription::InternalError, err));
+            }
+        };
         let invalid = |cx: &mut ServerContext<'_>| {
             cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,

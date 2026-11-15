@@ -153,7 +153,14 @@ impl CompleteClientHelloHandling {
             // ClientHello, so that handshake stays with this connection.
             let cookie = match &self.config.hello_retry_cookies {
                 Some(sealer) if !early_data_requested => RetryCookie {
-                    issued_at: self.config.current_time()?.as_secs(),
+                    issued_at: match self.config.current_time() {
+                        Ok(now) => now.as_secs(),
+                        Err(err) => {
+                            return Err(cx
+                                .common
+                                .send_fatal_alert(AlertDescription::InternalError, err));
+                        }
+                    },
                     suite: self.suite.common.suite,
                     group: selected_kxg.name(),
                     client_hello_hash: client_hello_hash.as_ref().to_vec(),

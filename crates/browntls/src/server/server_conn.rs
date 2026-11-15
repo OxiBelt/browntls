@@ -201,8 +201,11 @@ pub struct ServerConfig {
     /// of the connection that sent the HelloRetryRequest. Use a dedicated
     /// sealer with its own key, never the [`Self::ticketer`] instance: the
     /// plaintext is domain-separated from tickets, but a separate key keeps
-    /// the two kinds of token apart outright. A cookie is accepted for 60
-    /// seconds and only while the sealer still holds its key.
+    /// the two kinds of token apart outright. Creating a connection with
+    /// the very same `Arc` here and in [`Self::ticketer`] fails; a
+    /// separate sealer that shares the ticketer's key cannot be detected.
+    /// A cookie is accepted for 60 seconds and only while the sealer still
+    /// holds its key.
     pub hello_retry_cookies: Option<Arc<dyn ProducesTickets>>,
 
     /// Whether TLS 1.2 clients must support the extended master secret (RFC 7627).
@@ -300,6 +303,18 @@ impl ServerConfig {
             .iter()
             .copied()
             .find(|s| s.suite() == suite)
+    }
+
+    /// Refuses a configuration whose HelloRetryRequest cookie sealer is
+    /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
+    /// leaves the cookie format to the server; the key split is ours).
+    pub(super) fn check_cookie_sealer(&self) -> Result<(), Error> {
+        match &self.hello_retry_cookies {
+            Some(sealer) if Arc::ptr_eq(sealer, &self.ticketer) => Err(Error::General(
+                "hello_retry_cookies must not be the ticketer: give cookies their own key".into(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     pub(super) fn current_time(&self) -> Result<UnixTime, Error> {
@@ -444,6 +459,7 @@ impl SideData for ServerConnectionData {
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        config.check_cookie_sealer()?;
         let mut common = CommonState::new(Side::Server);
         common.set_max_fragment_size(config.max_fragment_size)?;
         common.enable_secret_extraction = config.enable_secret_extraction;
@@ -785,10 +801,10 @@ impl Accepted {
         mut self,
         config: Arc<ServerConfig>,
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = self
-            .connection
-            .set_max_fragment_size(config.max_fragment_size)
-        {
+        if let Err(err) = config.check_cookie_sealer().and_then(|()| {
+            self.connection
+                .set_max_fragment_size(config.max_fragment_size)
+        }) {
             return Err((err, AcceptedAlert::from(self.connection)));
         }
         self.connection.enable_secret_extraction = config.enable_secret_extraction;

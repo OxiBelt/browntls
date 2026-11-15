@@ -111,6 +111,21 @@ class CommandTest(unittest.TestCase):
         allowed = self.scenario("tls12-cbc-without-etm-allowed")
         self.assertIn("--allow-mac-then-encrypt", e2e.browntls_args(allowed, "server"))
 
+    def test_optional_extension_arguments(self):
+        sc = self.scenario("tls13-optional-extensions")
+        client = e2e.browntls_args(sc, "client")
+        server = e2e.browntls_args(sc, "server")
+        for flag in ("--grease", "--ticket-request", "--padding"):
+            self.assertIn(flag, client)
+            self.assertNotIn(flag, server)
+        for args in (client, server):
+            self.assertEqual(
+                args[args.index("--record-size-limit") + 1], str(e2e.OPTIONAL_RECORD_SIZE_LIMIT)
+            )
+        plain = self.scenario("tls13-aes128gcm-x25519")
+        self.assertNotIn("--grease", e2e.browntls_args(plain, "client"))
+        self.assertNotIn("--record-size-limit", e2e.browntls_args(plain, "server"))
+
     def test_client_auth_arguments(self):
         sc = self.scenario("tls13-client-auth")
         self.assertIn("--client-ca", e2e.browntls_args(sc, "server"))

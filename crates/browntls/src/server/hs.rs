@@ -380,28 +380,44 @@ impl ExpectClientHello {
             )?;
         }
 
-        // Choose the certificate.
-        let certkey = self
-            .config
-            .cert_resolver
-            .resolve(ClientHello::new(
+        // On a server configured with external PSKs, a TLS 1.3 ClientHello
+        // that offers a PSK we may accept (with psk_dhe_ke, the only mode we
+        // use) can do without a certificate: whether one is needed is
+        // decided once a PSK is, or is not, selected (RFC 9846 §4.3.11).
+        // Other servers keep failing at once without a certificate.
+        let psk_may_authenticate = version == ProtocolVersion::TLSv1_3
+            && self.config.external_psks.is_some()
+            && client_hello.extensions.preshared_key.is_some()
+            && client_hello
+                .extensions
+                .psk_modes
+                .as_ref()
+                .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
+
+        // Choose the certificate. RFC 9846 §4.3.3: a client that wants
+        // certificate authentication sends signature_algorithms; one that
+        // offered only a PSK may omit it (see `process_client_hello`).
+        let certkey = if sig_schemes.is_empty() {
+            None
+        } else {
+            self.config.cert_resolver.resolve(ClientHello::new(
                 cx.data.sni.as_ref(),
                 &sig_schemes,
                 client_hello,
             ))
-            .ok_or_else(|| {
-                // RFC 9325 §3.7 (RFC 6066 §3): a server name it does not
-                // serve gets unrecognized_name.
-                cx.common.send_fatal_alert(
-                    if cx.data.sni.is_some() {
-                        AlertDescription::UnrecognisedName
-                    } else {
-                        AlertDescription::AccessDenied
-                    },
-                    Error::general("no server certificate chain resolved"),
-                )
-            })?;
-        let certkey = ActiveCertifiedKey::from_certified_key(&certkey);
+        };
+        if sig_schemes.is_empty() && !psk_may_authenticate {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::MissingExtension,
+                PeerIncompatible::SignatureAlgorithmsExtensionRequired,
+            ));
+        }
+        if certkey.is_none() && !psk_may_authenticate {
+            return Err(no_server_certificate(cx));
+        }
+        let certkey = certkey
+            .as_deref()
+            .map(ActiveCertifiedKey::from_certified_key);
 
         // RFC 7250: certificate types, for the server's and the client's credentials.
         let cert_types = NegotiatedCertTypes {
@@ -513,29 +529,32 @@ impl ExpectClientHello {
         cx.common.kx_state = KxState::Started(selected_kxg);
 
         // Cipher suite: suitable for the version, the certificate's key type
-        // and the key exchange algorithms available.
-        let sigalg = certkey.get_key().algorithm();
+        // and the key exchange algorithms available. Without a certificate
+        // only TLS 1.3, whose suites are independent of it, gets here.
+        let sigalg = certkey.as_ref().map(|k| k.get_key().algorithm());
         let kx_algo = selected_kxg.name().key_exchange_algorithm();
         // RFC 8422 §5.3: in TLS 1.2 the server must respect the client's
         // curves for the certificate too; an ECDSA certificate on a curve
         // the client did not list rules out every ECDSA suite. (TLS 1.3
         // binds the certificate's curve through signature_algorithms.)
         let ecdsa_cert_usable = version != ProtocolVersion::TLSv1_2
-            || ecdsa_certificate_curve(certkey.get_key())
+            || certkey
+                .as_ref()
+                .and_then(|k| ecdsa_certificate_curve(k.get_key()))
                 .is_none_or(|curve| client_groups.contains(&curve));
         // RFC 7366 §2 and RFC 9325 §4.2: a block cipher suite is only
         // usable with Encrypt-then-MAC unless the configuration allows
         // MAC-then-encrypt.
         let client_offers_etm = client_hello.extensions.encrypt_then_mac.is_some();
         let block_ciphers_usable = client_offers_etm || self.config.allow_mac_then_encrypt;
-        let suitable: Vec<SupportedCipherSuite> = self
+        let mut suitable: Vec<SupportedCipherSuite> = self
             .config
             .provider
             .cipher_suites
             .iter()
             .copied()
             .filter(|suite| suite.version().version == version)
-            .filter(|suite| suite.usable_for_signature_algorithm(sigalg))
+            .filter(|suite| sigalg.is_none_or(|alg| suite.usable_for_signature_algorithm(alg)))
             .filter(|suite| {
                 ecdsa_cert_usable
                     || !suite.usable_for_signature_algorithm(SignatureAlgorithm::ECDSA)
@@ -545,6 +564,40 @@ impl ExpectClientHello {
             })
             .filter(|suite| block_ciphers_usable || !suite.is_tls12_block_cipher())
             .collect();
+
+        // External PSKs the client offered (RFC 9846 §4.3.11). The server
+        // "MUST ensure that it selects a compatible PSK (if any) and cipher
+        // suite": the first offered external PSK usable with some suite we
+        // could pick narrows the choice to the suites it is usable with
+        // (after a HelloRetryRequest the suite is already fixed).
+        let external_psks = match (
+            &self.config.external_psks,
+            &client_hello.extensions.preshared_key,
+        ) {
+            (Some(resolver), Some(offer)) if psk_may_authenticate => {
+                crate::psk::external_psk_candidates(
+                    &**resolver,
+                    offer
+                        .identities
+                        .iter()
+                        .zip(&offer.binders)
+                        .map(|(id, binder)| (id.identity.0.as_slice(), binder.as_ref().len())),
+                    cx.data.sni.as_ref(),
+                    cx.common.alpn_protocol.as_deref(),
+                )
+            }
+            _ => Vec::new(),
+        };
+        if self.retry_choice.is_none()
+            && let Some(first) = external_psks.iter().find(|candidate| {
+                suitable.iter().any(|s| {
+                    client_hello.cipher_suites.contains(&s.suite())
+                        && s.tls13().is_some_and(|t| candidate.compatible_with(t))
+                })
+            })
+        {
+            suitable.retain(|s| s.tls13().is_some_and(|t| first.compatible_with(t)));
+        }
 
         // Preferred suites first, then the non-preferred tier (RFC 9846
         // optional suites); within a tier, the client's order unless
@@ -623,6 +676,7 @@ impl ExpectClientHello {
                 done_retry: self.done_retry,
                 send_tickets: self.send_tickets,
                 cert_types,
+                external_psks,
             }
             .handle_client_hello(
                 cx,
@@ -634,6 +688,17 @@ impl ExpectClientHello {
             ),
             #[cfg(feature = "tls12")]
             SupportedCipherSuite::Tls12(suite) => {
+                // External PSKs exist only in TLS 1.3.
+                if self.config.require_external_psk {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        PeerIncompatible::ExternalPskRequired,
+                    ));
+                }
+                // Only a TLS 1.3 handshake may go without a certificate.
+                let Some(certkey) = certkey else {
+                    return Err(no_server_certificate(cx));
+                };
                 let using_ems = client_hello.ems_support_offered();
                 if self.config.require_ems && !using_ems {
                     return Err(cx.common.send_fatal_alert(
@@ -666,6 +731,21 @@ impl ExpectClientHello {
             }
         }
     }
+}
+
+/// Fails the handshake for want of a server certificate.
+///
+/// RFC 9325 §3.7 (RFC 6066 §3): a server name the server does not serve
+/// gets unrecognized_name.
+pub(super) fn no_server_certificate(cx: &mut ServerContext<'_>) -> Error {
+    cx.common.send_fatal_alert(
+        if cx.data.sni.is_some() {
+            AlertDescription::UnrecognisedName
+        } else {
+            AlertDescription::AccessDenied
+        },
+        Error::general("no server certificate chain resolved"),
+    )
 }
 
 /// The `record_size_limit` to send for `version` (RFC 8449 §4): our
@@ -861,6 +941,18 @@ pub(super) fn process_client_hello<'a>(
         .supported_versions
         .as_ref()
         .is_some_and(|v| v.contains(&ProtocolVersion::TLSv1_3));
+    // RFC 9846 §4.3.3 requires signature_algorithms of a client that wants
+    // certificate authentication: one that offers only TLS 1.3 and a PSK may
+    // leave it out, and is then served only with that PSK.
+    let psk_only = client_hello.extensions.preshared_key.is_some()
+        && client_hello
+            .extensions
+            .supported_versions
+            .as_ref()
+            .is_some_and(|v| v.iter().all(|v| *v == ProtocolVersion::TLSv1_3) && !v.is_empty());
+    if psk_only && client_hello.signature_schemes().is_none() {
+        return Ok((client_hello, Vec::new()));
+    }
     let sig_schemes = client_hello
         .signature_schemes()
         .ok_or_else(|| {

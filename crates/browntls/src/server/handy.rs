@@ -127,6 +127,17 @@ impl ProducesTickets for NeverProducesTickets {
     }
 }
 
+/// A resolver with no certificate, for servers that authenticate with
+/// external PSKs only.
+#[derive(Debug)]
+pub(super) struct NoServerCert;
+
+impl ResolvesServerCert for NoServerCert {
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        None
+    }
+}
+
 impl ResolvesServerCert for SingleCertAndKey {
     fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())

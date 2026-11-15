@@ -77,6 +77,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) unknown: Vec<ExtensionType>,
     /// Always encoded last (RFC 8446 §4.2.11).
     pub(crate) preshared_key: Option<PresharedKeyOffer>,
+    /// RFC 8773 `tls_cert_with_extern_psk`: an empty extension.
+    pub(crate) cert_with_extern_psk: Option<()>,
 }
 
 impl ClientExtensions {
@@ -165,6 +167,10 @@ impl ClientExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(
+            self.cert_with_extern_psk.is_some(),
+            ExtensionType::TlsCertWithExternPsk,
+        );
         for unknown in &self.unknown {
             add(true, *unknown);
         }
@@ -285,6 +291,9 @@ impl Codec<'_> for ClientExtensions {
         if let Some(request) = &self.ticket_request {
             encode_extension(ExtensionType::TicketRequest, out, |b| request.encode(b));
         }
+        if self.cert_with_extern_psk.is_some() {
+            encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
+        }
         if let Some(grease) = self.grease_last {
             // RFC 8701 §3: the second GREASE extension is not empty.
             encode_extension(ExtensionType::Unknown(grease), out, |b| b.push(0));
@@ -396,6 +405,7 @@ impl Codec<'_> for ClientExtensions {
                     out.delegated_credential =
                         Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
                 }
+                ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();
@@ -531,6 +541,9 @@ pub(crate) struct ServerHelloPayload {
 }
 
 /// The result of parsing a ServerHello-shaped message.
+// Short-lived: `HandshakePayload::read` converts it at once, so boxing the
+// larger variant would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServerHelloOrRetry {
     Hello(ServerHelloPayload),
     Retry(HelloRetryRequest),

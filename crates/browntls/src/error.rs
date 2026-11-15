@@ -339,6 +339,9 @@ pub enum PeerIncompatible {
     /// The server selected an external PSK without the certificate
     /// authentication (RFC 8773) our configuration requires.
     CertWithExternPskRequired,
+    /// The peer completed (or would complete) the handshake without the
+    /// external PSK our configuration requires (`require_external_psk`).
+    ExternalPskRequired,
 }
 
 impl From<PeerIncompatible> for Error {

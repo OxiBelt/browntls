@@ -17,6 +17,7 @@ use crate::msgs::handshake::CertificateChain;
 use crate::msgs::message::{Message, OutboundChunks, OutboundPlainMessage, PlainMessage};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
+use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
 
 /// Plaintext received from the peer is buffered up to this many bytes before
@@ -169,8 +170,12 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
-    /// The identity of the external PSK the handshake used, if any.
-    pub(crate) external_psk_identity: Option<Vec<u8>>,
+    /// The external PSK the handshake uses: the one selected, or the one a
+    /// resumed session was established with.
+    pub(crate) external_psk: Option<Arc<crate::psk::ExternalPsk>>,
+    /// Whether the peer's Finished has verified, which authenticates the
+    /// peer's knowledge of [`Self::external_psk`].
+    pub(crate) external_psk_confirmed: bool,
 }
 
 impl CommonState {
@@ -206,7 +211,8 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
-            external_psk_identity: None,
+            external_psk: None,
+            external_psk_confirmed: false,
         }
     }
 
@@ -254,15 +260,35 @@ impl CommonState {
     }
 
     /// The identity of the external PSK (RFC 9846 §4.3.11) the handshake
-    /// authenticated with, once the server selected one; for an imported
-    /// PSK (RFC 9258), its external identity.
+    /// authenticated with; for an imported PSK (RFC 9258), its external
+    /// identity. `None` until the peer's Finished message has verified (which
+    /// proves the peer holds the key), and for a handshake that used no
+    /// external PSK.
     ///
     /// Such a handshake is reported as [`HandshakeKind::Full`] (or
     /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
     /// authentication was negotiated on top of it (RFC 8773), there are no
-    /// peer certificates.
+    /// peer certificates. A session resumed from a ticket issued on such a
+    /// connection ([`HandshakeKind::Resumed`]) reports the same identity.
+    ///
+    /// A peer that offers or accepts external PSKs may still complete a
+    /// handshake without one (with certificates, or by resuming a session
+    /// that used none): unless `require_external_psk` is set in the
+    /// [`ClientConfig`](crate::ClientConfig) or
+    /// [`ServerConfig`](crate::ServerConfig), check this after the handshake.
     pub fn external_psk_identity(&self) -> Option<&[u8]> {
-        self.external_psk_identity.as_deref()
+        self.external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+            .map(|psk| psk.identity())
+    }
+
+    /// The external PSK to record in a ticket issued on this connection.
+    pub(crate) fn external_psk_binding(&self) -> Option<crate::psk::ExternalPskBinding> {
+        self.external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+            .map(|psk| crate::psk::ExternalPskBinding::of(psk))
     }
 
     /// Whether every negotiated component claims FIPS validation.

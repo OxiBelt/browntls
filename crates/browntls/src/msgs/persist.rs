@@ -12,6 +12,7 @@ use super::handshake::CertificateChain;
 use super::handshake::SessionId;
 use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::InvalidMessage;
+use crate::psk::ExternalPskBinding;
 use crate::sync::Arc;
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
@@ -74,6 +75,8 @@ pub struct Tls13ClientSessionValue {
     age_add: u32,
     max_early_data_size: u32,
     pub(crate) common: ClientSessionCommon,
+    /// The external PSK the session was established with, if any.
+    external_psk: Option<ExternalPskBinding>,
 }
 
 impl Tls13ClientSessionValue {
@@ -99,7 +102,25 @@ impl Tls13ClientSessionValue {
                 lifetime_secs,
                 server_cert_chain,
             ),
+            external_psk: None,
         }
+    }
+
+    /// Records the external PSK the session was established with.
+    pub(crate) fn with_external_psk(mut self, external_psk: Option<ExternalPskBinding>) -> Self {
+        self.external_psk = external_psk;
+        self
+    }
+
+    pub(crate) fn external_psk(&self) -> Option<&ExternalPskBinding> {
+        self.external_psk.as_ref()
+    }
+
+    /// The identity of the external PSK (RFC 9846 §4.3.11) the session was
+    /// established with, if it was; resuming it needs that PSK to still be
+    /// configured, and reports this identity again.
+    pub fn external_psk_identity(&self) -> Option<&[u8]> {
+        self.external_psk.as_ref().map(|b| b.identity.as_slice())
     }
 
     /// How much early data the server will accept with this ticket.
@@ -133,6 +154,7 @@ impl fmt::Debug for Tls13ClientSessionValue {
             .field("suite", &self.suite.common.suite)
             .field("max_early_data_size", &self.max_early_data_size)
             .field("common", &self.common)
+            .field("external_psk", &self.external_psk.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -283,6 +305,9 @@ pub(crate) struct ServerSessionValue {
     pub creation_time_sec: u64,
     pub(crate) age_obfuscation_offset: u32,
     freshness: Option<bool>,
+    /// The external PSK a TLS 1.3 session was established with: resuming
+    /// it requires that PSK to still be configured and usable.
+    pub(crate) external_psk: Option<ExternalPskBinding>,
 }
 
 impl ServerSessionValue {
@@ -310,7 +335,12 @@ impl ServerSessionValue {
             creation_time_sec: creation_time.as_secs(),
             age_obfuscation_offset,
             freshness: None,
+            external_psk: None,
         }
+    }
+
+    pub(crate) fn set_external_psk(&mut self, external_psk: Option<ExternalPskBinding>) {
+        self.external_psk = external_psk;
     }
 
     pub(crate) fn set_extended_ms_used(&mut self) {
@@ -360,6 +390,7 @@ impl fmt::Debug for ServerSessionValue {
             .field("has_client_cert", &self.client_cert_chain.is_some())
             .field("alpn", &self.alpn)
             .field("creation_time_sec", &self.creation_time_sec)
+            .field("external_psk", &self.external_psk.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -394,6 +425,19 @@ impl Codec<'_> for ServerSessionValue {
         self.application_data.encode(bytes);
         self.creation_time_sec.encode(bytes);
         self.age_obfuscation_offset.encode(bytes);
+        match &self.external_psk {
+            None => 0u8.encode(bytes),
+            Some(binding) => {
+                match &binding.import_context {
+                    None => 1u8.encode(bytes),
+                    Some(_) => 2u8.encode(bytes),
+                }
+                PayloadU16::encode_slice(&binding.identity, bytes);
+                if let Some(context) = &binding.import_context {
+                    PayloadU16::encode_slice(context, bytes);
+                }
+            }
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -432,6 +476,21 @@ impl Codec<'_> for ServerSessionValue {
         let application_data = PayloadU16::read(r)?;
         let creation_time_sec = u64::read(r)?;
         let age_obfuscation_offset = u32::read(r)?;
+        let external_psk = match u8::read(r)? {
+            0 => None,
+            tag @ (1 | 2) => {
+                let identity = PayloadU16::read(r)?.0;
+                let import_context = match tag {
+                    2 => Some(PayloadU16::read(r)?.0),
+                    _ => None,
+                };
+                Some(ExternalPskBinding {
+                    identity,
+                    import_context,
+                })
+            }
+            _ => return Err(InvalidMessage::IllegalEmptyValue),
+        };
         Ok(Self {
             sni,
             version,
@@ -444,6 +503,7 @@ impl Codec<'_> for ServerSessionValue {
             creation_time_sec,
             age_obfuscation_offset,
             freshness: None,
+            external_psk,
         })
     }
 }
@@ -490,6 +550,26 @@ mod tests {
         assert!(!back.is_fresh());
         assert!(ServerSessionValue::read_bytes(&enc[..enc.len() - 1]).is_err());
         assert!(alloc::format!("{back:?}").contains("example.com"));
+        assert_eq!(back.external_psk, None);
+    }
+
+    #[test]
+    fn server_value_external_psk_roundtrip() {
+        for import_context in [None, Some(Vec::new()), Some(alloc::vec![5, 6])] {
+            let mut v = sample();
+            let binding = ExternalPskBinding {
+                identity: b"psk".to_vec(),
+                import_context,
+            };
+            v.set_external_psk(Some(binding.clone()));
+            let enc = v.get_encoding();
+            let back = ServerSessionValue::read_bytes(&enc).unwrap();
+            assert_eq!(back.external_psk, Some(binding));
+            assert!(ServerSessionValue::read_bytes(&enc[..enc.len() - 1]).is_err());
+        }
+        let mut enc = sample().get_encoding();
+        *enc.last_mut().unwrap() = 3;
+        assert!(ServerSessionValue::read_bytes(&enc).is_err());
     }
 
     #[test]

@@ -246,6 +246,35 @@ impl CompleteClientHelloHandling {
                     {
                         continue;
                     }
+                    // A session established with an external PSK resumes
+                    // only while that PSK still resolves, unchanged, and is
+                    // usable on this connection (ALPN, server name, suite);
+                    // `require_external_psk` passes over other sessions.
+                    let resumed_external = match &resume.external_psk {
+                        Some(binding) => {
+                            let Some(psk) = self
+                                .config
+                                .external_psks
+                                .as_ref()
+                                .and_then(|resolver| resolver.resolve(&binding.identity))
+                                .filter(|psk| {
+                                    binding.matches(psk)
+                                        && psk.usable_by_server(
+                                            cx.data.sni.as_ref(),
+                                            cx.common.alpn_protocol.as_deref(),
+                                        )
+                                        && psk
+                                            .cipher_suite()
+                                            .is_none_or(|cs| cs == self.suite.common.suite)
+                                })
+                            else {
+                                continue;
+                            };
+                            Some(psk)
+                        }
+                        None if self.config.require_external_psk => continue,
+                        None => None,
+                    };
                     // A PSK past the lifetime we announced for it is not
                     // offered resumption (RFC 9846 §4.7.1).
                     let now = self.config.current_time()?;
@@ -267,6 +296,8 @@ impl CompleteClientHelloHandling {
                         ));
                     }
                     chosen_psk_index = Some(i);
+                    // Reported once the client's Finished verifies.
+                    cx.common.external_psk = resumed_external;
                     resumedata =
                         Some(resume.set_freshness(
                             psk_id.obfuscated_ticket_age,
@@ -284,7 +315,14 @@ impl CompleteClientHelloHandling {
         }
         if let Some((candidate, _)) = &external {
             debug!("Selected external PSK at index {}", candidate.index);
-            cx.common.external_psk_identity = Some(candidate.psk.identity().to_vec());
+            // Reported once the client's Finished verifies.
+            cx.common.external_psk = Some(candidate.psk.clone());
+        }
+        if self.config.require_external_psk && cx.common.external_psk.is_none() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::ExternalPskRequired,
+            ));
         }
 
         // RFC 8773: certificate authentication on top of an external PSK,
@@ -1133,7 +1171,7 @@ fn emit_ticket(
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
     let now = config.current_time()?;
-    let plain = ServerSessionValue::new(
+    let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
         ProtocolVersion::TLSv1_3,
         suite.common.suite,
@@ -1143,8 +1181,9 @@ fn emit_ticket(
         cx.data.resumption_data.clone(),
         now,
         age_add,
-    )
-    .get_encoding();
+    );
+    value.set_external_psk(cx.common.external_psk_binding());
+    let plain = value.get_encoding();
 
     let ticket = if config.ticketer.enabled() {
         match config.ticketer.encrypt(&plain) {
@@ -1204,6 +1243,9 @@ impl State<ServerConnectionData> for ExpectFinished {
                 .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
         }
         let fin = FinishedMessageVerified::assertion();
+        // The client has proven it holds the external PSK, if one is in use;
+        // tickets issued below record it.
+        cx.common.external_psk_confirmed = true;
 
         st.transcript.add_message(&m);
         let key_schedule = st.key_schedule.into_traffic(cx.common);

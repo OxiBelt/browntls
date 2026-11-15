@@ -470,7 +470,9 @@ fn ticket_and_external_psk_offered_together() {
     do_handshake(&mut client, &mut server).unwrap();
     assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
     assert_eq!(server.handshake_kind(), Some(HandshakeKind::Resumed));
-    assert_eq!(client.external_psk_identity(), None);
+    // The ticket came from an external-PSK session and carries its identity.
+    assert_eq!(client.external_psk_identity(), Some(&b"client-1"[..]));
+    assert_eq!(server.external_psk_identity(), Some(&b"client-1"[..]));
     exchange_data(&mut client, &mut server);
 
     // Third: a server that does not know the ticket takes the external PSK,
@@ -1008,8 +1010,10 @@ fn psk_client_hello_without_signature_algorithms() {
         server.read_tls(&mut input).unwrap();
     }
     server.process_new_packets().unwrap();
-    assert_eq!(server.external_psk_identity(), Some(&b"client-1"[..]));
+    // A server without a certificate answers only by selecting the PSK; the
+    // identity is reported once the client's Finished verifies.
     assert!(server.wants_write());
+    assert_eq!(server.external_psk_identity(), None);
 
     // A server with a certificate and no external PSKs still requires the
     // extension.
@@ -1022,4 +1026,428 @@ fn psk_client_hello_without_signature_algorithms() {
         server.process_new_packets().unwrap_err(),
         Error::PeerIncompatible(PeerIncompatible::SignatureAlgorithmsExtensionRequired)
     );
+}
+
+// ------------------------------------------------------ require_external_psk
+
+/// Hands the tickets `server` sent to `client`.
+fn take_tickets(client: &mut ClientConnection, server: &mut ServerConnection) {
+    transfer(server, client);
+    client.process_new_packets().unwrap();
+    assert!(client.tls13_tickets_received() > 0);
+}
+
+#[test]
+fn client_requiring_an_external_psk_refuses_a_certificate() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    // The server does not know the client's key and authenticates with its
+    // certificate, which the client would accept...
+    let mut client_config = client_with(&chain, vec![psk(b"a", HashAlgorithm::SHA256)]);
+    let (mut client, mut server) = connect(
+        client_config.clone(),
+        cert_and_psk_server(&chain, vec![psk(b"b", HashAlgorithm::SHA256)]),
+    );
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.external_psk_identity(), None);
+    assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
+
+    // ...unless it requires an external PSK.
+    client_config.require_external_psk = true;
+    let (mut client, mut server) = connect(
+        client_config.clone(),
+        cert_and_psk_server(&chain, vec![psk(b"b", HashAlgorithm::SHA256)]),
+    );
+    let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        client_res.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::ExternalPskRequired)
+    );
+    assert_eq!(
+        server_res.unwrap_err(),
+        Error::AlertReceived(AlertDescription::HandshakeFailure)
+    );
+
+    // With a server that knows the key, it is used.
+    let (mut client, mut server) = connect(
+        client_config,
+        cert_and_psk_server(&chain, vec![psk(b"a", HashAlgorithm::SHA256)]),
+    );
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.external_psk_identity(), Some(&b"a"[..]));
+}
+
+#[test]
+fn server_requiring_an_external_psk_refuses_certificate_clients() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut server_config = cert_and_psk_server(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]);
+    server_config.require_external_psk = true;
+    let server_config = Arc::new(server_config);
+
+    // A client without the key would get the certificate otherwise.
+    let mut client = ClientConnection::new(
+        Arc::new(client_with(
+            &chain,
+            vec![psk(b"other", HashAlgorithm::SHA256)],
+        )),
+        server_name(),
+    )
+    .unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        server_res.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::ExternalPskRequired)
+    );
+    assert_eq!(
+        client_res.unwrap_err(),
+        Error::AlertReceived(AlertDescription::HandshakeFailure)
+    );
+
+    let mut client = ClientConnection::new(
+        Arc::new(client_with(&chain, vec![psk(b"k", HashAlgorithm::SHA256)])),
+        server_name(),
+    )
+    .unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(server.external_psk_identity(), Some(&b"k"[..]));
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn requiring_an_external_psk_refuses_tls12() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    // Client side: a TLS 1.2 server.
+    let mut client_config = client_config(&chain);
+    client_config.external_psks = vec![Arc::new(psk(b"k", HashAlgorithm::SHA256))];
+    client_config.require_external_psk = true;
+    let server_config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    let (mut client, mut server) = connect(client_config, server_config);
+    let (client_res, _) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        client_res.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::ExternalPskRequired)
+    );
+
+    // Server side: a TLS 1.2 client.
+    let client_config = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    let mut server_config = cert_and_psk_server(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]);
+    server_config.require_external_psk = true;
+    let (mut client, mut server) = connect(client_config, server_config);
+    let (_, server_res) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        server_res.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::ExternalPskRequired)
+    );
+}
+
+// ------------------------------------------- tickets of external-PSK sessions
+
+#[test]
+fn tickets_of_external_psk_sessions_keep_the_psk() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(16);
+    let server = |psks: Vec<ExternalPsk>, require: bool| {
+        let mut config = cert_and_psk_server(&chain, psks);
+        config.session_storage = cache.clone();
+        config.require_external_psk = require;
+        Arc::new(config)
+    };
+    let mut client_config = client_with(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]);
+    client_config.require_external_psk = true;
+    let client_config = Arc::new(client_config);
+
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut first =
+        ServerConnection::new(server(vec![psk(b"k", HashAlgorithm::SHA256)], false)).unwrap();
+    do_handshake(&mut client, &mut first).unwrap();
+    take_tickets(&mut client, &mut first);
+
+    // Resuming reports the identity, and satisfies `require_external_psk`
+    // on both sides.
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut second =
+        ServerConnection::new(server(vec![psk(b"k", HashAlgorithm::SHA256)], true)).unwrap();
+    do_handshake(&mut client, &mut second).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(second.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(client.external_psk_identity(), Some(&b"k"[..]));
+    assert_eq!(second.external_psk_identity(), Some(&b"k"[..]));
+    assert!(client.peer_certificates().is_none());
+    exchange_data(&mut client, &mut second);
+    // Tickets issued on a resumed session carry the PSK forward.
+    take_tickets(&mut client, &mut second);
+
+    // A server whose resolver no longer has the key does not resume the
+    // session (nor select the key): a certificate handshake follows.
+    let mut client_config = (*client_config).clone();
+    client_config.require_external_psk = false;
+    let mut client = ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
+    let mut third = ServerConnection::new(server(Vec::new(), false)).unwrap();
+    do_handshake(&mut client, &mut third).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(third.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(client.external_psk_identity(), None);
+    assert_eq!(third.external_psk_identity(), None);
+    assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
+}
+
+#[test]
+fn imported_psk_tickets_keep_the_import_context() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(16);
+    let server = |context: &[u8]| {
+        let mut config = cert_and_psk_server(
+            &chain,
+            vec![imported(b"epsk", HashAlgorithm::SHA256, context)],
+        );
+        config.session_storage = cache.clone();
+        // Only the first server issues tickets: the client then holds those.
+        if context != b"ctx" {
+            config.send_tls13_tickets = 0;
+        }
+        Arc::new(config)
+    };
+    let client_config = Arc::new(client_with(
+        &chain,
+        vec![imported(b"epsk", HashAlgorithm::SHA256, b"ctx")],
+    ));
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut first = ServerConnection::new(server(b"ctx")).unwrap();
+    do_handshake(&mut client, &mut first).unwrap();
+    take_tickets(&mut client, &mut first);
+
+    // The server now holds the identity with another importer context: the
+    // ticket is not resumed, and the key is not selected either.
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut second = ServerConnection::new(server(b"other")).unwrap();
+    do_handshake(&mut client, &mut second).unwrap();
+    assert_eq!(second.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(second.external_psk_identity(), None);
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut third = ServerConnection::new(server(b"ctx")).unwrap();
+    do_handshake(&mut client, &mut third).unwrap();
+    assert_eq!(third.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(client.external_psk_identity(), Some(&b"epsk"[..]));
+    assert_eq!(third.external_psk_identity(), Some(&b"epsk"[..]));
+}
+
+#[test]
+fn resumption_rechecks_the_alpn_restriction() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let h2 = b"h2".to_vec();
+    let http11 = b"http/1.1".to_vec();
+    // SHA-384, the hash of the suite the server prefers: without the key,
+    // it would still pick a suite the ticket can resume with.
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(16);
+    let server = |protocols: Vec<Vec<u8>>| {
+        let mut config = cert_and_psk_server(
+            &chain,
+            vec![psk(b"k", HashAlgorithm::SHA384).with_alpn_protocol(b"h2".to_vec())],
+        );
+        config.session_storage = cache.clone();
+        // Only servers that would select the key issue tickets: the client
+        // then holds tickets of external-PSK sessions only.
+        if !protocols.contains(&b"h2".to_vec()) {
+            config.send_tls13_tickets = 0;
+        }
+        config.alpn_protocols = protocols;
+        Arc::new(config)
+    };
+    let mut client_config = client_with(
+        &chain,
+        vec![psk(b"k", HashAlgorithm::SHA384).with_alpn_protocol(h2.clone())],
+    );
+    client_config.alpn_protocols = vec![h2.clone(), http11.clone()];
+    let client_config = Arc::new(client_config);
+
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut first = ServerConnection::new(server(vec![h2.clone()])).unwrap();
+    do_handshake(&mut client, &mut first).unwrap();
+    assert_eq!(first.external_psk_identity(), Some(&b"k"[..]));
+    take_tickets(&mut client, &mut first);
+
+    // The server now negotiates another protocol: the key's restriction
+    // excludes resuming its session as much as selecting it.
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut second = ServerConnection::new(server(vec![http11])).unwrap();
+    do_handshake(&mut client, &mut second).unwrap();
+    assert_eq!(second.alpn_protocol(), Some(&b"http/1.1"[..]));
+    assert_eq!(second.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(client.external_psk_identity(), None);
+    assert_eq!(second.external_psk_identity(), None);
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut third = ServerConnection::new(server(vec![h2])).unwrap();
+    do_handshake(&mut client, &mut third).unwrap();
+    assert_eq!(third.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(client.external_psk_identity(), Some(&b"k"[..]));
+}
+
+#[test]
+fn which_tickets_go_with_external_psks() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    // SHA-384, the hash of the suite the certificate session below uses:
+    // its ticket must be usable next to the key.
+    let resolver = Arc::new(RecordingResolver {
+        keys: vec![Arc::new(psk(b"k", HashAlgorithm::SHA384))],
+        ..Default::default()
+    });
+    let mut server_config = server_config(&chain);
+    server_config.external_psks = Some(resolver.clone());
+    server_config.cert_with_extern_psk = true;
+    let server_config = Arc::new(server_config);
+    // How many identities the server was offered.
+    let offered = || std::mem::take(&mut *resolver.asked.lock().unwrap()).len();
+
+    // A certificate session, whose tickets go to the client's store.
+    let base = client_with(&chain, Vec::new());
+    let mut client = ClientConnection::new(Arc::new(base.clone()), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    take_tickets(&mut client, &mut server);
+    assert_eq!(offered(), 0);
+
+    // Usually the ticket is offered first, then the external PSK.
+    let mut with_psk = base.clone();
+    with_psk.external_psks = vec![Arc::new(psk(b"k", HashAlgorithm::SHA384))];
+    let mut client = ClientConnection::new(Arc::new(with_psk.clone()), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(offered(), 2);
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(client.external_psk_identity(), None);
+    take_tickets(&mut client, &mut server);
+
+    // A client that requires an external PSK does not offer the ticket of a
+    // certificate session.
+    let mut required = with_psk.clone();
+    required.require_external_psk = true;
+    let mut client = ClientConnection::new(Arc::new(required), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(offered(), 1);
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(client.external_psk_identity(), Some(&b"k"[..]));
+    take_tickets(&mut client, &mut server);
+
+    // With RFC 8773, no ticket goes along, not even one of an external-PSK
+    // session: the server cannot resume instead of authenticating with its
+    // certificate.
+    let mut cert_with_psk = with_psk;
+    cert_with_psk.cert_with_extern_psk = true;
+    let mut client = ClientConnection::new(Arc::new(cert_with_psk), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(offered(), 1);
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(client.external_psk_identity(), Some(&b"k"[..]));
+    assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
+}
+
+#[test]
+fn server_requiring_an_external_psk_passes_over_other_tickets() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(16);
+    let server = |require: bool| {
+        let mut config = cert_and_psk_server(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]);
+        config.session_storage = cache.clone();
+        config.require_external_psk = require;
+        Arc::new(config)
+    };
+    let base = client_with(&chain, Vec::new());
+    let mut client = ClientConnection::new(Arc::new(base.clone()), server_name()).unwrap();
+    let mut first = ServerConnection::new(server(false)).unwrap();
+    do_handshake(&mut client, &mut first).unwrap();
+    assert_eq!(first.external_psk_identity(), None);
+    take_tickets(&mut client, &mut first);
+
+    // The certificate session's ticket comes first, but the server takes
+    // the external PSK.
+    let mut with_psk = base;
+    with_psk.external_psks = vec![Arc::new(psk(b"k", HashAlgorithm::SHA256))];
+    let mut client = ClientConnection::new(Arc::new(with_psk), server_name()).unwrap();
+    let mut second = ServerConnection::new(server(true)).unwrap();
+    do_handshake(&mut client, &mut second).unwrap();
+    assert_eq!(second.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(second.external_psk_identity(), Some(&b"k"[..]));
+}
+
+// ---------------------------------------------- reported after Finished
+
+#[test]
+fn identity_is_reported_once_the_peer_finished() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (mut client, mut server) = connect(
+        client_with(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]),
+        psk_only_server(vec![psk(b"k", HashAlgorithm::SHA256)]),
+    );
+    // ClientHello: the server selects the key and sends its flight up to
+    // its Finished, but has not seen the client's Finished.
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    assert!(server.is_handshaking());
+    assert_eq!(server.external_psk_identity(), None);
+
+    // The client verifies the server's Finished.
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.external_psk_identity(), Some(&b"k"[..]));
+    assert_eq!(server.external_psk_identity(), None);
+
+    // The server verifies the client's Finished.
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    assert!(!server.is_handshaking());
+    assert_eq!(server.external_psk_identity(), Some(&b"k"[..]));
+}
+
+#[test]
+fn identity_is_not_reported_when_the_peer_finished_fails() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (mut client, mut server) = connect(
+        client_with(&chain, vec![psk(b"k", HashAlgorithm::SHA256)]),
+        psk_only_server(vec![psk(b"k", HashAlgorithm::SHA256)]),
+    );
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    // Corrupt the server's last record (its Finished, encrypted): the client
+    // cannot authenticate the server and reports no identity.
+    let mut flight = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut flight).unwrap();
+    }
+    let last = flight.len() - 1;
+    flight[last] ^= 1;
+    let mut cursor = &flight[..];
+    while !cursor.is_empty() {
+        client.read_tls(&mut cursor).unwrap();
+    }
+    assert!(client.process_new_packets().is_err());
+    assert_eq!(client.external_psk_identity(), None);
 }

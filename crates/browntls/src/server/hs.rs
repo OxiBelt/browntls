@@ -523,6 +523,13 @@ impl ExpectClientHello {
             ),
             #[cfg(feature = "tls12")]
             SupportedCipherSuite::Tls12(suite) => {
+                // External PSKs exist only in TLS 1.3.
+                if self.config.require_external_psk {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        PeerIncompatible::ExternalPskRequired,
+                    ));
+                }
                 // Only a TLS 1.3 handshake may go without a certificate.
                 let Some(certkey) = certkey else {
                     return Err(no_server_certificate(cx));

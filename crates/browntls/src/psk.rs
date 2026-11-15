@@ -66,24 +66,22 @@ impl ExternalPsk {
     /// RFC 9846 §4.3.11 makes SHA-256 the hash of an external PSK that was
     /// provisioned without one. The identity must be 1 to 65535 bytes long and
     /// the key [`Self::MIN_KEY_LEN`] to [`Self::MAX_KEY_LEN`] bytes.
-    pub fn new(identity: Vec<u8>, key: Vec<u8>, hash: HashAlgorithm) -> Result<Self, Error> {
-        if identity.is_empty() || identity.len() > usize::from(u16::MAX) {
-            return Err(Error::general(
-                "external PSK identity must be 1 to 65535 bytes",
-            ));
-        }
-        if key.len() < Self::MIN_KEY_LEN {
-            return Err(Error::general(
-                "external PSK shorter than 128 bits (RFC 9257)",
-            ));
-        }
-        if key.len() > Self::MAX_KEY_LEN {
-            return Err(Error::general("external PSK longer than 1024 bytes"));
-        }
-        if !matches!(hash, HashAlgorithm::SHA256 | HashAlgorithm::SHA384) {
-            return Err(Error::general(
-                "external PSK hash must be SHA-256 or SHA-384",
-            ));
+    pub fn new(identity: Vec<u8>, mut key: Vec<u8>, hash: HashAlgorithm) -> Result<Self, Error> {
+        let problem = if identity.is_empty() || identity.len() > usize::from(u16::MAX) {
+            Some("external PSK identity must be 1 to 65535 bytes")
+        } else if key.len() < Self::MIN_KEY_LEN {
+            Some("external PSK shorter than 128 bits (RFC 9257)")
+        } else if key.len() > Self::MAX_KEY_LEN {
+            Some("external PSK longer than 1024 bytes")
+        } else if !matches!(hash, HashAlgorithm::SHA256 | HashAlgorithm::SHA384) {
+            Some("external PSK hash must be SHA-256 or SHA-384")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            // The rejected key is still key material: wipe it.
+            crate::crypto::zeroize_vec(&mut key);
+            return Err(Error::general(problem));
         }
         Ok(Self {
             identity,
@@ -241,6 +239,30 @@ impl fmt::Debug for ExternalPsk {
             .field("max_early_data_size", &self.max_early_data_size)
             .field("imported", &self.import_context.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// What a resumption ticket records of the external PSK its session was
+/// established with: the PSK is looked up again (and its restrictions
+/// checked again) when the ticket is used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExternalPskBinding {
+    pub(crate) identity: Vec<u8>,
+    /// The importer context, for a PSK used through the importer (RFC 9258).
+    pub(crate) import_context: Option<Vec<u8>>,
+}
+
+impl ExternalPskBinding {
+    pub(crate) fn of(psk: &ExternalPsk) -> Self {
+        Self {
+            identity: psk.identity.clone(),
+            import_context: psk.import_context.clone(),
+        }
+    }
+
+    /// Whether `psk` is the key this binding names, used the same way.
+    pub(crate) fn matches(&self, psk: &ExternalPsk) -> bool {
+        psk.identity == self.identity && psk.import_context == self.import_context
     }
 }
 

@@ -432,6 +432,50 @@ fn emit_client_hello_for_retry(
         input.resuming = None;
     }
 
+    // Our external PSKs, in configuration order (RFC 9846 §4.3.11): whether
+    // we offer any decides which ticket may go with them.
+    let external_offers = if supports_tls13 && !config.external_psks.is_empty() {
+        crate::psk::client_external_offers(
+            &config.external_psks,
+            &config.provider.cipher_suites,
+            committed_suite.and_then(|s| s.tls13()),
+            &input.server_name,
+            &input.alpn_protocols,
+        )
+    } else {
+        Vec::new()
+    };
+    // RFC 8773: ask for certificate authentication on top of an external PSK.
+    let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
+    if cert_with_extern_psk {
+        exts.cert_with_extern_psk = Some(());
+    }
+
+    if let Some(Retrieved {
+        value: ClientSessionValue::Tls13(inner),
+        ..
+    }) = &input.resuming
+    {
+        // A session established with an external PSK is resumed only while
+        // that PSK is still configured and usable on this connection: the
+        // resumption carries its authentication forward. With
+        // `require_external_psk`, other sessions are not offered at all.
+        let ticket_usable = match inner.external_psk() {
+            Some(binding) => config.external_psks.iter().any(|psk| {
+                binding.matches(psk)
+                    && psk.usable_by_client(&input.server_name, &input.alpn_protocols)
+            }),
+            None => !config.require_external_psk,
+        };
+        // RFC 8773 asks for certificate authentication with an external PSK;
+        // a server that resumed the ticket instead would skip it. Rather
+        // than let the server choose, the ticket is not offered alongside
+        // (a conservative choice; RFC 8773 does not require it).
+        if !ticket_usable || cert_with_extern_psk {
+            input.resuming = None;
+        }
+    }
+
     // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in below.
     let tls13_session = match &input.resuming {
         Some(retrieved) if supports_tls13 => retrieved.map(|v| match v {
@@ -441,8 +485,8 @@ fn emit_client_hello_for_retry(
         }),
         _ => None,
     };
-    // The ticket goes first, then our external PSKs in configuration order
-    // (RFC 9846 §4.3.11); their binders are filled in below.
+    // The ticket goes first, then the external PSKs; their binders are
+    // filled in below.
     let mut offered_psks: Vec<OfferedPsk> = Vec::new();
     if let Some(resuming) = &tls13_session {
         offered_psks.push(OfferedPsk {
@@ -454,21 +498,7 @@ fn emit_client_hello_for_retry(
             external: None,
         });
     }
-    if supports_tls13 && !config.external_psks.is_empty() {
-        offered_psks.extend(crate::psk::client_external_offers(
-            &config.external_psks,
-            &config.provider.cipher_suites,
-            committed_suite.and_then(|s| s.tls13()),
-            &input.server_name,
-            &input.alpn_protocols,
-        ));
-    }
-    let offers_external_psk = offered_psks.iter().any(|o| o.external.is_some());
-    // RFC 8773: ask for certificate authentication on top of an external PSK.
-    let cert_with_extern_psk = config.cert_with_extern_psk && offers_external_psk;
-    if cert_with_extern_psk {
-        exts.cert_with_extern_psk = Some(());
-    }
+    offered_psks.extend(external_offers);
 
     // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
     // configuration allow it, but never in the second ClientHello of a
@@ -783,6 +813,14 @@ impl State<ClientConnectionData> for ExpectServerHello {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::SelectedDifferentCipherSuiteAfterRetry,
+            ));
+        }
+
+        // External PSKs exist only in TLS 1.3.
+        if config.require_external_psk && version != ProtocolVersion::TLSv1_3 {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::ExternalPskRequired,
             ));
         }
 

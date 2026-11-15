@@ -143,6 +143,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             external_psks: Vec::new(),
             cert_with_extern_psk: false,
             require_cert_with_extern_psk: false,
+            require_external_psk: false,
         }
     }
 }

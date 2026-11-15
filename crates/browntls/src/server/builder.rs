@@ -108,6 +108,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             external_psks: None,
             cert_with_extern_psk: false,
+            require_external_psk: false,
         }
     }
 

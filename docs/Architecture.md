@@ -241,8 +241,27 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   request client authentication) on top of the PSK and (EC)DHE. A client
   rejects the extension without an external PSK (`illegal_parameter`) and,
   with `require_cert_with_extern_psk`, a server that does not negotiate it.
-- `CommonState::external_psk_identity` reports the key used; such a
-  handshake is `HandshakeKind::Full`.
+  A client that sends the extension offers no resumption ticket alongside,
+  so the server cannot skip the requested certificate by resuming instead (a
+  conservative choice, not an RFC 8773 requirement).
+- `CommonState::external_psk_identity` reports the key used, once the peer's
+  Finished has verified (until then the peer has not proven it holds the
+  key); such a handshake is `HandshakeKind::Full`. A peer that offers or
+  accepts external PSKs may still complete a handshake without one;
+  `require_external_psk` (client and server) refuses that with
+  `handshake_failure`, otherwise the application must check
+  `external_psk_identity` after the handshake. With it, a client offers only
+  tickets from external-PSK sessions and a server passes over other tickets;
+  TLS 1.2 is refused.
+- Tickets: a ticket issued on a connection that used an external PSK records
+  the PSK's identity and importer context (in the server's encrypted ticket
+  and in the client's `Tls13ClientSessionValue`). Resuming it reports the
+  same `external_psk_identity` (as `HandshakeKind::Resumed`) and counts for
+  `require_external_psk`. The client offers such a ticket only while the PSK
+  is configured and usable for the connection; the server resolves the
+  identity again and resumes only while the same key (same importer
+  context) still resolves and its server name, ALPN protocol and suite
+  restrictions hold, so removing a key also ends resumption of its sessions.
 
 RFC 9257 guidance and what browntls enforces:
 
@@ -257,7 +276,11 @@ RFC 9257 guidance and what browntls enforces:
 - Identities are sent in clear and can link connections of one client;
   choose identities that reveal nothing and, where linkability matters, are
   not stable. The resolver receives unauthenticated identities and should
-  not leak through timing or errors which identities exist.
+  not leak through timing or errors which identities exist. The handshake
+  itself tells them apart: a known identity with a wrong binder fails with
+  `decrypt_error`, while an unknown one is passed over (a certificate
+  handshake, or `handshake_failure` without one). This is inherent in
+  checking binders only for identities the server knows.
 - A server that holds an external PSK and a certificate authenticates with
   the PSK when one is offered; the PSK proves only possession of the key,
   not any certificate identity.

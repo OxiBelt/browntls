@@ -228,11 +228,26 @@ pub(super) fn handle_server_hello(
                 None => {
                     debug!("Resuming using PSK");
                     cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+                    // A session established with an external PSK carries
+                    // it forward (we offered the ticket only while the PSK
+                    // is configured); reported once the server's Finished
+                    // verifies.
+                    cx.common.external_psk = resuming_session
+                        .as_ref()
+                        .and_then(|session| session.external_psk())
+                        .and_then(|binding| {
+                            config
+                                .external_psks
+                                .iter()
+                                .find(|psk| binding.matches(psk))
+                                .cloned()
+                        });
                 }
                 Some(psk) => {
                     debug!("Using external PSK");
                     resuming_session = None;
-                    cx.common.external_psk_identity = Some(psk.identity().to_vec());
+                    // Reported once the server's Finished verifies.
+                    cx.common.external_psk = Some(psk.clone());
                     external_psk = Some(psk.clone());
                 }
             }
@@ -259,12 +274,6 @@ pub(super) fn handle_server_hello(
         return Err(cx.common.send_fatal_alert(
             AlertDescription::IllegalParameter,
             PeerMisbehaved::CertWithExternPskWithoutExternalPsk,
-        ));
-    }
-    if external_psk.is_some() && config.require_cert_with_extern_psk && !cert_with_extern_psk {
-        return Err(cx.common.send_fatal_alert(
-            AlertDescription::HandshakeFailure,
-            PeerIncompatible::CertWithExternPskRequired,
         ));
     }
 
@@ -295,6 +304,23 @@ pub(super) fn handle_server_hello(
         &randoms.client,
         cx.common,
     );
+
+    // Refusals of what the server selected, sent once our alert can be
+    // protected under the handshake key the server now reads with: no 0-RTT
+    // is in flight (none was accepted without a PSK, and none is sent with
+    // RFC 8773).
+    if config.require_external_psk && cx.common.external_psk.is_none() {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::ExternalPskRequired,
+        ));
+    }
+    if external_psk.is_some() && config.require_cert_with_extern_psk && !cert_with_extern_psk {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::CertWithExternPskRequired,
+        ));
+    }
 
     Ok(Box::new(ExpectEncryptedExtensions {
         config,
@@ -387,22 +413,26 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         }
 
         // An external PSK restricted to an ALPN protocol is used with that
-        // protocol only; with early data, RFC 9846 §4.3.10 requires the
-        // provisioned protocol to be the negotiated one.
-        if let Some(psk) = &self.external_psk {
-            let negotiated = cx.common.alpn_protocol.as_deref();
-            if exts.early_data.is_some() && psk.alpn_protocol() != negotiated {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::IllegalParameter,
-                    PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
-                ));
-            }
-            if psk.alpn_protocol().is_some_and(|p| Some(p) != negotiated) {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::HandshakeFailure,
-                    PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
-                ));
-            }
+        // protocol only, also through a session resumed from it; with early
+        // data, RFC 9846 §4.3.10 requires the provisioned protocol to be the
+        // negotiated one.
+        let negotiated = cx.common.alpn_protocol.as_deref();
+        if let Some(psk) = &self.external_psk
+            && exts.early_data.is_some()
+            && psk.alpn_protocol() != negotiated
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
+            ));
+        }
+        if let Some(psk) = &cx.common.external_psk
+            && psk.alpn_protocol().is_some_and(|p| Some(p) != negotiated)
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
+            ));
         }
 
         // RFC 9846 §4.3.10: the early_data acknowledgement decides the fate
@@ -421,8 +451,10 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         match (self.resuming_session, self.external_psk) {
             (Some(resuming), _) => {
                 // The server authenticated through the PSK; reinstate the
-                // certificates seen when the session was established.
-                cx.common.peer_certificates = Some(resuming.server_cert_chain().clone());
+                // certificates seen when the session was established (none
+                // for a session authenticated by an external PSK alone).
+                let chain = resuming.server_cert_chain();
+                cx.common.peer_certificates = (!chain.0.is_empty()).then(|| chain.clone());
                 Ok(Box::new(ExpectFinished {
                     config: self.config,
                     server_name: self.server_name,
@@ -956,6 +988,8 @@ impl State<ClientConnectionData> for ExpectFinished {
                 .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
         }
         let fin = FinishedMessageVerified::assertion();
+        // The server has proven it holds the external PSK, if one is in use.
+        cx.common.external_psk_confirmed = true;
         st.transcript.add_message(&m);
 
         // The application secrets derive from the transcript through the
@@ -1085,7 +1119,8 @@ impl ExpectTraffic {
             nst.lifetime,
             nst.age_add,
             nst.exts.max_early_data_size.unwrap_or(0),
-        );
+        )
+        .with_external_psk(cx.common.external_psk_binding());
         self.config
             .resumption
             .store

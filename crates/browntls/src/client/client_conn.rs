@@ -157,6 +157,19 @@ pub struct ClientConfig {
     /// external PSK without also authenticating with its certificate is
     /// refused. Off by default.
     pub require_cert_with_extern_psk: bool,
+
+    /// Whether to refuse a server that does not authenticate through one of
+    /// [`Self::external_psks`]: the handshake fails unless the server selects
+    /// one, or resumes a session that was itself established with one (its
+    /// key still configured here). Only such tickets are offered, and a
+    /// TLS 1.2 server is refused. Off by default.
+    ///
+    /// Without it, a server that selects no external PSK is authenticated
+    /// with its certificate instead; an application that needs PSK
+    /// authentication must then check
+    /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
+    /// once the handshake completes.
+    pub require_external_psk: bool,
 }
 
 impl ClientConfig {

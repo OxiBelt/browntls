@@ -36,6 +36,7 @@ intent.
 | 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
+| `record_size_limit` (RFC 8449, both sides, TLS 1.3 and 1.2, on by default), `ticket_request` (RFC 9149), client GREASE (RFC 8701, opt-in) and ClientHello padding (RFC 7685, on by default for 256 to 511-byte hellos): in-memory suites on both providers, rustls 0.23 and OpenSSL 3 interop with all four on; Docker E2E scenarios added, GnuTLS not yet run (see [Architecture](Architecture.md#optional-clienthello-extensions)) | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
 | Fuzzing targets for codecs, PKI and handshake state | planned |
@@ -112,3 +113,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   warning alerts; post-handshake client authentication, the early exporter
   and stateless HelloRetryRequest cookies are not implemented, and the
   RFC 6066 `max_fragment_length` extension is not offered or accepted.
+- RFC 8449 `record_size_limit`: a peer value above the protocol maximum is
+  lowered rather than refused (RFC 8449 §4 lets a client abort); 0-RTT
+  records are not checked against the server's limit, and a TLS 1.3 client
+  checks its own limit only from the record after EncryptedExtensions. The
+  client's GREASE (RFC 8701) is off by default until the Docker E2E GnuTLS
+  scenarios have passed with it; server-side GREASE (RFC 8701 §4) is not
+  implemented.

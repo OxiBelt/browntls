@@ -14,7 +14,7 @@ use browntls_crypto::curve25519::x25519;
 use browntls_crypto::gcm::Aes256Gcm;
 use browntls_crypto::hash::{HashAlgorithm, HashFunction as _, Sha1, Sha256, Sha512, Shake128};
 use browntls_crypto::mlkem::{DecapsulationKey, MlKem768};
-use browntls_crypto::nist::p256;
+use browntls_crypto::nist::{p256, p384, p521};
 use browntls_crypto::rand::OsRng;
 use browntls_crypto::rsa::RsaPrivateKey;
 
@@ -58,6 +58,31 @@ fn fingerprint(rsa: &RsaPrivateKey) -> Vec<Vec<u8>> {
     let a = p256::SecretKey::from_bytes(&[3; 32]).unwrap();
     let b = p256::SecretKey::from_bytes(&[4; 32]).unwrap();
     out.push(a.diffie_hellman(&b.public_key()).unwrap().to_vec());
+
+    // ECDH covers the variable-base path; a deterministic signature covers
+    // the fixed-base path and the scalar inversion, and its verification the
+    // variable-time double multiplication.
+    macro_rules! wide_curve {
+        ($curve:ident, $len:literal, $hash:ident) => {
+            // A zero top byte keeps the P-521 scalars below the group order.
+            let mut key = [3u8; $len];
+            key[0] = 0;
+            let a = $curve::SecretKey::from_bytes(&key).unwrap();
+            key[$len - 1] = 4;
+            let b = $curve::SecretKey::from_bytes(&key).unwrap();
+            out.push(a.diffie_hellman(&b.public_key()).unwrap().to_vec());
+            let signer = $curve::SigningKey::new(a);
+            let sig = signer
+                .sign_deterministic(HashAlgorithm::$hash, &data)
+                .unwrap();
+            let sig = sig.fixed().to_vec();
+            $curve::verify_fixed(&signer.verifying_key(), HashAlgorithm::$hash, &data, &sig)
+                .unwrap();
+            out.push(sig);
+        };
+    }
+    wide_curve!(p384, 48, Sha384);
+    wide_curve!(p521, 66, Sha512);
 
     // ML-KEM matrix expansion uses the four-way Keccak.
     let (dk, ek) = DecapsulationKey::<MlKem768>::generate_deterministic(&[1; 32], &[2; 32]);

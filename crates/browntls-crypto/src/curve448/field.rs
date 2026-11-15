@@ -3,9 +3,20 @@
 //!
 //! An element is `sum(l[i] * 2^(56 i))`. A limb is exactly seven bytes, so
 //! the 56-byte little-endian encoding of RFC 7748 §5 and RFC 8032 §5.2.2 maps
-//! byte-aligned onto the limbs. Reduction uses `2^448 = 2^224 + 1 (mod p)`:
-//! a product column at weight `2^(56 (k + 8))` is added to columns `k` and
-//! `k + 4`.
+//! byte-aligned onto the limbs.
+//!
+//! Multiplication is Karatsuba on the two four-limb halves, in the form the
+//! prime was designed for (Hamburg, "Ed448-Goldilocks, a new elliptic
+//! curve"): with `phi = 2^224`, `phi^2 = phi + 1 (mod p)`, so for
+//! `a = a0 + a1 phi` and `b = b0 + b1 phi`
+//!
+//! ```text
+//! a b = (a0 b0 + a1 b1) + ((a0 + a1) (b0 + b1) - a0 b0) phi,
+//! ```
+//!
+//! three half products (48 limb products instead of 64) whose columns are
+//! combined without any subtraction that could underflow; see
+//! `Fe::karatsuba`. Squaring uses three half squares (30 limb products).
 //!
 //! Every operation is branch-free and uses only additions, shifts, masks and
 //! 64x64->128-bit multiplications, which are constant time on all supported
@@ -17,8 +28,12 @@
 //! `sub`, `neg`, `mul_small` and the constructors return reduced elements.
 //! `add` does not reduce: the sum of two reduced elements has limbs below
 //! `2^58`. `mul` and `square` accept limbs below `2^59` (sums of up to four
-//! reduced elements): every column of the 15-column product is then a sum of
-//! at most 20 products below `2^118` after folding, so below `2^123`, and the
+//! reduced elements). The half sums `a0 + a1` then have limbs below `2^60`
+//! (and their doubles in the squaring are below `2^61`), a column of
+//! `a0 b0` or `a1 b1` is at most four products below `2^118`, and a column
+//! of `(a0 + a1) (b0 + b1)` at most four products below `2^120`. The largest
+//! combined column, `hi[k] + lo[k + 4] + hi[k + 4]`, is below
+//! `4 * 2^120 + 6 * 2^118 + 3 * 2^120 < 2^124`, so the column sums and their
 //! carries fit comfortably in `u128`. `sub` accepts a minuend with limbs below
 //! `2^63` and a subtrahend with limbs below `2^58` (it adds `8p`, whose limbs
 //! are at least `2^59 - 16`). `to_bytes`, `ct_eq` and the predicates accept
@@ -196,22 +211,87 @@ impl Fe {
         Self(out)
     }
 
-    /// Folds the 15 product columns into 8 (`2^448 = 2^224 + 1`), from the
-    /// top so that columns 8..10 receive their share before being folded.
+    /// The 7-column schoolbook product of two four-limb halves.
     #[inline(always)]
-    fn reduce_wide(mut c: [u128; 15]) -> Self {
-        for k in (8..15).rev() {
-            let t = c[k];
-            c[k - 8] += t;
-            c[k - 4] += t;
+    fn mul4(a: &[u64; 4], b: &[u64; 4]) -> [u128; 7] {
+        let mut c = [0u128; 7];
+        for i in 0..4 {
+            for j in 0..4 {
+                c[i + j] += m(a[i], b[j]);
+            }
         }
-        let mut lo = [0u128; 8];
-        lo.copy_from_slice(&c[..8]);
-        Self::carry_wide(lo)
+        c
+    }
+
+    /// The 7-column square of a four-limb half (limbs below `2^62`).
+    #[inline(always)]
+    fn sqr4(a: &[u64; 4]) -> [u128; 7] {
+        let mut c = [0u128; 7];
+        for i in 0..4 {
+            c[2 * i] += m(a[i], a[i]);
+            let d = a[i] * 2;
+            for j in (i + 1)..4 {
+                c[i + j] += m(d, a[j]);
+            }
+        }
+        c
+    }
+
+    /// Combines the three half products of a Karatsuba multiplication:
+    /// `p0 = a0 b0`, `p1 = a1 b1` and `p2 = (a0 + a1) (b0 + b1)` for
+    /// `a = a0 + a1 phi`, `b = b0 + b1 phi`, `phi = 2^224`. Since
+    /// `phi^2 = phi + 1 (mod p)`,
+    ///
+    /// ```text
+    /// a b = (p0 + p1) + (p2 - p0) phi.
+    /// ```
+    ///
+    /// Columns 4..7 of the low part have weight `phi 2^(56 (k - 4))` and move
+    /// to the high half; columns 4..7 of the high part have weight
+    /// `phi^2 2^(56 (k - 4))` and are added to both halves. `p2 - p0` is
+    /// non-negative in every column, because each column of `p2` contains
+    /// the corresponding products of `p0`.
+    #[inline(always)]
+    fn karatsuba(p0: &[u128; 7], p1: &[u128; 7], p2: &[u128; 7]) -> Self {
+        let lo: [u128; 7] = core::array::from_fn(|k| p0[k] + p1[k]);
+        let hi: [u128; 7] = core::array::from_fn(|k| p2[k] - p0[k]);
+        Self::carry_wide([
+            lo[0] + hi[4],
+            lo[1] + hi[5],
+            lo[2] + hi[6],
+            lo[3],
+            hi[0] + lo[4] + hi[4],
+            hi[1] + lo[5] + hi[5],
+            hi[2] + lo[6] + hi[6],
+            hi[3],
+        ])
     }
 
     #[inline(always)]
     pub(crate) fn mul(&self, b: &Self) -> Self {
+        let (a, b) = (&self.0, &b.0);
+        let (a0, a1) = ([a[0], a[1], a[2], a[3]], [a[4], a[5], a[6], a[7]]);
+        let (b0, b1) = ([b[0], b[1], b[2], b[3]], [b[4], b[5], b[6], b[7]]);
+        let asum: [u64; 4] = core::array::from_fn(|i| a0[i] + a1[i]);
+        let bsum: [u64; 4] = core::array::from_fn(|i| b0[i] + b1[i]);
+        Self::karatsuba(
+            &Self::mul4(&a0, &b0),
+            &Self::mul4(&a1, &b1),
+            &Self::mul4(&asum, &bsum),
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn square(&self) -> Self {
+        let a = &self.0;
+        let (a0, a1) = ([a[0], a[1], a[2], a[3]], [a[4], a[5], a[6], a[7]]);
+        let asum: [u64; 4] = core::array::from_fn(|i| a0[i] + a1[i]);
+        Self::karatsuba(&Self::sqr4(&a0), &Self::sqr4(&a1), &Self::sqr4(&asum))
+    }
+
+    /// Schoolbook multiplication: the reference for the Karatsuba code.
+    #[cfg(test)]
+    fn mul_schoolbook(&self, b: &Self) -> Self {
         let a = &self.0;
         let b = &b.0;
         let mut c = [0u128; 15];
@@ -220,21 +300,16 @@ impl Fe {
                 c[i + j] += m(a[i], b[j]);
             }
         }
-        Self::reduce_wide(c)
-    }
-
-    #[inline(always)]
-    pub(crate) fn square(&self) -> Self {
-        let a = &self.0;
-        let mut c = [0u128; 15];
-        for i in 0..8 {
-            c[2 * i] += m(a[i], a[i]);
-            let d = a[i] * 2;
-            for j in (i + 1)..8 {
-                c[i + j] += m(d, a[j]);
-            }
+        // Fold the 15 columns into 8 (`2^448 = 2^224 + 1`), from the top so
+        // that columns 8..10 receive their share before being folded.
+        for k in (8..15).rev() {
+            let t = c[k];
+            c[k - 8] += t;
+            c[k - 4] += t;
         }
-        Self::reduce_wide(c)
+        let mut lo = [0u128; 8];
+        lo.copy_from_slice(&c[..8]);
+        Self::carry_wide(lo)
     }
 
     /// Returns `self^(2^k)` for `k >= 1`.
@@ -449,6 +524,75 @@ mod tests {
         let reduced = Fe::from_bytes(&max.to_bytes());
         assert_eq!(max.mul(&max).to_bytes(), reduced.mul(&reduced).to_bytes());
         assert_eq!(max.square().to_bytes(), reduced.square().to_bytes());
+    }
+
+    /// Karatsuba multiplication and squaring agree with the schoolbook
+    /// product on random elements, on sums of four elements and at the
+    /// documented limb maxima.
+    #[test]
+    fn karatsuba_matches_schoolbook() {
+        let mut st = 0x6a09_e667_f3bc_c908u64;
+        let mut next = || {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st
+        };
+        let max = Fe([(1 << 59) - 1; 8]);
+        let mut vals = std::vec![
+            Fe::ZERO,
+            Fe::ONE,
+            Fe(P),
+            max,
+            Fe([MASK56; 8]),
+            Fe([
+                (1 << 59) - 1,
+                0,
+                (1 << 59) - 1,
+                0,
+                (1 << 59) - 1,
+                0,
+                (1 << 59) - 1,
+                0
+            ]),
+            Fe([
+                0,
+                0,
+                0,
+                0,
+                (1 << 59) - 1,
+                (1 << 59) - 1,
+                (1 << 59) - 1,
+                (1 << 59) - 1
+            ]),
+            Fe([
+                (1 << 59) - 1,
+                (1 << 59) - 1,
+                (1 << 59) - 1,
+                (1 << 59) - 1,
+                0,
+                0,
+                0,
+                0
+            ]),
+        ];
+        for _ in 0..300 {
+            // Random limbs of up to 59 bits.
+            vals.push(Fe(core::array::from_fn(|_| next() >> 5)));
+            vals.push(Fe(core::array::from_fn(|_| next() & MASK56)));
+        }
+        for w in vals.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            assert_eq!(a.mul(b).to_bytes(), a.mul_schoolbook(b).to_bytes());
+            assert_eq!(b.mul(a).to_bytes(), a.mul_schoolbook(b).to_bytes());
+            assert_eq!(a.square().to_bytes(), a.mul_schoolbook(a).to_bytes());
+            // Results are reduced as documented.
+            assert!(a.mul(b).0.iter().all(|&l| l < (1 << 56) + (1 << 13)));
+            assert!(a.square().0.iter().all(|&l| l < (1 << 56) + (1 << 13)));
+        }
+        for a in &vals {
+            assert_eq!(a.mul(&max).to_bytes(), a.mul_schoolbook(&max).to_bytes());
+        }
     }
 
     #[test]

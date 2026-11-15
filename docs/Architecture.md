@@ -724,8 +724,8 @@ reference for testing, plus accelerated backends selected at run time.
 | AES decryption (CBC) | AES-NI, VAES (YMM) | FEAT_AES | Zvkned, Zknd |
 | ChaCha20-Poly1305 | AVX2, AVX-512 | NEON | RVV |
 | X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
-| X448 / Ed448 | portable 64-bit | portable 64-bit | portable 64-bit |
-| P-256 / P-384 / P-521 | BMI2 + ADX field arithmetic (P-256; specialised portable P-256 arithmetic elsewhere) | portable 64-bit | portable 64-bit |
+| X448 / Ed448 | portable 64-bit (Karatsuba field multiplication, precomputed fixed-base comb) | portable 64-bit | portable 64-bit |
+| P-256 / P-384 / P-521 | BMI2 + ADX field arithmetic (per-curve kernels; the same specialised reductions in portable code elsewhere) | portable 64-bit | portable 64-bit |
 | RSA | BMI2 + ADX Montgomery kernel, AVX-512 IFMA exponentiation | portable 64-bit | portable 64-bit |
 | FFDHE (RFC 7919) | RSA BMI2 + ADX Montgomery kernel | portable 64-bit | portable 64-bit |
 | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
@@ -802,7 +802,8 @@ schedule (AVX2 with BMI2) use both.
 At run time, `browntls_crypto::accel` (re-exported as
 `browntls::crypto::native::accel`) holds a process-wide `Policy` per
 algorithm family (SHA-1, SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
-ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM) with one level per kind:
+ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM, P-384, P-521) with one level
+per kind:
 
 | Level | Behaviour for that kind |
 |---|---|

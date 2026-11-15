@@ -26,8 +26,8 @@ OPENSSL_EVP = [
     ("SHA-512", ["-evp", "sha512"]),
     ("SHA3-256", ["-evp", "sha3-256"]),
 ]
-OPENSSL_PK = ["rsa2048", "rsa3072", "ecdsap256", "ecdsap384", "ecdhp256", "ecdhp384",
-              "ecdhx25519", "ed25519"]
+OPENSSL_PK = ["rsa2048", "rsa3072", "ecdsap256", "ecdsap384", "ecdsap521", "ecdhp256",
+              "ecdhp384", "ecdhp521", "ecdhx25519", "ecdhx448", "ed25519", "ed448"]
 
 
 def run(cmd, env=None):
@@ -66,8 +66,8 @@ def openssl(seconds):
             out[(f"P-{p[2]}", "sign")] = float(p[3])
             out[(f"P-{p[2]}", "verify")] = float(p[4])
         elif p[0] == "+F5":  # ECDH: bits, op/s
-            name = "X25519" if p[2] == "253" else f"P-{p[2]}"
-            out[(name, "derive" if name == "X25519" else "ecdh")] = float(p[3])
+            name = {"253": "X25519", "448": "X448"}.get(p[2], f"P-{p[2]}")
+            out[(name, "derive" if name.startswith("X") else "ecdh")] = float(p[3])
         elif p[0] == "+F6":  # EdDSA: bits, name, sign/s, verify/s
             out[(p[3], "sign")] = float(p[4])
             out[(p[3], "verify")] = float(p[5])

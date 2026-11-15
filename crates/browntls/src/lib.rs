@@ -164,6 +164,7 @@ pub use client::ClientConnection;
 pub mod server {
     pub(crate) mod builder;
     mod common;
+    mod cookie;
     pub(crate) mod handy;
     mod hs;
     mod server_conn;
@@ -178,8 +179,8 @@ pub mod server {
     #[cfg(feature = "std")]
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
-        ClientHello, ProducesTickets, ResolvesServerCert, ServerConfig, ServerConnectionData,
-        StoresServerSessions,
+        ClientHello, PostHandshakeAuthStatus, ProducesTickets, ResolvesServerCert, ServerConfig,
+        ServerConnectionData, StoresServerSessions,
     };
 
     pub use crate::verify::NoClientAuth;

@@ -186,10 +186,126 @@ where they live:
   groups in EncryptedExtensions (RFC 9846 §4.3.7). Key shares are generated
   per connection and never reused.
 
-Not implemented: post-handshake client authentication, the early exporter,
-stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
-(not "Recommended" in RFC 9846 Table 1; `record_size_limit` and the local
-`max_fragment_size` setting cover the use case).
+Not implemented: RFC 6066 `max_fragment_length` (not "Recommended" in
+RFC 9846 Table 1; `record_size_limit` and the local `max_fragment_size`
+setting cover the use case).
+
+### Post-handshake client authentication (RFC 9846 §4.7.2)
+
+A client offers `post_handshake_auth` when `ClientConfig::
+enable_post_handshake_auth` is set (off by default) and its certificate
+resolver has certificates. Its traffic state then keeps a copy of the
+transcript through its Finished and answers every CertificateRequest at
+once, in order, from the resolver: Certificate echoing the request's
+context, CertificateVerify over `Transcript-Hash(handshake .. client
+Finished, CertificateRequest, Certificate)` when it has a usable key (an
+empty Certificate otherwise), and a Finished keyed by the current
+`client_application_traffic_secret_N`. Each exchange starts from the
+handshake transcript, not from earlier exchanges (§4.5). A
+CertificateRequest without our offer is `unexpected_message`, one with an
+empty `certificate_request_context` is `illegal_parameter` (§4.4.2); its
+extensions are checked as in the handshake. Each answer costs a signature,
+so a client answers at most eight requests while the server sends no
+application data and then aborts with `unexpected_message`, the same local
+resource bound as for KeyUpdate requests.
+
+A server learns the offer from the ClientHello (`ServerConnection::
+post_handshake_auth_offered`). `ServerConnection::request_client_auth`
+needs a completed TLS 1.3 handshake, the offer, a verifier that offers
+client authentication and no request still unanswered (one at a time,
+which bounds the state kept per connection). The request's
+`certificate_request_context` is an 8-byte request counter followed by 24
+random bytes: unique on the connection and unpredictable (§4.4.2). The
+answer may come after any amount of application data or KeyUpdates, but
+once its Certificate has arrived the CertificateVerify and Finished must
+follow with nothing in between (`unexpected_message` otherwise). The
+answer goes through the same checks as the handshake's client
+authentication (context echo, `ClientCertVerifier`, scheme from our list,
+signature), then a constant-time Finished check (`decrypt_error`). Only
+after the Finished does `peer_certificates` change and
+`post_handshake_auth_status` become `Authenticated`; an empty Certificate
+is `Declined` (and `certificate_required` when the verifier makes client
+authentication mandatory). A resumed handshake may be followed by
+post-handshake authentication, as §4.4.2 allows.
+
+With `ServerConfig::request_client_auth_after_handshake` set, a server
+leaves client authentication out of a TLS 1.3 handshake whose client
+offered `post_handshake_auth`; other clients, and TLS 1.2, are asked in the
+handshake as before. The handshake then completes without a client
+certificate even when the verifier makes it mandatory, so the application
+must request and check it. RFC 8740 forbids post-handshake authentication
+over HTTP/2; the library does not tie either setting to ALPN, the
+application chooses.
+
+### Stateless HelloRetryRequest cookies (RFC 9846 §4.3.2)
+
+`ServerConfig::hello_retry_cookies` (default `None`) holds a
+`ProducesTickets` sealer, which should be a dedicated instance with its own
+key (for example a separate `TicketRotator` over an AEAD ticket producer).
+Creating a connection with the `ServerConfig::ticketer` instance itself as
+the sealer fails; a separate sealer sharing the ticketer's key cannot be
+detected, but the plaintexts stay disjoint (a ticket starts with a 0 or 1
+byte, a cookie with its label), which a unit test pins.
+When it is set, a HelloRetryRequest carries a cookie that seals
+(`server::cookie`):
+
+```text
+"browntls hrr ck1" (domain label, 16 bytes) | issued_at u64 (seconds)
+| cipher_suite u16 | named_group u16 | Hash(ClientHello1) <1 byte length>
+| legacy_session_id <1 byte length> | server_name <1 byte length>
+```
+
+The connection that sent the HelloRetryRequest keeps its state and requires
+the second ClientHello to echo the cookie byte for byte
+(`missing_extension` if absent, `illegal_parameter` if different). A fresh
+`ServerConnection` or `Acceptor` whose first ClientHello carries a cookie
+opens it instead: it must authenticate under the sealer's current or
+previous key, carry the label, parse exactly and be at most 60 seconds old
+(in either direction, for servers sharing a key); the suite and group must
+still be configured, the hash length must match the suite's, and the
+ClientHello must repeat the session ID and server name. Any failure is
+`illegal_parameter` (RFC 9846 names no alert for a bad cookie; RFC 9147
+§5.1 uses `illegal_parameter` for DTLS). The connection then rebuilds the
+transcript as `message_hash(Hash(ClientHello1))` followed by the
+HelloRetryRequest re-encoded from the cookie (§4.5), takes the cookie's
+suite and group as the retry's choice, and continues with the usual
+second-ClientHello rules. Like the stateful path, it compares the second
+ClientHello with the first only through what the cookie carries (suite,
+group, session ID, server name) and through `Hash(ClientHello1)` in the
+transcript, which the PSK binders and Finished cover. If the clock fails
+while a cookie is issued or opened, the handshake aborts with
+`internal_error`. Such a connection ignores change_cipher_spec
+records before that ClientHello (within the usual bound), as §4.3.2
+requires; ahead of any other first ClientHello they stay
+`unexpected_message`. Without a sealer no cookie is sent and one in a first
+ClientHello is ignored, as before.
+
+No cookie is sent when the first ClientHello offered 0-RTT: the client's
+early data records would reach a fresh connection ahead of its second
+ClientHello, so that retry stays stateful. A cookie can be replayed during
+its lifetime by anyone who saw it; that gives no more than replaying the
+second ClientHello would, since the handshake still needs the client's key
+share and Finished. Cookies are not bound to the client's address: that
+is fine over TCP, where the handshake itself proves the address, but a
+datagram transport would need that binding to stop amplification.
+
+### Exporters
+
+`export_keying_material` is the RFC 9846 §7.5 exporter (RFC 5705 in TLS
+1.2, where it requires the extended master secret). `ConnectionCommon::
+export_early_keying_material` is the separate early exporter that §7.5
+recommends, from `early_exporter_master_secret` (logged as
+`EARLY_EXPORTER_SECRET`; checked against RFC 8448 §4). A client has it from
+the moment it offers 0-RTT and loses it if the server rejects 0-RTT; a
+server has it once it accepts 0-RTT. Like 0-RTT data it is not forward
+secret and replays with the ClientHello.
+
+`tls_exporter_channel_binding` is the RFC 9266 `tls-exporter` channel
+binding: 32 bytes under the label `EXPORTER-Channel-Binding` with an empty
+context. RFC 9266 §2 defines it for TLS 1.3 and for earlier versions only
+with the extended master secret, which the TLS 1.2 exporter requires
+anyway; since browntls never renegotiates, the RFC 9266 §4.2 renegotiation
+exclusion does not arise.
 
 ### Cargo features (`browntls`)
 
@@ -326,7 +442,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are

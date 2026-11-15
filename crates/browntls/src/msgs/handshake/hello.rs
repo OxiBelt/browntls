@@ -47,6 +47,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) key_shares: Option<Vec<KeyShareEntry>>,
     pub(crate) psk_modes: Option<Vec<PskKeyExchangeMode>>,
     pub(crate) early_data: Option<()>,
+    /// RFC 9846 §4.3.6: an empty `post_handshake_auth` extension.
+    pub(crate) post_handshake_auth: Option<()>,
     pub(crate) cookie: Option<PayloadU16>,
     pub(crate) renegotiation_info: Option<PayloadU8>,
     pub(crate) certificate_authorities: Option<Vec<DistinguishedName>>,
@@ -108,6 +110,10 @@ impl ClientExtensions {
         add(self.key_shares.is_some(), ExtensionType::KeyShare);
         add(self.psk_modes.is_some(), ExtensionType::PSKKeyExchangeModes);
         add(self.early_data.is_some(), ExtensionType::EarlyData);
+        add(
+            self.post_handshake_auth.is_some(),
+            ExtensionType::PostHandshakeAuth,
+        );
         add(self.cookie.is_some(), ExtensionType::Cookie);
         add(
             self.renegotiation_info.is_some(),
@@ -207,6 +213,9 @@ impl Codec<'_> for ClientExtensions {
         if self.early_data.is_some() {
             encode_extension(ExtensionType::EarlyData, out, |_| {});
         }
+        if self.post_handshake_auth.is_some() {
+            encode_extension(ExtensionType::PostHandshakeAuth, out, |_| {});
+        }
         if let Some(cookie) = &self.cookie {
             encode_extension(ExtensionType::Cookie, out, |b| cookie.encode(b));
         }
@@ -287,6 +296,7 @@ impl Codec<'_> for ClientExtensions {
                     out.psk_modes = Some(read_nonempty_vec_u8(body, "PskKeyExchangeModes")?);
                 }
                 ExtensionType::EarlyData => out.early_data = Some(()),
+                ExtensionType::PostHandshakeAuth => out.post_handshake_auth = Some(()),
                 ExtensionType::Cookie => {
                     let cookie = PayloadU16::read(body)?;
                     if cookie.0.is_empty() {

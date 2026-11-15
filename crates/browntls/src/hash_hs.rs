@@ -114,6 +114,18 @@ impl HandshakeHash {
         ctx.finish()
     }
 
+    /// An independent copy of the running hash, without the raw buffer kept
+    /// for TLS 1.2 client authentication. Post-handshake authentications
+    /// each continue their own copy of the transcript through the client
+    /// Finished (RFC 9846 §4.5).
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            provider: self.provider,
+            ctx: self.ctx.fork(),
+            client_auth: None,
+        }
+    }
+
     /// Takes the raw transcript kept for client authentication, if any.
     pub(crate) fn take_handshake_buf(&mut self) -> Option<Vec<u8>> {
         self.client_auth.take()

@@ -5,8 +5,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::common::ActiveCertifiedKey;
+use super::cookie::RetryCookie;
 use super::hs::{self, HandshakeHashOrBuffer, NextStateOrError, ServerContext};
-use super::server_conn::{ServerConfig, ServerConnectionData};
+use super::server_conn::{PostHandshakeAuthStatus, ServerConfig, ServerConnectionData};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::SupportedKxGroup;
@@ -17,7 +18,7 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warning};
-use crate::msgs::base::{Payload, PayloadU8};
+use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, KeyUpdateRequest, NamedGroup, PskKeyExchangeMode};
@@ -144,14 +145,45 @@ impl CompleteClientHelloHandling {
                 ));
             }
             self.transcript.add_message(chm);
+            let client_hello_hash = self.transcript.current_hash();
             self.transcript.rollup_for_hrr();
-            emit_hello_retry_request(
-                &mut self.transcript,
+            // RFC 9846 §4.3.2: with a cookie sealer configured the retry is
+            // stateless. Not when 0-RTT data follows the first ClientHello:
+            // its records would reach a fresh connection ahead of the second
+            // ClientHello, so that handshake stays with this connection.
+            let cookie = match &self.config.hello_retry_cookies {
+                Some(sealer) if !early_data_requested => RetryCookie {
+                    issued_at: match self.config.current_time() {
+                        Ok(now) => now.as_secs(),
+                        Err(err) => {
+                            return Err(cx
+                                .common
+                                .send_fatal_alert(AlertDescription::InternalError, err));
+                        }
+                    },
+                    suite: self.suite.common.suite,
+                    group: selected_kxg.name(),
+                    client_hello_hash: client_hello_hash.as_ref().to_vec(),
+                    session_id: client_hello.session_id,
+                    server_name: cx
+                        .data
+                        .sni
+                        .as_ref()
+                        .map(|name| name.as_ref().as_bytes().to_vec())
+                        .unwrap_or_default(),
+                }
+                .seal(&**sealer),
+                _ => None,
+            };
+            let m = hello_retry_request_message(
                 self.suite,
                 client_hello.session_id,
                 selected_kxg.name(),
-                cx.common,
+                cookie.clone(),
             );
+            trace!("Requesting retry {:?}", m);
+            self.transcript.add_message(&m);
+            cx.common.send_msg(m, false);
             emit_fake_ccs(cx.common);
             cx.common.handshake_kind = Some(HandshakeKind::FullWithHelloRetryRequest);
             let skip_data_left = max_early_data_size(self.config.max_early_data_size);
@@ -164,6 +196,7 @@ impl CompleteClientHelloHandling {
                     suite: self.suite,
                     group: selected_kxg,
                 }),
+                sent_cookie: cookie,
                 send_tickets: self.send_tickets,
             });
             // Early data sent behind that first ClientHello is unreadable
@@ -278,6 +311,15 @@ impl CompleteClientHelloHandling {
                     &self.randoms.client,
                     cx.common,
                 );
+                // RFC 9846 §7.5: the early exporter, for use with the 0-RTT
+                // data we accepted.
+                if early_data == EarlyDataDecision::Accepted {
+                    cx.common.early_exporter = Some(early.early_exporter(
+                        client_hello_hash.as_ref(),
+                        &*self.config.key_log,
+                        &self.randoms.client,
+                    ));
+                }
                 early.into_pre_handshake()
             }
             None => KeySchedulePreHandshake::new(self.suite),
@@ -353,9 +395,14 @@ impl CompleteClientHelloHandling {
             supported_groups,
         );
 
+        // RFC 9846 §4.3.6: the client is willing to authenticate later.
+        cx.data.post_handshake_auth_offered = client_hello.extensions.post_handshake_auth.is_some();
+        let defer_client_auth =
+            self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
+
         let doing_client_auth = if resumedata.is_none() {
-            let client_auth =
-                emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
+            let client_auth = !defer_client_auth
+                && emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
             emit_certificate_tls13(
                 &mut self.transcript,
                 cx.common,
@@ -409,13 +456,7 @@ impl CompleteClientHelloHandling {
             // RFC 9846 §4.5.2: the client's CertificateVerify must use a
             // scheme from our CertificateRequest, which lists only the
             // verifier's TLS 1.3 schemes.
-            let offered_sigschemes = self
-                .config
-                .verifier
-                .supported_verify_schemes()
-                .into_iter()
-                .filter(SignatureScheme::supported_in_tls13)
-                .collect();
+            let offered_sigschemes = client_auth_sigschemes(&self.config);
             Ok(Box::new(ExpectCertificate {
                 config: self.config,
                 transcript: self.transcript,
@@ -611,14 +652,15 @@ fn emit_fake_ccs(common: &mut CommonState) {
     common.send_msg(m, false);
 }
 
-fn emit_hello_retry_request(
-    transcript: &mut HandshakeHash,
+/// The HelloRetryRequest selecting `suite` and `group`, with `cookie`. Also
+/// used to rebuild, for the transcript, one sent by a stateless retry.
+pub(super) fn hello_retry_request_message(
     suite: &'static Tls13CipherSuite,
     session_id: SessionId,
     group: NamedGroup,
-    common: &mut CommonState,
-) {
-    let m = Message {
+    cookie: Option<Vec<u8>>,
+) -> Message<'static> {
+    Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::HelloRetryRequest(HelloRetryRequest {
@@ -628,16 +670,13 @@ fn emit_hello_retry_request(
                 compression_method: Compression::Null,
                 extensions: HelloRetryRequestExtensions {
                     key_share: Some(group),
-                    cookie: None,
+                    cookie: cookie.map(PayloadU16::new),
                     supported_versions: Some(ProtocolVersion::TLSv1_3),
                     unknown: Vec::new(),
                 },
             }),
         )),
-    };
-    trace!("Requesting retry {:?}", m);
-    transcript.add_message(&m);
-    common.send_msg(m, false);
+    }
 }
 
 fn emit_encrypted_extensions(
@@ -681,6 +720,19 @@ fn emit_certificate_req_tls13(
     if !config.verifier.offer_client_auth() {
         return Ok(false);
     }
+    let m = certificate_request_message(config, Vec::new())?;
+    trace!("Sending CertificateRequest {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, true);
+    Ok(true)
+}
+
+/// A CertificateRequest with `context` (empty during the handshake, RFC
+/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities.
+fn certificate_request_message(
+    config: &ServerConfig,
+    context: Vec<u8>,
+) -> Result<Message<'static>, Error> {
     let schemes: Vec<SignatureScheme> = config
         .verifier
         .supported_verify_schemes()
@@ -694,7 +746,7 @@ fn emit_certificate_req_tls13(
     }
     let authorities = config.verifier.root_hint_subjects();
     let cr = CertificateRequestPayloadTls13 {
-        context: PayloadU8::empty(),
+        context: PayloadU8::new(context),
         extensions: CertificateRequestExtensions {
             signature_algorithms: Some(schemes),
             authorities: (!authorities.is_empty()).then(|| authorities.to_vec()),
@@ -705,16 +757,12 @@ fn emit_certificate_req_tls13(
             ..Default::default()
         },
     };
-    let m = Message {
+    Ok(Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::CertificateRequestTls13(cr),
         )),
-    };
-    trace!("Sending CertificateRequest {:?}", m);
-    transcript.add_message(&m);
-    common.send_msg(m, true);
-    Ok(true)
+    })
 }
 
 fn emit_certificate_tls13(
@@ -858,36 +906,8 @@ impl State<ServerConnectionData> for ExpectCertificate {
         };
         self.transcript.add_message(&m);
 
-        // RFC 9846 §4.5.1: the context echoes our (empty) request context.
-        // The message is well formed, so a mismatch is illegal_parameter.
-        if !certp.context.0.is_empty() {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::IllegalCertificateRequestContext,
-            ));
-        }
-        // We never request stapled responses or SCTs from clients.
-        if certp
-            .entries
-            .iter()
-            .any(|e| e.status.is_some() || e.sct_list.is_some())
-        {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::UnsupportedExtension,
-                PeerMisbehaved::UnsolicitedCertExtension,
-            ));
-        }
-
-        let client_cert = certp.into_certificate_chain().into_owned();
-
-        let Some((end_entity, intermediates)) = client_cert.0.split_first() else {
-            // RFC 8446 §4.4.2.4: an empty Certificate is allowed unless we require one.
-            if self.config.verifier.client_auth_mandatory() {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::CertificateRequired,
-                    Error::NoCertificatesPresented,
-                ));
-            }
+        let Some(client_cert) = check_client_certificate(cx.common, &self.config, &certp, &[])?
+        else {
             debug!("client auth requested but no certificate supplied");
             return Ok(Box::new(ExpectFinished {
                 config: self.config,
@@ -897,12 +917,6 @@ impl State<ServerConnectionData> for ExpectCertificate {
                 send_tickets: self.send_tickets,
             }));
         };
-
-        let now = self.config.current_time()?;
-        self.config
-            .verifier
-            .verify_client_cert(end_entity, intermediates, now)
-            .map_err(|err| crate::client::tls13::send_cert_path_error_alert(cx.common, err))?;
 
         Ok(Box::new(ExpectCertificateVerify {
             config: self.config,
@@ -914,6 +928,97 @@ impl State<ServerConnectionData> for ExpectCertificate {
             offered_sigschemes: self.offered_sigschemes,
         }))
     }
+}
+
+/// Checks a client Certificate message against the request it answers
+/// (`context`) and the client certificate verifier. Returns `None` for an
+/// empty certificate list the verifier allows.
+fn check_client_certificate(
+    common: &mut CommonState,
+    config: &ServerConfig,
+    certp: &CertificatePayloadTls13<'_>,
+    context: &[u8],
+) -> Result<Option<crate::msgs::handshake::CertificateChain<'static>>, Error> {
+    // RFC 9846 §4.4.2: the context echoes our request's. The message is
+    // well formed, so a mismatch is illegal_parameter.
+    if certp.context.0 != context {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::IllegalCertificateRequestContext,
+        ));
+    }
+    // We never request stapled responses or SCTs from clients.
+    if certp
+        .entries
+        .iter()
+        .any(|e| e.status.is_some() || e.sct_list.is_some())
+    {
+        return Err(common.send_fatal_alert(
+            AlertDescription::UnsupportedExtension,
+            PeerMisbehaved::UnsolicitedCertExtension,
+        ));
+    }
+
+    let client_cert = certp.clone().into_certificate_chain().into_owned();
+
+    let Some((end_entity, intermediates)) = client_cert.0.split_first() else {
+        // RFC 9846 §4.5: an empty Certificate is allowed unless we
+        // require one, which is certificate_required.
+        if config.verifier.client_auth_mandatory() {
+            return Err(common.send_fatal_alert(
+                AlertDescription::CertificateRequired,
+                Error::NoCertificatesPresented,
+            ));
+        }
+        return Ok(None);
+    };
+
+    let now = config.current_time()?;
+    config
+        .verifier
+        .verify_client_cert(end_entity, intermediates, now)
+        .map_err(|err| crate::client::tls13::send_cert_path_error_alert(common, err))?;
+    Ok(Some(client_cert))
+}
+
+/// Verifies a client CertificateVerify over `transcript` (RFC 9846 §4.5)
+/// with a scheme from our CertificateRequest.
+fn check_client_certificate_verify(
+    common: &mut CommonState,
+    config: &ServerConfig,
+    transcript: &HandshakeHash,
+    client_cert: &crate::msgs::handshake::CertificateChain<'static>,
+    offered_sigschemes: &[SignatureScheme],
+    sig: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, Error> {
+    if !offered_sigschemes.contains(&sig.scheme) {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+        ));
+    }
+    let handshake_hash = transcript.current_hash();
+    let msg = crate::client::tls13::construct_client_verify_message(&handshake_hash);
+    let end_entity = client_cert.0.first().ok_or_else(|| {
+        common.send_fatal_alert(
+            AlertDescription::DecodeError,
+            Error::NoCertificatesPresented,
+        )
+    })?;
+    config
+        .verifier
+        .verify_tls13_signature(&msg, end_entity, sig)
+        .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(common, err))
+}
+
+/// The TLS 1.3 signature schemes our CertificateRequest lists.
+fn client_auth_sigschemes(config: &ServerConfig) -> Vec<SignatureScheme> {
+    config
+        .verifier
+        .supported_verify_schemes()
+        .into_iter()
+        .filter(SignatureScheme::supported_in_tls13)
+        .collect()
 }
 
 struct ExpectCertificateVerify {
@@ -934,27 +1039,14 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
             HandshakePayload::CertificateVerify
         )?;
 
-        if !self.offered_sigschemes.contains(&sig.scheme) {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
-            ));
-        }
-
-        let handshake_hash = self.transcript.current_hash();
-        let msg = crate::client::tls13::construct_client_verify_message(&handshake_hash);
-        let end_entity = self.client_cert.0.first().ok_or_else(|| {
-            cx.common.send_fatal_alert(
-                AlertDescription::DecodeError,
-                Error::NoCertificatesPresented,
-            )
-        })?;
-        let sig_verified: HandshakeSignatureValid = self
-            .config
-            .verifier
-            .verify_tls13_signature(&msg, end_entity, sig)
-            .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(cx.common, err))?;
-        let _ = sig_verified;
+        let _sig_verified: HandshakeSignatureValid = check_client_certificate_verify(
+            cx.common,
+            &self.config,
+            &self.transcript,
+            &self.client_cert,
+            &self.offered_sigschemes,
+            sig,
+        )?;
 
         trace!("client CertificateVerify OK");
         cx.common.peer_certificates = Some(self.client_cert);
@@ -1089,8 +1181,21 @@ impl State<ServerConnectionData> for ExpectFinished {
 
         cx.common.start_traffic();
 
+        // Post-handshake authentications each continue the transcript
+        // through the client Finished (RFC 9846 §4.5).
+        let post_handshake_auth = cx
+            .data
+            .post_handshake_auth_offered
+            .then(|| PostHandshakeAuth {
+                config: st.config.clone(),
+                transcript: st.transcript.fork(),
+                requests_sent: 0,
+                pending: None,
+            });
+
         Ok(Box::new(ExpectTraffic {
             key_schedule,
+            post_handshake_auth,
             _fin_verified: fin,
         }))
     }
@@ -1098,7 +1203,192 @@ impl State<ServerConnectionData> for ExpectFinished {
 
 struct ExpectTraffic {
     key_schedule: KeyScheduleTraffic,
+    /// Present when the client offered `post_handshake_auth`.
+    post_handshake_auth: Option<PostHandshakeAuth>,
     _fin_verified: FinishedMessageVerified,
+}
+
+/// Post-handshake client authentication (RFC 9846 §4.7.2) state.
+struct PostHandshakeAuth {
+    config: Arc<ServerConfig>,
+    /// The transcript through the client Finished.
+    transcript: HandshakeHash,
+    /// How many CertificateRequests we sent, for unique contexts.
+    requests_sent: u64,
+    /// The request awaiting its answer; one at a time.
+    pending: Option<PendingClientAuth>,
+}
+
+/// One outstanding post-handshake CertificateRequest.
+struct PendingClientAuth {
+    context: Vec<u8>,
+    /// The transcript through the client Finished, then this request and
+    /// the answer so far.
+    transcript: HandshakeHash,
+    offered_sigschemes: Vec<SignatureScheme>,
+    stage: ClientAuthStage,
+}
+
+/// The message the answer to a post-handshake CertificateRequest needs next.
+enum ClientAuthStage {
+    Certificate,
+    CertificateVerify(crate::msgs::handshake::CertificateChain<'static>),
+    Finished(Option<crate::msgs::handshake::CertificateChain<'static>>),
+}
+
+/// The length of a post-handshake `certificate_request_context`: an 8-byte
+/// request counter, which makes it unique on the connection, then random
+/// bytes, which make it unpredictable (RFC 9846 §4.4.2).
+const POST_HANDSHAKE_CONTEXT_RANDOM_LEN: usize = 24;
+
+impl PostHandshakeAuth {
+    fn request(&mut self, common: &mut CommonState) -> Result<(), Error> {
+        if self.pending.is_some() {
+            return Err(Error::General(
+                "a post-handshake client authentication is already in progress".into(),
+            ));
+        }
+        if !self.config.verifier.offer_client_auth() {
+            return Err(Error::General(
+                "the client certificate verifier does not offer client authentication".into(),
+            ));
+        }
+        // RFC 9846 §6.1: nothing follows our close_notify.
+        if common.has_sent_close_notify() {
+            return Err(Error::General(
+                "cannot request client authentication after close_notify".into(),
+            ));
+        }
+        let mut context = self.requests_sent.to_be_bytes().to_vec();
+        context.extend(crate::rand::random_vec(
+            self.config.provider.secure_random,
+            POST_HANDSHAKE_CONTEXT_RANDOM_LEN,
+        )?);
+        let m = certificate_request_message(&self.config, context.clone())?;
+        let mut transcript = self.transcript.fork();
+        transcript.add_message(&m);
+        trace!("Sending post-handshake CertificateRequest {:?}", m);
+        common.send_msg(m, true);
+        self.requests_sent = self.requests_sent.wrapping_add(1);
+        self.pending = Some(PendingClientAuth {
+            context,
+            transcript,
+            offered_sigschemes: client_auth_sigschemes(&self.config),
+            stage: ClientAuthStage::Certificate,
+        });
+        Ok(())
+    }
+
+    /// Whether `m` continues the pending answer: an answer, once begun,
+    /// must arrive without other messages in between (RFC 9846 §4.7.2).
+    fn answer_in_progress(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| !matches!(p.stage, ClientAuthStage::Certificate))
+    }
+
+    fn handle(
+        &mut self,
+        cx: &mut ServerContext<'_>,
+        key_schedule: &KeyScheduleTraffic,
+        m: &Message<'_>,
+    ) -> Result<(), Error> {
+        let Some(mut pending) = self.pending.take() else {
+            return Err(crate::check::inappropriate_handshake_message(
+                &m.payload,
+                &[ContentType::ApplicationData, ContentType::Handshake],
+                &[HandshakeType::KeyUpdate],
+            ));
+        };
+        let MessagePayload::Handshake {
+            parsed: HandshakeMessagePayload(payload),
+            ..
+        } = &m.payload
+        else {
+            return Err(interleaved(cx.common));
+        };
+        pending.stage = match (pending.stage, payload) {
+            (ClientAuthStage::Certificate, HandshakePayload::CertificateTls13(certp)) => {
+                pending.transcript.add_message(m);
+                match check_client_certificate(cx.common, &self.config, certp, &pending.context)? {
+                    Some(chain) => ClientAuthStage::CertificateVerify(chain),
+                    None => ClientAuthStage::Finished(None),
+                }
+            }
+            // RFC 8879 §4: our CertificateRequest offers the same
+            // compression algorithms as in the handshake.
+            (ClientAuthStage::Certificate, HandshakePayload::CompressedCertificate(compressed)) => {
+                let certp = crate::compress::receive_compressed_certificate(
+                    cx.common,
+                    &self.config.cert_decompressors,
+                    self.config.cert_decompression_limit,
+                    compressed,
+                )?;
+                pending.transcript.add_message(m);
+                match check_client_certificate(cx.common, &self.config, &certp, &pending.context)? {
+                    Some(chain) => ClientAuthStage::CertificateVerify(chain),
+                    None => ClientAuthStage::Finished(None),
+                }
+            }
+            (
+                ClientAuthStage::CertificateVerify(chain),
+                HandshakePayload::CertificateVerify(sig),
+            ) => {
+                check_client_certificate_verify(
+                    cx.common,
+                    &self.config,
+                    &pending.transcript,
+                    &chain,
+                    &pending.offered_sigschemes,
+                    sig,
+                )?;
+                pending.transcript.add_message(m);
+                ClientAuthStage::Finished(Some(chain))
+            }
+            (ClientAuthStage::Finished(chain), HandshakePayload::Finished(finished)) => {
+                // RFC 9846 §4.5: the MAC uses the current
+                // client_application_traffic_secret_N as base key.
+                let expected = key_schedule
+                    .sign_post_handshake_client_finish(pending.transcript.current_hash().as_ref());
+                if !constant_time_eq(expected.as_ref(), finished.bytes()) {
+                    return Err(cx
+                        .common
+                        .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
+                }
+                cx.data.post_handshake_auth = Some(match chain {
+                    Some(chain) => {
+                        debug!("post-handshake client authentication succeeded");
+                        cx.common.peer_certificates = Some(chain);
+                        PostHandshakeAuthStatus::Authenticated
+                    }
+                    None => {
+                        debug!("client declined post-handshake authentication");
+                        PostHandshakeAuthStatus::Declined
+                    }
+                });
+                return Ok(());
+            }
+            (ClientAuthStage::Certificate, _) => {
+                return Err(crate::check::inappropriate_handshake_message(
+                    &m.payload,
+                    &[ContentType::ApplicationData, ContentType::Handshake],
+                    &[HandshakeType::KeyUpdate, HandshakeType::Certificate],
+                ));
+            }
+            _ => return Err(interleaved(cx.common)),
+        };
+        self.pending = Some(pending);
+        Ok(())
+    }
+}
+
+/// A message other than the next one of a post-handshake authentication
+/// answer arrived in the middle of it (RFC 9846 §4.7.2).
+fn interleaved(common: &mut CommonState) -> Error {
+    common.send_fatal_alert(
+        AlertDescription::UnexpectedMessage,
+        PeerMisbehaved::MessageInterleavedWithPostHandshakeAuthentication,
+    )
 }
 
 impl ExpectTraffic {
@@ -1127,6 +1417,12 @@ impl ExpectTraffic {
 
 impl State<ServerConnectionData> for ExpectTraffic {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        if let Some(auth) = &mut self.post_handshake_auth
+            && auth.answer_in_progress()
+        {
+            auth.handle(cx, &self.key_schedule, &m)?;
+            return Ok(self);
+        }
         match m.payload {
             MessagePayload::ApplicationData(payload) => {
                 cx.common.received_key_update_requests = 0;
@@ -1136,6 +1432,20 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(request)),
                 ..
             } => self.handle_key_update(cx.common, request)?,
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload(
+                        HandshakePayload::CertificateTls13(_)
+                        | HandshakePayload::CompressedCertificate(_)
+                        | HandshakePayload::CertificateVerify(_)
+                        | HandshakePayload::Finished(_),
+                    ),
+                ..
+            } if self.post_handshake_auth.is_some() => {
+                if let Some(auth) = &mut self.post_handshake_auth {
+                    auth.handle(cx, &self.key_schedule, &m)?;
+                }
+            }
             payload => {
                 return Err(crate::check::inappropriate_handshake_message(
                     &payload,
@@ -1155,6 +1465,17 @@ impl State<ServerConnectionData> for ExpectTraffic {
     ) -> Result<(), Error> {
         self.key_schedule
             .export_keying_material(output, label, context)
+    }
+
+    fn request_client_auth(&mut self, cx: &mut ServerContext<'_>) -> Result<(), Error> {
+        let Some(auth) = &mut self.post_handshake_auth else {
+            return Err(Error::General(
+                "the client did not offer post-handshake authentication".into(),
+            ));
+        };
+        auth.request(cx.common)?;
+        cx.data.post_handshake_auth = Some(PostHandshakeAuthStatus::Requested);
+        Ok(())
     }
 
     fn extract_secrets(&self) -> Result<PartiallyExtractedSecrets, Error> {

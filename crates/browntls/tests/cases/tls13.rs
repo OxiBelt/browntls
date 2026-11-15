@@ -734,6 +734,81 @@ fn early_data_is_rejected_by_the_application() {
     );
 }
 
+/// Runs a resumed handshake whose 0-RTT data the server rejects, with the
+/// server's skip budget `server_max`, after the client sent `writes` (one
+/// record each) under a ticket that allowed `ticket_max` bytes.
+fn reject_early_data_writes(
+    ticket_max: u32,
+    server_max: u32,
+    writes: &[&[u8]],
+) -> (Result<(), Error>, Result<(), Error>) {
+    use std::io::Write;
+    let chain = server_chain(KeyType::EcdsaP256);
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let client_config = early_data_client(&chain);
+    prime_ticket(
+        &client_config,
+        &early_data_server(&chain, ticket_max, &cache),
+    );
+
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(early_data_server(&chain, server_max, &cache)).unwrap();
+    server.reject_early_data();
+    for data in writes {
+        client.early_data().unwrap().write_all(data).unwrap();
+    }
+    let result = do_handshake_until_error(&mut client, &mut server);
+    if result.0.is_ok() && result.1.is_ok() {
+        assert!(!client.is_early_data_accepted());
+        assert!(server.early_data().is_none());
+        assert_eq!(
+            send_and_receive(&mut client, &mut server, b"resent over 1-RTT"),
+            b"resent over 1-RTT"
+        );
+    }
+    result
+}
+
+#[test]
+fn rejected_early_data_is_skipped_by_its_plaintext_size() {
+    init_logging();
+    // RFC 9846 §4.2.10: the server skips rejected 0-RTT records "up to the
+    // configured max_early_data_size", which counts plaintext, not the
+    // record's tag and content type byte.
+    assert_eq!(
+        reject_early_data_writes(16, 16, &[b"four"]),
+        (Ok(()), Ok(()))
+    );
+    // Exactly the limit, in one record and in four.
+    assert_eq!(
+        reject_early_data_writes(16, 16, &[&[7u8; 16]]),
+        (Ok(()), Ok(()))
+    );
+    assert_eq!(
+        reject_early_data_writes(16, 16, &[b"aaaa", b"bbbb", b"cccc", b"dddd"]),
+        (Ok(()), Ok(()))
+    );
+}
+
+#[test]
+fn rejected_early_data_past_the_skip_limit_fails() {
+    init_logging();
+    // A ticket that allowed more than this server skips: one byte past the
+    // limit, alone or spread over records, is a decryption failure.
+    for writes in [
+        &[&[7u8; 17][..]][..],
+        &[b"aaaa", b"bbbb", b"cccc", b"dddd", b"e"],
+    ] {
+        let (client, server) = reject_early_data_writes(1024, 16, writes);
+        assert_eq!(server, Err(Error::DecryptError));
+        assert_eq!(
+            client,
+            Err(Error::AlertReceived(AlertDescription::BadRecordMac))
+        );
+    }
+}
+
 #[test]
 fn early_data_is_rejected_after_hello_retry_request() {
     use std::io::Write;

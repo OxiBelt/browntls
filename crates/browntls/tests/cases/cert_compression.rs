@@ -9,6 +9,7 @@ use browntls::compress::{
     self, CertCompressor, CertDecompressor, CompressionFailed, CompressionLevel,
     DecompressionFailed,
 };
+use browntls::server::PostHandshakeAuthStatus;
 use browntls::{
     AlertDescription, CertificateCompressionAlgorithm, ClientConfig, ClientConnection, Error,
     PeerMisbehaved, ServerConfig, ServerConnection, version,
@@ -238,6 +239,50 @@ fn built_ins_compress_both_certificates() {
         assert_eq!(
             send_and_receive(&mut client, &mut server, b"compressed"),
             b"compressed"
+        );
+    }
+}
+
+#[test]
+fn post_handshake_client_auth_compresses_the_client_certificate() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = client_chain(KeyType::EcdsaP256);
+
+    for (compressor, decompressor) in builtins() {
+        let server_counter = Counting::new(decompressor);
+
+        let mut client_config = tls13_client(&chain, Some(&client_chain));
+        client_config.cert_compressors = vec![compressor];
+        client_config.enable_post_handshake_auth = true;
+        let mut server_config = tls13_server(&chain, Some(&client_chain));
+        server_config.cert_decompressors = vec![server_counter];
+        server_config.request_client_auth_after_handshake = true;
+
+        let (mut client, mut server) = connect(client_config, server_config);
+        do_handshake(&mut client, &mut server).unwrap();
+        assert!(server.peer_certificates().is_none());
+        assert_eq!(server_counter.calls(), 0);
+
+        // RFC 8879 §4: the post-handshake CertificateRequest offers the
+        // same algorithms, and the answer is a CompressedCertificate.
+        server.request_client_auth().unwrap();
+        transfer(&mut server, &mut client);
+        client.process_new_packets().unwrap();
+        transfer(&mut client, &mut server);
+        server.process_new_packets().unwrap();
+        assert_eq!(
+            server.post_handshake_auth_status(),
+            Some(PostHandshakeAuthStatus::Authenticated)
+        );
+        assert_eq!(
+            server.peer_certificates().unwrap(),
+            client_chain.cert_chain()
+        );
+        assert_eq!(server_counter.calls(), 1, "{:?}", compressor.algorithm());
+        assert_eq!(
+            send_and_receive(&mut client, &mut server, b"after"),
+            b"after"
         );
     }
 }

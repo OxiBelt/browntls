@@ -23,6 +23,9 @@
 //! with a Lucky Thirteen-resistant constant-time check, and encrypt-then-MAC)
 //! over a caller-supplied block cipher.
 //!
+//! [`hpke`] implements Hybrid Public Key Encryption (RFC 9180, base mode)
+//! from the primitives above.
+//!
 //! The crate is `no_std` and allocation-free by default; `std` adds runtime
 //! feature detection on aarch64. Unsafe code is denied crate-wide and allowed
 //! only in architecture backend modules, CPU detection and the system-call
@@ -56,6 +59,7 @@ pub mod zeroize;
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;
+pub mod hpke;
 pub mod tls12_prf;
 pub mod tls_cbc;
 

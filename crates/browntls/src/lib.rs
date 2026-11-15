@@ -134,8 +134,8 @@ pub mod client {
 
     pub use builder::WantsClientCert;
     pub use client_conn::{
-        ClientConfig, ClientConnectionData, ClientSessionStore, ResolvesClientCert, Resumption,
-        Tls12Resumption,
+        ClientConfig, ClientConnectionData, ClientHelloPadding, ClientSessionStore,
+        ResolvesClientCert, Resumption, TicketRequest, Tls12Resumption,
     };
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};

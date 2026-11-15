@@ -10,15 +10,24 @@ use crate::error::Error;
 const MINIMUM_MAX_FRAGMENT_SIZE: usize = 32;
 
 /// Splits plaintext into fragments.
+///
+/// The fragment limit is the smaller of the local `max_fragment_size`
+/// setting and the peer's record size limit (RFC 8449).
 #[derive(Debug)]
 pub(crate) struct MessageFragmenter {
     max_frag: usize,
+    /// From `max_fragment_size`.
+    local_max: usize,
+    /// From the peer's `record_size_limit`.
+    peer_max: usize,
 }
 
 impl Default for MessageFragmenter {
     fn default() -> Self {
         Self {
             max_frag: MAX_PLAINTEXT_LEN,
+            local_max: MAX_PLAINTEXT_LEN,
+            peer_max: MAX_PLAINTEXT_LEN,
         }
     }
 }
@@ -51,7 +60,7 @@ impl MessageFragmenter {
     /// Sets the limit on record size including the header, as RFC 6066's
     /// `max_fragment_length` and rustls's `max_fragment_size` define it.
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
-        self.max_frag = match new {
+        self.local_max = match new {
             Some(sz) => {
                 if !(MINIMUM_MAX_FRAGMENT_SIZE..=MAX_PLAINTEXT_LEN + HEADER_SIZE).contains(&sz) {
                     return Err(Error::BadMaxFragmentSize);
@@ -60,7 +69,15 @@ impl MessageFragmenter {
             }
             None => MAX_PLAINTEXT_LEN,
         };
+        self.max_frag = self.local_max.min(self.peer_max);
         Ok(())
+    }
+
+    /// Limits fragments to `max_plaintext` bytes, the largest plaintext the
+    /// peer's `record_size_limit` allows (RFC 8449 §4); at most 2^14.
+    pub(crate) fn set_peer_record_size_limit(&mut self, max_plaintext: usize) {
+        self.peer_max = max_plaintext.clamp(1, MAX_PLAINTEXT_LEN);
+        self.max_frag = self.local_max.min(self.peer_max);
     }
 
     pub(crate) fn max_fragment_len(&self) -> usize {
@@ -145,6 +162,22 @@ mod tests {
         let frags: alloc::vec::Vec<_> = f.fragment_message(&m).collect();
         assert_eq!(frags.len(), 4);
         assert_eq!(frags[3].payload.len(), 100 - 27 * 3);
+        f.set_max_fragment_size(None).unwrap();
+        assert_eq!(f.max_fragment_len(), MAX_PLAINTEXT_LEN);
+    }
+
+    #[test]
+    fn peer_record_size_limit_combines_with_local_limit() {
+        let mut f = MessageFragmenter::default();
+        f.set_peer_record_size_limit(63);
+        assert_eq!(f.max_fragment_len(), 63);
+        // The smaller limit wins, whichever is set first.
+        f.set_max_fragment_size(Some(32)).unwrap();
+        assert_eq!(f.max_fragment_len(), 27);
+        f.set_max_fragment_size(Some(1000)).unwrap();
+        assert_eq!(f.max_fragment_len(), 63);
+        f.set_peer_record_size_limit(16_385);
+        assert_eq!(f.max_fragment_len(), 995);
         f.set_max_fragment_size(None).unwrap();
         assert_eq!(f.max_fragment_len(), MAX_PLAINTEXT_LEN);
     }

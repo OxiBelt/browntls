@@ -525,6 +525,9 @@ pub(crate) struct ServerHelloPayload {
 }
 
 /// The result of parsing a ServerHello-shaped message.
+// Short-lived: `HandshakePayload::read` converts it at once, so boxing the
+// larger variant would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServerHelloOrRetry {
     Hello(ServerHelloPayload),
     Retry(HelloRetryRequest),

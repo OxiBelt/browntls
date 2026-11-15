@@ -804,6 +804,35 @@ fn free_port() -> u16 {
 /// browntls client against `openssl s_server -rev` (which echoes each line
 /// reversed).
 fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(), String> {
+    browntls_client_with(openssl, case, client_auth, |_| {})
+}
+
+/// [`browntls_client`] with every optional ClientHello extension on: GREASE
+/// (RFC 8701), a small `record_size_limit` (RFC 8449, which OpenSSL 3 does
+/// not implement and must ignore), `ticket_request` (RFC 9149) and padding
+/// to a fixed size (RFC 7685).
+fn browntls_client_with_extensions(
+    openssl: &Path,
+    case: &Case,
+    client_auth: bool,
+) -> Result<(), String> {
+    browntls_client_with(openssl, case, client_auth, |config| {
+        config.enable_grease = true;
+        config.record_size_limit = Some(512);
+        config.tls13_ticket_request = Some(browntls::client::TicketRequest {
+            new_session_count: 1,
+            resumption_count: 1,
+        });
+        config.client_hello_padding = browntls::client::ClientHelloPadding::AtLeast(1024);
+    })
+}
+
+fn browntls_client_with(
+    openssl: &Path,
+    case: &Case,
+    client_auth: bool,
+    tweak: fn(&mut ClientConfig),
+) -> Result<(), String> {
     let pki = pki(openssl, case.key);
     let port = free_port().to_string();
     let (cert, key) = (pki.path("server.pem"), pki.path("server.key"));
@@ -861,6 +890,7 @@ fn browntls_client(openssl: &Path, case: &Case, client_auth: bool) -> Result<(),
             builder.with_no_client_auth()
         };
         config.allow_mac_then_encrypt = case.allow_mac_then_encrypt();
+        tweak(&mut config);
         let conn =
             ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap())
                 .map_err(|e| e.to_string())?;
@@ -1019,6 +1049,11 @@ fn for_all(f: fn(&Path, &Case, bool) -> Result<(), String>) {
 #[test]
 fn browntls_client_with_openssl_server() {
     for_all(browntls_client);
+}
+
+#[test]
+fn browntls_client_with_grease_and_optional_extensions_with_openssl_server() {
+    for_all(browntls_client_with_extensions);
 }
 
 #[test]

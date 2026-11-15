@@ -27,6 +27,25 @@ pub(crate) const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
 /// The default limit on buffered outgoing data (TLS bytes plus unsent plaintext).
 pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
 
+/// RFC 8449 §4: the smallest record size limit an endpoint may announce;
+/// a smaller one is `illegal_parameter`.
+pub(crate) const MIN_RECORD_SIZE_LIMIT: u16 = 64;
+
+/// RFC 8449 §4: the largest record size limit worth announcing, the
+/// protocol's own limit: 2^14 for TLS 1.2, 2^14 + 1 for TLS 1.3 (whose
+/// limit counts the content type byte).
+pub(crate) const fn max_record_size_limit(tls13: bool) -> u16 {
+    if tls13 { 16_385 } else { 16_384 }
+}
+
+/// Checks a configured `record_size_limit` when a connection is created.
+pub(crate) fn check_record_size_limit_config(limit: Option<u16>) -> Result<(), Error> {
+    match limit {
+        Some(limit) if limit < MIN_RECORD_SIZE_LIMIT => Err(Error::BadRecordSizeLimit),
+        _ => Ok(()),
+    }
+}
+
 /// How many unprotected ChangeCipherSpec records a TLS 1.3 peer may send
 /// during the handshake (RFC 9846 appendix E.4).
 const MAX_MIDDLEBOX_CCS: u8 = 2;
@@ -330,6 +349,39 @@ impl CommonState {
 
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
         self.message_fragmenter.set_max_fragment_size(new)
+    }
+
+    /// Puts a negotiated `record_size_limit` (RFC 8449) into effect: `ours`
+    /// is the value we announced, `peers` the value the peer announced.
+    ///
+    /// A peer value below 64 is `illegal_parameter` (RFC 8449 §4). A value
+    /// above the protocol maximum is not an error (a server MUST NOT
+    /// enforce that, and a client MAY abort but we do not): records never
+    /// exceed the protocol maximum anyway. Our records then carry at most
+    /// `peers` bytes of plaintext in TLS 1.2 and `peers - 1` in TLS 1.3,
+    /// whose limit counts the content type (and any padding, of which we
+    /// send none); the local `max_fragment_size` still applies when
+    /// smaller. Protected records the peer sends from now on (except 0-RTT
+    /// data) must respect `ours`, or the connection fails with
+    /// `record_overflow`.
+    pub(crate) fn apply_record_size_limits(
+        &mut self,
+        ours: u16,
+        peers: u16,
+        tls13: bool,
+    ) -> Result<(), Error> {
+        if peers < MIN_RECORD_SIZE_LIMIT {
+            return Err(self.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalRecordSizeLimit,
+            ));
+        }
+        let max = max_record_size_limit(tls13);
+        let peers = usize::from(peers.min(max)) - usize::from(tls13);
+        self.message_fragmenter.set_peer_record_size_limit(peers);
+        self.record_layer
+            .set_inbound_record_size_limit(ours.min(max), tls13);
+        Ok(())
     }
 
     pub(crate) fn current_io_state(&self) -> IoState {

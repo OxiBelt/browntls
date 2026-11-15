@@ -11,24 +11,29 @@ use super::client_conn::ClientConnectionData;
 use super::common::ClientHelloDetails;
 #[cfg(feature = "tls12")]
 use super::tls12;
-use super::{ClientConfig, tls13};
+use super::{ClientConfig, ClientHelloPadding, tls13};
 use crate::common_state::ConnectionRandoms;
 use crate::common_state::{CommonState, HandshakeKind, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
-use crate::enums::{AlertDescription, CertificateType, CipherSuite, ProtocolVersion};
+use crate::enums::{
+    AlertDescription, CertificateType, CipherSuite, ProtocolVersion, SignatureScheme,
+};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::{
     Compression, ECPointFormat, ExtensionType, NamedGroup, PskKeyExchangeMode,
 };
+use crate::msgs::grease::GreaseValues;
 #[cfg(feature = "tls12")]
 use crate::msgs::handshake::ClientSessionTicket;
 use crate::msgs::handshake::{
-    CertificateStatusRequest, ClientExtensions, ClientHelloPayload, HandshakeMessagePayload,
-    HandshakePayload, HelloRetryRequest, KeyShareEntry, PresharedKeyBinder, PresharedKeyIdentity,
-    PresharedKeyOffer, ProtocolName, Random, ServerNamePayload, SessionId,
+    CertificateStatusRequest, ClientExtensions, ClientHelloPayload, ClientTicketRequest,
+    HandshakeMessagePayload, HandshakePayload, HelloRetryRequest, KeyShareEntry,
+    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, Random,
+    ServerNamePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{self, Retrieved};
@@ -201,6 +206,9 @@ pub(super) struct ClientHelloInput {
     pub(super) session_id: SessionId,
     pub(super) server_name: ServerName<'static>,
     pub(super) alpn_protocols: Vec<Vec<u8>>,
+    /// The GREASE values (RFC 8701) of this connection, when enabled; the
+    /// same ones go into a second ClientHello.
+    pub(super) grease: Option<GreaseValues>,
 }
 
 /// Builds and sends the first ClientHello.
@@ -257,6 +265,11 @@ pub(super) fn start_handshake(
     }
 
     let random = Random::new(config.provider.secure_random)?;
+    let grease = if config.enable_grease {
+        Some(GreaseValues::random(config.provider.secure_random)?)
+    } else {
+        None
+    };
     let input = ClientHelloInput {
         config,
         resuming,
@@ -266,6 +279,7 @@ pub(super) fn start_handshake(
         session_id,
         server_name,
         alpn_protocols,
+        grease,
     };
     emit_client_hello_for_retry(
         transcript_buffer,
@@ -545,6 +559,21 @@ fn emit_client_hello_for_retry(
         });
     }
 
+    // RFC 8449: the largest record we accept. The protocol maximum is that
+    // of the highest version offered; a TLS 1.2 server does not enforce a
+    // larger value (RFC 8449 §4) and we clamp what we enforce.
+    exts.record_size_limit = config
+        .record_size_limit
+        .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    // RFC 9149: a TLS 1.3 extension only.
+    exts.ticket_request = config
+        .tls13_ticket_request
+        .filter(|_| supports_tls13)
+        .map(|request| ClientTicketRequest {
+            new_session_count: request.new_session_count,
+            resumption_count: request.resumption_count,
+        });
+
     let mut cipher_suites: Vec<CipherSuite> = config
         .provider
         .cipher_suites
@@ -555,11 +584,17 @@ fn emit_client_hello_for_retry(
     // RFC 5746 §3.3: signal secure renegotiation support (we never renegotiate).
     cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
 
+    // What the server's choices are checked against: never a GREASE value.
     input.hello.sent_extensions = exts.present_types();
     cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
     input.hello.offered_sigschemes = offered_sigschemes;
+    input.hello.sent_record_size_limit = exts.record_size_limit;
 
-    let chp = ClientHelloPayload {
+    if let Some(grease) = &input.grease {
+        add_grease(grease, retryreq, &mut cipher_suites, &mut exts);
+    }
+
+    let mut chp = ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: input.random,
         session_id: input.session_id,
@@ -567,6 +602,12 @@ fn emit_client_hello_for_retry(
         compression_methods: vec![Compression::Null],
         extensions: exts,
     };
+    // RFC 7685: the length is final here, binders included (they are
+    // zero-filled placeholders of the right size until computed below).
+    chp.extensions.padding = padding_len(
+        config.client_hello_padding,
+        HANDSHAKE_HEADER_LEN + chp.get_encoding().len(),
+    );
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 
     tls13::fill_in_psk_binders(&offered_psks, &transcript_buffer, &mut hmp);
@@ -616,6 +657,87 @@ fn emit_client_hello_for_retry(
     } else {
         Box::new(ExpectServerHelloOrHelloRetryRequest { next })
     })
+}
+
+/// The four-byte handshake message header: type and 24-bit length.
+const HANDSHAKE_HEADER_LEN: usize = 4;
+
+/// Puts the GREASE values (RFC 8701 §3) into the ClientHello, each first in
+/// its list. After a HelloRetryRequest that names a group, the key share
+/// list must hold exactly one share for that group (RFC 9846 §4.1.2), so no
+/// GREASE share goes into that second ClientHello.
+fn add_grease(
+    grease: &GreaseValues,
+    retryreq: Option<&HelloRetryRequest>,
+    cipher_suites: &mut Vec<CipherSuite>,
+    exts: &mut ClientExtensions,
+) {
+    cipher_suites.insert(0, CipherSuite::Unknown(grease.cipher_suite));
+    if let Some(groups) = &mut exts.named_groups {
+        groups.insert(0, NamedGroup::Unknown(grease.group));
+    }
+    let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+    if let Some(shares) = &mut exts.key_shares
+        && !hrr_named_group
+    {
+        // RFC 8701 §3: a GREASE key share carries a single byte.
+        shares.insert(
+            0,
+            KeyShareEntry::new(NamedGroup::Unknown(grease.group), &[0]),
+        );
+    }
+    if let Some(schemes) = &mut exts.signature_schemes {
+        schemes.insert(0, SignatureScheme::Unknown(grease.signature_scheme));
+    }
+    if let Some(versions) = &mut exts.supported_versions {
+        versions.insert(0, ProtocolVersion::Unknown(grease.version));
+    }
+    if let Some(modes) = &mut exts.psk_modes {
+        modes.insert(0, PskKeyExchangeMode::Unknown(grease.psk_mode));
+    }
+    exts.grease_first = Some(grease.first_extension);
+    exts.grease_last = Some(grease.last_extension);
+}
+
+/// The length of the `padding` extension body (RFC 7685) for a ClientHello
+/// handshake message of `unpadded` bytes, or `None` for no extension.
+///
+/// Lengths of 256 to 511 bytes are padded to 512, the workaround RFC 7685
+/// §4 was written for; an `AtLeast` target is reached first. The extension
+/// itself takes four bytes of header.
+fn padding_len(policy: ClientHelloPadding, unpadded: usize) -> Option<usize> {
+    const PROBLEMATIC: core::ops::Range<usize> = 256..512;
+    let mut body = match policy {
+        ClientHelloPadding::Disabled => return None,
+        ClientHelloPadding::AtLeast(target) if unpadded < usize::from(target) => {
+            Some((usize::from(target) - unpadded).saturating_sub(4))
+        }
+        _ => None,
+    };
+    let padded = unpadded + body.map_or(0, |b| 4 + b);
+    if PROBLEMATIC.contains(&padded) {
+        let missing = PROBLEMATIC.end - padded;
+        body = Some(match body {
+            Some(b) => b + missing,
+            None => missing.saturating_sub(4),
+        });
+    }
+    body
+}
+
+/// Puts a `record_size_limit` the server announced (RFC 8449) into
+/// effect. The server can only have sent one when we did (the
+/// unsolicited-extension check runs first).
+pub(super) fn process_record_size_limit(
+    common: &mut CommonState,
+    hello: &ClientHelloDetails,
+    servers: Option<u16>,
+    tls13: bool,
+) -> Result<(), Error> {
+    match (hello.sent_record_size_limit, servers) {
+        (Some(ours), Some(servers)) => common.apply_record_size_limits(ours, servers, tls13),
+        _ => Ok(()),
+    }
 }
 
 /// Checks the server's answers to our RFC 7250 certificate type offers: a

@@ -229,6 +229,19 @@ pub struct ServerConfig {
     /// Decompressors for client certificates (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// The `record_size_limit` to answer a client's with (RFC 8449): the
+    /// largest record plaintext we accept, counting the content type in TLS
+    /// 1.3. `None` ignores the client's extension, so its limit is not
+    /// respected either. A value above the protocol maximum (2^14 + 1 for
+    /// TLS 1.3, 2^14 for TLS 1.2) is lowered to it; a value below 64 makes
+    /// connection creation fail with [`Error::BadRecordSizeLimit`].
+    ///
+    /// Defaults to `Some(16385)`: no restriction of our own, but a client
+    /// that announces a smaller limit has its limit respected. Records we
+    /// send are limited by the client's limit and by `max_fragment_size`,
+    /// whichever is smaller.
+    pub record_size_limit: Option<u16>,
+
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
@@ -487,6 +500,7 @@ impl ConnectionCore<ServerConnectionData> {
         config.check_cookie_sealer()?;
         let mut common = CommonState::new(Side::Server);
         common.set_max_fragment_size(config.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common.enable_secret_extraction = config.enable_secret_extraction;
         common.fips = config.fips();
         Ok(Self::new(
@@ -826,10 +840,16 @@ impl Accepted {
         mut self,
         config: Arc<ServerConfig>,
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = config.check_cookie_sealer().and_then(|()| {
-            self.connection
-                .set_max_fragment_size(config.max_fragment_size)
-        }) {
+        if let Err(err) = config
+            .check_cookie_sealer()
+            .and_then(|()| {
+                self.connection
+                    .set_max_fragment_size(config.max_fragment_size)
+            })
+            .and_then(|()| {
+                crate::common_state::check_record_size_limit_config(config.record_size_limit)
+            })
+        {
             return Err((err, AcceptedAlert::from(self.connection)));
         }
         self.connection.enable_secret_extraction = config.enable_secret_extraction;

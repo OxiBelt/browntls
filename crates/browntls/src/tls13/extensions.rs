@@ -66,6 +66,20 @@ pub(crate) fn allowed_in(ext: ExtensionType, msg: Tls13Message) -> Option<bool> 
         // RFC 8773 (RFC 9973).
         E::TlsCertWithExternPsk => &[ClientHello, ServerHello],
 
+        // Defined by RFCs outside RFC 9846; IANA registry TLS 1.3 column.
+        // RFC 8449 §4: the server answers in EncryptedExtensions.
+        E::RecordSizeLimit => &[ClientHello, EncryptedExtensions],
+        // RFC 9149 §3: the server's `expected_count` goes in
+        // EncryptedExtensions; in a ServerHello or HelloRetryRequest it is
+        // `illegal_parameter`.
+        E::TicketRequest => &[ClientHello, EncryptedExtensions],
+        // RFC 9345 §4.1.1 and RFC 9162 §6.
+        E::DelegatedCredential | E::TransparencyInfo => {
+            &[ClientHello, CertificateRequest, Certificate]
+        }
+        // RFC 8844 §3.
+        E::ExternalIdHash | E::ExternalSessionId => &[ClientHello, EncryptedExtensions],
+
         // Defined for TLS 1.2 and earlier only ("-" in the TLS 1.3 column).
         E::ClientCertificateUrl
         | E::TrustedCAKeys
@@ -76,6 +90,9 @@ pub(crate) fn allowed_in(ext: ExtensionType, msg: Tls13Message) -> Option<bool> 
         | E::CertificateType
         | E::ECPointFormats
         | E::SRP
+        | E::StatusRequestV2
+        | E::TokenBinding
+        | E::CachedInfo
         | E::EncryptThenMac
         | E::ExtendedMasterSecret
         | E::SessionTicket
@@ -148,6 +165,42 @@ mod tests {
         );
         assert_eq!(
             allowed_in(ExtensionType::Unknown(0x1234), EncryptedExtensions),
+            None
+        );
+    }
+
+    #[test]
+    fn later_rfcs() {
+        use Tls13Message::*;
+        for ext in [ExtensionType::RecordSizeLimit, ExtensionType::TicketRequest] {
+            assert_eq!(allowed_in(ext, ClientHello), Some(true));
+            assert_eq!(allowed_in(ext, EncryptedExtensions), Some(true));
+            for msg in [
+                ServerHello,
+                HelloRetryRequest,
+                CertificateRequest,
+                Certificate,
+                NewSessionTicket,
+            ] {
+                assert_eq!(allowed_in(ext, msg), Some(false), "{ext:?} in {msg:?}");
+            }
+        }
+        assert_eq!(allowed_in(ExtensionType::Padding, ClientHello), Some(true));
+        assert_eq!(
+            allowed_in(ExtensionType::Padding, EncryptedExtensions),
+            Some(false)
+        );
+        assert_eq!(
+            allowed_in(ExtensionType::StatusRequestV2, EncryptedExtensions),
+            Some(false)
+        );
+        assert_eq!(
+            allowed_in(ExtensionType::DelegatedCredential, Certificate),
+            Some(true)
+        );
+        // A GREASE value (RFC 8701) is never recognised.
+        assert_eq!(
+            allowed_in(ExtensionType::Unknown(0x3a3a), ServerHello),
             None
         );
     }

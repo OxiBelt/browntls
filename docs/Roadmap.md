@@ -37,6 +37,7 @@ intent.
 | 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
+| `record_size_limit` (RFC 8449, both sides, TLS 1.3 and 1.2, on by default), `ticket_request` (RFC 9149), client GREASE (RFC 8701, opt-in) and ClientHello padding (RFC 7685, on by default for 256 to 511-byte hellos): in-memory suites on both providers, rustls 0.23 and OpenSSL 3 interop with all four on; Docker E2E scenarios added, GnuTLS not yet run (see [Architecture](Architecture.md#optional-clienthello-extensions)) | done |
 | TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | TLS 1.3 external PSKs (RFC 9846 §4.3.11, `psk_dhe_ke` only), the PSK importer (RFC 9258) and certificate authentication with an external PSK (RFC 8773, opt-in); `require_external_psk` on both sides; tickets of external-PSK sessions keep the PSK identity and are resumed only while the PSK is configured; 0-RTT with external PSKs opt-in per key; both providers, cross-provider handshakes, OpenSSL 3 interop for direct external PSKs in both directions (see [Architecture](Architecture.md#tls-13-external-psks)) | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
@@ -131,6 +132,13 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   bound); no test sends a server messages interleaved within an answer,
   which needs a misbehaving client. The server side is also tested against
   `openssl s_client -enable_pha`.
+- RFC 8449 `record_size_limit`: a peer value above the protocol maximum is
+  lowered rather than refused (RFC 8449 §4 lets a client abort); 0-RTT
+  records are not checked against the server's limit, and a TLS 1.3 client
+  checks its own limit only from the record after EncryptedExtensions. The
+  client's GREASE (RFC 8701) is off by default until the Docker E2E GnuTLS
+  scenarios have passed with it; server-side GREASE (RFC 8701 §4) is not
+  implemented.
 - External PSKs: the `psk_ke` mode is not implemented (RFC 9257 recommends
   (EC)DHE); a server examines only the first 16 `pre_shared_key`
   identities; 0-RTT under an external PSK has no anti-replay protection

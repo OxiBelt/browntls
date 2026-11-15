@@ -294,6 +294,29 @@ pub(crate) enum ClientSessionTicket {
     Offer(Payload<'static>),
 }
 
+/// The client's `ticket_request` extension body (RFC 9149 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClientTicketRequest {
+    /// Tickets wanted when the server negotiates a new session.
+    pub(crate) new_session_count: u8,
+    /// Tickets wanted when the server resumes the offered session.
+    pub(crate) resumption_count: u8,
+}
+
+impl Codec<'_> for ClientTicketRequest {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.new_session_count.encode(bytes);
+        self.resumption_count.encode(bytes);
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
+        Ok(Self {
+            new_session_count: u8::read(r)?,
+            resumption_count: u8::read(r)?,
+        })
+    }
+}
+
 /// The extensions a server may send in ServerHello or EncryptedExtensions.
 ///
 /// Which of these are permitted in which message is decided by the handshake
@@ -320,6 +343,12 @@ pub(crate) struct ServerExtensions {
     /// TLS 1.3 EncryptedExtensions only: the server's groups, in preference
     /// order (RFC 9846 §4.3.7). Informational for the client.
     pub(crate) supported_groups: Option<Vec<NamedGroup>>,
+    /// RFC 8449: the largest record the server is willing to receive (TLS
+    /// 1.2 ServerHello, TLS 1.3 EncryptedExtensions).
+    pub(crate) record_size_limit: Option<u16>,
+    /// RFC 9149 §3: TLS 1.3 EncryptedExtensions only, the number of
+    /// tickets the server expects to send (`expected_count`).
+    pub(crate) ticket_request: Option<u8>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
     /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
@@ -385,6 +414,11 @@ impl ServerExtensions {
             self.supported_groups.is_some(),
             ExtensionType::EllipticCurves,
         );
+        add(
+            self.record_size_limit.is_some(),
+            ExtensionType::RecordSizeLimit,
+        );
+        add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
         add(
             self.cert_with_extern_psk.is_some(),
             ExtensionType::TlsCertWithExternPsk,
@@ -455,6 +489,12 @@ impl Codec<'_> for ServerExtensions {
                 crate::msgs::codec::encode_vec_u16(b, groups)
             });
         }
+        if let Some(limit) = self.record_size_limit {
+            encode_extension(ExtensionType::RecordSizeLimit, out, |b| limit.encode(b));
+        }
+        if let Some(count) = self.ticket_request {
+            encode_extension(ExtensionType::TicketRequest, out, |b| count.encode(b));
+        }
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
@@ -505,6 +545,10 @@ impl Codec<'_> for ServerExtensions {
                         "NamedGroups",
                     )?);
                 }
+                ExtensionType::RecordSizeLimit => {
+                    out.record_size_limit = Some(u16::read(body)?);
+                }
+                ExtensionType::TicketRequest => out.ticket_request = Some(u8::read(body)?),
                 ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);

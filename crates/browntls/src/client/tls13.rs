@@ -403,6 +403,9 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             exts.client_certificate_type,
             exts.server_certificate_type,
         )?;
+        // RFC 8449 §4: in TLS 1.3 the server's limit comes here. RFC 9149's
+        // `expected_count` is a hint only and needs no action.
+        hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
 
         let psk_selected = self.resuming_session.is_some() || self.external_psk.is_some();
         // RFC 9846 §4.3.10: early_data here requires a PSK, and the first

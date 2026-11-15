@@ -13,7 +13,9 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState
 use crate::conn::State;
 use crate::crypto::hmac;
 use crate::ct::constant_time_eq;
-use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
+use crate::enums::{
+    AlertDescription, CertificateCompressionAlgorithm, ContentType, HandshakeType, ProtocolVersion,
+};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace, warning};
@@ -23,8 +25,8 @@ use crate::msgs::codec::Codec;
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestPayloadTls13, HandshakeMessagePayload,
-    HandshakePayload, MAX_CERTIFICATE_SIZE_LIMIT, NewSessionTicketPayloadTls13, PresharedKeyBinder,
-    ServerExtensions, ServerHelloPayload,
+    HandshakePayload, NewSessionTicketPayloadTls13, PresharedKeyBinder, ServerExtensions,
+    ServerHelloPayload,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{self, Retrieved};
@@ -358,6 +360,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     transcript: self.transcript,
                     key_schedule: self.key_schedule,
                     client_auth: None,
+                    client_cert_compression: Vec::new(),
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
@@ -412,6 +415,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 client_auth: None,
+                client_cert_compression: Vec::new(),
                 offered_sigschemes: self.offered_sigschemes,
             })
             .handle(cx, m),
@@ -471,6 +475,12 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
 
         let compat_sigschemes = certificate_request_sigschemes(cx.common, certreq)?;
 
+        let client_cert_compression = certreq
+            .extensions
+            .certificate_compression
+            .clone()
+            .unwrap_or_default();
+
         let client_auth = ClientAuthDetails::resolve(
             &*self.config.client_auth_cert_resolver,
             certreq.extensions.authorities.as_deref(),
@@ -487,6 +497,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             transcript: self.transcript,
             key_schedule: self.key_schedule,
             client_auth: Some(client_auth),
+            client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
         }))
     }
@@ -542,58 +553,10 @@ struct ExpectCertificate {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
+    /// The compression algorithms the server's CertificateRequest accepts
+    /// for our Certificate (RFC 8879 §3); empty when it named none.
+    client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
-}
-
-impl ExpectCertificate {
-    /// Expands a CompressedCertificate (RFC 8879 §4) with a decompressor we offered.
-    fn decompress(
-        &self,
-        cx: &mut ClientContext<'_>,
-        m: &Message<'_>,
-    ) -> Result<CertificatePayloadTls13<'static>, Error> {
-        let compressed = require_handshake_msg!(
-            m,
-            HandshakeType::CompressedCertificate,
-            HandshakePayload::CompressedCertificate
-        )?;
-        let Some(decompressor) = self
-            .config
-            .cert_decompressors
-            .iter()
-            .find(|d| d.algorithm() == compressed.alg)
-        else {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::SelectedUnofferedCertCompression,
-            ));
-        };
-        let len = compressed.uncompressed_len as usize;
-        if len == 0 || len > MAX_CERTIFICATE_SIZE_LIMIT {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::BadCertificate,
-                PeerMisbehaved::InvalidCertCompression,
-            ));
-        }
-        let mut output = alloc::vec![0u8; len];
-        if decompressor
-            .decompress(compressed.compressed.0.bytes(), &mut output)
-            .is_err()
-        {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::BadCertificate,
-                PeerMisbehaved::InvalidCertCompression,
-            ));
-        }
-        CertificatePayloadTls13::read_bytes(&output)
-            .map(CertificatePayloadTls13::into_owned)
-            .map_err(|_| {
-                cx.common.send_fatal_alert(
-                    AlertDescription::BadCertificate,
-                    PeerMisbehaved::InvalidCertCompression,
-                )
-            })
-    }
 }
 
 impl State<ClientConnectionData> for ExpectCertificate {
@@ -604,9 +567,14 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 ..
             } => chain.clone().into_owned(),
             MessagePayload::Handshake {
-                parsed: HandshakeMessagePayload(HandshakePayload::CompressedCertificate(..)),
+                parsed: HandshakeMessagePayload(HandshakePayload::CompressedCertificate(compressed)),
                 ..
-            } => self.decompress(cx, &m)?,
+            } => crate::compress::receive_compressed_certificate(
+                cx.common,
+                &self.config.cert_decompressors,
+                self.config.cert_decompression_limit,
+                compressed,
+            )?,
             payload => {
                 return Err(crate::check::inappropriate_handshake_message(
                     payload,
@@ -657,6 +625,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             key_schedule: self.key_schedule,
             server_cert,
             client_auth: self.client_auth,
+            client_cert_compression: self.client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
         }))
     }
@@ -671,6 +640,9 @@ struct ExpectCertificateVerify {
     key_schedule: KeyScheduleHandshake,
     server_cert: ServerCertDetails,
     client_auth: Option<ClientAuthDetails>,
+    /// The compression algorithms the server's CertificateRequest accepts
+    /// for our Certificate (RFC 8879 §3); empty when it named none.
+    client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
 }
 
@@ -732,6 +704,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             transcript: self.transcript,
             key_schedule: self.key_schedule,
             client_auth: self.client_auth,
+            client_cert_compression: self.client_cert_compression,
             cert_verified,
             sig_verified,
         }))
@@ -795,14 +768,36 @@ fn construct_verify_message(
 
 fn emit_certificate_tls13(
     transcript: &mut HandshakeHash,
+    config: &ClientConfig,
     certkey: Option<&CertifiedKey>,
     auth_context: Option<Vec<u8>>,
+    compression: &[CertificateCompressionAlgorithm],
     common: &mut CommonState,
 ) {
     let certs: &[browntls_pki::CertificateDer<'static>] =
         certkey.map(|ck| ck.cert.as_slice()).unwrap_or(&[]);
     let mut cert_payload = CertificatePayloadTls13::new(certs.iter(), None);
     cert_payload.context = PayloadU8::new(auth_context.unwrap_or_default());
+
+    // RFC 8879 §4: compress when the CertificateRequest named an algorithm
+    // we have.
+    if let Some(compressed) = crate::compress::compress_certificate(
+        &config.cert_compressors,
+        &config.cert_compression_cache,
+        compression,
+        &cert_payload.get_encoding(),
+    ) {
+        let m = Message {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::CompressedCertificate(compressed),
+            )),
+        };
+        transcript.add_message(&m);
+        common.send_msg(m, true);
+        return;
+    }
+
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
@@ -867,6 +862,9 @@ struct ExpectFinished {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
+    /// The compression algorithms the server's CertificateRequest accepts
+    /// for our Certificate (RFC 8879 §3); empty when it named none.
+    client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
 }
@@ -914,7 +912,14 @@ impl State<ClientConnectionData> for ExpectFinished {
         if let Some(client_auth) = st.client_auth {
             match client_auth {
                 ClientAuthDetails::Empty { auth_context_tls13 } => {
-                    emit_certificate_tls13(&mut st.transcript, None, auth_context_tls13, cx.common);
+                    emit_certificate_tls13(
+                        &mut st.transcript,
+                        &st.config,
+                        None,
+                        auth_context_tls13,
+                        &st.client_cert_compression,
+                        cx.common,
+                    );
                 }
                 ClientAuthDetails::Verify {
                     certkey,
@@ -923,8 +928,10 @@ impl State<ClientConnectionData> for ExpectFinished {
                 } => {
                     emit_certificate_tls13(
                         &mut st.transcript,
+                        &st.config,
                         Some(&certkey),
                         auth_context_tls13,
+                        &st.client_cert_compression,
                         cx.common,
                     );
                     emit_certverify_tls13(&mut st.transcript, &*signer, cx.common)?;
@@ -1095,9 +1102,21 @@ impl ExpectTraffic {
             &sigschemes,
             Some(certreq.context.0.clone()),
         );
+        let compression = certreq
+            .extensions
+            .certificate_compression
+            .clone()
+            .unwrap_or_default();
         match client_auth {
             ClientAuthDetails::Empty { auth_context_tls13 } => {
-                emit_certificate_tls13(&mut transcript, None, auth_context_tls13, cx.common);
+                emit_certificate_tls13(
+                    &mut transcript,
+                    &self.config,
+                    None,
+                    auth_context_tls13,
+                    &compression,
+                    cx.common,
+                );
             }
             ClientAuthDetails::Verify {
                 certkey,
@@ -1106,8 +1125,10 @@ impl ExpectTraffic {
             } => {
                 emit_certificate_tls13(
                     &mut transcript,
+                    &self.config,
                     Some(&certkey),
                     auth_context_tls13,
+                    &compression,
                     cx.common,
                 );
                 emit_certverify_tls13(&mut transcript, &*signer, cx.common)?;

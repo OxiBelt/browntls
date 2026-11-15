@@ -7,15 +7,17 @@
 //! every pair of curve points, including the identity `(0 : 1 : 1)`, so the
 //! scalar multiplications below need no special cases.
 //!
-//! * [`EdwardsPoint::mul`] is constant time: a fixed 4-bit window over a
-//!   16-entry table built per call, with a masked (scan-all) table lookup.
-//!   It serves key generation and signing (`[s]B`, `[r]B`).
+//! * [`EdwardsPoint::mul_base`] is constant time: a signed radix-16 comb
+//!   over the precomputed multiples of B in `table`, with masked (scan-all)
+//!   lookups and mixed additions; 112 additions and four doublings. It
+//!   serves key generation and signing (`[s]B`, `[r]B`) and X448 public keys.
 //! * [`vartime_double_scalar_mul_base`] is **variable time** and must only be
-//!   used with public inputs (signature verification): width-5 NAF for both
-//!   scalars.
+//!   used with public inputs (signature verification): width-5 NAF for the
+//!   variable point and width-8 NAF over a precomputed table for B.
 
 use super::field::{Fe, cmov_u64, opaque_mask};
 use super::scalar::Scalar;
+use super::table::{BASE, ODD};
 use crate::ct::{self, Choice};
 use crate::zeroize::Zeroize;
 
@@ -39,7 +41,10 @@ impl EdwardsPoint {
 
     /// The base point B of RFC 8032 Table 2 (`(X(P), Y(P))` of edwards448 in
     /// RFC 7748 §4.2), in affine form. The test `base_point_matches_the_rfc`
-    /// checks these limbs against the decimal values in the RFC.
+    /// checks these limbs against the decimal values in the RFC. The
+    /// multiplications use the precomputed `table`, which the tests rebuild
+    /// from this constant.
+    #[cfg(test)]
     pub(crate) const BASE: Self = Self {
         x: Fe([
             0x26a82bc70cc05e,
@@ -153,6 +158,24 @@ impl EdwardsPoint {
         }
     }
 
+    /// Mixed addition of the affine point `(x, y)`: the addition of RFC 8032
+    /// §5.2.4 with `Z2 = 1`, complete like [`Self::add`].
+    fn add_affine(&self, q: &[Fe; 2]) -> Self {
+        let [qx, qy] = q;
+        let b = self.z.square();
+        let c = self.x.mul(qx);
+        let d = self.y.mul(qy);
+        let e_abs = c.mul(&d).mul_small(D_ABS);
+        let f = b.add(&e_abs);
+        let g = b.sub(&e_abs);
+        let h = self.x.add(&self.y).mul(&qx.add(qy));
+        Self {
+            x: self.z.mul(&f).mul(&h.sub(&c.add(&d))),
+            y: self.z.mul(&g).mul(&d.sub(&c)),
+            z: f.mul(&g),
+        }
+    }
+
     /// `true` if this is the identity `(0 : Z : Z)` (public inputs only).
     pub(crate) fn is_identity(&self) -> bool {
         self.x.is_zero().declassify() && self.y.ct_eq(&self.z).declassify()
@@ -164,6 +187,7 @@ impl EdwardsPoint {
         self.double().double().is_identity()
     }
 
+    #[cfg(test)]
     fn conditional_assign(&mut self, other: &Self, c: Choice) {
         let mask = opaque_mask(c);
         cmov_u64(mask, &mut self.x.0, &other.x.0);
@@ -171,12 +195,14 @@ impl EdwardsPoint {
         cmov_u64(mask, &mut self.z.0, &other.z.0);
     }
 
-    /// Constant-time `[k]P` for a reduced scalar `k < L < 2^446`.
+    /// Constant-time `[k]P` for a reduced scalar `k < L < 2^446`: the
+    /// variable-base reference the fixed-base comb is tested against.
     ///
     /// Fixed 4-bit windows from the top: four doublings, then the addition
     /// of `table[digit]` selected by scanning all 16 entries, for every one of
     /// the 112 digits. The sequence of field operations and memory accesses
     /// is independent of `k`.
+    #[cfg(test)]
     pub(crate) fn mul(&self, k: &Scalar) -> Self {
         let mut table = [Self::IDENTITY; 16];
         for i in 1..16 {
@@ -202,21 +228,82 @@ impl EdwardsPoint {
         acc
     }
 
-    /// Constant-time `[k]B` for the base point.
+    /// Constant-time `[k]B` for a reduced scalar `k < L < 2^446`.
+    ///
+    /// `k` is recoded into 112 signed radix-16 digits `e[i]` in `[-8, 8]`.
+    /// With the table rows `256^j B`, the odd digits give
+    /// `sum e[2j + 1] 256^j B`, four doublings multiply that by 16, and the
+    /// even digits add `sum e[2j] 256^j B`. Every digit costs one masked scan
+    /// of its table row and one complete mixed addition, so the sequence of
+    /// field operations and memory accesses is independent of `k`.
     pub(crate) fn mul_base(k: &Scalar) -> Self {
-        Self::BASE.mul(k)
+        let mut kb = k.to_bytes();
+        // Digits as two's complement bytes so that they can be wiped. The top
+        // nibble is at most 3 (k < 2^446), so the last digit absorbs the
+        // final carry without leaving [-8, 8].
+        let mut e = [0u8; 112];
+        for (i, &byte) in kb[..56].iter().enumerate() {
+            e[2 * i] = byte & 15;
+            e[2 * i + 1] = byte >> 4;
+        }
+        let mut carry = 0i8;
+        for d in e.iter_mut().take(111) {
+            let v = *d as i8 + carry;
+            carry = (v + 8) >> 4;
+            *d = (v - (carry << 4)) as u8;
+        }
+        e[111] = (e[111] as i8 + carry) as u8;
+
+        let mut t = [Fe::ZERO; 2];
+        let mut h = Self::IDENTITY;
+        for i in (1..112).step_by(2) {
+            t = select(i / 2, e[i] as i8);
+            h = h.add_affine(&t);
+        }
+        h = h.double().double().double().double();
+        for i in (0..112).step_by(2) {
+            t = select(i / 2, e[i] as i8);
+            h = h.add_affine(&t);
+        }
+        // The digits and the last selected multiple depend on the secret.
+        kb.zeroize();
+        e.zeroize();
+        for c in &mut t {
+            c.0.zeroize();
+        }
+        h
     }
 
     /// The Montgomery u-coordinate `y^2 / x^2` of the image of this point
-    /// under the 4-isogeny of RFC 7748 §4.2 (zero for the identity). Used in
-    /// tests to cross-check X448 against the Edwards arithmetic.
-    #[cfg(test)]
+    /// under the 4-isogeny of RFC 7748 §4.2 (zero for the identity, as
+    /// inversion maps zero to zero). The isogeny maps B to the X448 base
+    /// point `u = 5`, so this turns `[k]B` into the X448 public key of `k`.
+    /// Constant time.
     pub(crate) fn to_montgomery_u(self) -> [u8; 56] {
         self.y.square().mul(&self.x.square().invert()).to_bytes()
     }
 }
 
-/// Width-`w` non-adjacent form of a scalar below `2^446` (at most 447 digits).
+/// Constant-time lookup of `b * 256^row * B` for `b` in `[-8, 8]` as an
+/// affine `(x, y)`; `b = 0` gives the identity `(0, 1)`. All eight entries of
+/// the row are read, and the negation (`-(x, y) = (-x, y)`) is a masked
+/// select.
+#[inline]
+fn select(row: usize, b: i8) -> [Fe; 2] {
+    let bneg = u64::from((b as u8) >> 7);
+    let babs = b.wrapping_sub(((bneg as i8).wrapping_neg() & b).wrapping_shl(1)) as u8;
+    let mut t = [Fe::ZERO, Fe::ONE];
+    for (j, entry) in BASE[row].iter().enumerate() {
+        let m = opaque_mask(ct::eq_u64(u64::from(babs), j as u64 + 1));
+        cmov_u64(m, &mut t[0].0, &entry[0]);
+        cmov_u64(m, &mut t[1].0, &entry[1]);
+    }
+    t[0].conditional_negate(Choice::from_bit(bneg));
+    t
+}
+
+/// Width-`w` non-adjacent form (`w <= 8`) of a scalar below `2^446` (at most
+/// 447 digits, each odd and below `2^(w - 1)` in absolute value).
 fn naf(s: &[u8; 57], w: usize) -> [i8; 448] {
     let mut x = [0u64; 9];
     for (xi, chunk) in x.iter_mut().zip(s[..56].as_chunks::<8>().0) {
@@ -270,9 +357,8 @@ pub(crate) fn vartime_double_scalar_mul_base(
     b: &Scalar,
 ) -> EdwardsPoint {
     let a_naf = naf(&a.to_bytes(), 5);
-    let b_naf = naf(&b.to_bytes(), 5);
+    let b_naf = naf(&b.to_bytes(), 8);
     let ta = odd_multiples(pa);
-    let tb = odd_multiples(&EdwardsPoint::BASE);
     let mut i = 447;
     while i > 0 && a_naf[i] == 0 && b_naf[i] == 0 {
         i -= 1;
@@ -280,12 +366,18 @@ pub(crate) fn vartime_double_scalar_mul_base(
     let mut r = EdwardsPoint::IDENTITY;
     loop {
         r = r.double();
-        for (digit, table) in [(a_naf[i], &ta), (b_naf[i], &tb)] {
-            if digit > 0 {
-                r = r.add(&table[(digit / 2) as usize]);
-            } else if digit < 0 {
-                r = r.add(&table[(-digit / 2) as usize].neg());
-            }
+        let digit = a_naf[i];
+        if digit > 0 {
+            r = r.add(&ta[(digit / 2) as usize]);
+        } else if digit < 0 {
+            r = r.add(&ta[(-digit / 2) as usize].neg());
+        }
+        let digit = b_naf[i];
+        if digit != 0 {
+            // ODD[j] = (2j + 1) B; -(x, y) = (-x, y).
+            let [x, y] = ODD[usize::from(digit.unsigned_abs() / 2)];
+            let x = if digit < 0 { Fe(x).neg() } else { Fe(x) };
+            r = r.add_affine(&[x, Fe(y)]);
         }
         if i == 0 {
             break;
@@ -417,6 +509,163 @@ mod tests {
             assert!(eq(&vartime_double_scalar_mul_base(&k, &pt, &t), &want));
             assert!(eq(&pt.mul(&k), &mul_ref(&k.to_bytes(), &pt)));
         }
+    }
+
+    /// The comb agrees with the variable-base multiplication and the naive
+    /// reference on scalars that exercise every digit value and the carries
+    /// of the recoding.
+    #[test]
+    fn mul_base_matches_variable_base() {
+        let b = EdwardsPoint::BASE;
+        let mut cases = std::vec::Vec::new();
+        // Every nibble value in every position class, including 8 (which
+        // recodes to -8 with a carry) and runs of carries.
+        for nib in 0..16u8 {
+            let mut s = [nib | (nib << 4); 57];
+            s[55] &= 0x3f;
+            s[56] = 0;
+            cases.push(s);
+            let mut s = [0u8; 57];
+            s[0] = nib;
+            s[27] = nib << 4;
+            s[55] = nib & 0x3f;
+            cases.push(s);
+        }
+        let mut st = 0x0f1e_2d3c_4b5a_6978u64;
+        for _ in 0..40 {
+            let mut s = [0u8; 57];
+            for byte in s.iter_mut().take(56) {
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *byte = (st >> 56) as u8;
+            }
+            cases.push(s);
+        }
+        for s in &cases {
+            // Reduction makes any 448-bit value a valid scalar; L - 1 and the
+            // other large scalars arise from the all-ones patterns.
+            let k = scalar(s);
+            let got = EdwardsPoint::mul_base(&k);
+            assert!(eq(&got, &b.mul(&k)), "s = {s:x?}");
+            assert!(eq(&got, &mul_ref(&k.to_bytes(), &b)), "s = {s:x?}");
+        }
+        // 0 and 1.
+        assert!(EdwardsPoint::mul_base(&Scalar::ZERO).is_identity());
+        let one = scalar(&core::array::from_fn(|i| u8::from(i == 0)));
+        assert!(eq(&EdwardsPoint::mul_base(&one), &b));
+    }
+
+    /// `select` returns the signed multiples of the row's point.
+    #[test]
+    fn select_returns_signed_multiples() {
+        let mut row_point = EdwardsPoint::BASE;
+        for row in [0usize, 1, 55] {
+            if row == 55 {
+                for _ in 0..(8 * 54) {
+                    row_point = row_point.double();
+                }
+            }
+            let mut acc = EdwardsPoint::IDENTITY;
+            for b in 0..=8i8 {
+                for sign in [1i8, -1] {
+                    let [x, y] = select(row, sign * b);
+                    let got = EdwardsPoint { x, y, z: Fe::ONE };
+                    let want = if sign == 1 { acc } else { acc.neg() };
+                    assert!(eq(&got, &want), "row {row} digit {}", sign * b);
+                }
+                acc = acc.add(&row_point);
+            }
+            if row == 0 {
+                for _ in 0..8 {
+                    row_point = row_point.double();
+                }
+            }
+        }
+    }
+
+    fn affine_limbs(p: &EdwardsPoint) -> [[u64; 8]; 2] {
+        let zi = p.z.invert();
+        // Canonical limbs: decode the canonical encoding.
+        [
+            Fe::from_bytes(&p.x.mul(&zi).to_bytes()).0,
+            Fe::from_bytes(&p.y.mul(&zi).to_bytes()).0,
+        ]
+    }
+
+    fn write_entry(out: &mut std::string::String, indent: &str, e: &[[u64; 8]; 2]) {
+        use core::fmt::Write;
+        out.push_str(indent);
+        out.push('[');
+        for (c, coord) in e.iter().enumerate() {
+            out.push_str(if c == 0 { "[" } else { ", [" });
+            for (i, limb) in coord.iter().enumerate() {
+                write!(out, "{}0x{limb:014x}", if i == 0 { "" } else { ", " }).unwrap();
+            }
+            out.push(']');
+        }
+        out.push_str("],\n");
+    }
+
+    /// The complete source of `table.rs`, recomputed from B.
+    fn table_source() -> std::string::String {
+        let mut s = std::string::String::from(TABLE_HEADER);
+        s.push_str(
+            "/// `BASE[i][j] = (j + 1) * 256^i * B` for `i < 56`, `j < 8` (radix-16 comb).\n\
+             #[rustfmt::skip]\n\
+             pub(super) static BASE: [[[[u64; 8]; 2]; 8]; 56] = [\n",
+        );
+        let mut row_point = EdwardsPoint::BASE;
+        for _ in 0..56 {
+            s.push_str("    [\n");
+            let mut acc = row_point;
+            for _ in 0..8 {
+                write_entry(&mut s, "        ", &affine_limbs(&acc));
+                acc = acc.add(&row_point);
+            }
+            s.push_str("    ],\n");
+            for _ in 0..8 {
+                row_point = row_point.double();
+            }
+        }
+        s.push_str(
+            "];\n\n\
+             /// `ODD[i] = (2 i + 1) * B` for `i < 64` (width-8 NAF, verification only).\n\
+             #[rustfmt::skip]\n\
+             pub(super) static ODD: [[[u64; 8]; 2]; 64] = [\n",
+        );
+        let b2 = EdwardsPoint::BASE.double();
+        let mut acc = EdwardsPoint::BASE;
+        for _ in 0..64 {
+            write_entry(&mut s, "    ", &affine_limbs(&acc));
+            acc = acc.add(&b2);
+        }
+        s.push_str("];\n");
+        s
+    }
+
+    const TABLE_HEADER: &str = "\
+//! Precomputed multiples of the Ed448 base point B (generated; do not edit).
+//!
+//! Each entry is an affine point `[x, y]` with field elements as eight
+//! 56-bit limbs (least significant first), fully reduced.
+//! Regenerate with
+//! `cargo test -p browntls-crypto --lib curve448::edwards::tests::regenerate_tables -- --ignored`;
+//! the test `edwards::tests::tables_are_reproducible` checks this file.
+
+";
+
+    #[test]
+    fn tables_are_reproducible() {
+        assert!(
+            table_source() == include_str!("table.rs"),
+            "table.rs is stale; run the ignored `regenerate_tables` test"
+        );
+    }
+
+    #[test]
+    #[ignore = "rewrites src/curve448/table.rs"]
+    fn regenerate_tables() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/curve448/table.rs");
+        std::fs::write(path, table_source()).unwrap();
     }
 
     #[test]

@@ -7,14 +7,17 @@
 //!   values (`p` through `2^448 - 1`) are accepted and processed as if
 //!   reduced. Low-order inputs are not rejected here; they yield an all-zero
 //!   output, which [`is_all_zero`] detects.
-//! * [`x448_base`] is `x448(k, 5)` (the base point u-coordinate 5).
+//! * [`x448_base`] is `x448(k, 5)` (the base point u-coordinate 5), computed
+//!   with the fixed-base comb of edwards448 and the 4-isogeny to curve448.
 //! * [`PrivateKey::diffie_hellman`] additionally rejects an all-zero shared
 //!   secret with [`Error::KeyAgreementFailed`] (RFC 7748 §6.2, RFC 9846
 //!   §7.4.2, RFC 8422 §5.11).
 //!
 //! There is a single portable backend (eight 56-bit limbs, see `field`).
 
+use super::edwards::EdwardsPoint;
 use super::field::Fe;
+use super::scalar::Scalar;
 use crate::Error;
 use crate::ct::{self, Choice};
 use crate::rand::SecureRandom;
@@ -54,9 +57,23 @@ pub fn x448(scalar: &[u8; 56], u: &[u8; 56]) -> [u8; 56] {
 }
 
 /// `x448(scalar, BASEPOINT)`: the public key for `scalar`.
+///
+/// Computed on edwards448 with the constant-time fixed-base comb instead of
+/// a ladder: the 4-isogeny of RFC 7748 §4.2, `u = y^2 / x^2`, is a group
+/// homomorphism that maps the Ed448 base point B (of prime order `L`) to the
+/// X448 base point `u = 5`, so `[k](u = 5)` is the image of `[k mod L]B`. If
+/// `L` divides the clamped scalar (only `k = 4L`), both sides are the
+/// identity and the output is zero, as with the ladder.
 #[must_use]
 pub fn x448_base(scalar: &[u8; 56]) -> [u8; 56] {
-    x448(scalar, &BASEPOINT)
+    let mut wide = [0u8; 57];
+    wide[..56].copy_from_slice(&clamp(scalar));
+    let mut k = Scalar::from_bytes_mod_order(&wide);
+    wide.zeroize();
+    // The point is the public key in another form; only `k` is secret.
+    let out = EdwardsPoint::mul_base(&k).to_montgomery_u();
+    k.zeroize();
+    out
 }
 
 /// Whether an X448 output is all zero (the peer's point had small order),
@@ -193,27 +210,52 @@ impl core::fmt::Debug for PrivateKey {
 
 #[cfg(test)]
 mod tests {
-    use super::super::edwards::EdwardsPoint;
-    use super::super::scalar::Scalar;
     use super::*;
 
-    /// X448 of the base point equals the 4-isogeny image `y^2 / x^2` of
-    /// `[k]B` on edwards448 (RFC 7748 §4.2 maps B to u = 5): an independent
-    /// check of the ladder against the Edwards arithmetic.
+    /// The comb-based public key equals the ladder on `u = 5` for random
+    /// scalars and for scalars at the edges of the clamped range, including
+    /// `4L` (the only clamped multiple of the group order), whose result is
+    /// the identity and therefore zero.
     #[test]
-    fn ladder_matches_edwards_isogeny() {
-        let mut st = 5u64;
-        for _ in 0..8 {
+    fn base_matches_ladder() {
+        let via_ladder = |k: &[u8; 56]| ladder(&clamp(k), &BASEPOINT);
+        let mut cases = std::vec![[0u8; 56], [0xff; 56], [0x55; 56], [0xaa; 56]];
+        // 4L = 2^448 - 4 * 13818066809895115352007386748515426880336692474882178609894547503885:
+        // L little endian, shifted left by two bits.
+        let l: [u8; 56] = [
+            0xf3, 0x44, 0x58, 0xab, 0x92, 0xc2, 0x78, 0x23, 0x55, 0x8f, 0xc5, 0x8d, 0x72, 0xc2,
+            0x6c, 0x21, 0x90, 0x36, 0xd6, 0xae, 0x49, 0xdb, 0x4e, 0xc4, 0xe9, 0x23, 0xca, 0x7c,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f,
+        ];
+        let mut four_l = [0u8; 56];
+        let mut carry = 0u8;
+        for (o, b) in four_l.iter_mut().zip(l) {
+            *o = (b << 2) | carry;
+            carry = b >> 6;
+        }
+        assert_eq!(carry, 0);
+        assert_eq!(clamp(&four_l), four_l, "4L is a clamped scalar");
+        assert_eq!(x448_base(&four_l), [0u8; 56]);
+        cases.push(four_l);
+        // 4L +- 4 are clamped too: +-4 B.
+        let mut near = four_l;
+        near[0] = near[0].wrapping_add(4);
+        cases.push(near);
+        near[0] = four_l[0].wrapping_sub(4);
+        cases.push(near);
+        let mut st = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..64 {
             let mut k = [0u8; 56];
             for b in &mut k {
                 st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
                 *b = (st >> 56) as u8;
             }
-            let mut wide = [0u8; 57];
-            wide[..56].copy_from_slice(&clamp(&k));
-            let s = Scalar::from_bytes_mod_order(&wide);
-            let ed = EdwardsPoint::mul_base(&s).to_montgomery_u();
-            assert_eq!(x448_base(&k), ed);
+            cases.push(k);
+        }
+        for k in &cases {
+            assert_eq!(x448_base(k), via_ladder(k), "k = {k:x?}");
+            assert_eq!(x448_base(k), x448(k, &BASEPOINT));
         }
     }
 }

@@ -16,8 +16,8 @@
 //! Measurement mirrors `openssl speed -elapsed`: single thread, wall-clock
 //! time, AEADs sealed TLS-style (fresh call with nonce, 13-byte AAD and tag
 //! per message, like `-aead`), hashes computed one-shot per message, ECDSA
-//! over a pre-hashed digest with hedged nonces, Ed25519 over a 20-byte
-//! message, RSA PKCS #1 v1.5 over SHA-256.
+//! over a pre-hashed digest with hedged nonces, Ed25519 and Ed448 over a
+//! 20-byte message, RSA PKCS #1 v1.5 over SHA-256.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -208,8 +208,16 @@ fn main() {
     }
 
     if wanted("X448") {
-        // X448: one Diffie-Hellman derivation (as `openssl speed ecdhx448`).
+        // X448: one Diffie-Hellman derivation (as `openssl speed ecdhx448`)
+        // and one public key (no OpenSSL counterpart).
         let peer = x448::x448_base(&[9; 56]);
+        ops_line(
+            "X448",
+            "keygen",
+            rate(budget, || {
+                black_box(x448::x448_base(black_box(&[7; 56])));
+            }),
+        );
         ops_line(
             "X448",
             "derive",

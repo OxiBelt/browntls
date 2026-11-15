@@ -39,6 +39,8 @@ intent.
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | `record_size_limit` (RFC 8449, both sides, TLS 1.3 and 1.2, on by default), `ticket_request` (RFC 9149), client GREASE (RFC 8701, opt-in) and ClientHello padding (RFC 7685, on by default for 256 to 511-byte hellos): in-memory suites on both providers, rustls 0.23 and OpenSSL 3 interop with all four on; Docker E2E scenarios added, GnuTLS not yet run (see [Architecture](Architecture.md#optional-clienthello-extensions)) | done |
 | TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
+| Delegated credentials (RFC 9345), server side in TLS 1.3: issuing with the native provider, `DelegationUsage` parsing, client validation with the RFC 9345 alerts; tests on both providers (`crates/browntls/tests/delegated_credentials*.rs`), browntls to browntls only. Client credentials not implemented | done |
+| Exported authenticators (RFC 9261) for TLS 1.3 and TLS 1.2 with EMS: requests, authenticators, spontaneous server authenticators, the empty authenticator, validation through the configured verifiers; tests on both providers (`crates/browntls/tests/exported_authenticators*.rs`), browntls to browntls only | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | done: optional features `zlib` (`miniz_oxide`), `brotli` (`brotli`) and `zstd` (`ruzstd`, single compression level), default lists when enabled; both directions in TLS 1.3 (client certificates included); declared length bounded by a 64 KiB cap and a configurable limit and enforced exactly; unit and handshake tests on both providers and across them. zlib and Brotli interoperate with rustls 0.23 (zlib-rs, brotli) in both roles and both directions; Zstandard has no second implementation in the test suite and accepts frames with a window of at most 128 KiB (below the RFC 8878 recommendation; see [Architecture](Architecture.md#certificate-compression-rfc-8879)), and nothing is tested against OpenSSL (the OpenSSL 3.0 command-line tool of the interop suite has no certificate compression; OpenSSL 3.2 and later do) |
 | Unbuffered API (`browntls::unbuffered`, `UnbufferedClientConnection`, `UnbufferedServerConnection`; also without `std`): TLS 1.2 and 1.3, both sides, in-place decryption in the caller's buffer, encryption into the caller's buffer with exact size errors, resumption, 0-RTT, KeyUpdate including the confidentiality-limit refresh, `close_notify`; tested against buffered browntls peers, itself and rustls 0.23 on both providers, with whole and byte-by-byte input (`tests/cases/unbuffered.rs`) | done |
 | QUIC, Encrypted Client Hello | planned |
@@ -147,3 +149,17 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   client's GREASE (RFC 8701) is off by default until the Docker E2E GnuTLS
   scenarios have passed with it; server-side GREASE (RFC 8701 §4) is not
   implemented.
+- Delegated credentials (RFC 9345) have no interoperability evidence: no
+  implementation the project tests against (OpenSSL 3, rustls) supports
+  them. A server does not check a credential's signature when it is
+  attached, so a credential issued for another certificate is only rejected
+  by the peer. Verifiers that do not override
+  `verify_tls13_signature_with_delegated_key` refuse credentials.
+  `CertifiedKey` gained a private field, so struct-literal construction no
+  longer compiles (use `CertifiedKey::new`).
+- Exported authenticators (RFC 9261) have no interoperability evidence and
+  were written from the RFC alone; the exporter labels, the CertificateVerify
+  context string and the message layout have not been checked against
+  another implementation or published test vectors. Secondary host names
+  (the `server_name` request extension) are not supported: a client
+  validates server authenticators against the connection's SNI only.

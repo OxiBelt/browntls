@@ -67,8 +67,10 @@ pub mod compress;
 mod conn;
 pub mod crypto;
 mod ct;
+pub mod delegated_credential;
 mod enums;
 mod error;
+pub mod exported_authenticator;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;

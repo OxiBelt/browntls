@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use browntls_pki::{CertificateDer, ServerName, UnixTime};
+use browntls_pki::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
 
 use crate::enums::SignatureScheme;
 use crate::error::{Error, InvalidMessage};
@@ -95,6 +95,25 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// Subjects to send in `certificate_authorities`, if any.
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
         None
+    }
+
+    /// Verifies a TLS 1.3 CertificateVerify signature made with the key of
+    /// a delegated credential (RFC 9345), given as a `SubjectPublicKeyInfo`.
+    ///
+    /// The default refuses, so a client with a verifier that does not
+    /// implement this fails a handshake in which the server authenticates
+    /// with a delegated credential; such a verifier should not be combined
+    /// with `ClientConfig::enable_delegated_credentials`.
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        let _ = (message, public_key, dss);
+        Err(Error::General(
+            "this certificate verifier cannot verify delegated credential signatures".into(),
+        ))
     }
 }
 

@@ -168,6 +168,28 @@ mod tests {
     }
 
     #[test]
+    fn delegated_credential() {
+        use Tls13Message::*;
+        for msg in [ClientHello, CertificateRequest, Certificate] {
+            assert_eq!(
+                allowed_in(ExtensionType::DelegatedCredential, msg),
+                Some(true)
+            );
+        }
+        for msg in [
+            ServerHello,
+            HelloRetryRequest,
+            EncryptedExtensions,
+            NewSessionTicket,
+        ] {
+            assert_eq!(
+                allowed_in(ExtensionType::DelegatedCredential, msg),
+                Some(false)
+            );
+        }
+    }
+
+    #[test]
     fn later_rfcs() {
         use Tls13Message::*;
         for ext in [ExtensionType::RecordSizeLimit, ExtensionType::TicketRequest] {

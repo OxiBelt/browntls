@@ -56,6 +56,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) client_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) server_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) transport_parameters: Option<Payload<'static>>,
+    /// RFC 9345 §4.1.1: the schemes accepted for a delegated credential.
+    pub(crate) delegated_credential: Option<Vec<SignatureScheme>>,
     /// RFC 8449: the largest record we are willing to receive.
     pub(crate) record_size_limit: Option<u16>,
     /// RFC 9149: how many TLS 1.3 tickets we would like.
@@ -153,6 +155,10 @@ impl ClientExtensions {
         add(
             self.transport_parameters.is_some(),
             ExtensionType::TransportParameters,
+        );
+        add(
+            self.delegated_credential.is_some(),
+            ExtensionType::DelegatedCredential,
         );
         add(
             self.record_size_limit.is_some(),
@@ -268,6 +274,11 @@ impl Codec<'_> for ClientExtensions {
         if let Some(tp) = &self.transport_parameters {
             encode_extension(ExtensionType::TransportParameters, out, |b| tp.encode(b));
         }
+        if let Some(schemes) = &self.delegated_credential {
+            encode_extension(ExtensionType::DelegatedCredential, out, |b| {
+                encode_vec_u16(b, schemes);
+            });
+        }
         if let Some(limit) = self.record_size_limit {
             encode_extension(ExtensionType::RecordSizeLimit, out, |b| limit.encode(b));
         }
@@ -379,6 +390,11 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::PreSharedKey => {
                     out.preshared_key = Some(PresharedKeyOffer::read(body)?);
+                }
+                ExtensionType::DelegatedCredential => {
+                    // SignatureSchemeList: supported_signature_algorithm<2..2^16-2>.
+                    out.delegated_credential =
+                        Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
                 }
                 other => {
                     out.unknown.push(other);

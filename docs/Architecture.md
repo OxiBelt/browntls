@@ -224,6 +224,42 @@ public key.
   No other implementation the project tests against supports delegated
   credentials, so the tests are browntls to browntls only.
 
+### Exported authenticators (RFC 9261)
+
+`browntls::exported_authenticator` adds `request_authenticator`,
+`authenticator` and `validate_authenticator` to `ClientConnection` and
+`ServerConnection`. The messages are carried by the application protocol,
+not the record layer. A client request is a `ClientCertificateRequest`
+(type 17), a server request a TLS 1.3 `CertificateRequest`; the answer is
+TLS 1.3 `Certificate`, `CertificateVerify` and `Finished` messages, or a lone
+`Finished` over an empty certificate list to decline (also when no key can
+sign with a requested scheme). A server may authenticate spontaneously with
+a random 32-byte context.
+
+- Keys: the exporter with the labels `EXPORTER-client authenticator
+  handshake context` / `... finished key` (`server` for server
+  authenticators), no context, the length of the connection's hash. TLS 1.3
+  and TLS 1.2 with the extended master secret (the TLS 1.2 exporter refuses
+  sessions without it); for TLS 1.2 the HMAC comes from a TLS 1.3 suite of
+  the provider with the same hash.
+- Validation: framing bounded by the handshake message limit, request type
+  and context checked, `Finished` compared in constant time before any
+  certificate or signature is verified, the CertificateVerify scheme must be
+  one the request offered (for a spontaneous authenticator, one the client's
+  verifier supports), then the chain and signature go through the configured
+  `ServerCertVerifier` (with the connection's server name) or
+  `ClientCertVerifier`. Entry extensions are refused.
+- Local policy: contexts are 1 to 255 bytes and used once per connection
+  (a reused context is `PeerMisbehaved::ReusedAuthenticatorContext`); each
+  side remembers at most 256 contexts, after which requests and
+  authenticators fail. A request's `signature_algorithms` is required;
+  `certificate_authorities` may be set, `server_name`, `oid_filters` and
+  `status_request` are not supported.
+- Errors are returned to the caller; no alert is sent and the connection
+  continues, since the messages are outside the TLS record layer.
+- No other implementation the project tests against exposes exported
+  authenticators, so the tests are browntls to browntls only.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |

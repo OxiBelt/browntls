@@ -246,7 +246,7 @@ impl ClientConfig {
             .ok_or(Error::FailedToGetCurrentTime)
     }
 
-    pub(super) fn verifier(&self) -> &dyn ServerCertVerifier {
+    pub(crate) fn verifier(&self) -> &dyn ServerCertVerifier {
         &*self.verifier
     }
 }
@@ -439,19 +439,24 @@ pub struct ClientConnectionData {
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
-    server_name: ServerName<'static>,
+    pub(crate) server_name: ServerName<'static>,
     /// The delegated credential the server authenticated with (RFC 9345).
     pub(super) delegated_credential: Option<DelegatedCredential>,
+    /// The configuration, for exported authenticators (RFC 9261).
+    pub(crate) config: Arc<ClientConfig>,
+    pub(crate) authenticators: crate::exported_authenticator::AuthenticatorState,
 }
 
 impl ClientConnectionData {
-    fn new(session_store: Arc<dyn ClientSessionStore>, server_name: ServerName<'static>) -> Self {
+    fn new(config: Arc<ClientConfig>, server_name: ServerName<'static>) -> Self {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
-            session_store,
+            session_store: config.resumption.store.clone(),
             server_name,
             delegated_credential: None,
+            config,
+            authenticators: Default::default(),
         }
     }
 }
@@ -480,7 +485,7 @@ impl ConnectionCore<ClientConnectionData> {
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
-        let mut data = ClientConnectionData::new(config.resumption.store.clone(), name.clone());
+        let mut data = ClientConnectionData::new(config.clone(), name.clone());
         let mut cx = crate::conn::Context {
             common: &mut common_state,
             data: &mut data,

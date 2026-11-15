@@ -67,6 +67,7 @@ mod ct;
 pub mod delegated_credential;
 mod enums;
 mod error;
+pub mod exported_authenticator;
 mod hash_hs;
 mod key_log;
 #[cfg(feature = "std")]

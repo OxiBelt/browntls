@@ -267,6 +267,7 @@ pub enum PeerMisbehaved {
     ResumptionOfferedWithVariedCipherSuite,
     ResumptionOfferedWithVariedEms,
     ResumptionOfferedWithIncompatibleCipherSuite,
+    ReusedAuthenticatorContext,
     SelectedDifferentCipherSuiteAfterRetry,
     SelectedInvalidPsk,
     SelectedTls12UsingTls13VersionExtension,

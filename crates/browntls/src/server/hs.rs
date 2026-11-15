@@ -118,6 +118,10 @@ impl ExpectClientHello {
         m: &Message<'_>,
         cx: &mut ServerContext<'_>,
     ) -> NextStateOrError {
+        // RFC 9261: what exported authenticators need after the handshake.
+        cx.data.authenticators.config = Some(self.config.clone());
+        cx.data.authenticators.client_sig_schemes = sig_schemes.clone();
+
         let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3);
         let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2);
 

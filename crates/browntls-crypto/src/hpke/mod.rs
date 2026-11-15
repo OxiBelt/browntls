@@ -26,6 +26,8 @@
 mod context;
 mod kem;
 mod labeled;
+#[cfg(all(test, feature = "alloc"))]
+mod tests;
 
 pub use context::{RecipientContext, SenderContext};
 pub use kem::{EncapsulatedKey, PrivateKey, PublicKey};
@@ -138,13 +140,18 @@ impl Kem {
     /// `DeriveKeyPair(ikm)` (RFC 9180 §7.1.3): derives a key pair
     /// deterministically from input keying material.
     ///
-    /// `ikm` should hold at least `Nsk` bytes of entropy.
+    /// `ikm` must be at least `Nsk` bytes long and should hold that much
+    /// entropy (RFC 9180 §7.1.3).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidKey`] if no valid NIST scalar is found within
-    /// 256 candidates (probability below 2^-200 for honest input).
+    /// Returns [`Error::InvalidLength`] if `ikm` is shorter than `Nsk`, or
+    /// [`Error::InvalidKey`] if no valid NIST scalar is found within 256
+    /// candidates (probability below 2^-200 for honest input).
     pub fn derive_key_pair(self, ikm: &[u8]) -> Result<PrivateKey, Error> {
+        if ikm.len() < self.private_key_len() {
+            return Err(Error::InvalidLength);
+        }
         kem::derive_key_pair(self, ikm)
     }
 
@@ -329,15 +336,10 @@ impl Suite {
     }
 
     /// `SetupBaseS` with the ephemeral key derived from `ikm_e` through
-    /// `DeriveKeyPair` (as RFC 9180's test vectors do). Only for
-    /// known-answer tests: reusing `ikm_e` across messages breaks
-    /// confidentiality.
-    ///
-    /// # Errors
-    ///
-    /// As [`Suite::setup_sender`].
-    #[doc(hidden)]
-    pub fn setup_sender_derandomized(
+    /// `DeriveKeyPair` (as RFC 9180's test vectors do). Test-only: a reused
+    /// `ikm_e` would reuse the ephemeral key.
+    #[cfg(all(test, feature = "alloc"))]
+    pub(crate) fn setup_sender_derandomized(
         self,
         pk_r: &PublicKey,
         info: &[u8],

@@ -146,6 +146,11 @@ pub struct ClientConfig {
     /// Decompressors to offer for the server's certificate (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// Encrypted Client Hello (RFC 9849); `None` (the default) sends no
+    /// ECH extension. [`EchMode::Enable`](crate::ech::EchMode::Enable)
+    /// needs TLS 1.3 enabled and limits connections to it.
+    pub ech_mode: Option<crate::ech::EchMode>,
+
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
@@ -440,6 +445,10 @@ pub struct ClientConnectionData {
     pub(super) offered_post_handshake_auth: bool,
     /// How many post-handshake CertificateRequests we have answered.
     pub(super) post_handshake_auth_responses: u32,
+    /// Where Encrypted Client Hello stands.
+    pub(super) ech_status: crate::ech::EchStatus,
+    /// The server's ECH retry configurations, after a rejection.
+    pub(super) ech_retry_configs: Option<Vec<u8>>,
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
@@ -453,6 +462,8 @@ impl ClientConnectionData {
             early_data: EarlyData::new(),
             offered_post_handshake_auth: false,
             post_handshake_auth_responses: 0,
+            ech_status: crate::ech::EchStatus::NotOffered,
+            ech_retry_configs: None,
             session_store,
             server_name,
         }
@@ -572,6 +583,12 @@ impl ClientConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// Where Encrypted Client Hello stands. A rejection also ends the
+    /// handshake with [`Error::RejectedEch`].
+    pub fn ech_status(&self) -> crate::ech::EchStatus {
+        self.inner.core.data.ech_status
     }
 
     /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].

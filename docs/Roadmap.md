@@ -39,7 +39,8 @@ intent.
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
-| Unbuffered API, QUIC, Encrypted Client Hello | planned |
+| Encrypted Client Hello (RFC 9849) client and server in shared mode, GREASE, retry configurations, SVCB/HTTPS `ech` parameter parsing (RFC 9848); see [Architecture](Architecture.md#encrypted-client-hello-rfc-9849) | done |
+| Unbuffered API, QUIC | planned |
 | Fuzzing targets for codecs, PKI and handshake state | planned |
 | Kernel integration design | planned |
 

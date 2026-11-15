@@ -12,6 +12,7 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::SupportedKxGroup;
 use crate::ct::constant_time_eq;
+use crate::ech::server::ServerEch;
 use crate::enums::{
     AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
 };
@@ -147,43 +148,57 @@ impl CompleteClientHelloHandling {
             self.transcript.add_message(chm);
             let client_hello_hash = self.transcript.current_hash();
             self.transcript.rollup_for_hrr();
+            let ech = match &cx.data.ech {
+                ServerEch::Accepted(_) => HrrEch::Confirm(client_hello.random.0),
+                ServerEch::Rejected => HrrEch::Random,
+                ServerEch::NotOffered => HrrEch::None,
+            };
             // RFC 9846 §4.3.2: with a cookie sealer configured the retry is
             // stateless. Not when 0-RTT data follows the first ClientHello:
             // its records would reach a fresh connection ahead of the second
-            // ClientHello, so that handshake stays with this connection.
+            // ClientHello, so that handshake stays with this connection. Nor
+            // when the client offered ECH (RFC 9849): the HPKE context and
+            // the HelloRetryRequest's ECH extension cannot be rebuilt from a
+            // cookie.
             let cookie = match &self.config.hello_retry_cookies {
-                Some(sealer) if !early_data_requested => RetryCookie {
-                    issued_at: match self.config.current_time() {
-                        Ok(now) => now.as_secs(),
-                        Err(err) => {
-                            return Err(cx
-                                .common
-                                .send_fatal_alert(AlertDescription::InternalError, err));
-                        }
-                    },
-                    suite: self.suite.common.suite,
-                    group: selected_kxg.name(),
-                    client_hello_hash: client_hello_hash.as_ref().to_vec(),
-                    session_id: client_hello.session_id,
-                    server_name: cx
-                        .data
-                        .sni
-                        .as_ref()
-                        .map(|name| name.as_ref().as_bytes().to_vec())
-                        .unwrap_or_default(),
+                Some(sealer) if !early_data_requested && matches!(ech, HrrEch::None) => {
+                    RetryCookie {
+                        issued_at: match self.config.current_time() {
+                            Ok(now) => now.as_secs(),
+                            Err(err) => {
+                                return Err(cx
+                                    .common
+                                    .send_fatal_alert(AlertDescription::InternalError, err));
+                            }
+                        },
+                        suite: self.suite.common.suite,
+                        group: selected_kxg.name(),
+                        client_hello_hash: client_hello_hash.as_ref().to_vec(),
+                        session_id: client_hello.session_id,
+                        server_name: cx
+                            .data
+                            .sni
+                            .as_ref()
+                            .map(|name| name.as_ref().as_bytes().to_vec())
+                            .unwrap_or_default(),
+                    }
+                    .seal(&**sealer)
                 }
-                .seal(&**sealer),
                 _ => None,
             };
-            let m = hello_retry_request_message(
+            emit_hello_retry_request(
+                &mut self.transcript,
+                hello_retry_request(
+                    self.suite,
+                    client_hello.session_id,
+                    selected_kxg.name(),
+                    cookie.clone(),
+                ),
                 self.suite,
-                client_hello.session_id,
-                selected_kxg.name(),
-                cookie.clone(),
-            );
-            trace!("Requesting retry {:?}", m);
-            self.transcript.add_message(&m);
-            cx.common.send_msg(m, false);
+                ech,
+                cx.common,
+                self.config.provider.secure_random,
+            )?;
             emit_fake_ccs(cx.common);
             cx.common.handshake_kind = Some(HandshakeKind::FullWithHelloRetryRequest);
             let skip_data_left = max_early_data_size(self.config.max_early_data_size);
@@ -326,14 +341,16 @@ impl CompleteClientHelloHandling {
         };
         let key_schedule = key_schedule_pre.into_handshake_with_shared_secret(&kx.secret);
 
+        let ech_accepted = cx.data.ech.is_accepted();
         emit_server_hello(
             &mut self.transcript,
-            &self.randoms,
+            &mut self.randoms,
             self.suite,
             cx.common,
             &client_hello.session_id,
             chosen_psk_index,
             KeyShareEntry::new(selected_kxg.name(), &kx.pub_key),
+            ech_accepted,
         );
         if !self.done_retry {
             emit_fake_ccs(cx.common);
@@ -386,6 +403,12 @@ impl CompleteClientHelloHandling {
             && most_preferred_mutual != Some(selected_kxg.name()))
         .then(|| our_groups.iter().map(|g| g.name()).collect());
 
+        // RFC 9849 §7.1: a client whose ECH extension did not decrypt gets
+        // our current configurations to retry with.
+        let retry_configs = match (&cx.data.ech, &self.config.ech) {
+            (ServerEch::Rejected, Some(ech)) => Some(ech.ech_config_list().to_vec()),
+            _ => None,
+        };
         emit_encrypted_extensions(
             &mut self.transcript,
             cx,
@@ -393,6 +416,7 @@ impl CompleteClientHelloHandling {
             early_data == EarlyDataDecision::Accepted,
             self.cert_types,
             supported_groups,
+            retry_configs,
         );
 
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
@@ -610,14 +634,16 @@ impl State<ServerConnectionData> for ExpectEarlyData {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_server_hello(
     transcript: &mut HandshakeHash,
-    randoms: &ConnectionRandoms,
+    randoms: &mut ConnectionRandoms,
     suite: &'static Tls13CipherSuite,
     common: &mut CommonState,
     session_id: &SessionId,
     chosen_psk_index: Option<usize>,
     key_share: KeyShareEntry,
+    ech_accepted: bool,
 ) {
     let extensions = ServerExtensions {
         key_share: Some(key_share),
@@ -625,17 +651,34 @@ fn emit_server_hello(
         supported_versions: Some(ProtocolVersion::TLSv1_3),
         ..Default::default()
     };
+    let mut payload = ServerHelloPayload {
+        legacy_version: ProtocolVersion::TLSv1_2,
+        random: randoms.server.into(),
+        session_id: *session_id,
+        cipher_suite: suite.common.suite,
+        compression_method: Compression::Null,
+        extensions,
+    };
+    // RFC 9849 §7.2: confirm ECH in the last 8 bytes of the random,
+    // computed over the inner transcript with those bytes zeroed. The
+    // client random is the inner ClientHello's.
+    if ech_accepted {
+        payload.random.0[24..].fill(0);
+        let zeroed = HandshakeMessagePayload(HandshakePayload::ServerHello(payload.clone()));
+        let hash = transcript.hash_with(&zeroed.get_encoding());
+        let confirmation = crate::ech::accept_confirmation(
+            suite.hkdf_provider,
+            &randoms.client,
+            crate::ech::ACCEPT_LABEL,
+            hash.as_ref(),
+        );
+        payload.random.0[24..].copy_from_slice(&confirmation);
+        randoms.server = payload.random.0;
+    }
     let sh = Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::ServerHello(
-            ServerHelloPayload {
-                legacy_version: ProtocolVersion::TLSv1_2,
-                random: randoms.server.into(),
-                session_id: *session_id,
-                cipher_suite: suite.common.suite,
-                compression_method: Compression::Null,
-                extensions,
-            },
+            payload,
         ))),
     };
     trace!("sending server hello {:?}", sh);
@@ -652,8 +695,32 @@ fn emit_fake_ccs(common: &mut CommonState) {
     common.send_msg(m, false);
 }
 
-/// The HelloRetryRequest selecting `suite` and `group`, with `cookie`. Also
-/// used to rebuild, for the transcript, one sent by a stateless retry.
+/// The HelloRetryRequest selecting `suite` and `group`, with `cookie` and
+/// no ECH extension.
+fn hello_retry_request(
+    suite: &'static Tls13CipherSuite,
+    session_id: SessionId,
+    group: NamedGroup,
+    cookie: Option<Vec<u8>>,
+) -> HelloRetryRequest {
+    HelloRetryRequest {
+        legacy_version: ProtocolVersion::TLSv1_2,
+        session_id,
+        cipher_suite: suite.common.suite,
+        compression_method: Compression::Null,
+        extensions: HelloRetryRequestExtensions {
+            key_share: Some(group),
+            cookie: cookie.map(PayloadU16::new),
+            supported_versions: Some(ProtocolVersion::TLSv1_3),
+            encrypted_client_hello: None,
+            unknown: Vec::new(),
+        },
+    }
+}
+
+/// The HelloRetryRequest selecting `suite` and `group`, with `cookie`, as
+/// a stateless retry sends it (never with ECH). Also used to rebuild it for
+/// the transcript.
 pub(super) fn hello_retry_request_message(
     suite: &'static Tls13CipherSuite,
     session_id: SessionId,
@@ -663,20 +730,63 @@ pub(super) fn hello_retry_request_message(
     Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::HelloRetryRequest(HelloRetryRequest {
-                legacy_version: ProtocolVersion::TLSv1_2,
-                session_id,
-                cipher_suite: suite.common.suite,
-                compression_method: Compression::Null,
-                extensions: HelloRetryRequestExtensions {
-                    key_share: Some(group),
-                    cookie: cookie.map(PayloadU16::new),
-                    supported_versions: Some(ProtocolVersion::TLSv1_3),
-                    unknown: Vec::new(),
-                },
-            }),
+            HandshakePayload::HelloRetryRequest(hello_retry_request(
+                suite, session_id, group, cookie,
+            )),
         )),
     }
+}
+
+/// What a HelloRetryRequest says about ECH (RFC 9849 §7).
+enum HrrEch {
+    /// Nothing: the client sent no ECH extension, or we have no keys.
+    None,
+    /// ECH is rejected: 8 random bytes, so the message looks the same as
+    /// an acceptance (§7.1, §10.10.4).
+    Random,
+    /// ECH is accepted: the confirmation, keyed by the first inner
+    /// ClientHello's random (§7.2.1).
+    Confirm([u8; 32]),
+}
+
+/// Sends `hrr` with the ECH extension `ech` calls for.
+fn emit_hello_retry_request(
+    transcript: &mut HandshakeHash,
+    mut hrr: HelloRetryRequest,
+    suite: &'static Tls13CipherSuite,
+    ech: HrrEch,
+    common: &mut CommonState,
+    rng: &dyn crate::crypto::SecureRandom,
+) -> Result<(), Error> {
+    match ech {
+        HrrEch::None => {}
+        HrrEch::Random => {
+            let mut random = [0u8; 8];
+            rng.fill(&mut random)?;
+            hrr.extensions.encrypted_client_hello = Some(random);
+        }
+        HrrEch::Confirm(inner_random) => {
+            hrr.extensions.encrypted_client_hello = Some([0; 8]);
+            let zeroed = HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(hrr.clone()));
+            let hash = transcript.hash_with(&zeroed.get_encoding());
+            hrr.extensions.encrypted_client_hello = Some(crate::ech::accept_confirmation(
+                suite.hkdf_provider,
+                &inner_random,
+                crate::ech::HRR_ACCEPT_LABEL,
+                hash.as_ref(),
+            ));
+        }
+    }
+    let m = Message {
+        version: ProtocolVersion::TLSv1_2,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::HelloRetryRequest(hrr),
+        )),
+    };
+    trace!("Requesting retry {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, false);
+    Ok(())
 }
 
 fn emit_encrypted_extensions(
@@ -686,9 +796,11 @@ fn emit_encrypted_extensions(
     early_data_accepted: bool,
     cert_types: hs::NegotiatedCertTypes,
     supported_groups: Option<Vec<NamedGroup>>,
+    retry_configs: Option<Vec<u8>>,
 ) {
     let exts = ServerExtensions {
         supported_groups,
+        encrypted_client_hello: retry_configs,
         alpn: cx
             .common
             .alpn_protocol

@@ -319,6 +319,10 @@ pub(crate) struct ServerExtensions {
     /// TLS 1.3 EncryptedExtensions only: the server's groups, in preference
     /// order (RFC 9846 §4.3.7). Informational for the client.
     pub(crate) supported_groups: Option<Vec<NamedGroup>>,
+    /// TLS 1.3 EncryptedExtensions only: the server's ECH retry
+    /// configurations, an `ECHConfigList` with its length prefix (RFC 9849
+    /// §5). Checked to be well formed when parsed.
+    pub(crate) encrypted_client_hello: Option<Vec<u8>>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
 }
@@ -381,6 +385,10 @@ impl ServerExtensions {
         add(
             self.supported_groups.is_some(),
             ExtensionType::EllipticCurves,
+        );
+        add(
+            self.encrypted_client_hello.is_some(),
+            ExtensionType::EncryptedClientHello,
         );
         out.extend(self.unknown.iter().copied());
         out
@@ -448,6 +456,11 @@ impl Codec<'_> for ServerExtensions {
                 crate::msgs::codec::encode_vec_u16(b, groups)
             });
         }
+        if let Some(list) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| {
+                b.extend_from_slice(list);
+            });
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -494,6 +507,12 @@ impl Codec<'_> for ServerExtensions {
                         body,
                         "NamedGroups",
                     )?);
+                }
+                ExtensionType::EncryptedClientHello => {
+                    // RFC 9849 §6.1.6: a malformed list is decode_error.
+                    let list = body.rest();
+                    crate::ech::config::read_config_list(list)?;
+                    out.encrypted_client_hello = Some(list.to_vec());
                 }
                 other => {
                     out.unknown.push(other);

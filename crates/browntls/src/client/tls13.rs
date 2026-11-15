@@ -13,6 +13,7 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState
 use crate::conn::State;
 use crate::crypto::hmac;
 use crate::ct::constant_time_eq;
+use crate::ech::{EchStatus, RejectedEch};
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -313,6 +314,21 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             ));
         }
 
+        // RFC 9849 §5: retry configurations answer a rejected offer only;
+        // after a GREASE offer they are ignored (§6.2.1).
+        match cx.data.ech_status {
+            EchStatus::Accepted if exts.encrypted_client_hello.is_some() => {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::UnsupportedExtension,
+                    PeerMisbehaved::UnsolicitedEchExtension,
+                ));
+            }
+            EchStatus::Rejected => {
+                cx.data.ech_retry_configs = exts.encrypted_client_hello.clone();
+            }
+            _ => {}
+        }
+
         hs::process_alpn_protocol(
             cx.common,
             &self.alpn_protocols,
@@ -468,13 +484,20 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
 
         let compat_sigschemes = certificate_request_sigschemes(cx.common, certreq)?;
 
-        let client_auth = ClientAuthDetails::resolve(
-            &*self.config.client_auth_cert_resolver,
-            certreq.extensions.authorities.as_deref(),
-            None,
-            &compat_sigschemes,
-            Some(certreq.context.0.clone()),
-        );
+        // RFC 9849 §6.1.7: a server that rejected ECH gets no certificate.
+        let client_auth = if cx.data.ech_status == EchStatus::Rejected {
+            ClientAuthDetails::Empty {
+                auth_context_tls13: Some(certreq.context.0.clone()),
+            }
+        } else {
+            ClientAuthDetails::resolve(
+                &*self.config.client_auth_cert_resolver,
+                certreq.extensions.authorities.as_deref(),
+                None,
+                &compat_sigschemes,
+                Some(certreq.context.0.clone()),
+            )
+        };
 
         Ok(Box::new(ExpectCertificate {
             config: self.config,
@@ -933,6 +956,17 @@ impl State<ClientConnectionData> for ExpectFinished {
         emit_finished_tls13(&mut st.transcript, &verify_data, cx.common);
 
         let key_schedule = traffic_pending.into_traffic(cx.common);
+
+        // RFC 9849 §6.1.6: a handshake with the outer ClientHello only
+        // authenticates the rejection. Abort with ech_required before any
+        // application data, handing back the retry configurations.
+        if cx.data.ech_status == EchStatus::Rejected {
+            let retry_configs = cx.data.ech_retry_configs.take();
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::EncryptedClientHelloRequired,
+                Error::RejectedEch(RejectedEch { retry_configs }),
+            ));
+        }
         cx.common.start_traffic();
 
         if let Some(group) = cx.common.negotiated_key_exchange_group() {

@@ -186,6 +186,14 @@ impl ExpectClientHello {
         let Some(state) = RetryCookie::open(sealer, cookie, now) else {
             return Err(invalid(cx));
         };
+        // We issue no cookie when the first ClientHello offered ECH, so a
+        // second one may not offer it either (RFC 9849 §7.1.1).
+        if !matches!(cx.data.ech, crate::ech::server::ServerEch::NotOffered) {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::EchChangedOnRetry,
+            ));
+        }
         // The configuration may have changed since the cookie was issued.
         let Some(suite) = self
             .config
@@ -735,6 +743,18 @@ impl State<ServerConnectionData> for ExpectClientHello {
             cx.common.process_middlebox_ccs()?;
             return Ok(self);
         }
+        // RFC 9849 §7.1: decide on ECH before anything else; an accepted
+        // offer replaces the ClientHello with the inner one.
+        let m = match crate::ech::server::process_client_hello(
+            self.config.ech.as_deref(),
+            &mut cx.data.ech,
+            cx.common,
+            &m,
+            self.done_retry,
+        )? {
+            Some(inner) => inner,
+            None => m,
+        };
         let (client_hello, sig_schemes) = process_client_hello(&m, self.done_retry, cx)?;
         self.with_certified_key(sig_schemes, client_hello, &m, cx)
     }

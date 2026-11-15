@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use browntls_pki::DnsName;
 
 use super::common::ActiveCertifiedKey;
+use super::cookie::RetryCookie;
 use super::server_conn::{ClientHello, ServerConfig, ServerConnectionData};
 use super::tls13;
 use crate::common_state::{ConnectionRandoms, KxState};
@@ -18,9 +19,12 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup};
-use crate::msgs::handshake::{ClientHelloPayload, HandshakePayload, Random, SessionId};
-use crate::msgs::message::Message;
+use crate::msgs::handshake::{
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, Random, SessionId,
+};
+use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -83,6 +87,9 @@ pub(super) struct ExpectClientHello {
     /// What our HelloRetryRequest selected, which the second ClientHello
     /// must follow (RFC 9846 §4.2.4).
     pub(super) retry_choice: Option<RetryChoice>,
+    /// The cookie our HelloRetryRequest carried, which the second
+    /// ClientHello must echo (RFC 9846 §4.3.2).
+    pub(super) sent_cookie: Option<Vec<u8>>,
     pub(super) send_tickets: usize,
 }
 
@@ -105,19 +112,143 @@ impl ExpectClientHello {
             session_id: SessionId::empty(),
             done_retry: false,
             retry_choice: None,
+            sent_cookie: None,
             send_tickets: 0,
         }
+    }
+
+    /// Checks the cookie of a second ClientHello, or continues a stateless
+    /// retry (RFC 9846 §4.3.2) when a first message carries one of ours.
+    fn process_cookie(
+        &mut self,
+        client_hello: &ClientHelloPayload,
+        cx: &mut ServerContext<'_>,
+    ) -> Result<(), Error> {
+        let received = client_hello.extensions.cookie.as_ref().map(|c| &c.0);
+        if self.done_retry {
+            // The client MUST copy the cookie it was sent.
+            return match (&self.sent_cookie, received) {
+                (None, _) => Ok(()),
+                (Some(_), None) => Err(cx.common.send_fatal_alert(
+                    AlertDescription::MissingExtension,
+                    PeerMisbehaved::MissingCookieInSecondClientHello,
+                )),
+                (Some(sent), Some(received)) if sent == received => Ok(()),
+                (Some(_), Some(_)) => Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::InvalidHelloRetryRequestCookie,
+                )),
+            };
+        }
+        match (received, &self.config.hello_retry_cookies) {
+            (Some(cookie), Some(sealer)) => {
+                let sealer = sealer.clone();
+                self.resume_from_cookie(&*sealer, cookie, client_hello, cx)
+            }
+            // RFC 9846 §4.3.2: a stateless server ignores change_cipher_spec
+            // records ahead of a second ClientHello; ahead of any other it
+            // is unexpected.
+            _ if cx.common.received_middlebox_ccs > 0 => Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::IllegalMiddleboxChangeCipherSpec,
+            )),
+            // Without a sealer we issue no cookies, and ignore one a client
+            // sends in its first ClientHello.
+            _ => Ok(()),
+        }
+    }
+
+    /// Restores the state a HelloRetryRequest left in its cookie, so this
+    /// connection continues the handshake from the second ClientHello.
+    fn resume_from_cookie(
+        &mut self,
+        sealer: &dyn super::server_conn::ProducesTickets,
+        cookie: &[u8],
+        client_hello: &ClientHelloPayload,
+        cx: &mut ServerContext<'_>,
+    ) -> Result<(), Error> {
+        let now = self.config.current_time()?.as_secs();
+        let invalid = |cx: &mut ServerContext<'_>| {
+            cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::InvalidHelloRetryRequestCookie,
+            )
+        };
+        let Some(state) = RetryCookie::open(sealer, cookie, now) else {
+            return Err(invalid(cx));
+        };
+        // The configuration may have changed since the cookie was issued.
+        let Some(suite) = self
+            .config
+            .find_cipher_suite(state.suite)
+            .and_then(|s| s.tls13())
+        else {
+            return Err(invalid(cx));
+        };
+        let Some(group) =
+            self.config.kx_groups().iter().copied().find(|g| {
+                g.name() == state.group && g.usable_for_version(ProtocolVersion::TLSv1_3)
+            })
+        else {
+            return Err(invalid(cx));
+        };
+        if state.client_hello_hash.len() != suite.common.hash_provider.output_len() {
+            return Err(invalid(cx));
+        }
+        // RFC 9846 §4.2.2: the second ClientHello repeats the first, apart
+        // from what the HelloRetryRequest asked to change.
+        if client_hello.session_id != state.session_id {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::RefusedToFollowHelloRetryRequest,
+            ));
+        }
+        let sni = cx
+            .data
+            .sni
+            .as_ref()
+            .map(|name| name.as_ref().as_bytes())
+            .unwrap_or_default();
+        if sni != state.server_name.as_slice() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::ServerNameDifferedOnRetry,
+            ));
+        }
+
+        // RFC 9846 §4.5: message_hash(Hash(ClientHello1)), then the
+        // HelloRetryRequest exactly as sent (it is rebuilt from the cookie).
+        let mut transcript = HandshakeHashBuffer::new().start_hash(suite.common.hash_provider);
+        transcript.add(
+            &HandshakeMessagePayload::build_handshake_hash(&state.client_hello_hash).get_encoding(),
+        );
+        transcript.add_message(&tls13::hello_retry_request_message(
+            suite,
+            state.session_id,
+            group.name(),
+            Some(cookie.to_vec()),
+        ));
+        debug!("continuing a stateless HelloRetryRequest from its cookie");
+        self.transcript = HandshakeHashOrBuffer::Hash(transcript);
+        self.done_retry = true;
+        self.retry_choice = Some(RetryChoice { suite, group });
+        self.sent_cookie = Some(cookie.to_vec());
+        cx.common.handshake_kind =
+            Some(crate::common_state::HandshakeKind::FullWithHelloRetryRequest);
+        Ok(())
     }
 
     /// Negotiates version, suite and key exchange group, chooses the
     /// certificate and hands off to the version-specific handler.
     pub(super) fn with_certified_key(
-        self,
+        mut self,
         sig_schemes: Vec<SignatureScheme>,
         client_hello: &ClientHelloPayload,
         m: &Message<'_>,
         cx: &mut ServerContext<'_>,
     ) -> NextStateOrError {
+        self.process_cookie(client_hello, cx)?;
+
         let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3);
         let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2);
 
@@ -585,6 +716,16 @@ pub(super) fn kx_groups_by_preference(
 
 impl State<ServerConnectionData> for ExpectClientHello {
     fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 9846 §4.3.2: a stateless server may see the client's
+        // change_cipher_spec ahead of a second ClientHello on a fresh
+        // connection; `process_cookie` refuses it ahead of any other.
+        if let MessagePayload::ChangeCipherSpec(_) = &m.payload
+            && !self.done_retry
+            && self.config.hello_retry_cookies.is_some()
+        {
+            cx.common.process_middlebox_ccs()?;
+            return Ok(self);
+        }
         let (client_hello, sig_schemes) = process_client_hello(&m, self.done_retry, cx)?;
         self.with_certified_key(sig_schemes, client_hello, &m, cx)
     }

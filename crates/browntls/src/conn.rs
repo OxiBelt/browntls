@@ -53,6 +53,12 @@ pub(crate) trait State<Data>: Send + Sync {
         Err(Error::HandshakeNotComplete)
     }
 
+    /// Sends a post-handshake CertificateRequest (TLS 1.3 servers only,
+    /// RFC 9846 §4.7.2).
+    fn request_client_auth(&mut self, _cx: &mut Context<'_, Data>) -> Result<(), Error> {
+        Err(Error::HandshakeNotComplete)
+    }
+
     /// Hook called when a record failed to decrypt.
     fn handle_decrypt_error(&self) {}
 }
@@ -427,41 +433,71 @@ impl<Data: SideData> ConnectionCore<Data> {
         &mut self,
         buffer: &mut DeframerVecBuffer,
     ) -> Result<Option<Message<'static>>, Error> {
-        match self.deframer.pop(
-            &mut self.common_state.record_layer,
-            self.common_state.negotiated_version,
-            buffer,
-        ) {
-            Ok(Some(Deframed::Handshake { len, version })) => {
-                let bytes = &self.deframer.joiner.buffered()[..len];
-                let parsed = HandshakeMessagePayload::read_version(
-                    &mut CodecReader::init(bytes),
-                    ProtocolVersion::TLSv1_2,
-                )
-                .map_err(|e| {
-                    self.common_state
-                        .send_fatal_alert(AlertDescription::from(e), Error::from(e))
-                })?;
-                let msg = Message {
-                    version,
-                    payload: MessagePayload::Handshake {
-                        parsed,
-                        encoded: Payload::Borrowed(bytes),
-                    },
+        loop {
+            match self.deframer.pop(
+                &mut self.common_state.record_layer,
+                self.common_state.negotiated_version,
+                buffer,
+            ) {
+                Ok(Some(Deframed::Handshake { len, version })) => {
+                    let bytes = &self.deframer.joiner.buffered()[..len];
+                    let parsed = HandshakeMessagePayload::read_version(
+                        &mut CodecReader::init(bytes),
+                        ProtocolVersion::TLSv1_2,
+                    )
+                    .map_err(|e| {
+                        self.common_state
+                            .send_fatal_alert(AlertDescription::from(e), Error::from(e))
+                    })?;
+                    let msg = Message {
+                        version,
+                        payload: MessagePayload::Handshake {
+                            parsed,
+                            encoded: Payload::Borrowed(bytes),
+                        },
+                    }
+                    .into_owned();
+                    self.deframer.joiner.consume(len);
+                    return Ok(Some(msg));
                 }
-                .into_owned();
-                self.deframer.joiner.consume(len);
-                Ok(Some(msg))
+                // RFC 9846 §4.3.2: a stateless server may receive the
+                // client's compatibility change_cipher_spec ahead of a second
+                // ClientHello. It is set aside here, within the usual bound;
+                // the handshake refuses it unless the ClientHello continues
+                // a stateless HelloRetryRequest.
+                Ok(Some(Deframed::Record {
+                    typ: ContentType::ChangeCipherSpec,
+                    version,
+                    plaintext,
+                    consumed,
+                    ..
+                })) => {
+                    let payload = &buffer.filled()[plaintext];
+                    let result = match Message::try_from(InboundPlainMessage {
+                        typ: ContentType::ChangeCipherSpec,
+                        version,
+                        payload,
+                    }) {
+                        Ok(_) => self.common_state.process_middlebox_ccs(),
+                        Err(err) => Err(self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                    };
+                    buffer.discard(consumed);
+                    result?;
+                }
+                Ok(Some(Deframed::Record { typ, .. })) => {
+                    return Err(self.common_state.send_fatal_alert(
+                        AlertDescription::UnexpectedMessage,
+                        Error::InappropriateMessage {
+                            expect_types: alloc::vec![ContentType::Handshake],
+                            got_type: typ,
+                        },
+                    ));
+                }
+                Ok(None) => return Ok(None),
+                Err(err) => return Err(self.handle_deframe_error(err, &NoState)),
             }
-            Ok(Some(Deframed::Record { typ, .. })) => Err(self.common_state.send_fatal_alert(
-                AlertDescription::UnexpectedMessage,
-                Error::InappropriateMessage {
-                    expect_types: alloc::vec![ContentType::Handshake],
-                    got_type: typ,
-                },
-            )),
-            Ok(None) => Ok(None),
-            Err(err) => Err(self.handle_deframe_error(err, &NoState)),
         }
     }
 }
@@ -504,6 +540,57 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core
             .export_keying_material(output.as_mut(), label, context)?;
         Ok(output)
+    }
+
+    /// Derives keying material from the early exporter (RFC 9846 §7.5,
+    /// `early_exporter_master_secret`), the exporter for use with 0-RTT data.
+    ///
+    /// Available on a client from the moment it offers 0-RTT (see
+    /// `ClientConnection::early_data`) and on a server once it has accepted
+    /// 0-RTT; the client loses it again if the server rejects 0-RTT, since
+    /// the two sides would no longer agree on the value. Like 0-RTT data the
+    /// output is bound to the ClientHello and the resumption PSK only: it is
+    /// not forward secret and an attacker who replays the ClientHello
+    /// replays it too. Use [`Self::export_keying_material`] for anything
+    /// else; the two never return the same value.
+    pub fn export_early_keying_material<T: AsMut<[u8]>>(
+        &self,
+        mut output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
+        let out = output.as_mut();
+        if out.is_empty() {
+            return Err(Error::general(
+                "export_early_keying_material: output buffer is empty",
+            ));
+        }
+        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
+            return Err(Error::general(
+                "export_early_keying_material: context too long",
+            ));
+        }
+        match &self.core.common_state.early_exporter {
+            Some(exporter) => exporter.export_keying_material(out, label, context)?,
+            None => {
+                return Err(Error::General(
+                    "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
+                ));
+            }
+        }
+        Ok(output)
+    }
+
+    /// The `tls-exporter` channel binding of RFC 9266: 32 bytes exported
+    /// with the label `EXPORTER-Channel-Binding` and an empty context.
+    ///
+    /// Defined only when the handshake produced a unique master secret
+    /// (RFC 9266 §2): always in TLS 1.3, and in TLS 1.2 only with the
+    /// extended master secret (RFC 7627), which the TLS 1.2 exporter already
+    /// requires. browntls never renegotiates, so the value is fixed for the
+    /// connection (RFC 9266 §4.2). Fails until the handshake is complete.
+    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
+        self.export_keying_material([0u8; 32], b"EXPORTER-Channel-Binding", Some(&[]))
     }
 
     /// Extracts the traffic secrets for kernel TLS offload.
@@ -856,6 +943,27 @@ impl Connection {
         match self {
             Self::Client(conn) => conn.export_keying_material(output, label, context),
             Self::Server(conn) => conn.export_keying_material(output, label, context),
+        }
+    }
+
+    /// See [`ConnectionCommon::export_early_keying_material`].
+    pub fn export_early_keying_material<T: AsMut<[u8]>>(
+        &self,
+        output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
+        match self {
+            Self::Client(conn) => conn.export_early_keying_material(output, label, context),
+            Self::Server(conn) => conn.export_early_keying_material(output, label, context),
+        }
+    }
+
+    /// See [`ConnectionCommon::tls_exporter_channel_binding`].
+    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
+        match self {
+            Self::Client(conn) => conn.tls_exporter_channel_binding(),
+            Self::Server(conn) => conn.tls_exporter_channel_binding(),
         }
     }
 

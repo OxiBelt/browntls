@@ -159,6 +159,12 @@ where they live:
   local resource bound.
 - Record layer: a protected `change_cipher_spec` record, or one whose value
   is not 0x01, is `unexpected_message`.
+- Rejected 0-RTT: a server that declines early data skips the client's
+  undecryptable records while their plaintext totals at most
+  `max_early_data_size` (§4.2.10); each record is charged its length less
+  the suite's tag and content type byte, an upper bound on its plaintext
+  (`RecordLayer::doing_trial_decryption`). One byte more fails with
+  `bad_record_mac`.
 - Alerts: `general_error` (117) exists; `user_canceled` is ignored at either
   level in TLS 1.3 (the peer must follow it with `close_notify`), within the
   same bound as TLS 1.2 warning alerts; every other alert except

@@ -15,6 +15,10 @@ use crate::msgs::message::{
 const SEQ_SOFT_LIMIT: u64 = 0xffff_ffff_ffff_0000;
 const SEQ_HARD_LIMIT: u64 = 0xffff_ffff_ffff_fffe;
 
+/// The largest expansion a TLS 1.3 record may have over its plaintext
+/// (RFC 9846 §5.2: `TLSCiphertext.length` is at most 2^14 + 256).
+const MAX_TLS13_EXPANSION: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectionState {
     /// No cipher is set up; records pass through unprotected.
@@ -53,8 +57,8 @@ pub(crate) struct RecordLayer {
     encrypt_state: DirectionState,
     decrypt_state: DirectionState,
     confidentiality_limit: u64,
-    /// Remaining bytes of records that may fail decryption silently (rejected
-    /// 0-RTT data on the server, RFC 8446 §4.2.10).
+    /// Remaining plaintext bytes of records that may fail decryption
+    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.2.10).
     trial_decryption_len: Option<usize>,
     /// The record size limit we announced (RFC 8449), once negotiated.
     inbound_size_limit: Option<InboundSizeLimit>,
@@ -219,8 +223,9 @@ impl RecordLayer {
         self.reading_early_data = true;
     }
 
-    /// Like `set_message_decrypter`, but up to `max_length` bytes of records
-    /// that fail to decrypt are dropped silently.
+    /// Like `set_message_decrypter`, but records that fail to decrypt are
+    /// dropped silently while they carry at most `max_length` bytes of
+    /// plaintext in total (see `doing_trial_decryption`).
     pub(crate) fn set_message_decrypter_with_trial_decryption(
         &mut self,
         cipher: Box<dyn MessageDecrypter>,
@@ -303,10 +308,29 @@ impl RecordLayer {
         }
     }
 
+    /// Charges a skipped record of `requested` ciphertext bytes against the
+    /// trial decryption budget; `false` once the budget would be exceeded.
+    ///
+    /// RFC 9846 §4.2.10 counts `max_early_data_size` in plaintext bytes
+    /// (excluding the inner content type and padding), so each record is
+    /// charged the most plaintext it can carry: its length minus the
+    /// AEAD expansion. TLS 1.3 uses one suite in both directions, so that
+    /// expansion (tag plus content type byte) is what our own write key
+    /// adds, which is active by the time the client's records arrive. It is
+    /// capped at the 256 bytes RFC 9846 §5.2 allows; without a write key
+    /// nothing is subtracted (the stricter, ciphertext-based budget).
     fn doing_trial_decryption(&mut self, requested: usize) -> bool {
+        let overhead = if self.encrypt_state == DirectionState::Active {
+            self.message_encrypter
+                .encrypted_payload_len(0)
+                .min(MAX_TLS13_EXPANSION)
+        } else {
+            0
+        };
+        let plaintext_bound = requested.saturating_sub(overhead);
         match self
             .trial_decryption_len
-            .and_then(|value| value.checked_sub(requested))
+            .and_then(|value| value.checked_sub(plaintext_bound))
         {
             Some(remaining) => {
                 self.trial_decryption_len = Some(remaining);

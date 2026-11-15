@@ -25,9 +25,11 @@ const TOP: u64 = 0x1ff;
 
 /// `s - (1 - carry)` masked to 521 bits, where `carry` is bit 521 of `s`.
 ///
-/// For `s = x + 1` with `x < 2^522 - 1` this is `x mod p`, fully reduced: if
-/// bit 521 is clear, `x <= p - 1` and the result is `s - 1 = x`; if it is set,
-/// `x >= p` and clearing it gives `x + 1 - 2^521 = x - p <= p - 1`.
+/// For `s = x + 1` with `x < 2p` this is `x mod p`, fully reduced: if bit 521
+/// is clear, `x <= p - 1` and the result is `s - 1 = x`; if it is set,
+/// `x >= p` and clearing it gives `x + 1 - 2^521 = x - p <= p - 1`. (For
+/// `x = 2p`, the largest value nine limbs of 521 bits can sum to, the result
+/// would be `p`, hence the bound.)
 #[inline(always)]
 fn finish(mut s: [u64; 9]) -> Fe<9> {
     let mut b = 1 - (s[8] >> 9);
@@ -38,14 +40,19 @@ fn finish(mut s: [u64; 9]) -> Fe<9> {
     s
 }
 
-/// Reduces a product `t < 2^1042` to `t * 2^-576 mod p`, fully reduced.
+/// Reduces a product `t <= (2^521 - 1)^2` to `t * 2^-576 mod p`, fully
+/// reduced.
 ///
 /// The bound holds for the product of any two values below `2^521`, so the
-/// operands of a multiplication need only have a top limb below `2^9`.
+/// operands of a multiplication need only have a top limb below `2^9`. (Any
+/// `t < 2^1042` is reduced below `2^521`, but `t = 2^1042 - 1` gives `p`
+/// rather than zero.)
 #[inline(always)]
 pub(crate) fn reduce(t: &[u64; 18]) -> Fe<9> {
-    // lo = t mod 2^521 and hi = t >> 521 are both below 2^521, and
-    // t = lo + hi (mod p). s = lo + hi + 1 has no carry out of nine limbs.
+    // lo = t mod 2^521 is at most p and hi = t >> 521 is at most
+    // p - 1 (t <= 2^1042 - 2^522 + 1), and t = lo + hi (mod p).
+    // s = lo + hi + 1 <= 2p has no carry out of nine limbs, and
+    // lo + hi < 2p is what `finish` needs.
     let mut s = [0u64; 9];
     let mut c = 1;
     for i in 0..9 {

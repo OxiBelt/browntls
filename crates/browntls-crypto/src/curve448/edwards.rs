@@ -32,6 +32,14 @@ pub(crate) struct EdwardsPoint {
     z: Fe,
 }
 
+impl Zeroize for EdwardsPoint {
+    fn zeroize(&mut self) {
+        for c in [&mut self.x, &mut self.y, &mut self.z] {
+            c.0.zeroize();
+        }
+    }
+}
+
 impl EdwardsPoint {
     pub(crate) const IDENTITY: Self = Self {
         x: Fe::ZERO,
@@ -230,7 +238,8 @@ impl EdwardsPoint {
 
     /// Constant-time `[k]B` for a reduced scalar `k < L < 2^446`.
     ///
-    /// `k` is recoded into 112 signed radix-16 digits `e[i]` in `[-8, 8]`.
+    /// `k` is recoded into 112 signed radix-16 digits `e[i]`: `[-8, 7]` for
+    /// all but the last, which is in `[0, 4]`.
     /// With the table rows `256^j B`, the odd digits give
     /// `sum e[2j + 1] 256^j B`, four doublings multiply that by 16, and the
     /// even digits add `sum e[2j] 256^j B`. Every digit costs one masked scan
@@ -240,7 +249,7 @@ impl EdwardsPoint {
         let mut kb = k.to_bytes();
         // Digits as two's complement bytes so that they can be wiped. The top
         // nibble is at most 3 (k < 2^446), so the last digit absorbs the
-        // final carry without leaving [-8, 8].
+        // final carry and is at most 4.
         let mut e = [0u8; 112];
         for (i, &byte) in kb[..56].iter().enumerate() {
             e[2 * i] = byte & 15;

@@ -106,9 +106,9 @@ impl Scalar {
     /// The input is split as `lo + mid * 2^448 + hi * 2^896` and reduced as
     /// `lo R / R + mid R^2 / R + hi R^3 / R`.
     pub(crate) fn from_bytes_mod_order_wide(b: &[u8; 114]) -> Self {
-        let lo = Self(limbs(&b[..56]));
-        let mid = Self(limbs(&b[56..112]));
-        let hi = Self([
+        let mut lo = Self(limbs(&b[..56]));
+        let mut mid = Self(limbs(&b[56..112]));
+        let mut hi = Self([
             u64::from(b[112]) | (u64::from(b[113]) << 8),
             0,
             0,
@@ -118,10 +118,16 @@ impl Scalar {
             0,
             0,
         ]);
-        let lo = Self::montgomery_mul(&lo, &Self(R1));
-        let mid = Self::montgomery_mul(&mid, &Self(R2));
-        let hi = Self::montgomery_mul(&hi, &Self(R3));
-        lo.add(&mid).add(&hi)
+        let mut lo_r = Self::montgomery_mul(&lo, &Self(R1));
+        let mut mid_r = Self::montgomery_mul(&mid, &Self(R2));
+        let mut hi_r = Self::montgomery_mul(&hi, &Self(R3));
+        let out = lo_r.add(&mid_r).add(&hi_r);
+        // The pieces are as secret as the input (a nonce hash or a private
+        // key).
+        for s in [&mut lo, &mut mid, &mut hi, &mut lo_r, &mut mid_r, &mut hi_r] {
+            s.zeroize();
+        }
+        out
     }
 
     /// Reduces a 57-byte little-endian integer modulo `L`.

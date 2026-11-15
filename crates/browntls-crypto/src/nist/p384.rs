@@ -1,8 +1,9 @@
 //! NIST P-384 (secp384r1): ECDH and ECDSA.
 //!
-//! Backends: the full-width product followed by a Montgomery reduction specialised to the shape of `p`
-//! everywhere; on x86-64 with BMI2 and ADX the product comes from a
-//! `mulx`/`adcx`/`adox` kernel.
+//! Backends: the full-width product followed by a Montgomery reduction
+//! specialised to the shape of `p` everywhere; on x86-64 with BMI2 and ADX
+//! the product comes from a `mulx`/`adcx`/`adox` kernel, and the reduction,
+//! addition and subtraction are assembly as well.
 
 use super::params::P384;
 

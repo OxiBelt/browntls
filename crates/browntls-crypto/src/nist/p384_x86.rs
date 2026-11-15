@@ -20,7 +20,8 @@ use super::wide_x86;
 fn reduce(t: &[u64; 12]) -> Fe<6> {
     let mut o = [0u64; 6];
     // SAFETY: only reachable through `P384Adx`, which is selected after
-    // `wide_x86::available()` reported BMI2 (`mulx`). The asm reads the 96
+    // `wide_x86::available()` reported BMI2 (`mulx`), and from a test that
+    // checks the same. The asm reads the 96
     // bytes behind `t` (a valid reference), writes no memory, does not touch
     // the stack and declares every register it clobbers.
     unsafe {
@@ -396,6 +397,9 @@ mod tests {
     /// reduced operands and on high halves at their extremes.
     #[test]
     fn reduction_matches_portable() {
+        if !wide_x86::available() {
+            return;
+        }
         let mut seed = 0x3f84_d5b5_b547_0917u64;
         let mut next = || {
             seed ^= seed << 13;

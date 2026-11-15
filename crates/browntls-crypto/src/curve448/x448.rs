@@ -66,12 +66,17 @@ pub fn x448(scalar: &[u8; 56], u: &[u8; 56]) -> [u8; 56] {
 /// identity and the output is zero, as with the ladder.
 #[must_use]
 pub fn x448_base(scalar: &[u8; 56]) -> [u8; 56] {
+    let mut clamped = clamp(scalar);
     let mut wide = [0u8; 57];
-    wide[..56].copy_from_slice(&clamp(scalar));
+    wide[..56].copy_from_slice(&clamped);
     let mut k = Scalar::from_bytes_mod_order(&wide);
+    clamped.zeroize();
     wide.zeroize();
-    // The point is the public key in another form; only `k` is secret.
-    let out = EdwardsPoint::mul_base(&k).to_montgomery_u();
+    // The affine point is the public key in another form, but its projective
+    // representation depends on how `k` was processed, so it is wiped too.
+    let mut point = EdwardsPoint::mul_base(&k);
+    let out = point.to_montgomery_u();
+    point.zeroize();
     k.zeroize();
     out
 }

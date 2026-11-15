@@ -1,10 +1,10 @@
 //! Full-width products for the curves with a specialised reduction (P-384,
 //! P-521) and the constant-time safegcd inversion they share.
 //!
-//! [`mul`] and [`sqr`] return the `2N`-limb product of two `N`-limb values.
-//! The portable versions here are row-wise schoolbook multiplications built
-//! from `64x64->128`-bit products; `wide_x86` provides BMI2/ADX kernels with
-//! the same interface. Neither the instruction sequence nor the memory
+//! [`mul`] returns the `2N`-limb product of two `N`-limb values as a
+//! row-wise schoolbook multiplication built from `64x64->128`-bit products
+//! (squaring uses it too); `wide_x86` provides BMI2/ADX multiplication and
+//! squaring kernels for six and nine limbs. Neither the instruction sequence nor the memory
 //! accesses depend on the operands.
 //!
 //! [`invert`] wraps the generic Bernstein–Yang inversion of

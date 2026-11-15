@@ -14,8 +14,9 @@ use super::curve::{Affine, Curve, Fe};
 use super::params::{P521, wide_invert, wide_scalar_invert};
 use super::wide_x86;
 
-/// Reduces a product `t < 2^1042` to `t * 2^-576 mod p`, fully reduced: the
-/// same steps as `p521_field::reduce`.
+/// Reduces a product `t <= (2^521 - 1)^2` to `t * 2^-576 mod p`, fully
+/// reduced: the same steps as `p521_field::reduce`, with the same result for
+/// every `t < 2^1042`.
 #[inline]
 fn reduce(t: &[u64; 18]) -> Fe<9> {
     let mut o = [0u64; 9];
@@ -316,8 +317,9 @@ mod tests {
         }
     }
 
-    /// The assembly reduction agrees with the portable one on the whole
-    /// documented domain (`t < 2^1042`), including its extremes.
+    /// The assembly reduction agrees with the portable one for every
+    /// `t < 2^1042`, including the extremes, and is fully reduced on the
+    /// documented domain `t <= (2^521 - 1)^2`.
     #[test]
     fn reduction_matches_portable() {
         let mut seed = 0x3f84_d5b5_b547_0917u64;
@@ -357,9 +359,25 @@ mod tests {
         for _ in 0..2000 {
             v.push(clamp(core::array::from_fn(|_| next())));
         }
+        let p = P521::P;
+        // (2^521 - 1)^2 = 2^1042 - 2^522 + 1.
+        let mut max = clamp([u64::MAX; 18]);
+        max[0] = 1;
+        max[8] = !0x3ff;
+        v.push(max);
         for t in &v {
-            assert_eq!(reduce(t), p521_field::reduce(t), "t = {t:x?}");
+            let r = reduce(t);
+            assert_eq!(r, p521_field::reduce(t), "t = {t:x?}");
+            let in_domain = (0..18)
+                .rev()
+                .find(|&i| t[i] != max[i])
+                .is_none_or(|i| t[i] < max[i]);
+            if in_domain {
+                assert_ne!(mont::sub(&r, &p).1, 0, "not reduced: t = {t:x?}");
+            }
         }
+        // Just outside the domain the result is p itself.
+        assert_eq!(reduce(&clamp([u64::MAX; 18])), p);
     }
 
     /// Fixed-base and variable-base multiplications agree with the portable

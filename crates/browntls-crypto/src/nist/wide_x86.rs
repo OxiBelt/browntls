@@ -9,9 +9,10 @@
 //! products `a[i] * a[j]`, `i < j`, once, then double them on one flag chain
 //! while adding the squares `a[i]^2` on the other.
 //!
-//! The reductions are the portable ones (`p384_field::reduce`,
-//! `p521_field::reduce`), so the two backends of a curve differ only in how
-//! the product is formed.
+//! The reductions that follow a product are in `p384_x86` and `p521_x86`:
+//! the same steps as the portable `p384_field::reduce` and
+//! `p521_field::reduce`, written as assembly so that the result stays in
+//! registers.
 //!
 //! Every kernel is one straight-line instruction sequence: no branch, no
 //! data-dependent address and no instruction with operand-dependent timing

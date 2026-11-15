@@ -116,11 +116,15 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   RFC 6066 `max_fragment_length` extension is not offered or accepted.
 - Delegated credentials (RFC 9345) have no interoperability evidence: no
   implementation the project tests against (OpenSSL 3, rustls) supports
-  them. A server does not check a
-  credential's signature when it is attached, so a credential issued for
-  another certificate is only rejected by the peer. Verifiers that do not
-  override `verify_tls13_signature_with_delegated_key` refuse credentials.
+  them. A server does not check a credential's signature when it is
+  attached, so a credential issued for another certificate is only rejected
+  by the peer. Verifiers that do not override
+  `verify_tls13_signature_with_delegated_key` refuse credentials.
+  `CertifiedKey` gained a private field, so struct-literal construction no
+  longer compiles (use `CertifiedKey::new`).
 - Exported authenticators (RFC 9261) have no interoperability evidence and
   were written from the RFC alone; the exporter labels, the CertificateVerify
   context string and the message layout have not been checked against
-  another implementation or published test vectors.
+  another implementation or published test vectors. Secondary host names
+  (the `server_name` request extension) are not supported: a client
+  validates server authenticators against the connection's SNI only.

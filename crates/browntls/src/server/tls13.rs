@@ -915,11 +915,12 @@ impl State<ServerConnectionData> for ExpectCertificate {
                 PeerMisbehaved::IllegalCertificateRequestContext,
             ));
         }
-        // We never request stapled responses or SCTs from clients.
+        // We never request stapled responses, SCTs or delegated credentials
+        // (RFC 9345 client credentials are not supported) from clients.
         if certp
             .entries
             .iter()
-            .any(|e| e.status.is_some() || e.sct_list.is_some())
+            .any(|e| e.status.is_some() || e.sct_list.is_some() || e.delegated_credential.is_some())
         {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,

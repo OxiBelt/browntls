@@ -48,10 +48,9 @@ pub struct CertifiedKey {
     /// A stapled OCSP response for the end entity, if any.
     pub ocsp: Option<Vec<u8>>,
 
-    /// Delegated credentials for the end entity (RFC 9345), most preferred
-    /// first. A TLS 1.3 server sends the first one the client accepts and
-    /// signs CertificateVerify with its key; otherwise `key` signs.
-    pub delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
+    /// Delegated credentials for the end entity (RFC 9345); see
+    /// [`Self::delegated_credentials`].
+    delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
 }
 
 impl CertifiedKey {
@@ -89,6 +88,14 @@ impl CertifiedKey {
         let dc = DelegatedCredentialKey::new(self.end_entity_cert()?, credential, key)?;
         self.delegated_credentials.push(Arc::new(dc));
         Ok(self)
+    }
+
+    /// The delegated credentials added with
+    /// [`Self::with_delegated_credential`], most preferred first. A TLS 1.3
+    /// server sends the first one the client accepts and signs
+    /// CertificateVerify with its key; otherwise `key` signs.
+    pub fn delegated_credentials(&self) -> &[Arc<DelegatedCredentialKey>] {
+        &self.delegated_credentials
     }
 
     /// Checks that the key's public half matches the end-entity certificate.

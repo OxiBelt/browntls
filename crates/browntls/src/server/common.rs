@@ -20,7 +20,7 @@ impl<'a> ActiveCertifiedKey<'a> {
             cert: &certkey.cert,
             key: &*certkey.key,
             ocsp: certkey.ocsp.as_deref(),
-            delegated_credentials: &certkey.delegated_credentials,
+            delegated_credentials: certkey.delegated_credentials(),
         }
     }
 

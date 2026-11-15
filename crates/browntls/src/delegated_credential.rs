@@ -49,6 +49,20 @@ const MAX_SPKI_LEN: usize = 0x4000;
 const SERVER_CONTEXT: &[u8] = b"TLS, server delegated credentials";
 const CLIENT_CONTEXT: &[u8] = b"TLS, client delegated credentials";
 
+/// Whether `scheme` may be a credential's `dc_cert_verify_algorithm`: a
+/// TLS 1.3 scheme whose key is not an `rsaEncryption` key. RFC 9345 §4
+/// forbids `rsaEncryption` credential keys, so the `rsa_pss_rsae_*` schemes
+/// are excluded (`rsa_pss_pss_*` keys are allowed).
+pub(crate) fn credential_scheme_allowed(scheme: SignatureScheme) -> bool {
+    scheme.supported_in_tls13()
+        && !matches!(
+            scheme,
+            SignatureScheme::RSA_PSS_SHA256
+                | SignatureScheme::RSA_PSS_SHA384
+                | SignatureScheme::RSA_PSS_SHA512
+        )
+}
+
 /// The `Credential` structure of RFC 9345 §4: the delegated public key, the
 /// scheme it signs with and its lifetime.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,14 +77,25 @@ pub struct Credential {
 }
 
 impl Codec<'_> for Credential {
+    /// [`DelegatedCredential::issue`] and [`DelegatedCredentialKey::new`]
+    /// refuse public keys above 16 KiB (the decoding bound). A key too long
+    /// for the 24-bit length, only possible by filling the public fields by
+    /// hand, is written as an empty key, which every decoder rejects,
+    /// rather than with a wrong length.
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.valid_time.encode(bytes);
         self.dc_cert_verify_algorithm.encode(bytes);
         let spki = self.public_key.as_ref();
-        u24::from_usize(spki.len())
-            .unwrap_or(u24(u24::MAX))
-            .encode(bytes);
-        bytes.extend_from_slice(spki);
+        match u24::from_usize(spki.len()) {
+            Some(len) => {
+                len.encode(bytes);
+                bytes.extend_from_slice(spki);
+            }
+            None => {
+                debug_assert!(false, "delegated public key longer than 2^24 - 1 bytes");
+                u24(0).encode(bytes);
+            }
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -170,9 +195,11 @@ impl DelegatedCredential {
     /// `schemes` that key can sign with (only schemes usable in TLS 1.3 are
     /// considered). `side` is the side that will authenticate with it.
     ///
-    /// The certificate must permit delegation (RFC 9345 §4.2) and the
-    /// credential's scheme must be usable in TLS 1.3. The validity is not
-    /// checked here; see [`valid_time_until`] to compute `valid_time`.
+    /// The certificate must permit delegation (RFC 9345 §4.2), the
+    /// credential's scheme must be usable in TLS 1.3 and not need an
+    /// `rsaEncryption` key (`rsa_pss_rsae_*`, forbidden by RFC 9345 §4), and
+    /// the public key must be non-empty and at most 16 KiB. The validity is
+    /// not checked here; see [`valid_time_until`] to compute `valid_time`.
     pub fn issue(
         side: Side,
         end_entity: &CertificateDer<'_>,
@@ -181,11 +208,7 @@ impl DelegatedCredential {
         credential: Credential,
     ) -> Result<Self, Error> {
         check_delegation_certificate(end_entity)?;
-        if !credential.dc_cert_verify_algorithm.supported_in_tls13() {
-            return Err(Error::General(
-                "a delegated credential's scheme must be usable in TLS 1.3".into(),
-            ));
-        }
+        check_credential(&credential)?;
         let schemes: Vec<SignatureScheme> = schemes
             .iter()
             .copied()
@@ -235,6 +258,25 @@ fn expiry_from(not_before: UnixTime, valid_time: u32) -> UnixTime {
     ))
 }
 
+/// Checks what we issue or attach: an allowed scheme and a public key that
+/// decoding would accept.
+fn check_credential(credential: &Credential) -> Result<(), Error> {
+    if !credential_scheme_allowed(credential.dc_cert_verify_algorithm) {
+        return Err(Error::General(
+            "a delegated credential's scheme must be a TLS 1.3 scheme without an \
+             rsaEncryption key (RFC 9345 §4)"
+                .into(),
+        ));
+    }
+    let len = credential.public_key.as_ref().len();
+    if len == 0 || len > MAX_SPKI_LEN {
+        return Err(Error::General(
+            "a delegated credential's public key must be 1 to 16384 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Checks that `end_entity` may sign delegated credentials (RFC 9345
 /// §4.2): it has the `DelegationUsage` extension and the `digitalSignature`
 /// key usage.
@@ -266,7 +308,8 @@ impl DelegatedCredentialKey {
     /// Pairs `credential` with its private `key` for `end_entity`.
     ///
     /// Checks that the certificate permits delegation, that the key can
-    /// sign with the credential's scheme (a TLS 1.3 scheme) and, when the
+    /// sign with the credential's scheme (a TLS 1.3 scheme other than
+    /// `rsa_pss_rsae_*`, RFC 9345 §4) and, when the
     /// key exposes its public half, that it matches the credential. The
     /// credential's signature is the issuer's responsibility and is not
     /// checked here; peers check it.
@@ -276,8 +319,9 @@ impl DelegatedCredentialKey {
         key: Arc<dyn SigningKey>,
     ) -> Result<Self, Error> {
         check_delegation_certificate(end_entity)?;
+        check_credential(&credential.credential)?;
         let scheme = credential.credential.dc_cert_verify_algorithm;
-        if !scheme.supported_in_tls13() || key.choose_scheme(&[scheme]).is_none() {
+        if key.choose_scheme(&[scheme]).is_none() {
             return Err(Error::General(
                 "the delegated credential key cannot sign with the credential's scheme".into(),
             ));
@@ -362,8 +406,9 @@ pub(crate) fn validate(
     ) -> Result<HandshakeSignatureValid, Error>,
 ) -> Result<HandshakeSignatureValid, Error> {
     let cred = &dc.credential;
-    // §4.1.1: both schemes must be ones we offered, in the right list.
-    if !cred.dc_cert_verify_algorithm.supported_in_tls13()
+    // §4.1.1: both schemes must be ones we offered, in the right list; §4:
+    // never an rsaEncryption key, whatever was offered.
+    if !credential_scheme_allowed(cred.dc_cert_verify_algorithm)
         || !presented
             .offered_dc_schemes
             .contains(&cred.dc_cert_verify_algorithm)
@@ -666,6 +711,53 @@ mod validate_tests {
             check(&client, &ee, &[P256], P256, now).map(|_| ()),
             err(PeerMisbehaved::DelegatedCredentialBadSignature)
         );
+    }
+
+    #[test]
+    fn no_rsa_encryption_keys() {
+        const RSAE: [SignatureScheme; 3] = [
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+        ];
+        for scheme in RSAE {
+            assert!(!credential_scheme_allowed(scheme), "{scheme:?}");
+        }
+        for scheme in [
+            SignatureScheme::RSA_PSS_PSS_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+        ] {
+            assert!(credential_scheme_allowed(scheme), "{scheme:?}");
+        }
+
+        let now = UnixTime::now().as_secs();
+        let (ee, key) = cert(true, true);
+        let mut dc = credential(&ee, &*key, now + 3600);
+        // Rejected by a validator even when it offered the scheme
+        // (illegal_parameter, like every validation failure).
+        dc.credential.dc_cert_verify_algorithm = SignatureScheme::RSA_PSS_SHA256;
+        assert_eq!(
+            check(&dc, &ee, &RSAE, SignatureScheme::RSA_PSS_SHA256, now).map(|_| ()),
+            Err(Error::PeerMisbehaved(
+                PeerMisbehaved::DelegatedCredentialWithUnofferedScheme
+            ))
+        );
+        // Neither issued nor attached.
+        let refused = |r: Result<(), Error>| matches!(r, Err(Error::General(msg)) if msg.contains("rsaEncryption"));
+        assert!(refused(
+            DelegatedCredential::issue(
+                Side::Server,
+                &ee,
+                &*key,
+                &[SignatureScheme::ED25519],
+                dc.credential.clone(),
+            )
+            .map(|_| ())
+        ));
+        assert!(refused(
+            DelegatedCredentialKey::new(&ee, dc, key).map(|_| ())
+        ));
     }
 
     #[test]

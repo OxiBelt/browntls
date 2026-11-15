@@ -364,3 +364,115 @@ fn malformed_requests_are_rejected() {
             .is_err()
     );
 }
+
+/// RFC 9261 §5.1 calls the exporter with a zero-length context, which in
+/// TLS 1.2 (RFC 5705) is not the same as no context: recompute an empty
+/// authenticator's Finished from the public exporter.
+#[cfg(feature = "tls12")]
+#[test]
+fn tls12_exporter_uses_a_zero_length_context() {
+    let mut s = setup(&[&version::TLS12]);
+    let request = s
+        .server
+        .request_authenticator(b"ctx", &AuthenticatorRequestExtensions::default())
+        .unwrap();
+    let auth = s.client.authenticator(&request, None).unwrap();
+    assert_eq!(auth[0], 20);
+
+    let suite = s.client.negotiated_cipher_suite().unwrap();
+    let hash_len = if format!("{:?}", suite.suite()).ends_with("SHA384") {
+        48
+    } else {
+        32
+    };
+    let tls13 = provider()
+        .cipher_suites
+        .iter()
+        .find_map(|cs| {
+            cs.tls13()
+                .filter(|cs| cs.common.hash_provider.output_len() == hash_len)
+        })
+        .unwrap();
+    let finished = |context: Option<&[u8]>| {
+        let export = |label: &[u8]| {
+            s.server
+                .export_keying_material(vec![0u8; hash_len], label, context)
+                .unwrap()
+        };
+        let handshake_context = export(b"EXPORTER-client authenticator handshake context");
+        let key = export(b"EXPORTER-client authenticator finished key");
+        // The empty authenticator's Finished covers a Certificate with the
+        // request's context and no entries.
+        let certificate = [11, 0, 0, 7, 3, b'c', b't', b'x', 0, 0, 0];
+        let mut transcript = handshake_context;
+        transcript.extend_from_slice(&request);
+        transcript.extend_from_slice(&certificate);
+        let hash = tls13.common.hash_provider.hash(&transcript);
+        tls13
+            .hkdf_provider
+            .hmac_sign(&browntls::crypto::tls13::OkmBlock::new(&key), hash.as_ref())
+            .as_ref()
+            .to_vec()
+    };
+    assert_eq!(&auth[4..], finished(Some(&[])));
+    assert_ne!(&auth[4..], finished(None));
+    assert_eq!(s.server.validate_authenticator(&request, &auth), Ok(None));
+}
+
+#[test]
+fn only_requests_made_on_this_connection_are_validated() {
+    let mut s = tls13();
+    let server_key = key(&s.server_chain);
+    let request = s
+        .client
+        .request_authenticator(b"ours", &AuthenticatorRequestExtensions::default())
+        .unwrap();
+    // A request with a context this client never asked for, answered by
+    // the server: refused before anything else is looked at.
+    let mut other = tls13();
+    let foreign = other
+        .client
+        .request_authenticator(b"foreign", &AuthenticatorRequestExtensions::default())
+        .unwrap();
+    let auth = s
+        .server
+        .authenticator(Some(&foreign), Some(&server_key))
+        .unwrap();
+    assert!(matches!(
+        s.client.validate_authenticator(Some(&foreign), &auth),
+        Err(Error::General(_))
+    ));
+    // Our context, but other request bytes (other signature schemes).
+    let altered = other
+        .client
+        .request_authenticator(
+            b"ours",
+            &AuthenticatorRequestExtensions {
+                signature_schemes: Some(vec![SignatureScheme::ECDSA_NISTP256_SHA256]),
+                certificate_authorities: None,
+            },
+        )
+        .unwrap();
+    assert_ne!(altered, request);
+    let auth = s
+        .server
+        .authenticator(Some(&altered), Some(&server_key))
+        .unwrap();
+    assert!(matches!(
+        s.client.validate_authenticator(Some(&altered), &auth),
+        Err(Error::General(_))
+    ));
+    // The server side checks the same way.
+    let server_request = other
+        .server
+        .request_authenticator(b"not ours", &AuthenticatorRequestExtensions::default())
+        .unwrap();
+    let auth = s
+        .client
+        .authenticator(&server_request, Some(&key(&s.client_chain)))
+        .unwrap();
+    assert!(matches!(
+        s.server.validate_authenticator(&server_request, &auth),
+        Err(Error::General(_))
+    ));
+}

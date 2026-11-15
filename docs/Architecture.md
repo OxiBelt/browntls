@@ -196,7 +196,11 @@ certificate's key sign the credential. A credential is attached to a
 certificate carries the `DelegationUsage` extension
 (1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
 `digitalSignature` key usage, and that the key matches the credential's
-public key.
+public key. Credential keys may not be `rsaEncryption` keys (§4): the
+`rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
+(`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
+private field (`delegated_credentials()` reads them), so it can no longer
+be built with a struct literal; `CertifiedKey::new` remains.
 
 - Server: when the ClientHello carries `delegated_credential` and a
   credential is unexpired, has at most seven days left, uses a
@@ -220,7 +224,9 @@ public key.
   under the credential's key gets the same alert as one that fails under a
   certificate key (`decrypt_error` for a bad signature).
 - Not implemented: client credentials (the extension is parsed in
-  CertificateRequest but never sent, and a client never presents one).
+  CertificateRequest but never sent, and a client never presents one; a
+  server answers a client Certificate entry carrying one with
+  `unsupported_extension`, like other unsolicited entry extensions).
   No other implementation the project tests against supports delegated
   credentials, so the tests are browntls to browntls only.
 
@@ -238,21 +244,29 @@ a random 32-byte context.
 
 - Keys: the exporter with the labels `EXPORTER-client authenticator
   handshake context` / `... finished key` (`server` for server
-  authenticators), no context, the length of the connection's hash. TLS 1.3
-  and TLS 1.2 with the extended master secret (the TLS 1.2 exporter refuses
-  sessions without it); for TLS 1.2 the HMAC comes from a TLS 1.3 suite of
-  the provider with the same hash.
-- Validation: framing bounded by the handshake message limit, request type
-  and context checked, `Finished` compared in constant time before any
-  certificate or signature is verified, the CertificateVerify scheme must be
-  one the request offered (for a spontaneous authenticator, one the client's
-  verifier supports), then the chain and signature go through the configured
-  `ServerCertVerifier` (with the connection's server name) or
-  `ClientCertVerifier`. Entry extensions are refused.
+  authenticators), a zero-length context (§5.1; in TLS 1.2 its two length
+  octets enter the RFC 5705 seed, in TLS 1.3 it equals no context) and the
+  length of the connection's hash. TLS 1.3 and TLS 1.2 with the extended
+  master secret (the TLS 1.2 exporter refuses sessions without it); for
+  TLS 1.2 the HMAC comes from a TLS 1.3 suite of the provider with the
+  same hash.
+- Validation: the request must be one this side made and not yet answered
+  (recognised by a digest of its bytes); framing is bounded by the
+  handshake message limit; request type and context are checked;
+  `Finished` is compared in constant time before any certificate or
+  signature is verified; the CertificateVerify scheme must be one the
+  request offered (for a spontaneous authenticator, one the client's
+  verifier supports); then the chain and signature go through the
+  configured `ServerCertVerifier` (with the connection's server name, the
+  SNI; no secondary host names) or `ClientCertVerifier`. Entry extensions
+  are refused.
 - Local policy: contexts are 1 to 255 bytes and used once per connection
-  (a reused context is `PeerMisbehaved::ReusedAuthenticatorContext`); each
-  side remembers at most 256 contexts, after which requests and
-  authenticators fail. A request's `signature_algorithms` is required;
+  (a reused context is `PeerMisbehaved::ReusedAuthenticatorContext`). Each
+  side keeps three lists of at most 256 entries, capped separately:
+  requests it made, authenticators it made, and spontaneous authenticators
+  it validated. A full list makes further requests, authenticators or
+  spontaneous validations fail; answers to its own requests are recorded
+  on the request, so a peer cannot use up the room they need. A request's `signature_algorithms` is required;
   `certificate_authorities` may be set, `server_name`, `oid_filters` and
   `status_request` are not supported.
 - Errors are returned to the caller; no alert is sent and the connection

@@ -772,7 +772,8 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
 }
 
 /// The schemes a client accepts for a server's delegated credential
-/// (RFC 9345 §4.1.1): the verifier's TLS 1.3 schemes.
+/// (RFC 9345 §4.1.1): the verifier's TLS 1.3 schemes, without
+/// `rsa_pss_rsae_*` (RFC 9345 §4 forbids `rsaEncryption` credential keys).
 pub(super) fn delegated_credential_schemes(
     config: &ClientConfig,
 ) -> Vec<crate::enums::SignatureScheme> {
@@ -780,7 +781,7 @@ pub(super) fn delegated_credential_schemes(
         .verifier()
         .supported_verify_schemes()
         .into_iter()
-        .filter(crate::enums::SignatureScheme::supported_in_tls13)
+        .filter(|scheme| delegated_credential::credential_scheme_allowed(*scheme))
         .collect()
 }
 

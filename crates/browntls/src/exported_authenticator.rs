@@ -22,10 +22,12 @@
 //! The `Handshake Context` and `Finished MAC Key` come from the exporter
 //! (RFC 9261 §5.1) with the labels `EXPORTER-{client,server} authenticator
 //! handshake context` and `EXPORTER-{client,server} authenticator finished
-//! key` of the side creating the authenticator, no context and the length
-//! of the connection's hash. The CertificateVerify signature covers 64
-//! octets of 0x20, `"Exported Authenticator"`, a zero octet and
-//! `Hash(Handshake Context || request || Certificate)` (§5.2.2); `Finished`
+//! key` of the side creating the authenticator, a zero-length context (in
+//! TLS 1.2 its length octets enter the RFC 5705 seed; in TLS 1.3 it is the
+//! same as no context) and the length of the connection's hash. The
+//! CertificateVerify signature covers 64 octets of 0x20, `"Exported
+//! Authenticator"`, a zero octet and `Hash(Handshake Context || request ||
+//! Certificate)` (§5.2.2); `Finished`
 //! is `HMAC(Finished MAC Key, Hash(Handshake Context || request ||
 //! Certificate || CertificateVerify))` (§5.2.3).
 //!
@@ -33,8 +35,14 @@
 //! secret (without it the exporter is refused, RFC 7627 §5.4), are
 //! supported. Each `certificate_request_context` is used at most once per
 //! connection: a second request, authenticator or validation with a context
-//! already used fails, and at most 256 contexts are remembered on each side,
-//! after which further requests and authenticators fail (fail closed).
+//! already used fails. `validate_authenticator` accepts only a request this
+//! connection made (recognised by a digest of its bytes) and not yet
+//! answered. Each side keeps three lists of at most 256 entries: requests
+//! it made, authenticators it made and spontaneous authenticators it
+//! validated; a full list makes further requests, authenticators or
+//! spontaneous validations fail (fail closed), and since the lists are
+//! separate, a peer cannot stop answers to our own requests from
+//! validating.
 //!
 //! No interoperability with other implementations has been tested; browntls
 //! talks to itself only.
@@ -67,8 +75,11 @@ const CERTIFICATE_VERIFY: u8 = 15;
 const CLIENT_CERTIFICATE_REQUEST: u8 = 17;
 const FINISHED: u8 = 20;
 
-/// How many contexts each side remembers (requests made, and authenticators
-/// made or validated).
+/// How many entries each list of a side's [`AuthenticatorState`] holds: the
+/// requests it made, the authenticators it made, and the spontaneous
+/// authenticators it validated. Each list is capped separately, so a peer
+/// filling one (with requests to answer or spontaneous authenticators)
+/// cannot stop answers to our own requests from validating.
 const MAX_CONTEXTS: usize = 256;
 
 /// The length of the context a server picks for a spontaneous authenticator.
@@ -101,18 +112,37 @@ pub fn authenticator_context(authenticator: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(PayloadU8::read(&mut body)?.0)
 }
 
+/// A request we made: its context, a digest of its bytes and whether an
+/// authenticator answering it has been validated.
+#[derive(Debug)]
+struct Requested {
+    context: Vec<u8>,
+    digest: Vec<u8>,
+    answered: bool,
+}
+
+/// What a successful validation answered, to be recorded.
+enum Answered {
+    /// The request at this index of [`AuthenticatorState::requested`].
+    Request(usize),
+    /// A spontaneous server authenticator with this context.
+    Spontaneous(Vec<u8>),
+}
+
 /// The contexts one side has used.
 #[derive(Debug, Default)]
 pub(crate) struct AuthenticatorState {
-    /// Contexts of requests we made.
-    requested: Vec<Vec<u8>>,
-    /// Contexts of authenticators we made or validated.
-    used: Vec<Vec<u8>>,
+    /// Requests we made.
+    requested: Vec<Requested>,
+    /// Contexts of authenticators we made.
+    made: Vec<Vec<u8>>,
+    /// Contexts of spontaneous server authenticators we validated.
+    spontaneous: Vec<Vec<u8>>,
 }
 
 impl AuthenticatorState {
     fn check_request(&self, context: &[u8]) -> Result<(), Error> {
-        if self.requested.iter().any(|c| c == context) {
+        if self.requested.iter().any(|r| r.context == context) {
             return Err(Error::General(
                 "certificate_request_context already used in a request on this connection".into(),
             ));
@@ -125,17 +155,74 @@ impl AuthenticatorState {
         Ok(())
     }
 
-    fn check_unused(&self, context: &[u8]) -> Result<(), Error> {
-        if self.used.iter().any(|c| c == context) {
+    fn add_request(&mut self, context: &[u8], digest: Vec<u8>) {
+        self.requested.push(Requested {
+            context: context.to_vec(),
+            digest,
+            answered: false,
+        });
+    }
+
+    /// Before making an authenticator with `context`.
+    fn check_make(&self, context: &[u8]) -> Result<(), Error> {
+        if self.made.iter().any(|c| c == context) {
             return Err(PeerMisbehaved::ReusedAuthenticatorContext.into());
         }
-        if self.used.len() >= MAX_CONTEXTS {
+        if self.made.len() >= MAX_CONTEXTS {
             return Err(Error::General(
-                "too many exported authenticators on this connection".into(),
+                "too many exported authenticators made on this connection".into(),
             ));
         }
         Ok(())
     }
+
+    /// The unanswered request we made whose bytes have `digest`.
+    fn find_request(&self, digest: &[u8]) -> Result<usize, Error> {
+        let index = self
+            .requested
+            .iter()
+            .position(|r| r.digest == digest)
+            .ok_or_else(|| {
+                Error::General("not an authenticator request made on this connection".into())
+            })?;
+        if self.requested[index].answered {
+            return Err(PeerMisbehaved::ReusedAuthenticatorContext.into());
+        }
+        Ok(index)
+    }
+
+    /// Before validating a spontaneous authenticator with `context`.
+    fn check_spontaneous(&self, context: &[u8]) -> Result<(), Error> {
+        if self.spontaneous.iter().any(|c| c == context)
+            || self.requested.iter().any(|r| r.context == context)
+        {
+            return Err(PeerMisbehaved::ReusedAuthenticatorContext.into());
+        }
+        if self.spontaneous.len() >= MAX_CONTEXTS {
+            return Err(Error::General(
+                "too many spontaneous exported authenticators on this connection".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, answered: Answered) {
+        match answered {
+            Answered::Request(index) => self.requested[index].answered = true,
+            Answered::Spontaneous(context) => self.spontaneous.push(context),
+        }
+    }
+}
+
+/// A digest of a request's bytes, to recognise it when an answer arrives:
+/// the hash of the provider's first cipher suite, which does not depend on
+/// the negotiated suite (a request may be made during the handshake).
+fn request_digest(provider: &CryptoProvider, request: &[u8]) -> Result<Vec<u8>, Error> {
+    let suite = provider
+        .cipher_suites
+        .first()
+        .ok_or_else(|| Error::General("the crypto provider has no cipher suites".into()))?;
+    Ok(suite.hash_provider().hash(request).as_ref().to_vec())
 }
 
 /// Server-side state: what the handshake left for exported authenticators.
@@ -343,14 +430,19 @@ fn make_request(
 /// The connection-level inputs of [`make_authenticator`] and [`validate`].
 /// The connection's exporter, without context.
 trait Exporter {
-    /// Fills `output` from the exporter with `label` and no context.
+    /// Fills `output` from the exporter with `label` and an empty context.
     fn export(&self, label: &[u8], output: &mut [u8]) -> Result<(), Error>;
 }
 
 #[cfg(feature = "std")]
 impl<Data: crate::conn::SideData> Exporter for crate::conn::ConnectionCommon<Data> {
     fn export(&self, label: &[u8], output: &mut [u8]) -> Result<(), Error> {
-        self.export_keying_material(output, label, None).map(|_| ())
+        // RFC 9261 §5.1: "context_value is empty (zero length)". In TLS 1.2
+        // (RFC 5705) a zero-length context differs from no context: its
+        // two length octets enter the PRF seed. In TLS 1.3 both hash the
+        // empty string.
+        self.export_keying_material(output, label, Some(&[]))
+            .map(|_| ())
     }
 }
 
@@ -396,7 +488,7 @@ impl Connection<'_> {
                 ));
             }
         };
-        state.check_unused(&context)?;
+        state.check_make(&context)?;
         let keys = self.keys(self.side)?;
 
         let signing = certified_key
@@ -447,7 +539,10 @@ impl Connection<'_> {
     /// Validates the peer's `authenticator` answering our `request`, or a
     /// spontaneous server authenticator when we are the client and
     /// `request` is `None`. Returns the certificates (`None` for an empty
-    /// authenticator) and the context.
+    /// authenticator) and what was answered.
+    ///
+    /// A `request` must be one this side made (compared by digest) and not
+    /// yet answered.
     #[allow(clippy::type_complexity)]
     fn validate(
         &self,
@@ -461,8 +556,12 @@ impl Connection<'_> {
             &CertificateDer<'_>,
             &DigitallySignedStruct,
         ) -> Result<HandshakeSignatureValid, Error>,
-    ) -> Result<(Option<Vec<CertificateDer<'static>>>, Vec<u8>), Error> {
+    ) -> Result<(Option<Vec<CertificateDer<'static>>>, Answered), Error> {
         let creator = self.side.peer();
+        let request_index = match request {
+            Some(bytes) => Some(state.find_request(&request_digest(self.provider, bytes)?)?),
+            None => None,
+        };
         let request = match request {
             Some(bytes) => {
                 let ours = match self.side {
@@ -487,10 +586,9 @@ impl Connection<'_> {
         // An empty authenticator: a lone Finished declining the request.
         if typ == FINISHED {
             r.expect_empty("exported authenticator")?;
-            let Some(request) = &request else {
+            let (Some(request), Some(index)) = (&request, request_index) else {
                 return Err(Error::NoCertificatesPresented);
             };
-            state.check_unused(&request.context)?;
             let certificate = frame(
                 CERTIFICATE,
                 &CertificatePayloadTls13 {
@@ -504,7 +602,7 @@ impl Connection<'_> {
             if !constant_time_eq(&keys.finished(transcript), body) {
                 return Err(Error::DecryptError);
             }
-            return Ok((None, request.context.clone()));
+            return Ok((None, Answered::Request(index)));
         }
 
         if typ != CERTIFICATE {
@@ -524,7 +622,9 @@ impl Connection<'_> {
             }
             _ => {}
         }
-        state.check_unused(&context)?;
+        if request.is_none() {
+            state.check_spontaneous(&context)?;
+        }
         // RFC 9261 §5.2.1: a Certificate with no entries is not sent; the
         // empty authenticator omits it.
         if payload.entries.is_empty() {
@@ -586,12 +686,12 @@ impl Connection<'_> {
             chain.split_first().ok_or(Error::NoCertificatesPresented)?;
         verify_chain(end_entity, intermediates)?;
         verify_signature(&signed, end_entity, &dss)?;
-        Ok((Some(chain), context))
+        let answered = match request_index {
+            Some(index) => Answered::Request(index),
+            None => Answered::Spontaneous(context),
+        };
+        Ok((Some(chain), answered))
     }
-}
-
-fn remember(list: &mut Vec<Vec<u8>>, context: Vec<u8>) {
-    list.push(context);
 }
 
 #[cfg(feature = "std")]
@@ -601,7 +701,7 @@ mod api {
     use browntls_pki::CertificateDer;
 
     use super::{
-        AuthenticatorRequestExtensions, Connection, make_request, remember, tls13_schemes,
+        AuthenticatorRequestExtensions, Connection, make_request, request_digest, tls13_schemes,
     };
     use crate::client::ClientConnection;
     use crate::common_state::Side;
@@ -623,10 +723,8 @@ mod api {
             data.authenticators.check_request(context)?;
             let defaults = data.config.verifier().supported_verify_schemes();
             let request = make_request(Side::Client, context, extensions, defaults)?;
-            remember(
-                &mut self.core.data.authenticators.requested,
-                context.to_vec(),
-            );
+            let digest = request_digest(data.config.crypto_provider(), &request)?;
+            self.core.data.authenticators.add_request(context, digest);
             Ok(request)
         }
 
@@ -648,23 +746,30 @@ mod api {
                     &self.core.data.authenticators,
                 )?
             };
-            remember(&mut self.core.data.authenticators.used, context);
+            self.core.data.authenticators.made.push(context);
             Ok(out)
         }
 
         /// Validates the server's `authenticator` answering our `request`,
         /// or a spontaneous one when `request` is `None` (RFC 9261 §5).
         ///
-        /// The chain is verified for this connection's server name, and the
+        /// `request` must be one this connection made with
+        /// [`Self::request_authenticator`] and not yet answered.
+        ///
+        /// The chain is verified for this connection's server name (the
+        /// name given to [`ClientConnection::new`] and sent as SNI), and the
         /// signature checked, by the configured server certificate
-        /// verifier. Returns the certificates, end entity first, or `None`
-        /// for an empty authenticator (the server declined).
+        /// verifier. Secondary host names are not supported: requests carry
+        /// no `server_name` extension, and a certificate valid only for
+        /// another name is rejected. Returns the certificates, end entity
+        /// first, or `None` for an empty authenticator (the server
+        /// declined).
         pub fn validate_authenticator(
             &mut self,
             request: Option<&[u8]>,
             authenticator: &[u8],
         ) -> Result<Option<Vec<CertificateDer<'static>>>, Error> {
-            let (chain, context) = {
+            let (chain, answered) = {
                 let data = &self.core.data;
                 let config = &data.config;
                 let verifier = config.verifier();
@@ -687,7 +792,7 @@ mod api {
                     |msg, ee, dss| verifier.verify_tls13_signature(msg, ee, dss),
                 )?
             };
-            remember(&mut self.core.data.authenticators.used, context);
+            self.core.data.authenticators.record(answered);
             Ok(chain)
         }
     }
@@ -707,10 +812,12 @@ mod api {
             let config = state.config.as_ref().ok_or(Error::HandshakeNotComplete)?;
             let defaults = config.verifier.supported_verify_schemes();
             let request = make_request(Side::Server, context, extensions, defaults)?;
-            remember(
-                &mut self.core.data.authenticators.contexts.requested,
-                context.to_vec(),
-            );
+            let digest = request_digest(config.crypto_provider(), &request)?;
+            self.core
+                .data
+                .authenticators
+                .contexts
+                .add_request(context, digest);
             Ok(request)
         }
 
@@ -735,12 +842,14 @@ mod api {
                     &state.contexts,
                 )?
             };
-            remember(&mut self.core.data.authenticators.contexts.used, context);
+            self.core.data.authenticators.contexts.made.push(context);
             Ok(out)
         }
 
         /// Validates the client's `authenticator` answering our `request`
-        /// (RFC 9261 §5). The chain and signature are checked by the
+        /// (RFC 9261 §5), which must be one this connection made with
+        /// [`Self::request_authenticator`] and not yet answered. The chain
+        /// and signature are checked by the
         /// configured client certificate verifier. Returns the
         /// certificates, end entity first, or `None` for an empty
         /// authenticator (the client declined).
@@ -749,7 +858,7 @@ mod api {
             request: &[u8],
             authenticator: &[u8],
         ) -> Result<Option<Vec<CertificateDer<'static>>>, Error> {
-            let (chain, context) = {
+            let (chain, answered) = {
                 let state = &self.core.data.authenticators;
                 let config = state.config.as_ref().ok_or(Error::HandshakeNotComplete)?;
                 let verifier = &config.verifier;
@@ -771,7 +880,7 @@ mod api {
                     |msg, ee, dss| verifier.verify_tls13_signature(msg, ee, dss),
                 )?
             };
-            remember(&mut self.core.data.authenticators.contexts.used, context);
+            self.core.data.authenticators.contexts.record(answered);
             Ok(chain)
         }
     }
@@ -815,5 +924,49 @@ mod api {
                 .as_ref()
                 .map(|c| &**c.crypto_provider())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_lists_are_capped_separately() {
+        let mut state = AuthenticatorState::default();
+        state.add_request(b"ours", vec![1]);
+        // A peer fills the list of spontaneous authenticators...
+        for i in 0..MAX_CONTEXTS {
+            let context = (i as u32).to_be_bytes().to_vec();
+            state.check_spontaneous(&context).unwrap();
+            state.record(Answered::Spontaneous(context));
+        }
+        assert!(matches!(
+            state.check_spontaneous(b"one more"),
+            Err(Error::General(_))
+        ));
+        // ...and of authenticators we made (one per request it sends).
+        for i in 0..MAX_CONTEXTS {
+            let context = (i as u32).to_be_bytes().to_vec();
+            state.check_make(&context).unwrap();
+            state.made.push(context);
+        }
+        assert!(state.check_make(b"one more").is_err());
+        // Answers to our own request still validate, once.
+        let index = state.find_request(&[1]).unwrap();
+        state.record(Answered::Request(index));
+        assert_eq!(
+            state.find_request(&[1]),
+            Err(PeerMisbehaved::ReusedAuthenticatorContext.into())
+        );
+        // A request we did not make is refused.
+        assert!(matches!(state.find_request(&[2]), Err(Error::General(_))));
+        // A spontaneous authenticator may not take a requested context.
+        let mut state = AuthenticatorState::default();
+        state.add_request(b"ours", vec![1]);
+        assert_eq!(
+            state.check_spontaneous(b"ours"),
+            Err(PeerMisbehaved::ReusedAuthenticatorContext.into())
+        );
     }
 }

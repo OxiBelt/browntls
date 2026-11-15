@@ -58,8 +58,9 @@ fuzzing, and named independent review of `unsafe` code and cryptography.
 Dependabot covers both. The fuzz project's extra dependencies (`libfuzzer-sys`
 and its build-time `cc`, `arbitrary`, `rcgen`) are development tooling:
 `safe-to-run` is the bar once `cargo vet` is adopted. `libfuzzer-sys` carries
-LLVM's libFuzzer (C++, NCSA licence), which `deny.toml` admits for that crate
-only.
+LLVM's libFuzzer (C++, NCSA licence), which `deny.toml` admits for the exact
+locked version of that crate only; the exception is due for review by
+2027-05-15 and has to be revisited whenever the version changes.
 
 ### Optional compression dependencies
 

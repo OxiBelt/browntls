@@ -29,10 +29,14 @@ allow = [
   "Unicode-3.0",
 ]
 
-# The cargo-fuzz project (`fuzz/`, checked with this file as well) links
-# LLVM's libFuzzer through `libfuzzer-sys`. Development tooling only.
+# `libfuzzer-sys` bundles LLVM's libFuzzer, which is under the NCSA licence
+# (the crate's licence is "(MIT OR Apache-2.0) AND NCSA"). It is a dependency
+# of the cargo-fuzz project only (`fuzz/`, outside the workspace and checked
+# with this file as well): development tooling that is never part of a
+# browntls build. The exception names the exact version in `fuzz/Cargo.lock`,
+# so an upgrade has to revisit it. Review by 2027-05-15.
 exceptions = [
-  { allow = ["NCSA"], crate = "libfuzzer-sys" },
+  { allow = ["NCSA"], crate = "libfuzzer-sys@0.4.13" },
 ]
 
 [bans]

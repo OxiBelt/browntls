@@ -254,7 +254,7 @@ pub struct ServerConfig {
     pub record_size_limit: Option<u16>,
 
     pub(super) versions: EnabledVersions,
-    pub(super) verifier: Arc<dyn ClientCertVerifier>,
+    pub(crate) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
 }
 
@@ -447,6 +447,8 @@ pub struct ServerConnectionData {
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
+    /// State for exported authenticators (RFC 9261).
+    pub(crate) authenticators: crate::exported_authenticator::ServerAuthenticatorState,
     /// Whether the TLS 1.3 ClientHello offered `post_handshake_auth`.
     pub(super) post_handshake_auth_offered: bool,
     /// The most recent post-handshake client authentication, if any.

@@ -358,6 +358,95 @@ exclusion does not arise.
   extension comes right before `pre_shared_key`, which stays last, and is
   sized with the binders in place. A server ignores its content.
 
+### Delegated credentials (RFC 9345)
+
+`browntls::delegated_credential` holds the `DelegatedCredential` codec,
+signing (`DelegatedCredential::issue`) and validation; the native provider
+adds `crypto::native::delegated_credential::generate`, which creates an
+ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
+certificate's key sign the credential. A credential is attached to a
+`CertifiedKey` with `with_delegated_credential`, which checks that the
+certificate carries the `DelegationUsage` extension
+(1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
+`digitalSignature` key usage, and that the key matches the credential's
+public key. Credential keys may not be `rsaEncryption` keys (§4): the
+`rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
+(`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
+private field (`delegated_credentials()` reads them), so it can no longer
+be built with a struct literal; `CertifiedKey::new` remains.
+
+- Server: when the ClientHello carries `delegated_credential` and a
+  credential is unexpired, has at most seven days left, uses a
+  `dc_cert_verify_algorithm` the client listed and is signed with a scheme
+  in its `signature_algorithms`, the credential goes on the end-entity
+  CertificateEntry and its key signs CertificateVerify. Otherwise the
+  certificate key signs, as before. Never with raw public keys or TLS 1.2.
+- Client: off unless `ClientConfig::enable_delegated_credentials`. The
+  chain is verified as usual; then the credential is validated (offered
+  schemes, not expired, at most seven days left and not beyond the
+  certificate's `notAfter`, CertificateVerify scheme equal to
+  `dc_cert_verify_algorithm`, `DelegationUsage` and `digitalSignature`,
+  signature by the certificate key) and CertificateVerify is verified with
+  its key through
+  `ServerCertVerifier::verify_tls13_signature_with_delegated_key` (the
+  default implementation refuses). `ClientConnection::delegated_credential`
+  returns the credential used.
+- Alerts (§4.1.3): an invalid credential is `illegal_parameter`; one the
+  client did not ask for is `unexpected_message`; one on an entry other than
+  the end entity's is `illegal_parameter`; a CertificateVerify that fails
+  under the credential's key gets the same alert as one that fails under a
+  certificate key (`decrypt_error` for a bad signature).
+- Not implemented: client credentials (the extension is parsed in
+  CertificateRequest but never sent, and a client never presents one; a
+  server answers a client Certificate entry carrying one with
+  `unsupported_extension`, like other unsolicited entry extensions).
+  No other implementation the project tests against supports delegated
+  credentials, so the tests are browntls to browntls only.
+
+### Exported authenticators (RFC 9261)
+
+`browntls::exported_authenticator` adds `request_authenticator`,
+`authenticator` and `validate_authenticator` to `ClientConnection` and
+`ServerConnection`. The messages are carried by the application protocol,
+not the record layer. A client request is a `ClientCertificateRequest`
+(type 17), a server request a TLS 1.3 `CertificateRequest`; the answer is
+TLS 1.3 `Certificate`, `CertificateVerify` and `Finished` messages, or a lone
+`Finished` over an empty certificate list to decline (also when no key can
+sign with a requested scheme). A server may authenticate spontaneously with
+a random 32-byte context.
+
+- Keys: the exporter with the labels `EXPORTER-client authenticator
+  handshake context` / `... finished key` (`server` for server
+  authenticators), a zero-length context (§5.1; in TLS 1.2 its two length
+  octets enter the RFC 5705 seed, in TLS 1.3 it equals no context) and the
+  length of the connection's hash. TLS 1.3 and TLS 1.2 with the extended
+  master secret (the TLS 1.2 exporter refuses sessions without it); for
+  TLS 1.2 the HMAC comes from a TLS 1.3 suite of the provider with the
+  same hash.
+- Validation: the request must be one this side made and not yet answered
+  (recognised by a digest of its bytes); framing is bounded by the
+  handshake message limit; request type and context are checked;
+  `Finished` is compared in constant time before any certificate or
+  signature is verified; the CertificateVerify scheme must be one the
+  request offered (for a spontaneous authenticator, one the client's
+  verifier supports); then the chain and signature go through the
+  configured `ServerCertVerifier` (with the connection's server name, the
+  SNI; no secondary host names) or `ClientCertVerifier`. Entry extensions
+  are refused.
+- Local policy: contexts are 1 to 255 bytes and used once per connection
+  (a reused context is `PeerMisbehaved::ReusedAuthenticatorContext`). Each
+  side keeps three lists of at most 256 entries, capped separately:
+  requests it made, authenticators it made, and spontaneous authenticators
+  it validated. A full list makes further requests, authenticators or
+  spontaneous validations fail; answers to its own requests are recorded
+  on the request, so a peer cannot use up the room they need. A request's `signature_algorithms` is required;
+  `certificate_authorities` may be set, `server_name`, `oid_filters` and
+  `status_request` are not supported.
+- Errors are returned to the caller; no alert is sent and the connection
+  continues, since the messages are outside the TLS record layer.
+- No other implementation the project tests against exposes exported
+  authenticators, so the tests are browntls to browntls only.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |

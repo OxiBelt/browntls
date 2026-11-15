@@ -411,15 +411,14 @@ fn emit_client_hello_for_retry(
             .verifier
             .requires_raw_public_keys()
             .then(|| vec![CertificateType::RawPublicKey]),
-        certificate_compression: (supports_tls13 && !config.cert_decompressors.is_empty()).then(
-            || {
-                config
-                    .cert_decompressors
-                    .iter()
-                    .map(|d| d.algorithm())
-                    .collect()
-            },
-        ),
+        certificate_compression: supports_tls13
+            .then(|| {
+                crate::compress::offered_cert_compression(
+                    &config.cert_decompressors,
+                    config.cert_decompression_limit,
+                )
+            })
+            .flatten(),
         ..Default::default()
     };
 

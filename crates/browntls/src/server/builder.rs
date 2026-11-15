@@ -108,6 +108,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
+            cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
             external_psks: None,
             cert_with_extern_psk: false,
             require_external_psk: false,

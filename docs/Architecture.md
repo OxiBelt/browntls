@@ -468,6 +468,61 @@ RFC 9257 guidance and what browntls enforces:
 | `tls12` | yes | TLS 1.2 support |
 | `logging` | yes | `log` crate diagnostics |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
+| `zlib` | no | zlib certificate compression (RFC 8879), `miniz_oxide` |
+| `brotli` | no | Brotli certificate compression (RFC 8879), `brotli`; enables `std` |
+| `zstd` | no | Zstandard certificate compression (RFC 8879), `ruzstd` |
+| `fuzzing` | no | Unstable entry points for the [fuzz targets](../fuzz/README.md); not a supported API |
+
+### Certificate compression (RFC 8879)
+
+`browntls::compress` defines the `CertCompressor` and `CertDecompressor`
+traits and, behind the `zlib`, `brotli` and `zstd` features, one built-in
+pair per RFC 8879 algorithm (`compress::ZLIB`, `BROTLI`, `ZSTD`). Enabled
+built-ins are the default compressor and decompressor lists of new client and
+server configurations, in the order Brotli, zlib, Zstandard; without those
+features the lists are empty and the extension is neither offered nor
+accepted. Compression applies to TLS 1.3 only, in both directions: a server
+compresses its Certificate with its first compressor the ClientHello offered,
+a client its own with the first one the CertificateRequest offered, and a
+compressed message that would not be smaller is sent uncompressed. Servers
+cache compressed messages (`CompressionCache`).
+
+On receipt (`compress::receive_compressed_certificate`, used by both sides):
+
+- an algorithm that was not offered is `illegal_parameter`;
+- `uncompressed_length` must be non-zero and at most the configuration's
+  `cert_decompression_limit`, itself capped at 64 KiB
+  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the limit for an
+  uncompressed Certificate message); the codec already rejects a length above
+  that cap with `decode_error`, anything else over a limit is
+  `bad_certificate`, in both cases before any decompression;
+- the output buffer is allocated once at the declared length and the
+  decompressor must fill it exactly: shorter, longer, truncated or trailing
+  input is `bad_certificate` (RFC 8879 §4), as is a decompressed message that
+  is not a well-formed Certificate.
+
+A `cert_decompression_limit` of zero turns reception off: the client does
+not send the extension, the server leaves it out of its CertificateRequest,
+and a compressed message is then an algorithm that was not offered.
+
+The built-in decoders use memory besides that buffer, bounded by the expected
+length and the format, never by what the stream declares:
+
+| Algorithm | Working memory besides the output buffer | Refused before decoding |
+|---|---|---|
+| zlib | Fixed decoder state (about 11 KiB); the output buffer is the window | |
+| Brotli | A window of at most the expected length rounded up to a power of two (the decoder's byte allocator refuses larger requests, so a stream announcing more fails without the allocation), context maps up to 16 KiB, prefix code tables (at most 256 per category) | Large-window streams |
+| Zstandard | The declared window, at most 128 KiB, plus one block (128 KiB) and entropy tables | Skippable frames, dictionaries, a declared content size other than the expected length, a window above 128 KiB |
+
+The Zstandard window limit is below the 8 MiB that RFC 8878 §3.1.1.1.2
+recommends decoders accept. One-shot encoders, which know the size of a
+Certificate message, write single-segment frames whose window is the content
+size, and the built-in encoder declares 128 KiB; a frame from a streaming
+encoder that was not told the size (libzstd then declares at least 512 KiB)
+is refused. `tests/cert_compression_memory.rs` checks, on Linux, that
+refusing streams of a few hundred bytes which announce 8 to 16 MiB does not
+raise the process's peak resident memory by more than 1 MiB. Zstandard
+compression uses the single level `ruzstd` implements.
 
 ## Primitive backends
 
@@ -590,8 +645,9 @@ entropy from the optional `getrandom` crate feature.
   (`rust-version`). Toolchain upgrades are explicit changes.
 - `Cargo.lock` is committed and CI builds with `--locked`.
 - Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`
-  (optional) and the RustCrypto crates (only with `rustcrypto`) for
-  `browntls`. Independent implementations (RustCrypto, rustls with ring,
+  (optional), the RustCrypto crates (only with `rustcrypto`) and the
+  pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
+  with `zlib`, `brotli`, `zstd`) for `browntls`. Independent implementations (RustCrypto, rustls with ring,
   rcgen) are dev-dependencies used as test oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.
@@ -604,6 +660,7 @@ entropy from the optional `getrandom` crate feature.
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
 | TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions, interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
+| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, and both connection state machines ([`fuzz/`](../fuzz/README.md)); CI builds them and runs generated seeds on the stable toolchain, campaigns are manual |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are

@@ -66,6 +66,9 @@ pub mod crypto;
 mod ct;
 mod enums;
 mod error;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod hash_hs;
 mod key_log;
 #[cfg(feature = "std")]
@@ -222,7 +225,7 @@ pub mod sign {
 /// APIs for implementing a time source.
 pub mod time_provider;
 
-/// Low-level access to the message codec, for fuzzing and interop tooling.
+/// Low-level access to the message codec, for interop tooling.
 #[doc(hidden)]
 pub mod internal {
     pub mod msgs {
@@ -234,9 +237,6 @@ pub mod internal {
         }
         pub mod message {
             pub use crate::msgs::message::OutboundOpaqueMessage;
-        }
-        pub mod deframer {
-            pub use crate::msgs::deframer::fuzz_deframer;
         }
     }
 }

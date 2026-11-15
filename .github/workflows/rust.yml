@@ -240,6 +240,31 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo build -p browntls-pki --no-default-features --target "${{ matrix.target }}" --locked
 
+  # The fuzz targets need a nightly toolchain to be instrumented, which CI
+  # does not install. This job keeps them building on the pinned toolchain
+  # and runs each harness over its generated seeds (fuzz/README.md).
+  fuzz-harness:
+    name: Fuzz harnesses (stable build and seeds)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Run the harnesses over their seeds
+        run: cargo test --manifest-path fuzz/Cargo.toml --locked
+
   dependencies:
     name: Dependency policy (cargo-deny)
     runs-on: ubuntu-26.04
@@ -270,3 +295,7 @@ jobs:
 
       - name: Check advisories, licenses, bans and sources
         run: cargo deny --locked --all-features check
+
+      # The cargo-fuzz project is outside the workspace (fuzz/README.md).
+      - name: Check the fuzz project
+        run: cargo deny --manifest-path fuzz/Cargo.toml --locked check

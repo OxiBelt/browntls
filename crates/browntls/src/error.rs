@@ -237,12 +237,21 @@ pub enum PeerMisbehaved {
     IllegalTlsInnerPlaintext,
     IncorrectBinder,
     InvalidCertCompression,
+    /// A second ClientHello carried a cookie that is not one we issued, or
+    /// no longer valid (RFC 9846 §4.3.2).
+    InvalidHelloRetryRequestCookie,
     InvalidMaxEarlyDataSize,
     InvalidKeyShare,
     KeyEpochWithPendingFragment,
     KeyUpdateReceivedInQuicConnection,
     MessageInterleavedWithHandshakeMessage,
+    /// Another message came between the messages of a post-handshake
+    /// authentication response (RFC 9846 §4.7.2).
+    MessageInterleavedWithPostHandshakeAuthentication,
     MissingBinderInPskExtension,
+    /// A second ClientHello did not echo our HelloRetryRequest's cookie
+    /// (RFC 9846 §4.3.2).
+    MissingCookieInSecondClientHello,
     MissingKeyShare,
     MissingPskExtensionInSecondClientHello,
     MissingPskModesExtension,
@@ -279,12 +288,16 @@ pub enum PeerMisbehaved {
     SignedHandshakeWithUnadvertisedSigScheme,
     TooManyEmptyFragments,
     TooManyKeyUpdateRequests,
+    TooManyPostHandshakeCertificateRequests,
     TooManyRenegotiationRequests,
     TooManyWarningAlertsReceived,
     TooMuchEarlyDataReceived,
     UnexpectedCleartextExtension,
     UnsolicitedCertExtension,
     UnsolicitedEncryptedExtension,
+    /// A post-handshake CertificateRequest reached a client that did not
+    /// offer `post_handshake_auth` (RFC 9846 §4.7.2).
+    UnsolicitedPostHandshakeCertificateRequest,
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,

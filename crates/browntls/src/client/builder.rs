@@ -133,6 +133,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             key_log: Arc::new(NoKeyLog {}),
             enable_secret_extraction: false,
             enable_early_data: false,
+            enable_post_handshake_auth: false,
             require_ems,
             require_secure_renegotiation: true,
             allow_mac_then_encrypt: false,

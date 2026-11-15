@@ -22,8 +22,9 @@ use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{
-    CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload, MAX_CERTIFICATE_SIZE_LIMIT,
-    NewSessionTicketPayloadTls13, PresharedKeyBinder, ServerExtensions, ServerHelloPayload,
+    CertificatePayloadTls13, CertificateRequestPayloadTls13, HandshakeMessagePayload,
+    HandshakePayload, MAX_CERTIFICATE_SIZE_LIMIT, NewSessionTicketPayloadTls13, PresharedKeyBinder,
+    ServerExtensions, ServerHelloPayload,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist;
@@ -42,6 +43,11 @@ use crate::verify::{
 
 /// How many `update_requested` KeyUpdates we tolerate without sending data.
 const MAX_KEY_UPDATE_REQUESTS: u8 = 8;
+
+/// How many post-handshake CertificateRequests we answer while the server
+/// sends no application data: each answer costs a signature, so this is a
+/// local resource bound, not an RFC 9846 rule.
+const MAX_POST_HANDSHAKE_AUTH_REQUESTS: u8 = 8;
 
 /// Computes the binder of every offered PSK (RFC 9846 §4.3.11.2), each
 /// with its own hash and label, over the ClientHello up to the binders, and
@@ -94,6 +100,8 @@ pub(super) fn derive_early_traffic_secret(
         client_random,
         cx.common,
     );
+    cx.common.early_exporter =
+        Some(early_key_schedule.early_exporter(client_hello_hash.as_ref(), key_log, client_random));
     cx.common.early_traffic = true;
     trace!("Starting early data traffic");
 }
@@ -262,6 +270,7 @@ pub(super) fn handle_server_hello(
                 cx.data.early_data.rejected();
             }
             cx.common.early_traffic = false;
+            cx.common.early_exporter = None;
             resuming_session = None;
             KeySchedulePreHandshake::new(suite)
         }
@@ -443,6 +452,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 None => {
                     cx.data.early_data.rejected();
                     cx.common.early_traffic = false;
+                    cx.common.early_exporter = None;
                     self.key_schedule.set_handshake_encrypter(cx.common);
                 }
             }
@@ -582,39 +592,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             ));
         }
 
-        // RFC 9846 §4.3: a recognised extension that may not appear in a
-        // CertificateRequest is illegal_parameter.
-        if first_disallowed(
-            certreq.extensions.unknown.iter().copied(),
-            Tls13Message::CertificateRequest,
-        )
-        .is_some()
-        {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::DisallowedCertificateRequestExtension,
-            ));
-        }
-
-        // RFC 9846 §4.4.2: signature_algorithms MUST be specified; its
-        // absence is missing_extension (§6.2).
-        let Some(sigschemes) = &certreq.extensions.signature_algorithms else {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::MissingExtension,
-                PeerIncompatible::SignatureAlgorithmsExtensionRequired,
-            ));
-        };
-        let compat_sigschemes: Vec<_> = sigschemes
-            .iter()
-            .copied()
-            .filter(crate::enums::SignatureScheme::supported_in_tls13)
-            .collect();
-        if compat_sigschemes.is_empty() {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::HandshakeFailure,
-                PeerIncompatible::NoCertificateRequestSignatureSchemesInCommon,
-            ));
-        }
+        let compat_sigschemes = certificate_request_sigschemes(cx.common, certreq)?;
 
         let client_auth = ClientAuthDetails::resolve(
             &*self.config.client_auth_cert_resolver,
@@ -635,6 +613,48 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             offered_sigschemes: self.offered_sigschemes,
         }))
     }
+}
+
+/// Checks a CertificateRequest's extensions (RFC 9846 §4.4.2) and returns
+/// the TLS 1.3 signature schemes it allows.
+fn certificate_request_sigschemes(
+    common: &mut CommonState,
+    certreq: &CertificateRequestPayloadTls13,
+) -> Result<Vec<crate::enums::SignatureScheme>, Error> {
+    // RFC 9846 §4.3: a recognised extension that may not appear in a
+    // CertificateRequest is illegal_parameter.
+    if first_disallowed(
+        certreq.extensions.unknown.iter().copied(),
+        Tls13Message::CertificateRequest,
+    )
+    .is_some()
+    {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::DisallowedCertificateRequestExtension,
+        ));
+    }
+
+    // RFC 9846 §4.4.2: signature_algorithms MUST be specified; its
+    // absence is missing_extension (§6.2).
+    let Some(sigschemes) = &certreq.extensions.signature_algorithms else {
+        return Err(common.send_fatal_alert(
+            AlertDescription::MissingExtension,
+            PeerIncompatible::SignatureAlgorithmsExtensionRequired,
+        ));
+    };
+    let compat_sigschemes: Vec<_> = sigschemes
+        .iter()
+        .copied()
+        .filter(crate::enums::SignatureScheme::supported_in_tls13)
+        .collect();
+    if compat_sigschemes.is_empty() {
+        return Err(common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::NoCertificateRequestSignatureSchemesInCommon,
+        ));
+    }
+    Ok(compat_sigschemes)
 }
 
 struct ExpectCertificate {
@@ -1050,12 +1070,21 @@ impl State<ClientConnectionData> for ExpectFinished {
                 .set_kx_hint(st.server_name.clone(), group.name());
         }
 
+        // Post-handshake authentications each continue the transcript
+        // through our Finished (RFC 9846 §4.5); keep it only if offered.
+        let post_handshake_transcript = cx
+            .data
+            .offered_post_handshake_auth
+            .then(|| st.transcript.fork());
+
         Ok(Box::new(ExpectTraffic {
             config: st.config,
             server_name: st.server_name,
             suite: st.suite,
             // Resumption secrets derive from the transcript through our Finished.
             final_hash: st.transcript.current_hash(),
+            post_handshake_transcript,
+            post_handshake_requests_since_data: 0,
             key_schedule,
             _cert_verified: st.cert_verified,
             _sig_verified: st.sig_verified,
@@ -1069,6 +1098,12 @@ struct ExpectTraffic {
     server_name: ServerName<'static>,
     suite: &'static Tls13CipherSuite,
     final_hash: crate::crypto::hash::Output,
+    /// The transcript through our Finished, when we offered
+    /// `post_handshake_auth`.
+    post_handshake_transcript: Option<HandshakeHash>,
+    /// CertificateRequests answered since the server last sent
+    /// application data; see [`MAX_POST_HANDSHAKE_AUTH_REQUESTS`].
+    post_handshake_requests_since_data: u8,
     key_schedule: KeyScheduleTraffic,
     _cert_verified: ServerCertVerified,
     _sig_verified: HandshakeSignatureValid,
@@ -1129,6 +1164,90 @@ impl ExpectTraffic {
         Ok(())
     }
 
+    /// Answers a post-handshake CertificateRequest (RFC 9846 §4.7.2) at
+    /// once with Certificate, CertificateVerify (when we have a usable
+    /// certificate) and Finished, consecutively.
+    fn handle_post_handshake_certificate_request(
+        &mut self,
+        cx: &mut ClientContext<'_>,
+        certreq: &CertificateRequestPayloadTls13,
+        m: &Message<'_>,
+    ) -> Result<(), Error> {
+        let Some(base) = &self.post_handshake_transcript else {
+            // RFC 9846 §4.7.2: without our post_handshake_auth offer this
+            // is unexpected_message.
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest,
+            ));
+        };
+        // RFC 9846 §4.4.2: a post-handshake CertificateRequest needs a
+        // non-empty context, which makes each answer distinct.
+        if certreq.context.0.is_empty() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalCertificateRequestContext,
+            ));
+        }
+        let sigschemes = certificate_request_sigschemes(cx.common, certreq)?;
+
+        // RFC 9846 §6.1: nothing follows our close_notify.
+        if cx.common.has_sent_close_notify() {
+            debug!("Ignoring CertificateRequest after our close_notify");
+            return Ok(());
+        }
+
+        // Each answer costs a signature: refuse a server that keeps
+        // asking without sending application data in between.
+        self.post_handshake_requests_since_data =
+            self.post_handshake_requests_since_data.saturating_add(1);
+        if self.post_handshake_requests_since_data > MAX_POST_HANDSHAKE_AUTH_REQUESTS {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::TooManyPostHandshakeCertificateRequests,
+            ));
+        }
+
+        // Handshake Context: ClientHello ... client Finished +
+        // CertificateRequest; earlier post-handshake exchanges are not
+        // included (RFC 9846 §4.5).
+        let mut transcript = base.fork();
+        transcript.add_message(m);
+
+        let client_auth = ClientAuthDetails::resolve(
+            &*self.config.client_auth_cert_resolver,
+            certreq.extensions.authorities.as_deref(),
+            None,
+            &sigschemes,
+            Some(certreq.context.0.clone()),
+        );
+        match client_auth {
+            ClientAuthDetails::Empty { auth_context_tls13 } => {
+                emit_certificate_tls13(&mut transcript, None, auth_context_tls13, cx.common);
+            }
+            ClientAuthDetails::Verify {
+                certkey,
+                signer,
+                auth_context_tls13,
+            } => {
+                emit_certificate_tls13(
+                    &mut transcript,
+                    Some(&certkey),
+                    auth_context_tls13,
+                    cx.common,
+                );
+                emit_certverify_tls13(&mut transcript, &*signer, cx.common)?;
+            }
+        }
+        let verify_data = self
+            .key_schedule
+            .sign_post_handshake_client_finish(transcript.current_hash().as_ref());
+        emit_finished_tls13(&mut transcript, &verify_data, cx.common);
+        cx.data.post_handshake_auth_responses =
+            cx.data.post_handshake_auth_responses.saturating_add(1);
+        Ok(())
+    }
+
     fn handle_key_update(
         &mut self,
         common: &mut CommonState,
@@ -1157,6 +1276,7 @@ impl State<ClientConnectionData> for ExpectTraffic {
         match m.payload {
             MessagePayload::ApplicationData(payload) => {
                 cx.common.received_key_update_requests = 0;
+                self.post_handshake_requests_since_data = 0;
                 cx.common.take_received_plaintext(payload);
             }
             MessagePayload::Handshake {
@@ -1167,11 +1287,20 @@ impl State<ClientConnectionData> for ExpectTraffic {
                 parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(request)),
                 ..
             } => self.handle_key_update(cx.common, request)?,
+            MessagePayload::Handshake {
+                parsed:
+                    HandshakeMessagePayload(HandshakePayload::CertificateRequestTls13(ref certreq)),
+                ..
+            } => self.handle_post_handshake_certificate_request(cx, certreq, &m)?,
             payload => {
                 return Err(crate::check::inappropriate_handshake_message(
                     &payload,
                     &[ContentType::ApplicationData, ContentType::Handshake],
-                    &[HandshakeType::NewSessionTicket, HandshakeType::KeyUpdate],
+                    &[
+                        HandshakeType::NewSessionTicket,
+                        HandshakeType::KeyUpdate,
+                        HandshakeType::CertificateRequest,
+                    ],
                 ));
             }
         }

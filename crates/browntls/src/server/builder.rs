@@ -100,6 +100,8 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             max_early_data_size: 0,
             send_half_rtt_data: false,
             send_tls13_tickets: 2,
+            request_client_auth_after_handshake: false,
+            hello_retry_cookies: None,
             require_ems,
             allow_mac_then_encrypt: false,
             time_provider: self.time_provider,

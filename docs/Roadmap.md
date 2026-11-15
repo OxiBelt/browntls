@@ -22,6 +22,7 @@ intent.
 | P-256 / P-384 / P-521 ECDH and ECDSA | done | RCB complete formulas for secret-scalar additions, Jacobian doubling in the ladder and variable-time Jacobian verification, RFC 6979 with hedging; P-256: specialised BMI2/ADX and portable field arithmetic, safegcd inversion, width-6 fixed-base comb; P-384/P-521: generic CIOS reduction and Fermat inversion (performance headroom) |
 | RSA PKCS #1 v1.5 / PSS | done | 2048-8192-bit verification, CRT signing with blinding and fault check, key generation; safegcd unblinding; fused BMI2/ADX and portable Montgomery kernels; AVX-512 IFMA CRT and public-exponent exponentiation; signing stack 24-52 KiB by key size (IFMA); RSASSA-PSS (`id-RSASSA-PSS`) keys without parameters or restricted to SHA-256/384/512 (in every encoding RFC 4055 treats as equal, with any minimum salt length up to the digest length), signing and verifying only `rsa_pss_pss_*` (TLS 1.3 and 1.2), matched through one canonical form in path validation and handshake verification, in the OpenSSL 3 interop suite |
 | ML-KEM-512/768/1024 | done | AVX2, NEON and RVV arithmetic; four-way SHAKE sampling |
+| HPKE (RFC 9180), base mode | done | DHKEM(X25519, X448, P-256, P-384, P-521), HKDF-SHA256/384/512, AES-GCM, ChaCha20-Poly1305 and export-only; all RFC 9180 base-mode vectors for the supported suites (none exist for P-384 or HKDF-SHA384) and differential tests against the `hpke` crate for every X25519/NIST suite; PSK and authenticated modes left out |
 | FFDHE (RFC 7919 groups, TLS 1.3 only) | done | ffdhe2048-8192 with RFC 7919 short exponents over the RSA constant-time Montgomery exponentiation; non-preferred groups of the native provider, ffdhe2048-4096 in the defaults and ffdhe6144/8192 opt-in (server cost); OpenSSL 3 interop suite |
 | PKI types and PEM | done | |
 | X.509 path validation, name checks, CRLs | done | DFS path building with webpki-style budgets, RFC 6125 names, DNS/IP name constraints, v2 CRLs; directoryName/URI constraints fail closed; deviations from webpki documented in the crate |
@@ -36,6 +37,7 @@ intent.
 | 0-RTT early data (stateful resumption), hybrid post-quantum groups, kTLS secret export | done |
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
+| TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | TLS 1.3 external PSKs (RFC 9846 §4.3.11, `psk_dhe_ke` only), the PSK importer (RFC 9258) and certificate authentication with an external PSK (RFC 8773, opt-in); `require_external_psk` on both sides; tickets of external-PSK sessions keep the PSK identity and are resumed only while the PSK is configured; 0-RTT with external PSKs opt-in per key; both providers, cross-provider handshakes, OpenSSL 3 interop for direct external PSKs in both directions (see [Architecture](Architecture.md#tls-13-external-psks)) | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
@@ -110,9 +112,25 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   a peer that sends more than eight `update_requested` KeyUpdates without
   application data in between is cut off with `unexpected_message` (a local
   resource bound); `user_canceled` counts towards the same bound as TLS 1.2
-  warning alerts; post-handshake client authentication, the early exporter
-  and stateless HelloRetryRequest cookies are not implemented, and the
-  RFC 6066 `max_fragment_length` extension is not offered or accepted.
+  warning alerts; the RFC 6066 `max_fragment_length` extension is not
+  offered or accepted; a server keeps at most one post-handshake
+  CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
+  answer must not be a CompressedCertificate (as in the handshake: client
+  certificate decompression is not implemented); a client answers at most
+  eight post-handshake CertificateRequests without application data from
+  the server in between and then aborts with `unexpected_message` (a local
+  resource bound: each answer costs a signature); a HelloRetryRequest cookie
+  expires after 60 seconds, is not bound to the client's address, and none
+  is sent when the first ClientHello offered 0-RTT.
+- Post-handshake client authentication, stateless HelloRetryRequest
+  cookies, the early exporter and the RFC 9266 channel binding have had one
+  code review (its findings are addressed) and no security audit. The
+  client side of post-handshake authentication is exercised against the
+  browntls server and against records forged with the server's extracted
+  keys (an unsolicited CertificateRequest, an empty context, the request
+  bound); no test sends a server messages interleaved within an answer,
+  which needs a misbehaving client. The server side is also tested against
+  `openssl s_client -enable_pha`.
 - External PSKs: the `psk_ke` mode is not implemented (RFC 9257 recommends
   (EC)DHE); a server examines only the first 16 `pre_shared_key`
   identities; 0-RTT under an external PSK has no anti-replay protection

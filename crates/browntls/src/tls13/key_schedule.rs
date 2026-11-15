@@ -29,6 +29,7 @@ enum SecretKind {
     ExternalPskBinderKey,
     ImportedPskBinderKey,
     ClientEarlyTrafficSecret,
+    EarlyExporterMasterSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
     ClientApplicationTrafficSecret,
@@ -45,6 +46,7 @@ impl SecretKind {
             Self::ExternalPskBinderKey => b"ext binder",
             Self::ImportedPskBinderKey => b"imp binder",
             Self::ClientEarlyTrafficSecret => b"c e traffic",
+            Self::EarlyExporterMasterSecret => b"e exp master",
             Self::ClientHandshakeTrafficSecret => b"c hs traffic",
             Self::ServerHandshakeTrafficSecret => b"s hs traffic",
             Self::ClientApplicationTrafficSecret => b"c ap traffic",
@@ -58,6 +60,7 @@ impl SecretKind {
     fn log_label(self) -> Option<&'static str> {
         Some(match self {
             Self::ClientEarlyTrafficSecret => "CLIENT_EARLY_TRAFFIC_SECRET",
+            Self::EarlyExporterMasterSecret => "EARLY_EXPORTER_SECRET",
             Self::ClientHandshakeTrafficSecret => "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
             Self::ServerHandshakeTrafficSecret => "SERVER_HANDSHAKE_TRAFFIC_SECRET",
             Self::ClientApplicationTrafficSecret => "CLIENT_TRAFFIC_SECRET_0",
@@ -310,6 +313,25 @@ impl KeyScheduleEarly {
         }
     }
 
+    /// Derives `early_exporter_master_secret` (RFC 9846 §7.1) from the
+    /// transcript hash of the ClientHello, for the early exporter (§7.5).
+    pub(crate) fn early_exporter(
+        &self,
+        hs_hash: &[u8],
+        key_log: &dyn KeyLog,
+        client_random: &[u8; 32],
+    ) -> EarlyExporter {
+        EarlyExporter {
+            suite: self.ks.suite,
+            secret: self.ks.derive_logged_secret(
+                SecretKind::EarlyExporterMasterSecret,
+                hs_hash,
+                key_log,
+                client_random,
+            ),
+        }
+    }
+
     /// The `pre_shared_key` binder: the Finished computation with
     /// `binder_key = Derive-Secret(early_secret, label, "")` over `hs_hash`
     /// (RFC 9846 §4.3.11.2, §7.1).
@@ -518,6 +540,58 @@ impl KeyScheduleTrafficWithClientFinishedPending {
     }
 }
 
+/// `TLS-Exporter(label, context, length)` of RFC 9846 §7.5 under `secret`
+/// (the exporter or the early exporter master secret).
+fn export_from_secret(
+    suite: &'static Tls13CipherSuite,
+    secret: &OkmBlock,
+    out: &mut [u8],
+    label: &[u8],
+    context: Option<&[u8]>,
+) -> Result<(), Error> {
+    let hash = suite.common.hash_provider;
+    if out.len() > 255 * hash.output_len() {
+        return Err(Error::general("exporter output too long"));
+    }
+    // HkdfLabel.label is `"tls13 " + label`, at most 255 bytes.
+    if label.len() > 255 - 6 {
+        return Err(Error::general("exporter label too long"));
+    }
+    let empty_hash = hash.hash(&[]);
+    let expander = suite.hkdf_provider.expander_for_okm(secret);
+    let derived = hkdf_expand_label_block(&*expander, label, empty_hash.as_ref());
+    let context_hash = hash.hash(context.unwrap_or(&[]));
+    let expander = suite.hkdf_provider.expander_for_okm(&derived);
+    hkdf_expand_label(&*expander, b"exporter", context_hash.as_ref(), out);
+    Ok(())
+}
+
+/// The early exporter (RFC 9846 §7.5): keying material bound to the
+/// ClientHello and the PSK, usable with 0-RTT data. Like 0-RTT data it is
+/// not forward secret and is replayable with the ClientHello.
+#[derive(Clone)]
+pub(crate) struct EarlyExporter {
+    suite: &'static Tls13CipherSuite,
+    secret: OkmBlock,
+}
+
+impl EarlyExporter {
+    pub(crate) fn export_keying_material(
+        &self,
+        out: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        export_from_secret(self.suite, &self.secret, out, label, context)
+    }
+}
+
+impl core::fmt::Debug for EarlyExporter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EarlyExporter").finish_non_exhaustive()
+    }
+}
+
 /// The steady-state schedule: application traffic, exporter and resumption secrets.
 pub(crate) struct KeyScheduleTraffic {
     ks: KeySchedule,
@@ -595,28 +669,28 @@ impl KeyScheduleTraffic {
         out
     }
 
-    /// RFC 8446 §7.5 and RFC 5705 exporter.
+    /// RFC 9846 §7.5 and RFC 5705 exporter.
     pub(crate) fn export_keying_material(
         &self,
         out: &mut [u8],
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
-        if out.len() > 255 * self.ks.hash_len() {
-            return Err(Error::general("exporter output too long"));
-        }
-        let hash = self.ks.suite.common.hash_provider;
-        let empty_hash = hash.hash(&[]);
-        let expander = self
-            .ks
-            .suite
-            .hkdf_provider
-            .expander_for_okm(&self.current_exporter_secret);
-        let secret = hkdf_expand_label_block(&*expander, label, empty_hash.as_ref());
-        let context_hash = hash.hash(context.unwrap_or(&[]));
-        let expander = self.ks.suite.hkdf_provider.expander_for_okm(&secret);
-        hkdf_expand_label(&*expander, b"exporter", context_hash.as_ref(), out);
-        Ok(())
+        export_from_secret(
+            self.ks.suite,
+            &self.current_exporter_secret,
+            out,
+            label,
+            context,
+        )
+    }
+
+    /// The Finished MAC of a post-handshake client authentication over
+    /// `hs_hash`, keyed by the current `client_application_traffic_secret_N`
+    /// (RFC 9846 §4.5, "Authentication Inputs").
+    pub(crate) fn sign_post_handshake_client_finish(&self, hs_hash: &[u8]) -> hmac::Tag {
+        self.ks
+            .sign_finish(&self.current_client_traffic_secret, hs_hash)
     }
 
     /// Extracts the current traffic secrets for kernel offload.
@@ -638,5 +712,73 @@ impl KeyScheduleTraffic {
                 rx: client,
             },
         })
+    }
+}
+
+#[cfg(all(test, feature = "native", feature = "std"))]
+mod tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct Recorder(std::sync::Mutex<Vec<(String, Vec<u8>)>>);
+
+    impl KeyLog for Recorder {
+        fn log(&self, label: &str, _client_random: &[u8], secret: &[u8]) {
+            if let Ok(mut entries) = self.0.lock() {
+                entries.push((label.into(), secret.to_vec()));
+            }
+        }
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        let digits: Vec<u8> = s
+            .bytes()
+            .filter(u8::is_ascii_hexdigit)
+            .map(|c| match c {
+                b'0'..=b'9' => c - b'0',
+                _ => (c | 0x20) - b'a' + 10,
+            })
+            .collect();
+        digits.chunks(2).map(|p| (p[0] << 4) | p[1]).collect()
+    }
+
+    /// RFC 8448 §4 (resumed 0-RTT handshake): `early_exporter_master_secret`
+    /// from the resumption PSK and the ClientHello hash.
+    #[test]
+    fn early_exporter_master_secret_matches_rfc8448() {
+        let suite = crate::crypto::native::cipher_suite::TLS13_AES_128_GCM_SHA256
+            .tls13()
+            .unwrap();
+        let psk = unhex(
+            "4e cd 0e b6 ec 3b 4d 87 f5 d6 02 8f 92 2c a4 c5
+             85 1a 27 7f d4 13 11 c9 e6 2d 2c 94 92 e1 c4 f3",
+        );
+        let client_hello_hash = unhex(
+            "08 ad 0f a0 5d 7c 72 33 b1 77 5b a2 ff 9f 4c 5b
+             8b 59 27 6b 7f 22 7f 13 a9 76 24 5f 5d 96 09 13",
+        );
+        let expected = unhex(
+            "b2 02 68 66 61 09 37 d7 42 3e 5b e9 08 62
+             cc f2 4c 0e 60 91 18 6d 34 f8 12 08 9f f5 be 2e f7 df",
+        );
+        let recorder = Recorder::default();
+        let exporter = KeyScheduleEarly::new(suite, &psk).early_exporter(
+            &client_hello_hash,
+            &recorder,
+            &[0; 32],
+        );
+        assert_eq!(exporter.secret.as_ref(), expected.as_slice());
+        let logged = recorder.0.lock().unwrap().clone();
+        assert_eq!(logged, [(String::from("EARLY_EXPORTER_SECRET"), expected)]);
+
+        // HkdfLabel cannot hold a label longer than 249 bytes.
+        assert!(
+            exporter
+                .export_keying_material(&mut [0u8; 8], &[b'x'; 250], None)
+                .is_err()
+        );
     }
 }

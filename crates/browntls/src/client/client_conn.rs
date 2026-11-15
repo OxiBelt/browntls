@@ -105,6 +105,18 @@ pub struct ClientConfig {
     /// Whether to send 0-RTT data when a session allows it.
     pub enable_early_data: bool,
 
+    /// Whether to offer TLS 1.3 post-handshake client authentication
+    /// (RFC 9846 §4.7.2, the `post_handshake_auth` extension). Off by
+    /// default. When on, and [`Self::client_auth_cert_resolver`] has
+    /// certificates, the server may ask for a certificate at any time after
+    /// the handshake; the connection answers at once from the resolver, with
+    /// an empty Certificate when it has none suitable.
+    ///
+    /// RFC 8740 forbids post-handshake authentication over HTTP/2; an
+    /// application speaking HTTP/2 should leave this off. The library does
+    /// not tie the setting to the negotiated ALPN protocol.
+    pub enable_post_handshake_auth: bool,
+
     /// Whether TLS 1.2 servers must support the extended master secret (RFC 7627).
     pub require_ems: bool,
 
@@ -457,6 +469,10 @@ impl EarlyData {
 pub struct ClientConnectionData {
     pub(super) tls13_tickets_received: u32,
     pub(super) early_data: EarlyData,
+    /// Whether our ClientHello offered `post_handshake_auth`.
+    pub(super) offered_post_handshake_auth: bool,
+    /// How many post-handshake CertificateRequests we have answered.
+    pub(super) post_handshake_auth_responses: u32,
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
@@ -468,6 +484,8 @@ impl ClientConnectionData {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
+            offered_post_handshake_auth: false,
+            post_handshake_auth_responses: 0,
             session_store,
             server_name,
         }
@@ -553,6 +571,12 @@ impl ClientConnection {
         } else {
             None
         }
+    }
+
+    /// How many post-handshake CertificateRequests (RFC 9846 §4.7.2) this
+    /// connection has answered, with or without a certificate.
+    pub fn post_handshake_auth_responses(&self) -> u32 {
+        self.inner.core.data.post_handshake_auth_responses
     }
 
     /// Whether the server accepted the early data sent so far.

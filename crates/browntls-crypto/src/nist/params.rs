@@ -5,11 +5,14 @@
 //! factors and inversion exponents are derived from them at compile time. The
 //! base-point tables live in `tables/` (generated, validated by `table::tests`).
 
-use super::curve::{Affine, Curve, Fe, fe_from_canonical, fe_mul_soft};
+use super::curve::{Affine, Curve, Fe, fe_from_canonical};
 use super::mont;
 use super::p256_field;
+use super::p384_field;
+use super::p521_field;
 use super::safegcd;
 use super::tables;
+use super::wide;
 
 /// DER contents of `id-ecPublicKey` (1.2.840.10045.2.1).
 pub(crate) const ID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
@@ -138,7 +141,17 @@ define_curve! {
     extra = {
         #[inline]
         fn mul(a: &Fe<6>, b: &Fe<6>) -> Fe<6> {
-            fe_mul_soft::<Self, 6>(a, b)
+            p384_field::mul(a, b)
+        }
+
+        #[inline]
+        fn invert(a: &Fe<6>) -> Fe<6> {
+            wide_invert::<Self, 6>(a)
+        }
+
+        #[inline]
+        fn scalar_invert(a: &[u64; 6]) -> [u64; 6] {
+            wide_scalar_invert::<Self, 6>(a)
         }
     }
 }
@@ -156,9 +169,45 @@ define_curve! {
     extra = {
         #[inline]
         fn mul(a: &Fe<9>, b: &Fe<9>) -> Fe<9> {
-            fe_mul_soft::<Self, 9>(a, b)
+            p521_field::mul(a, b)
+        }
+
+        #[inline]
+        fn add(a: &Fe<9>, b: &Fe<9>) -> Fe<9> {
+            p521_field::add(a, b)
+        }
+
+        #[inline]
+        fn sub(a: &Fe<9>, b: &Fe<9>) -> Fe<9> {
+            p521_field::sub(a, b)
+        }
+
+        #[inline]
+        fn invert(a: &Fe<9>) -> Fe<9> {
+            wide_invert::<Self, 9>(a)
+        }
+
+        #[inline]
+        fn scalar_invert(a: &[u64; 9]) -> [u64; 9] {
+            wide_scalar_invert::<Self, 9>(a)
         }
     }
+}
+
+/// Field inversion in the Montgomery domain of backend `C` for P-384 and
+/// P-521: `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form.
+#[inline]
+pub(crate) fn wide_invert<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
+    let r3 = const { mont::mont_mul_const(&C::R2, &C::R2, &C::P, C::P_INV) };
+    C::mul(&wide::invert(a, &C::P), &r3)
+}
+
+/// Scalar inversion in the Montgomery domain of the group order for P-384
+/// and P-521 (same construction as [`wide_invert`], modulo `n`).
+#[inline]
+pub(crate) fn wide_scalar_invert<C: Curve<N>, const N: usize>(a: &[u64; N]) -> [u64; N] {
+    let r3 = const { mont::mont_mul_const(&C::ORDER_R2, &C::ORDER_R2, &C::ORDER, C::ORDER_INV) };
+    mont::mont_mul(&wide::invert(a, &C::ORDER), &r3, &C::ORDER, C::ORDER_INV)
 }
 
 #[cfg(test)]
@@ -241,6 +290,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The safegcd inversions of P-384 and P-521 agree with the generic
+    /// Fermat routines on edge and random Montgomery-form inputs.
+    fn wide_inversions_match_fermat<C: Curve<N>, const N: usize>() {
+        use super::super::curve::fe_invert_fermat;
+        let mut seed = 0xbb67_ae85_84ca_a73bu64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let small = |v: u64| {
+            let mut t = [0u64; N];
+            t[0] = v;
+            t
+        };
+        for (m, m_one) in [(C::P, C::ONE), (C::ORDER, C::ORDER_ONE)] {
+            let mut inputs = std::vec![
+                [0u64; N],
+                small(1),
+                small(2),
+                mont::sub(&m, &small(1)).0,
+                mont::sub(&m, &small(2)).0,
+                m_one,
+            ];
+            while inputs.len() < 120 {
+                let mut v: [u64; N] = core::array::from_fn(|_| next());
+                v[N - 1] &= m[N - 1];
+                if mont::lt(&v, &m) != 0 {
+                    inputs.push(v);
+                }
+            }
+            for a in &inputs {
+                if m == C::P {
+                    let want = fe_invert_fermat::<C, N>(a);
+                    assert_eq!(C::invert(a), want, "field a = {a:x?}");
+                } else {
+                    let want = mont::pow_pubexp(
+                        a,
+                        &C::ORDER_MINUS_2,
+                        &C::ORDER,
+                        C::ORDER_INV,
+                        &C::ORDER_ONE,
+                    );
+                    assert_eq!(C::scalar_invert(a), want, "scalar a = {a:x?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn p384_inversions_match_fermat() {
+        wide_inversions_match_fermat::<P384, 6>();
+    }
+
+    #[test]
+    fn p521_inversions_match_fermat() {
+        wide_inversions_match_fermat::<P521, 9>();
     }
 
     #[test]

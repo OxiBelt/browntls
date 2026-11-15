@@ -187,7 +187,9 @@ pub(crate) fn fe_neg<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
     C::sub(&[0; N], a)
 }
 
-/// Portable Montgomery multiplication.
+/// Generic word-by-word Montgomery multiplication: the reference the
+/// specialised field multiplications are tested against.
+#[cfg(test)]
 #[inline(always)]
 pub(crate) fn fe_mul_soft<C: Curve<N>, const N: usize>(a: &Fe<N>, b: &Fe<N>) -> Fe<N> {
     mont::mont_mul(a, b, &C::P, C::P_INV)

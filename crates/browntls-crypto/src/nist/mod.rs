@@ -7,10 +7,14 @@
 //!
 //! # Implementation
 //!
-//! * Field and scalar arithmetic: 64-bit limbs in Montgomery form, word-by-word
-//!   CIOS multiplication with masked final subtraction (`mont`). P-256 has a
-//!   specialised field multiplication that exploits the shape of `p`
-//!   (`p256_field`).
+//! * Field arithmetic: 64-bit limbs in Montgomery form. Each curve forms the
+//!   full double-width product and then reduces it with a method that
+//!   exploits the shape of its prime: four (P-256, `p256_field`) or six
+//!   (P-384, `p384_field`) Montgomery rounds whose quotient digit needs no
+//!   multiplication by `-p^-1`, and for the Mersenne prime of P-521 a fold
+//!   and a 55-bit rotation (`p521_field`). Scalar arithmetic modulo the group
+//!   order is generic word-by-word CIOS Montgomery multiplication with a
+//!   masked final subtraction (`mont`).
 //! * Group law: complete projective formulas (Renes–Costello–Batina 2016,
 //!   `a = -3`), so no secret-dependent special cases (`curve`).
 //! * Secret scalars: fixed-window Booth recoding with masked table scans;
@@ -18,15 +22,18 @@
 //!   (`scalar_mul`, `table`; width 6 without doublings for P-256). Between
 //!   complete additions, runs of doublings use branch-free Jacobian doubling,
 //!   which has no exceptional case on prime-order curves (`jacobian`).
-//! * Inversions: P-256 uses constant-time Bernstein–Yang safegcd for the field
-//!   and the group order (`safegcd`); P-384 and P-521 use Fermat
-//!   exponentiations with a fixed schedule.
+//! * Inversions: constant-time Bernstein–Yang safegcd for the field and the
+//!   group order, with a fixed number of division steps per curve (`safegcd`
+//!   for P-256; `wide::invert`, on the generic `rsa::bigint::inv`, for P-384
+//!   and P-521).
 //! * Verification is variable time (public inputs only): interleaved wNAF in
 //!   Jacobian coordinates with explicit exceptional cases, and `x(R) mod n = r`
 //!   checked as `X = r Z^2` without an inversion.
-//! * x86-64 with BMI2 + ADX: `mulx`/`adcx`/`adox` multiplication and squaring
-//!   with the P-256 reduction, and branch-free addition and subtraction in
-//!   assembly (`p256_x86`). aarch64 and riscv64 use the portable backend.
+//! * x86-64 with BMI2 + ADX: `mulx`/`adcx`/`adox` multiplication and squaring,
+//!   and the reduction, addition and subtraction in branch-free assembly
+//!   (`p256_x86`; `wide_x86` with `p384_x86` and `p521_x86`). aarch64 and
+//!   riscv64 use the portable backend, which has the same specialised
+//!   reductions.
 //!
 //! Nonces follow RFC 6979, hedged with fresh randomness by default.
 
@@ -37,14 +44,23 @@ mod jacobian;
 mod keys;
 mod mont;
 mod p256_field;
+mod p384_field;
+mod p521_field;
 mod params;
 mod safegcd;
 mod scalar_mul;
 mod table;
 mod tables;
+mod wide;
 
 #[cfg(target_arch = "x86_64")]
 mod p256_x86;
+#[cfg(target_arch = "x86_64")]
+mod p384_x86;
+#[cfg(target_arch = "x86_64")]
+mod p521_x86;
+#[cfg(target_arch = "x86_64")]
+mod wide_x86;
 
 pub mod p256;
 pub mod p384;
@@ -101,3 +117,73 @@ impl crate::accel::Backends for P256Backend {
     }
 }
 pub mod p521;
+
+/// Whether the CPU offers the BMI2/ADX product kernels of P-384 and P-521.
+pub(crate) fn wide_hardware_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        wide_x86::available()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Declares the backend set of a curve whose only accelerated backend is the
+/// BMI2/ADX product kernel.
+macro_rules! wide_backend {
+    ($(#[$m:meta])* $name:ident, $alg:ident) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum $name {
+            /// BMI2 `mulx` + ADX `adcx`/`adox` products (x86-64).
+            BmiAdx,
+            /// Portable 64-bit arithmetic.
+            Portable,
+        }
+
+        impl $name {
+            /// Whether the curve's operations use the BMI2/ADX kernels now.
+            pub(crate) fn accelerated() -> bool {
+                crate::accel::select::<Self>() == Self::BmiAdx
+            }
+        }
+
+        impl crate::accel::Backends for $name {
+            const ALGORITHM: crate::accel::Algorithm = crate::accel::Algorithm::$alg;
+            const PREFERENCE: &'static [Self] = &[Self::BmiAdx, Self::Portable];
+
+            fn available(self) -> bool {
+                match self {
+                    Self::BmiAdx => wide_hardware_available(),
+                    Self::Portable => true,
+                }
+            }
+
+            fn uses(self) -> crate::accel::Uses {
+                match self {
+                    Self::BmiAdx => crate::accel::Uses::DEDICATED,
+                    Self::Portable => crate::accel::Uses::PORTABLE,
+                }
+            }
+
+            fn name(self) -> &'static str {
+                match self {
+                    Self::BmiAdx => "BMI2/ADX",
+                    Self::Portable => "portable",
+                }
+            }
+        }
+    };
+}
+
+wide_backend! {
+    /// P-384 field arithmetic backends (for the acceleration policy).
+    P384Backend, P384
+}
+
+wide_backend! {
+    /// P-521 field arithmetic backends (for the acceleration policy).
+    P521Backend, P521
+}

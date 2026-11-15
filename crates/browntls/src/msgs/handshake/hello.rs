@@ -8,6 +8,7 @@ use super::{
     HandshakePayload, KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random,
     ServerExtensions, ServerNamePayload, SessionId, read_payload,
 };
+use crate::ech::codec::EchClientHello;
 use crate::enums::{
     CertificateCompressionAlgorithm, CertificateType, CipherSuite, HandshakeType, ProtocolVersion,
     SignatureScheme,
@@ -56,6 +57,12 @@ pub(crate) struct ClientExtensions {
     pub(crate) client_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) server_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) transport_parameters: Option<Payload<'static>>,
+    /// Only ever valid inside an EncodedClientHelloInner (RFC 9849 §5.1);
+    /// parsed so a server can reject it anywhere else.
+    pub(crate) ech_outer_extensions: Option<Vec<ExtensionType>>,
+    /// RFC 9849 §5: encoded after every other extension but the GREASE
+    /// extension, `padding` and `pre_shared_key`.
+    pub(crate) encrypted_client_hello: Option<EchClientHello>,
     /// RFC 9345 §4.1.1: the schemes accepted for a delegated credential.
     pub(crate) delegated_credential: Option<Vec<SignatureScheme>>,
     /// RFC 8449: the largest record we are willing to receive.
@@ -170,6 +177,14 @@ impl ClientExtensions {
         add(
             self.cert_with_extern_psk.is_some(),
             ExtensionType::TlsCertWithExternPsk,
+        );
+        add(
+            self.ech_outer_extensions.is_some(),
+            ExtensionType::EncryptedClientHelloOuterExtensions,
+        );
+        add(
+            self.encrypted_client_hello.is_some(),
+            ExtensionType::EncryptedClientHello,
         );
         for unknown in &self.unknown {
             add(true, *unknown);
@@ -294,6 +309,18 @@ impl Codec<'_> for ClientExtensions {
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
+        if let Some(types) = &self.ech_outer_extensions {
+            encode_extension(
+                ExtensionType::EncryptedClientHelloOuterExtensions,
+                out,
+                |b| {
+                    encode_vec_u8(b, types);
+                },
+            );
+        }
+        if let Some(ech) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| ech.encode(b));
+        }
         if let Some(grease) = self.grease_last {
             // RFC 8701 §3: the second GREASE extension is not empty.
             encode_extension(ExtensionType::Unknown(grease), out, |b| b.push(0));
@@ -399,6 +426,12 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::PreSharedKey => {
                     out.preshared_key = Some(PresharedKeyOffer::read(body)?);
+                }
+                ExtensionType::EncryptedClientHelloOuterExtensions => {
+                    out.ech_outer_extensions = Some(read_nonempty_vec_u8(body, "OuterExtensions")?);
+                }
+                ExtensionType::EncryptedClientHello => {
+                    out.encrypted_client_hello = Some(EchClientHello::read(body)?);
                 }
                 ExtensionType::DelegatedCredential => {
                     // SignatureSchemeList: supported_signature_algorithm<2..2^16-2>.
@@ -604,6 +637,8 @@ pub(crate) struct HelloRetryRequestExtensions {
     pub(crate) key_share: Option<NamedGroup>,
     pub(crate) cookie: Option<PayloadU16>,
     pub(crate) supported_versions: Option<ProtocolVersion>,
+    /// RFC 9849 §5: the server's `hrr_accept_confirmation`.
+    pub(crate) encrypted_client_hello: Option<[u8; 8]>,
     /// Present only when an unknown extension was seen; the handshake will
     /// reject the message, but the codec records it for diagnostics.
     pub(crate) unknown: Vec<ExtensionType>,
@@ -622,12 +657,26 @@ impl Codec<'_> for HelloRetryRequestExtensions {
         if let Some(v) = &self.supported_versions {
             encode_extension(ExtensionType::SupportedVersions, out, |b| v.encode(b));
         }
+        if let Some(conf) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| {
+                b.extend_from_slice(conf);
+            });
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let mut out = Self::default();
         read_extensions(r, |typ, body| {
             match typ {
+                ExtensionType::EncryptedClientHello => {
+                    // RFC 9849 §6.1.4: any length but 8 is decode_error.
+                    let conf = body
+                        .take(8)
+                        .ok_or(InvalidMessage::MissingData("ECHHelloRetryRequest"))?;
+                    let mut out_conf = [0u8; 8];
+                    out_conf.copy_from_slice(conf);
+                    out.encrypted_client_hello = Some(out_conf);
+                }
                 ExtensionType::KeyShare => out.key_share = Some(NamedGroup::read(body)?),
                 ExtensionType::Cookie => {
                     let cookie = PayloadU16::read(body)?;
@@ -967,6 +1016,7 @@ mod tests {
                 key_share: Some(NamedGroup::secp256r1),
                 supported_versions: Some(ProtocolVersion::TLSv1_3),
                 cookie: Some(PayloadU16::new(alloc::vec![1, 2])),
+                encrypted_client_hello: Some([7; 8]),
                 unknown: Vec::new(),
             },
         };

@@ -88,6 +88,7 @@ pub mod delegated_credential;
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;
+pub mod hpke;
 #[cfg(feature = "tls12")]
 pub mod prf;
 pub mod sign;

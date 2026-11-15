@@ -343,6 +343,10 @@ pub(crate) struct ServerExtensions {
     /// TLS 1.3 EncryptedExtensions only: the server's groups, in preference
     /// order (RFC 9846 §4.3.7). Informational for the client.
     pub(crate) supported_groups: Option<Vec<NamedGroup>>,
+    /// TLS 1.3 EncryptedExtensions only: the server's ECH retry
+    /// configurations, an `ECHConfigList` with its length prefix (RFC 9849
+    /// §5). Checked to be well formed when parsed.
+    pub(crate) encrypted_client_hello: Option<Vec<u8>>,
     /// RFC 8449: the largest record the server is willing to receive (TLS
     /// 1.2 ServerHello, TLS 1.3 EncryptedExtensions).
     pub(crate) record_size_limit: Option<u16>,
@@ -413,6 +417,10 @@ impl ServerExtensions {
         add(
             self.supported_groups.is_some(),
             ExtensionType::EllipticCurves,
+        );
+        add(
+            self.encrypted_client_hello.is_some(),
+            ExtensionType::EncryptedClientHello,
         );
         add(
             self.record_size_limit.is_some(),
@@ -489,6 +497,11 @@ impl Codec<'_> for ServerExtensions {
                 crate::msgs::codec::encode_vec_u16(b, groups)
             });
         }
+        if let Some(list) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| {
+                b.extend_from_slice(list);
+            });
+        }
         if let Some(limit) = self.record_size_limit {
             encode_extension(ExtensionType::RecordSizeLimit, out, |b| limit.encode(b));
         }
@@ -544,6 +557,12 @@ impl Codec<'_> for ServerExtensions {
                         body,
                         "NamedGroups",
                     )?);
+                }
+                ExtensionType::EncryptedClientHello => {
+                    // RFC 9849 §6.1.6: a malformed list is decode_error.
+                    let list = body.rest();
+                    crate::ech::config::read_config_list(list)?;
+                    out.encrypted_client_hello = Some(list.to_vec());
                 }
                 ExtensionType::RecordSizeLimit => {
                     out.record_size_limit = Some(u16::read(body)?);

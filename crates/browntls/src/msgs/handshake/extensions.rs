@@ -252,6 +252,7 @@ pub(crate) struct PresharedKeyOffer {
 }
 
 impl PresharedKeyOffer {
+    #[cfg(test)]
     pub(crate) fn new(id: PresharedKeyIdentity, binder: Vec<u8>) -> Self {
         Self {
             identities: alloc::vec![id],
@@ -350,6 +351,8 @@ pub(crate) struct ServerExtensions {
     pub(crate) ticket_request: Option<u8>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
+    /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
+    pub(crate) cert_with_extern_psk: Option<()>,
 }
 
 impl ServerExtensions {
@@ -416,6 +419,10 @@ impl ServerExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(
+            self.cert_with_extern_psk.is_some(),
+            ExtensionType::TlsCertWithExternPsk,
+        );
         out.extend(self.unknown.iter().copied());
         out
     }
@@ -488,6 +495,9 @@ impl Codec<'_> for ServerExtensions {
         if let Some(count) = self.ticket_request {
             encode_extension(ExtensionType::TicketRequest, out, |b| count.encode(b));
         }
+        if self.cert_with_extern_psk.is_some() {
+            encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -539,6 +549,7 @@ impl Codec<'_> for ServerExtensions {
                     out.record_size_limit = Some(u16::read(body)?);
                 }
                 ExtensionType::TicketRequest => out.ticket_request = Some(u8::read(body)?),
+                ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();

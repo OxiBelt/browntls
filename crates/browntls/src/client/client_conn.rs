@@ -203,6 +203,39 @@ pub struct ClientConfig {
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
+
+    /// External PSKs (RFC 9846 §4.3.11) to offer in TLS 1.3, in preference
+    /// order, after any resumption ticket. Empty by default. See
+    /// [`crate::psk`].
+    ///
+    /// A server that selects one authenticates through it and sends no
+    /// certificate; a server that selects none is authenticated with its
+    /// certificate as usual, through the configured verifier.
+    pub external_psks: Vec<Arc<crate::psk::ExternalPsk>>,
+
+    /// Whether to ask a server that selects an external PSK to authenticate
+    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 8773).
+    /// Off by default. The server may decline; set
+    /// [`Self::require_cert_with_extern_psk`] to refuse a server that does.
+    pub cert_with_extern_psk: bool,
+
+    /// With [`Self::cert_with_extern_psk`], whether a server that selects an
+    /// external PSK without also authenticating with its certificate is
+    /// refused. Off by default.
+    pub require_cert_with_extern_psk: bool,
+
+    /// Whether to refuse a server that does not authenticate through one of
+    /// [`Self::external_psks`]: the handshake fails unless the server selects
+    /// one, or resumes a session that was itself established with one (its
+    /// key still configured here). Only such tickets are offered, and a
+    /// TLS 1.2 server is refused. Off by default.
+    ///
+    /// Without it, a server that selects no external PSK is authenticated
+    /// with its certificate instead; an application that needs PSK
+    /// authentication must then check
+    /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
+    /// once the handshake completes.
+    pub require_external_psk: bool,
 }
 
 impl ClientConfig {

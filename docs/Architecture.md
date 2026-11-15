@@ -207,9 +207,14 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   `WriteTraffic::encrypt` encrypts into a caller buffer after checking the
   whole size first (`InsufficientSize` carries the exact requirement, and
   nothing is consumed); a KeyUpdate that is due (an answer to the peer, or
-  the RFC 9846 §5.5 refresh) is written into the same buffer in order, and
-  data that cannot be rekeyed (TLS 1.2, 0-RTT, a server's half-RTT data)
-  fails with `EncryptExhausted` at the limit instead of being held back.
+  the RFC 9846 §5.5 refresh) is written into the same buffer in order. At
+  the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
+  `EncryptExhausted`, and a server's half-RTT data fails with the temporary
+  `KeyUpdateAwaitsHandshake` until the client's Finished arrives, instead of
+  being held back. Should a provider's record turn out longer than its
+  `encrypted_payload_len` promised, a KeyUpdate that no longer fits stays
+  queued for `EncodeTlsData`, and data records already sequenced are never
+  withdrawn.
   Handshake messages, alerts and KeyUpdates produced by the state machine
   are queued as encoded records until `EncodeTlsData::encode` copies them
   out; that queue and the handshake joiner are bounded by the protocol, not

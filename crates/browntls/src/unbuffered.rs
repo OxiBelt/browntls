@@ -47,15 +47,14 @@
 //! error.
 
 use core::fmt;
-use core::ops::{Deref, DerefMut, Range};
+use core::ops::{Deref, Range};
 
 use crate::client::ClientConnectionData;
-use crate::common_state::CommonState;
+use crate::common_state::{CommonState, MAX_KEY_UPDATES};
 use crate::conn::{ConnectionCore, Processed, SideData};
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::deframer::DeframerSliceBuffer;
-use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::message::HEADER_SIZE;
 use crate::record_layer::PreEncryptAction;
 use crate::suites::ExtractedSecrets;
@@ -70,7 +69,10 @@ const ALERT_LEN: usize = 2;
 /// A connection driven by the unbuffered API; see the [module
 /// documentation](self).
 ///
-/// Dereferences to [`CommonState`] for the negotiated parameters.
+/// Dereferences (read-only) to [`CommonState`] for the negotiated
+/// parameters. Its buffered-API members (`wants_read`, `wants_write`,
+/// `set_buffer_limit`) say nothing useful here; the states returned by
+/// [`Self::process_tls_records`] do.
 pub struct UnbufferedConnectionCommon<Data> {
     pub(crate) core: ConnectionCore<Data>,
     /// Records were encoded for the caller and not yet reported sent.
@@ -209,14 +211,21 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
     /// Extracts the traffic secrets for kernel TLS offload.
     ///
     /// Requires `enable_secret_extraction` in the configuration, a completed
-    /// handshake, no queued records and no partly received handshake
-    /// message.
+    /// handshake, no queued records, no partly received handshake message
+    /// and no KeyUpdate still to be sent (process the input to the end and
+    /// send what `EncodeTlsData` offers first).
     pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
-        if !self.core.common_state.sendable_tls.is_empty()
-            || self.core.deframer.has_buffered_handshake()
-        {
+        let common = &self.core.common_state;
+        if !common.sendable_tls.is_empty() || self.core.deframer.has_buffered_handshake() {
             return Err(Error::general(
                 "cannot extract secrets with unsent or unprocessed data",
+            ));
+        }
+        // A KeyUpdate we still owe would have to be sent under the current
+        // key before the secrets are handed over (RFC 9846 §4.7.3).
+        if common.key_update_owed || common.refresh_traffic_keys_pending {
+            return Err(Error::general(
+                "cannot extract secrets with a KeyUpdate pending",
             ));
         }
         self.core.dangerous_extract_secrets()
@@ -227,11 +236,11 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// Encrypts `payload` as application data (or 0-RTT data when `early`)
     /// straight into `outgoing`; returns the bytes written.
     ///
-    /// Everything is checked before anything is written: on error nothing
-    /// of `payload` was taken. A KeyUpdate that is due (an answer to the
-    /// peer, or a refresh for the confidentiality limit, RFC 9846 §5.5) goes
-    /// out first, in the same buffer; one that this write makes due follows
-    /// it.
+    /// Everything is decided and the size checked before anything changes:
+    /// on error nothing of `payload` was taken and no state was touched. A
+    /// KeyUpdate that is due (an answer to the peer, or a refresh for the
+    /// confidentiality limit, RFC 9846 §5.5) goes out first, in the same
+    /// buffer; one that this write makes due follows it.
     fn encrypt_into(
         &mut self,
         payload: &[u8],
@@ -242,7 +251,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         if common.encrypt_failed {
             return Err(EncryptError::Failed);
         }
-        if common.has_sent_close_notify() || common.sent_fatal_alert {
+        if self.state.is_err() || common.has_sent_close_notify() || common.sent_fatal_alert {
             return Err(EncryptError::AlreadyClosed);
         }
         if payload.is_empty() {
@@ -253,7 +262,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         let max_frag = common.max_fragment_len();
         let full = payload.len() / max_frag;
         let rest = payload.len() % max_frag;
-        let records = full + usize::from(rest > 0);
+        let records = (full + usize::from(rest > 0)) as u64;
         let data_len = full
             .saturating_mul(HEADER_SIZE + record_layer.encrypted_payload_len(max_frag))
             .saturating_add(match rest {
@@ -261,31 +270,39 @@ impl<Data: SideData> ConnectionCore<Data> {
                 n => HEADER_SIZE + record_layer.encrypted_payload_len(n),
             });
 
-        // 0-RTT data cannot be rekeyed, and TLS 1.2 has no KeyUpdate: at the
-        // limit those connections must close (RFC 9846 §5.5).
-        let can_rekey = !early
-            && common.is_tls13()
-            && common
-                .key_update_to_send(KeyUpdateRequest::UpdateNotRequested)
-                .is_some();
-        let due = !early && (common.key_update_owed || common.refresh_traffic_keys_pending);
-        if due && !can_rekey && !early {
-            // At the epoch limit: nothing more is sent, the flags just clear.
-            self.maybe_send_key_update()
-                .map_err(|_| EncryptError::Failed)?;
-        }
-        let common = &self.common_state;
-        let record_layer = &common.record_layer;
-        let action_now = record_layer.pre_encrypt_action(records as u64);
+        // How many KeyUpdates this write may send. 0-RTT data cannot be
+        // rekeyed and TLS 1.2 has no KeyUpdate; a TLS 1.3 sender stops at
+        // the epoch limit (RFC 9846 §4.7.3). A server's half-RTT data
+        // cannot be rekeyed *yet*: KeyUpdate needs the client's Finished.
+        let rekeyable = !early && common.is_tls13();
+        let blocked_by_handshake = rekeyable && common.is_handshaking();
+        let updates_left = if rekeyable {
+            MAX_KEY_UPDATES.saturating_sub(common.sent_key_updates)
+        } else {
+            0
+        };
+        let can_rekey = !blocked_by_handshake && updates_left > 0;
+        let due = rekeyable && (common.key_update_owed || common.refresh_traffic_keys_pending);
+
+        let action_now = record_layer.pre_encrypt_action(records);
         let rekey_before = can_rekey && (due || action_now == PreEncryptAction::Refuse);
         let action = if rekey_before {
-            record_layer.pre_encrypt_action_after_key_update(records as u64)
+            record_layer.pre_encrypt_action_after_key_update(records)
         } else {
             action_now
         };
-        let mut rekey_after = match action {
-            PreEncryptAction::Nothing => false,
-            PreEncryptAction::RefreshOrClose if can_rekey => true,
+        // What this write makes due once its records are out.
+        let (rekey_after, refresh_later) = match action {
+            PreEncryptAction::Nothing => (false, false),
+            PreEncryptAction::RefreshOrClose if can_rekey => {
+                (updates_left > u64::from(rekey_before), false)
+            }
+            // The write may still go out under the current key; the
+            // refresh follows once the handshake is complete.
+            PreEncryptAction::RefreshOrClose if blocked_by_handshake => (false, true),
+            PreEncryptAction::Refuse if blocked_by_handshake => {
+                return Err(EncryptError::KeyUpdateAwaitsHandshake);
+            }
             _ => return Err(EncryptError::EncryptExhausted),
         };
 
@@ -302,22 +319,19 @@ impl<Data: SideData> ConnectionCore<Data> {
             }));
         }
 
+        if due && !can_rekey && !blocked_by_handshake {
+            // At the epoch limit: nothing more is sent, the flags just clear.
+            self.maybe_send_key_update()
+                .map_err(|_| EncryptError::Failed)?;
+        }
         if rekey_before {
-            let queued = self.common_state.sendable_tls.len();
             self.common_state.refresh_traffic_keys_pending = true;
             self.maybe_send_key_update()
                 .map_err(|_| EncryptError::Failed)?;
-            if self.common_state.sendable_tls.len() == queued {
-                // The state cannot send a KeyUpdate yet (a server's half-RTT
-                // data): the write is judged under the current key.
-                rekey_after = match action_now {
-                    PreEncryptAction::Nothing => false,
-                    PreEncryptAction::RefreshOrClose => true,
-                    PreEncryptAction::Refuse => return Err(EncryptError::EncryptExhausted),
-                };
-            }
         }
-        // Anything queued (the KeyUpdate just made) precedes the data.
+        // Anything queued (the KeyUpdate just made) precedes the data. If it
+        // does not fit after all (a provider understating its record
+        // length), it stays queued and no data is taken.
         let mut written = self.drain_queued_into(outgoing)?;
 
         let fragments = self.common_state.max_fragment_len();
@@ -337,12 +351,20 @@ impl<Data: SideData> ConnectionCore<Data> {
             written += self.copy_record(&record, &mut outgoing[written..])?;
         }
 
-        if rekey_after {
+        if rekey_after || refresh_later {
             // RFC 9846 §5.5: refresh before the next write passes the limit.
             self.common_state.refresh_traffic_keys_pending = true;
+        }
+        if rekey_after {
             self.maybe_send_key_update()
                 .map_err(|_| EncryptError::Failed)?;
-            written += self.drain_queued_into(&mut outgoing[written..])?;
+            // The data records are already sequenced and in `outgoing`: a
+            // KeyUpdate that does not fit after all stays queued for
+            // `EncodeTlsData` (and goes before any later write) rather than
+            // failing the call.
+            written += self
+                .drain_queued_into(&mut outgoing[written..])
+                .unwrap_or(0);
         }
         Ok(written)
     }
@@ -422,12 +444,6 @@ impl<Data> Deref for UnbufferedConnectionCommon<Data> {
     }
 }
 
-impl<Data> DerefMut for UnbufferedConnectionCommon<Data> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core.common_state
-    }
-}
-
 impl<Data> fmt::Debug for UnbufferedConnectionCommon<Data> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnbufferedConnectionCommon")
@@ -477,6 +493,12 @@ pub enum ConnectionState<'c, 'i, Data> {
 
     /// Application data may be sent; receiving more TLS bytes is needed for
     /// anything else.
+    ///
+    /// A server that enables `send_half_rtt_data` sees this state before the
+    /// handshake completes, while the client is not yet authenticated (its
+    /// Finished has not arrived): check
+    /// [`CommonState::is_handshaking`] before sending anything that depends
+    /// on who the client is.
     ///
     /// Also reported after our own `close_notify` while the peer has not
     /// closed, to ask for more input; [`WriteTraffic::encrypt`] then fails
@@ -787,7 +809,13 @@ pub enum EncryptError {
     /// limit and cannot be refreshed (TLS 1.2, 0-RTT data, or the RFC 9846
     /// §4.7.3 key epoch limit): the connection must be closed.
     EncryptExhausted,
-    /// Our `close_notify` (or a fatal alert) was already sent.
+    /// The write key has reached its confidentiality limit, and the
+    /// KeyUpdate that refreshes it can only be sent once the handshake has
+    /// completed (a server's half-RTT data). Temporary: retry once
+    /// `is_handshaking()` is false.
+    KeyUpdateAwaitsHandshake,
+    /// Our `close_notify` (or a fatal alert) was already sent, or the
+    /// connection has failed.
     AlreadyClosed,
     /// Record protection failed; the connection is unusable.
     Failed,
@@ -798,6 +826,9 @@ impl fmt::Display for EncryptError {
         match self {
             Self::InsufficientSize(e) => e.fmt(f),
             Self::EncryptExhausted => f.write_str("encryption key exhausted"),
+            Self::KeyUpdateAwaitsHandshake => {
+                f.write_str("encryption key spent until the handshake completes")
+            }
             Self::AlreadyClosed => f.write_str("connection already closed for writing"),
             Self::Failed => f.write_str("record encryption failed"),
         }

@@ -473,10 +473,16 @@ impl UnbufferedServerConnection {
         self.inner.core.data.resumption_data = data.to_vec();
     }
 
-    /// Refuses any 0-RTT data on this connection; effective only before the
-    /// ClientHello has been processed.
+    /// Refuses any 0-RTT data on this connection.
+    ///
+    /// Effective only before the ClientHello has been processed; once early
+    /// data was accepted this does nothing (the client is already sending
+    /// it under the early traffic key, RFC 9846 §4.2.10).
     pub fn reject_early_data(&mut self) {
-        self.inner.core.data.early_data.reject();
+        let early_data = &mut self.inner.core.data.early_data;
+        if !early_data.was_accepted() {
+            early_data.reject();
+        }
     }
 
     /// Whether the connection only uses FIPS-validated components.

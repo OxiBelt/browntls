@@ -1180,24 +1180,180 @@ fn half_rtt_data_at_the_limit_is_refused_not_misordered() {
     let Ok(ConnectionState::WriteTraffic(mut w)) = s.conn.process_tls_records(&mut []).state else {
         panic!("expected WriteTraffic");
     };
-    let mut buf = vec![0u8; 1024];
     let mut wire = Vec::new();
     let mut taken = Vec::new();
     for i in 0..8u8 {
-        match w.encrypt(&[i], &mut buf) {
-            Ok(n) => {
-                wire.extend_from_slice(&buf[..n]);
-                taken.push(i);
+        // The size asked for is exactly one record: no KeyUpdate can be
+        // sent before the handshake completes, so none is counted.
+        let required = match w.encrypt(&[i], &mut []) {
+            Err(EncryptError::InsufficientSize(InsufficientSizeError { required_size })) => {
+                required_size
             }
-            Err(EncryptError::EncryptExhausted) => {}
-            Err(e) => panic!("{e:?}"),
-        }
+            // The key is spent; this is temporary, not fatal.
+            Err(EncryptError::KeyUpdateAwaitsHandshake) => continue,
+            other => panic!("{other:?}"),
+        };
+        let mut buf = vec![0u8; required];
+        assert_eq!(w.encrypt(&[i], &mut buf), Ok(required));
+        wire.extend_from_slice(&buf);
+        taken.push(i);
     }
     assert!(!taken.is_empty() && taken.len() < 8, "{taken:?}");
     s.outgoing.extend_from_slice(&wire);
     handshake(&mut c, &mut s);
     assert_eq!(c.take_received(), taken);
     exchange(&mut c, &mut s, b"after the refresh");
+}
+
+/// A TLS 1.3 AEAD that understates the record length of a KeyUpdate (a
+/// 5-byte plaintext) by one byte, standing in for a provider whose
+/// `encrypted_payload_len` is wrong.
+struct UnderstatesKeyUpdates(&'static dyn browntls::crypto::cipher::Tls13AeadAlgorithm);
+
+struct UnderstatingEncrypter(Box<dyn browntls::crypto::cipher::MessageEncrypter>);
+
+impl browntls::crypto::cipher::MessageEncrypter for UnderstatingEncrypter {
+    fn encrypt(
+        &mut self,
+        msg: browntls::crypto::cipher::OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<browntls::crypto::cipher::OutboundOpaqueMessage, Error> {
+        self.0.encrypt(msg, seq)
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        let real = self.0.encrypted_payload_len(payload_len);
+        if payload_len == 5 { real - 1 } else { real }
+    }
+}
+
+impl browntls::crypto::cipher::Tls13AeadAlgorithm for UnderstatesKeyUpdates {
+    fn encrypter(
+        &self,
+        key: browntls::crypto::cipher::AeadKey,
+        iv: browntls::crypto::cipher::Iv,
+    ) -> Box<dyn browntls::crypto::cipher::MessageEncrypter> {
+        Box::new(UnderstatingEncrypter(self.0.encrypter(key, iv)))
+    }
+
+    fn decrypter(
+        &self,
+        key: browntls::crypto::cipher::AeadKey,
+        iv: browntls::crypto::cipher::Iv,
+    ) -> Box<dyn browntls::crypto::cipher::MessageDecrypter> {
+        self.0.decrypter(key, iv)
+    }
+
+    fn key_len(&self) -> usize {
+        self.0.key_len()
+    }
+
+    fn extract_keys(
+        &self,
+        key: browntls::crypto::cipher::AeadKey,
+        iv: browntls::crypto::cipher::Iv,
+    ) -> Result<
+        browntls::ConnectionTrafficSecrets,
+        browntls::crypto::cipher::UnsupportedOperationError,
+    > {
+        self.0.extract_keys(key, iv)
+    }
+}
+
+#[test]
+fn trailing_key_update_that_does_not_fit_stays_queued() {
+    init_logging();
+    // The data records are sequenced and written; the KeyUpdate that
+    // follows them must not be lost when it turns out longer than promised.
+    let orig = prov::cipher_suite::TLS13_AES_128_GCM_SHA256
+        .tls13()
+        .unwrap();
+    let suite: &'static browntls::Tls13CipherSuite =
+        Box::leak(Box::new(browntls::Tls13CipherSuite {
+            common: browntls::CipherSuiteCommon {
+                suite: orig.common.suite,
+                hash_provider: orig.common.hash_provider,
+                confidentiality_limit: 4,
+            },
+            hkdf_provider: orig.hkdf_provider,
+            aead_alg: Box::leak(Box::new(UnderstatesKeyUpdates(orig.aead_alg))),
+        }));
+    let chain = server_chain(KeyType::Ed25519);
+    let mut p = prov::default_provider();
+    p.cipher_suites = vec![browntls::SupportedCipherSuite::Tls13(suite)];
+    let cc = Arc::new(
+        ClientConfig::builder_with_provider(Arc::new(p))
+            .with_protocol_versions(&[&version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+            .with_no_client_auth(),
+    );
+    let sc = Arc::new(versioned_server(&chain, ProtocolVersion::TLSv1_3));
+    let mut c = ub_client(&cc, Feed::Whole);
+    let mut s = b_server(&sc);
+    handshake(&mut c, &mut s);
+
+    let mut wire = Vec::new();
+    let mut queued_after = None;
+    let mut i = 0u8;
+    while i < 6 {
+        let Ok(ConnectionState::WriteTraffic(mut w)) = c.conn.process_tls_records(&mut []).state
+        else {
+            // The KeyUpdate left behind is offered first.
+            let mut buf = vec![0u8; 256];
+            match c.conn.process_tls_records(&mut []).state {
+                Ok(ConnectionState::EncodeTlsData(mut e)) => {
+                    let n = e.encode(&mut buf).unwrap();
+                    wire.extend_from_slice(&buf[..n]);
+                }
+                other => panic!("{other:?}"),
+            }
+            match c.conn.process_tls_records(&mut []).state {
+                Ok(ConnectionState::TransmitTlsData(t)) => t.done(),
+                other => panic!("{other:?}"),
+            }
+            continue;
+        };
+        let required = match w.encrypt(&[i], &mut []) {
+            Err(EncryptError::InsufficientSize(InsufficientSizeError { required_size })) => {
+                required_size
+            }
+            other => panic!("{other:?}"),
+        };
+        let mut buf = vec![0u8; required];
+        let n = w.encrypt(&[i], &mut buf).unwrap();
+        if n < required {
+            queued_after.get_or_insert(i);
+        }
+        wire.extend_from_slice(&buf[..n]);
+        i += 1;
+    }
+    assert!(queued_after.is_some(), "the KeyUpdate did not fit once");
+    s.give_input(&wire);
+    assert!(!s.failed(), "{:?}", s.error);
+    assert_eq!(s.take_received(), (0..6u8).collect::<Vec<_>>());
+    exchange(&mut c, &mut s, b"still in step");
+}
+
+#[test]
+fn reject_early_data_after_accepting_it_does_nothing() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (cc, sc) = early_data_configs(&chain, 1024);
+    prime(&cc, &sc);
+    let mut c = b_client(&cc);
+    c.conn.early_data().unwrap().write_all(b"one ").unwrap();
+    let mut s = ub_server(&sc, Feed::Whole);
+    let flight = c.take_output();
+    s.give_input(&flight);
+    assert_eq!(s.received_early, b"one ");
+    // Too late: the server already accepted the client's 0-RTT data.
+    s.conn.reject_early_data();
+    c.conn.early_data().unwrap().write_all(b"two").unwrap();
+    handshake(&mut c, &mut s);
+    assert!(c.conn.is_early_data_accepted());
+    assert_eq!(s.received_early, b"one two");
 }
 
 // ------------------------------------------------------------ rustls interop

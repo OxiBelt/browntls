@@ -124,7 +124,9 @@ where they live:
 
 - Extensions are checked against RFC 9846 Table 1 (`tls13::extensions`;
   extensions outside the table follow the TLS 1.3 column of the IANA
-  registry, and TLS 1.2-only ones are allowed in a ClientHello alone). A
+  registry, and TLS 1.2-only ones are allowed in a ClientHello alone;
+  `record_size_limit` and `ticket_request` may appear in ClientHello and
+  EncryptedExtensions only). A
   recognised extension in a message that may not carry it is
   `illegal_parameter`; one that answers nothing we sent is
   `unsupported_extension`. This covers ServerHello, HelloRetryRequest,
@@ -306,6 +308,55 @@ context. RFC 9266 §2 defines it for TLS 1.3 and for earlier versions only
 with the extended master secret, which the TLS 1.2 exporter requires
 anyway; since browntls never renegotiates, the RFC 9266 §4.2 renegotiation
 exclusion does not arise.
+
+### Optional ClientHello extensions
+
+- `record_size_limit` (RFC 8449), both sides, TLS 1.3 and 1.2, on by
+  default (`ClientConfig::record_size_limit`,
+  `ServerConfig::record_size_limit`, default 16385): the client announces
+  the configured value, lowered to the protocol maximum (2^14 + 1 when TLS
+  1.3 is offered, 2^14 otherwise); a server answers only a client that sent
+  it, in EncryptedExtensions (TLS 1.3) or the ServerHello (TLS 1.2), with
+  its value lowered to the negotiated version's maximum. Once negotiated,
+  records we send carry at most the peer's limit of plaintext (minus one in
+  TLS 1.3, whose limit counts the content type) or `max_fragment_size` less
+  the header, whichever is smaller (`MessageFragmenter`); protected records
+  the peer sends that exceed our limit (TLS 1.3: the whole
+  `TLSInnerPlaintext`, padding included, derived from the ciphertext length
+  less the suite's expansion) end the connection with `record_overflow`
+  (`RecordLayer::set_inbound_record_size_limit`). A peer value below 64 is
+  `illegal_parameter`; a value above the protocol maximum is lowered, not
+  refused; a configured value below 64 fails connection creation
+  (`Error::BadRecordSizeLimit`). 0-RTT data, sent before the client could
+  see the server's limit, is exempt, and a TLS 1.3 client applies its own
+  limit from the record after EncryptedExtensions (the server's handshake
+  records already respect it).
+- `ticket_request` (RFC 9149), TLS 1.3 only: the client sends
+  `ClientConfig::tls13_ticket_request` (default none) when it offers TLS
+  1.3; the server sends at most `resumption_count` tickets for a resumed
+  session and `new_session_count` otherwise, never more than
+  `send_tls13_tickets`, and announces that number as `expected_count` in
+  EncryptedExtensions. The extension in a ServerHello or HelloRetryRequest
+  is `illegal_parameter` (TLS 1.3) or `unsupported_extension` (TLS 1.2).
+- GREASE (RFC 8701, `msgs::grease`), client only, opt-in
+  (`ClientConfig::enable_grease`, default off until the GnuTLS end-to-end
+  scenarios have run with it): random per-connection GREASE values first in
+  the cipher suites, `supported_groups`, `key_share` (a one-byte share),
+  `supported_versions`, `signature_algorithms` and `psk_key_exchange_modes`,
+  plus an empty GREASE extension first and a one-byte one after every other
+  extension but `padding` and `pre_shared_key`. A second ClientHello repeats
+  the values, but drops the GREASE key share when the HelloRetryRequest
+  named a group. The values never enter the lists the server's choices are
+  checked against, so a server selecting one fails as for any value not
+  offered (`illegal_parameter`, or `unsupported_extension` for an
+  extension). ALPN is not GREASEd. A browntls server ignores GREASE values
+  like any unknown value and sends none itself (RFC 8701 §4 is optional).
+- `padding` (RFC 7685), client: by default
+  (`ClientHelloPadding::AvoidProblematicLengths`) a ClientHello handshake
+  message of 256 to 511 bytes is padded to 512 (RFC 7685 §4);
+  `AtLeast(n)` pads to at least `n` bytes first; `Disabled` never pads. The
+  extension comes right before `pre_shared_key`, which stays last, and is
+  sized with the binders in place. A server ignores its content.
 
 ### Cargo features (`browntls`)
 

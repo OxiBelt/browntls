@@ -11,8 +11,15 @@
 //!                     [COMMON...]
 //!
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
-//!         --group NAME (repeatable), --allow-mac-then-encrypt
+//!         --group NAME (repeatable), --allow-mac-then-encrypt,
+//!         --record-size-limit N|none
+//! CLIENT: --grease, --ticket-request NEW,RESUMPTION, --padding N
 //! ```
+//!
+//! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
+//! extension); `--grease` sends RFC 8701 GREASE values; `--ticket-request`
+//! sends the RFC 9149 extension; `--padding` pads the ClientHello to at
+//! least N bytes (RFC 7685).
 //!
 //! The server answers the first line of each connection with the line
 //! reversed (as `openssl s_server -rev` does), then closes the connection
@@ -36,6 +43,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use browntls::client::{ClientHelloPadding, TicketRequest};
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
 use browntls::pki_types::pem::PemObject;
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -91,6 +99,11 @@ struct Options {
     suites: Vec<SupportedCipherSuite>,
     groups: Vec<&'static dyn SupportedKxGroup>,
     allow_mac_then_encrypt: bool,
+    /// `None`: the library default; `Some(None)`: no extension.
+    record_size_limit: Option<Option<u16>>,
+    grease: bool,
+    ticket_request: Option<TicketRequest>,
+    padding: Option<u16>,
 }
 
 impl Options {
@@ -105,6 +118,10 @@ impl Options {
         while let Some(flag) = it.next() {
             if flag == "--allow-mac-then-encrypt" {
                 o.allow_mac_then_encrypt = true;
+                continue;
+            }
+            if flag == "--grease" {
+                o.grease = true;
                 continue;
             }
             let value = it
@@ -141,6 +158,25 @@ impl Options {
                         .find(|g| format!("{:?}", g.name()) == value)
                         .ok_or_else(|| format!("unknown key exchange group {value:?}"))?,
                 ),
+                "--record-size-limit" => {
+                    o.record_size_limit = Some(match value.as_str() {
+                        "none" => None,
+                        n => Some(n.parse().map_err(|_| format!("{flag}: {value:?}"))?),
+                    });
+                }
+                "--ticket-request" => {
+                    let (new, resumption) = value
+                        .split_once(',')
+                        .ok_or_else(|| format!("{flag} needs NEW,RESUMPTION"))?;
+                    let count = |v: &str| v.parse::<u8>().map_err(|_| format!("{flag}: {value:?}"));
+                    o.ticket_request = Some(TicketRequest {
+                        new_session_count: count(new)?,
+                        resumption_count: count(resumption)?,
+                    });
+                }
+                "--padding" => {
+                    o.padding = Some(value.parse().map_err(|_| format!("{flag}: {value:?}"))?);
+                }
                 _ => return Err(format!("unknown option {flag}")),
             }
         }
@@ -394,6 +430,9 @@ fn server(o: &Options) -> Result<()> {
         .with_single_cert(chain, key)
         .map_err(|e| e.to_string())?;
     config.allow_mac_then_encrypt = o.allow_mac_then_encrypt;
+    if let Some(limit) = o.record_size_limit {
+        config.record_size_limit = limit;
+    }
     let config = Arc::new(config);
 
     let listener = TcpListener::bind(listen).map_err(|e| format!("bind {listen}: {e}"))?;
@@ -461,6 +500,14 @@ fn client(o: &Options) -> Result<()> {
         None => builder.with_no_client_auth(),
     };
     config.allow_mac_then_encrypt = o.allow_mac_then_encrypt;
+    if let Some(limit) = o.record_size_limit {
+        config.record_size_limit = limit;
+    }
+    config.enable_grease = o.grease;
+    config.tls13_ticket_request = o.ticket_request;
+    if let Some(n) = o.padding {
+        config.client_hello_padding = ClientHelloPadding::AtLeast(n);
+    }
     let config = Arc::new(config);
     let server_name = ServerName::try_from(name.to_owned()).map_err(|e| e.to_string())?;
 

@@ -386,13 +386,21 @@ impl CompleteClientHelloHandling {
             && most_preferred_mutual != Some(selected_kxg.name()))
         .then(|| our_groups.iter().map(|g| g.name()).collect());
 
+        // RFC 9846 §4.7.1 and RFC 9149: how many tickets follow, announced
+        // in EncryptedExtensions when the client sent ticket_request.
+        let (send_tickets, expected_tickets) =
+            hs::tls13_tickets_to_send(&self.config, client_hello, resumedata.is_some());
+        self.send_tickets = send_tickets;
+
         emit_encrypted_extensions(
             &mut self.transcript,
             cx,
+            &self.config,
             client_hello,
             early_data == EarlyDataDecision::Accepted,
             self.cert_types,
             supported_groups,
+            expected_tickets,
         );
 
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
@@ -425,20 +433,6 @@ impl CompleteClientHelloHandling {
             cx.data.received_resumption_data = Some(resume.application_data.0.clone());
             cx.common.peer_certificates = resume.client_cert_chain.clone();
         }
-
-        // RFC 9846 §4.7.1: tickets go only to a client whose ClientHello
-        // carried a suitable psk_key_exchange_modes; psk_dhe_ke is the only
-        // mode we resume with.
-        let client_takes_tickets = client_hello
-            .extensions
-            .psk_modes
-            .as_ref()
-            .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
-        self.send_tickets = if client_takes_tickets {
-            self.config.send_tls13_tickets
-        } else {
-            0
-        };
 
         let key_schedule = emit_finished_tls13(
             &mut self.transcript,
@@ -679,13 +673,16 @@ pub(super) fn hello_retry_request_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_encrypted_extensions(
     transcript: &mut HandshakeHash,
     cx: &mut ServerContext<'_>,
+    config: &ServerConfig,
     client_hello: &ClientHelloPayload,
     early_data_accepted: bool,
     cert_types: hs::NegotiatedCertTypes,
     supported_groups: Option<Vec<NamedGroup>>,
+    expected_tickets: Option<u8>,
 ) {
     let exts = ServerExtensions {
         supported_groups,
@@ -698,6 +695,14 @@ fn emit_encrypted_extensions(
         early_data: early_data_accepted.then_some(()),
         client_certificate_type: cert_types.client,
         server_certificate_type: cert_types.server,
+        // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
+        record_size_limit: hs::record_size_limit_ack(
+            config,
+            client_hello,
+            ProtocolVersion::TLSv1_3,
+        ),
+        // RFC 9149 §3: `expected_count`.
+        ticket_request: expected_tickets,
         ..Default::default()
     };
     let m = Message {

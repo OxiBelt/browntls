@@ -312,6 +312,12 @@ impl CompleteClientHelloHandling {
             server_name_ack: (!resuming)
                 .then(|| client_hello.sni().map(|_| ()))
                 .flatten(),
+            // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
+            record_size_limit: hs::record_size_limit_ack(
+                &self.config,
+                client_hello,
+                ProtocolVersion::TLSv1_2,
+            ),
             ..Default::default()
         };
         let sh = Message {

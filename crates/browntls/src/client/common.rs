@@ -93,6 +93,8 @@ impl ClientAuthDetails {
 pub(super) struct ClientHelloDetails {
     pub(super) sent_extensions: Vec<ExtensionType>,
     pub(super) offered_sigschemes: Vec<SignatureScheme>,
+    /// The `record_size_limit` we announced (RFC 8449), if any.
+    pub(super) sent_record_size_limit: Option<u16>,
 }
 
 impl ClientHelloDetails {
@@ -100,6 +102,7 @@ impl ClientHelloDetails {
         Self {
             sent_extensions: Vec::new(),
             offered_sigschemes: Vec::new(),
+            sent_record_size_limit: None,
         }
     }
 

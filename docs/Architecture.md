@@ -228,13 +228,28 @@ On receipt (`compress::receive_compressed_certificate`, used by both sides):
   input is `bad_certificate` (RFC 8879 §4), as is a decompressed message that
   is not a well-formed Certificate.
 
-The built-in decompressors write into that buffer only. Their working memory
-beyond it is bounded by the format, not by the peer: none for zlib (the
-buffer is the window), at most a 16 MiB window for Brotli (large-window
-streams are refused) and at most an 8 MiB window plus one 128 KiB block for
-Zstandard (one frame, no dictionary; frames declaring a larger window or
-another content size are refused before decoding). Zstandard compression
-uses the single level `ruzstd` implements.
+A `cert_decompression_limit` of zero turns reception off: the client does
+not send the extension, the server leaves it out of its CertificateRequest,
+and a compressed message is then an algorithm that was not offered.
+
+The built-in decoders use memory besides that buffer, bounded by the expected
+length and the format, never by what the stream declares:
+
+| Algorithm | Working memory besides the output buffer | Refused before decoding |
+|---|---|---|
+| zlib | Fixed decoder state (about 11 KiB); the output buffer is the window | |
+| Brotli | A window of at most the expected length rounded up to a power of two (the decoder's byte allocator refuses larger requests, so a stream announcing more fails without the allocation), context maps up to 16 KiB, prefix code tables (at most 256 per category) | Large-window streams |
+| Zstandard | The declared window, at most 128 KiB, plus one block (128 KiB) and entropy tables | Skippable frames, dictionaries, a declared content size other than the expected length, a window above 128 KiB |
+
+The Zstandard window limit is below the 8 MiB that RFC 8878 §3.1.1.1.2
+recommends decoders accept. One-shot encoders, which know the size of a
+Certificate message, write single-segment frames whose window is the content
+size, and the built-in encoder declares 128 KiB; a frame from a streaming
+encoder that was not told the size (libzstd then declares at least 512 KiB)
+is refused. `tests/cert_compression_memory.rs` checks, on Linux, that
+refusing streams of a few hundred bytes which announce 8 to 16 MiB does not
+raise the process's peak resident memory by more than 1 MiB. Zstandard
+compression uses the single level `ruzstd` implements.
 
 ## Primitive backends
 

@@ -67,6 +67,10 @@ cargo run --example seed_corpus          # writes corpus/<target>/seed-NNN
 cargo +nightly fuzz run handshake_message -- -max_total_time=60
 ```
 
+For `cert_decompress`, add `-malloc_limit_mb=4`: libFuzzer then reports any
+single allocation above 4 MiB, which the decompressors must never make
+whatever a stream declares.
+
 `cargo fuzz list` prints the targets. Crashes land in `artifacts/<target>/`;
 `cargo +nightly fuzz run <target> artifacts/<target>/<file>` replays one. Treat
 a crash as a potential vulnerability: follow [SECURITY.md](../SECURITY.md), do

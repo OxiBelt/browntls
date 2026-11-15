@@ -17,13 +17,22 @@
 //!
 //! # Limits on received messages
 //!
-//! A `CompressedCertificate` is expanded only when its declared
-//! `uncompressed_length` is non-zero and no larger than both
-//! [`MAX_DECOMPRESSED_CERTIFICATE_SIZE`] and the configuration's
+//! A `CompressedCertificate` whose `uncompressed_length` exceeds
+//! [`MAX_DECOMPRESSED_CERTIFICATE_SIZE`] does not parse: the connection ends
+//! with `decode_error`. Otherwise the message is expanded only when that
+//! length is non-zero and no larger than the configuration's
 //! `cert_decompression_limit`; the output buffer has exactly that length, the
 //! decompressor must fill it exactly, and anything else ends the handshake
-//! with `bad_certificate` (RFC 8879 §4). The built-in decompressors write
-//! into that buffer only and also reject trailing input.
+//! with `bad_certificate` (RFC 8879 §4). A limit of zero turns reception
+//! off: the extension is then not offered, and a compressed message is an
+//! algorithm that was not offered (`illegal_parameter`).
+//!
+//! The built-in decompressors also reject trailing input. They do not all
+//! work in the output buffer alone; each documents the memory it can use
+//! besides it, which never depends on what the peer declares beyond these
+//! bounds: nothing for zlib, a window no larger than the expected length
+//! rounded up to a power of two for Brotli, and at most 256 KiB for
+//! Zstandard, plus entropy tables whose size the formats fix.
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -140,6 +149,17 @@ fn smaller_than(input: &[u8], compressed: Vec<u8>) -> Result<Vec<u8>, Compressio
     }
 }
 
+/// The algorithms to list in our `compress_certificate` extension (RFC 8879
+/// §3): those of `decompressors`, or `None`, meaning no extension, when
+/// there are none or the configured `limit` rules out every message.
+pub(crate) fn offered_cert_compression(
+    decompressors: &[&'static dyn CertDecompressor],
+    limit: usize,
+) -> Option<Vec<CertificateCompressionAlgorithm>> {
+    (limit != 0 && !decompressors.is_empty())
+        .then(|| decompressors.iter().map(|d| d.algorithm()).collect())
+}
+
 /// Why a received `CompressedCertificate` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CertDecompressionError {
@@ -161,6 +181,10 @@ pub(crate) fn decompress_certificate(
     limit: usize,
     compressed: &CompressedCertificatePayload<'_>,
 ) -> Result<Vec<u8>, CertDecompressionError> {
+    // With a limit of zero nothing was offered (`offered_cert_compression`).
+    if limit == 0 {
+        return Err(CertDecompressionError::UnofferedAlgorithm);
+    }
     let decompressor = decompressors
         .iter()
         .find(|d| d.algorithm() == compressed.alg)
@@ -387,12 +411,24 @@ mod tests {
 
         // zero, over the configured limit, over the hard cap whatever the
         // configured limit: refused without calling the decompressor
+        // a limit of zero offers nothing, so anything is unoffered
+        assert_eq!(
+            decompress_certificate(&[&PROBE], 0, &payload(1)),
+            Err(CertDecompressionError::UnofferedAlgorithm)
+        );
+        assert_eq!(called(), usize::MAX);
+        assert_eq!(offered_cert_compression(&[&PROBE], 0), None);
+        assert_eq!(offered_cert_compression(&[], 1024), None);
+        assert_eq!(
+            offered_cert_compression(&[&PROBE], 1),
+            Some(alloc::vec![CertificateCompressionAlgorithm::Zlib])
+        );
+
         for (limit, len) in [
             (1024, 0),
             (1024, 1025),
             (usize::MAX, hard + 1),
             (usize::MAX, 0x00ff_ffff),
-            (0, 1),
         ] {
             assert_eq!(
                 decompress_certificate(&[&PROBE], limit, &payload(len)),
@@ -536,7 +572,7 @@ mod tests {
             decompress_certificate(&list, 3000, &payload(3000)).unwrap(),
             plain
         );
-        for (limit, len) in [(2999, 3000), (3000, 2999), (usize::MAX, 3001), (0, 3000)] {
+        for (limit, len) in [(2999, 3000), (3000, 2999), (usize::MAX, 3001), (1, 3000)] {
             assert_eq!(
                 decompress_certificate(&list, limit, &payload(len)),
                 Err(CertDecompressionError::Invalid)

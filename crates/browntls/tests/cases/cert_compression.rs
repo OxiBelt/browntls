@@ -525,6 +525,44 @@ fn compression_across_providers() {
     }
 }
 
+#[test]
+fn a_limit_of_zero_does_not_offer_compression() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = client_chain(KeyType::EcdsaP256);
+    for (compressor, decompressor) in builtins() {
+        let client_counter = Counting::new(decompressor);
+        let server_counter = Counting::new(decompressor);
+        let configs = |client_limit: usize, server_limit: usize| {
+            let mut client_config = tls13_client(&chain, Some(&client_chain));
+            client_config.cert_compressors = vec![compressor];
+            client_config.cert_decompressors = vec![client_counter];
+            client_config.cert_decompression_limit = client_limit;
+            let mut server_config = tls13_server(&chain, Some(&client_chain));
+            server_config.cert_compressors = vec![compressor];
+            server_config.cert_decompressors = vec![server_counter];
+            server_config.cert_decompression_limit = server_limit;
+            connect(client_config, server_config)
+        };
+
+        // the client offers nothing: the server's Certificate is plain,
+        // the client's own is still compressed
+        let (mut client, mut server) = configs(0, 4096);
+        do_handshake(&mut client, &mut server).unwrap();
+        assert_eq!((client_counter.calls(), server_counter.calls()), (0, 1));
+        assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
+
+        // the server's CertificateRequest offers nothing
+        let (mut client, mut server) = configs(4096, 0);
+        do_handshake(&mut client, &mut server).unwrap();
+        assert_eq!((client_counter.calls(), server_counter.calls()), (1, 1));
+        assert_eq!(
+            server.peer_certificates().unwrap(),
+            client_chain.cert_chain()
+        );
+    }
+}
+
 // ------------------------------------------------------- rustls as the peer
 //
 // rustls 0.23 implements RFC 8879 with zlib (zlib-rs) and Brotli; it has no

@@ -18,9 +18,10 @@ use crate::enums::CertificateCompressionAlgorithm;
 
 /// zlib certificate compression and decompression (RFC 8879 §3, algorithm 1).
 ///
-/// Decompression writes into the caller's buffer only, verifies the Adler-32
-/// trailer, and fails on a stream that is truncated, longer than the buffer,
-/// or followed by further bytes.
+/// Decompression verifies the Adler-32 trailer and fails on a stream that is
+/// truncated, longer than the caller's buffer, or followed by further bytes.
+/// The caller's buffer is the back-reference window; the only other memory
+/// is the decoder state, of a fixed size (about 11 KiB).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Zlib;
 

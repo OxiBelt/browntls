@@ -698,13 +698,10 @@ fn emit_certificate_req_tls13(
         extensions: CertificateRequestExtensions {
             signature_algorithms: Some(schemes),
             authorities: (!authorities.is_empty()).then(|| authorities.to_vec()),
-            certificate_compression: (!config.cert_decompressors.is_empty()).then(|| {
-                config
-                    .cert_decompressors
-                    .iter()
-                    .map(|d| d.algorithm())
-                    .collect()
-            }),
+            certificate_compression: crate::compress::offered_cert_compression(
+                &config.cert_decompressors,
+                config.cert_decompression_limit,
+            ),
             ..Default::default()
         },
     };

@@ -21,7 +21,7 @@ browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
 
 | Crate | Role | `unsafe` |
 |---|---|---|
-| `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
+| `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, HPKE, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 
@@ -234,6 +234,16 @@ HMAC-SHA256 or HMAC-SHA384) over a `CbcBlockCipher` trait. For
 MAC-then-encrypt, the padding check and the record MAC are constant time with
 respect to the padding (the Lucky Thirteen countermeasure): the number of hash
 compressions depends only on the record length.
+
+`browntls_crypto::hpke` implements RFC 9180 Hybrid Public Key Encryption in
+base mode for Encrypted Client Hello: DHKEM over X25519, X448, P-256, P-384
+and P-521, HKDF-SHA256/384/512, and AES-128-GCM, AES-256-GCM,
+ChaCha20-Poly1305 or export-only. It composes the crate's own primitives (and
+therefore their accelerated backends), adds no `unsafe`, and stays
+allocation-free: `seal`/`open` returning vectors exist only with `alloc`.
+NIST public keys must be uncompressed points on the curve, X25519/X448
+all-zero shared secrets are rejected, and a failed `open` leaves the sequence
+number unchanged. The PSK and authenticated modes are not implemented.
 
 The table states the design target; [Status](#status) records what has been
 implemented and executed.

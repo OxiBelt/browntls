@@ -114,13 +114,18 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   offered or accepted; a server keeps at most one post-handshake
   CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
   answer must not be a CompressedCertificate (as in the handshake: client
-  certificate decompression is not implemented); a HelloRetryRequest cookie
-  expires after 60 seconds, and none is sent when the first ClientHello
-  offered 0-RTT.
+  certificate decompression is not implemented); a client answers at most
+  eight post-handshake CertificateRequests without application data from
+  the server in between and then aborts with `unexpected_message` (a local
+  resource bound: each answer costs a signature); a HelloRetryRequest cookie
+  expires after 60 seconds, is not bound to the client's address, and none
+  is sent when the first ClientHello offered 0-RTT.
 - Post-handshake client authentication, stateless HelloRetryRequest
-  cookies, the early exporter and the RFC 9266 channel binding have had no
-  independent review. The client side of post-handshake authentication is
-  exercised against the browntls server only (no test drives a
-  CertificateRequest at a client that did not offer the extension, nor
-  messages interleaved within an answer, which need a misbehaving peer);
-  the server side is also tested against `openssl s_client -enable_pha`.
+  cookies, the early exporter and the RFC 9266 channel binding have had one
+  code review (its findings are addressed) and no security audit. The
+  client side of post-handshake authentication is exercised against the
+  browntls server and against records forged with the server's extracted
+  keys (an unsolicited CertificateRequest, an empty context, the request
+  bound); no test sends a server messages interleaved within an answer,
+  which needs a misbehaving client. The server side is also tested against
+  `openssl s_client -enable_pha`.

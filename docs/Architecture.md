@@ -196,8 +196,12 @@ Finished, CertificateRequest, Certificate)` when it has a usable key (an
 empty Certificate otherwise), and a Finished keyed by the current
 `client_application_traffic_secret_N`. Each exchange starts from the
 handshake transcript, not from earlier exchanges (§4.5). A
-CertificateRequest without our offer is `unexpected_message`; its
-extensions are checked as in the handshake.
+CertificateRequest without our offer is `unexpected_message`, one with an
+empty `certificate_request_context` is `illegal_parameter` (§4.4.2); its
+extensions are checked as in the handshake. Each answer costs a signature,
+so a client answers at most eight requests while the server sends no
+application data and then aborts with `unexpected_message`, the same local
+resource bound as for KeyUpdate requests.
 
 A server learns the offer from the ClientHello (`ServerConnection::
 post_handshake_auth_offered`). `ServerConnection::request_client_auth`
@@ -232,6 +236,10 @@ application chooses.
 `ServerConfig::hello_retry_cookies` (default `None`) holds a
 `ProducesTickets` sealer, which should be a dedicated instance with its own
 key (for example a separate `TicketRotator` over an AEAD ticket producer).
+Creating a connection with the `ServerConfig::ticketer` instance itself as
+the sealer fails; a separate sealer sharing the ticketer's key cannot be
+detected, but the plaintexts stay disjoint (a ticket starts with a 0 or 1
+byte, a cookie with its label), which a unit test pins.
 When it is set, a HelloRetryRequest carries a cookie that seals
 (`server::cookie`):
 
@@ -255,7 +263,12 @@ ClientHello must repeat the session ID and server name. Any failure is
 transcript as `message_hash(Hash(ClientHello1))` followed by the
 HelloRetryRequest re-encoded from the cookie (§4.5), takes the cookie's
 suite and group as the retry's choice, and continues with the usual
-second-ClientHello rules. Such a connection ignores change_cipher_spec
+second-ClientHello rules. Like the stateful path, it compares the second
+ClientHello with the first only through what the cookie carries (suite,
+group, session ID, server name) and through `Hash(ClientHello1)` in the
+transcript, which the PSK binders and Finished cover. If the clock fails
+while a cookie is issued or opened, the handshake aborts with
+`internal_error`. Such a connection ignores change_cipher_spec
 records before that ClientHello (within the usual bound), as §4.3.2
 requires; ahead of any other first ClientHello they stay
 `unexpected_message`. Without a sealer no cookie is sent and one in a first
@@ -266,7 +279,9 @@ early data records would reach a fresh connection ahead of its second
 ClientHello, so that retry stays stateful. A cookie can be replayed during
 its lifetime by anyone who saw it; that gives no more than replaying the
 second ClientHello would, since the handshake still needs the client's key
-share and Finished.
+share and Finished. Cookies are not bound to the client's address: that
+is fine over TCP, where the handshake itself proves the address, but a
+datagram transport would need that binding to stop amplification.
 
 ### Exporters
 

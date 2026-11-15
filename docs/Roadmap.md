@@ -37,6 +37,7 @@ intent.
 | RFC 9846 optional AES-CCM suites (non-preferred tier): `TLS_AES_128_CCM_SHA256` then `TLS_AES_128_CCM_8_SHA256` in the defaults after every AES-GCM and ChaCha20-Poly1305 suite; RFC 9147 Appendix B limits, kTLS export for CCM only | done |
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | `record_size_limit` (RFC 8449, both sides, TLS 1.3 and 1.2, on by default), `ticket_request` (RFC 9149), client GREASE (RFC 8701, opt-in) and ClientHello padding (RFC 7685, on by default for 256 to 511-byte hellos): in-memory suites on both providers, rustls 0.23 and OpenSSL 3 interop with all four on; Docker E2E scenarios added, GnuTLS not yet run (see [Architecture](Architecture.md#optional-clienthello-extensions)) | done |
+| TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | Built-in certificate compressors (zlib, brotli, zstd) | planned |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
 | Fuzzing targets for codecs, PKI and handshake state | planned |
@@ -110,9 +111,25 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   a peer that sends more than eight `update_requested` KeyUpdates without
   application data in between is cut off with `unexpected_message` (a local
   resource bound); `user_canceled` counts towards the same bound as TLS 1.2
-  warning alerts; post-handshake client authentication, the early exporter
-  and stateless HelloRetryRequest cookies are not implemented, and the
-  RFC 6066 `max_fragment_length` extension is not offered or accepted.
+  warning alerts; the RFC 6066 `max_fragment_length` extension is not
+  offered or accepted; a server keeps at most one post-handshake
+  CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
+  answer must not be a CompressedCertificate (as in the handshake: client
+  certificate decompression is not implemented); a client answers at most
+  eight post-handshake CertificateRequests without application data from
+  the server in between and then aborts with `unexpected_message` (a local
+  resource bound: each answer costs a signature); a HelloRetryRequest cookie
+  expires after 60 seconds, is not bound to the client's address, and none
+  is sent when the first ClientHello offered 0-RTT.
+- Post-handshake client authentication, stateless HelloRetryRequest
+  cookies, the early exporter and the RFC 9266 channel binding have had one
+  code review (its findings are addressed) and no security audit. The
+  client side of post-handshake authentication is exercised against the
+  browntls server and against records forged with the server's extracted
+  keys (an unsolicited CertificateRequest, an empty context, the request
+  bound); no test sends a server messages interleaved within an answer,
+  which needs a misbehaving client. The server side is also tested against
+  `openssl s_client -enable_pha`.
 - RFC 8449 `record_size_limit`: a peer value above the protocol maximum is
   lowered rather than refused (RFC 8449 §4 lets a client abort); 0-RTT
   records are not checked against the server's limit, and a TLS 1.3 client

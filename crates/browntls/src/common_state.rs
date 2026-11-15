@@ -166,6 +166,9 @@ pub struct CommonState {
     pub(crate) may_send_application_data: bool,
     pub(crate) may_receive_application_data: bool,
     pub(crate) early_traffic: bool,
+    /// The early exporter (RFC 9846 §7.5), while 0-RTT is offered (client)
+    /// or once it was accepted; dropped when 0-RTT is rejected.
+    pub(crate) early_exporter: Option<crate::tls13::key_schedule::EarlyExporter>,
     pub(crate) sent_fatal_alert: bool,
     sent_close_notify: bool,
     pub(crate) has_received_close_notify: bool,
@@ -207,6 +210,7 @@ impl CommonState {
             may_send_application_data: false,
             may_receive_application_data: false,
             early_traffic: false,
+            early_exporter: None,
             sent_fatal_alert: false,
             sent_close_notify: false,
             has_received_close_notify: false,

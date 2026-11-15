@@ -395,6 +395,11 @@ fn emit_client_hello_for_retry(
         psk_modes: supports_tls13.then(|| vec![PskKeyExchangeMode::PSK_DHE_KE]),
         key_shares,
         cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
+        // RFC 9846 §4.3.6: willing to authenticate after the handshake.
+        post_handshake_auth: (supports_tls13
+            && config.enable_post_handshake_auth
+            && config.client_auth_cert_resolver.has_certs())
+        .then_some(()),
         // RFC 7250: raw public keys instead of certificates, in either direction.
         client_certificate_types: config
             .client_auth_cert_resolver
@@ -497,6 +502,7 @@ fn emit_client_hello_for_retry(
 
     // What the server's choices are checked against: never a GREASE value.
     input.hello.sent_extensions = exts.present_types();
+    cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
     input.hello.offered_sigschemes = offered_sigschemes;
     input.hello.sent_record_size_limit = exts.record_size_limit;
 
@@ -1059,6 +1065,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
             cx.data.early_data.rejected();
         }
         cx.common.early_traffic = false;
+        cx.common.early_exporter = None;
 
         // The retry must repeat the PSK offer (with a new binder) or drop it;
         // our session is still held in `input.resuming` for that.

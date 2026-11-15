@@ -26,6 +26,8 @@ use crate::tls13::Tls13CipherSuite;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecretKind {
     ResumptionPskBinderKey,
+    ExternalPskBinderKey,
+    ImportedPskBinderKey,
     ClientEarlyTrafficSecret,
     ClientHandshakeTrafficSecret,
     ServerHandshakeTrafficSecret,
@@ -40,6 +42,8 @@ impl SecretKind {
     fn to_bytes(self) -> &'static [u8] {
         match self {
             Self::ResumptionPskBinderKey => b"res binder",
+            Self::ExternalPskBinderKey => b"ext binder",
+            Self::ImportedPskBinderKey => b"imp binder",
             Self::ClientEarlyTrafficSecret => b"c e traffic",
             Self::ClientHandshakeTrafficSecret => b"c hs traffic",
             Self::ServerHandshakeTrafficSecret => b"s hs traffic",
@@ -62,6 +66,45 @@ impl SecretKind {
             _ => return None,
         })
     }
+}
+
+/// Which kind of PSK a binder is for: the label of its `binder_key`
+/// (RFC 9846 §7.1; `imp binder` for imported PSKs, RFC 9258).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinderLabel {
+    /// A resumption PSK from a NewSessionTicket (`res binder`).
+    Resumption,
+    /// An external PSK used directly (`ext binder`).
+    External,
+    /// An external PSK imported with RFC 9258 (`imp binder`).
+    Imported,
+}
+
+impl BinderLabel {
+    fn secret_kind(self) -> SecretKind {
+        match self {
+            Self::Resumption => SecretKind::ResumptionPskBinderKey,
+            Self::External => SecretKind::ExternalPskBinderKey,
+            Self::Imported => SecretKind::ImportedPskBinderKey,
+        }
+    }
+}
+
+/// The imported PSK of RFC 9258: `ipskx = HKDF-Expand-Label(
+/// HKDF-Extract(0, epsk), "derived psk", Hash(ImportedIdentity), L)`, where
+/// HKDF and Hash are those of the EPSK (`epsk_suite`'s) and `L` is the hash
+/// length of the target KDF.
+pub(crate) fn derive_imported_psk(
+    epsk_suite: &Tls13CipherSuite,
+    epsk: &[u8],
+    imported_identity: &[u8],
+    target_len: usize,
+) -> Vec<u8> {
+    let epskx = epsk_suite.hkdf_provider.extract_from_secret(None, epsk);
+    let identity_hash = epsk_suite.common.hash_provider.hash(imported_identity);
+    let mut out = alloc::vec![0u8; target_len];
+    hkdf_expand_label(&*epskx, b"derived psk", identity_hash.as_ref(), &mut out);
+    out
 }
 
 /// The running `HKDF-Extract` chain plus the suite it belongs to.
@@ -267,15 +310,12 @@ impl KeyScheduleEarly {
         }
     }
 
-    /// `HMAC(binder_key, hs_hash)` for the `pre_shared_key` binder.
-    pub(crate) fn resumption_psk_binder_key_and_sign_verify_data(
-        &self,
-        hs_hash: &[u8],
-    ) -> hmac::Tag {
+    /// The `pre_shared_key` binder: the Finished computation with
+    /// `binder_key = Derive-Secret(early_secret, label, "")` over `hs_hash`
+    /// (RFC 9846 §4.3.11.2, §7.1).
+    pub(crate) fn psk_binder(&self, label: BinderLabel, hs_hash: &[u8]) -> hmac::Tag {
         let empty_hash = self.ks.suite.common.hash_provider.hash(&[]);
-        let binder_key = self
-            .ks
-            .derive(SecretKind::ResumptionPskBinderKey, empty_hash.as_ref());
+        let binder_key = self.ks.derive(label.secret_kind(), empty_hash.as_ref());
         self.ks.sign_finish(&binder_key, hs_hash)
     }
 

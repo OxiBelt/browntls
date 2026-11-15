@@ -26,7 +26,8 @@ use crate::msgs::handshake::{
     NewSessionTicketPayloadTls13, PresharedKeyBinder, ServerExtensions, ServerHelloPayload,
 };
 use crate::msgs::message::{Message, MessagePayload};
-use crate::msgs::persist::{self, Retrieved};
+use crate::msgs::persist;
+use crate::psk::{ExternalPsk, OfferedPsk};
 use crate::sign::{CertifiedKey, Signer};
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
@@ -42,28 +43,34 @@ use crate::verify::{
 /// How many `update_requested` KeyUpdates we tolerate without sending data.
 const MAX_KEY_UPDATE_REQUESTS: u8 = 8;
 
-/// Computes the real PSK binder (RFC 8446 §4.2.11.2) and writes it into the
-/// ClientHello, returning the early key schedule for the offered PSK.
-pub(super) fn fill_in_psk_binder(
-    resuming: &Retrieved<&persist::Tls13ClientSessionValue>,
+/// Computes the binder of every offered PSK (RFC 9846 §4.3.11.2), each
+/// with its own hash and label, over the ClientHello up to the binders, and
+/// writes them into the ClientHello.
+pub(super) fn fill_in_psk_binders(
+    offered: &[OfferedPsk],
     transcript: &HandshakeHashBuffer,
     hmp: &mut HandshakeMessagePayload<'_>,
-) -> KeyScheduleEarly {
-    let suite = resuming.suite();
+) {
+    if offered.is_empty() {
+        return;
+    }
     let binder_plaintext = hmp.encoding_for_binder_signing();
-    let handshake_hash = transcript.hash_given(suite.common.hash_provider, &binder_plaintext);
-
-    let key_schedule = KeyScheduleEarly::new(suite, resuming.secret());
-    let real_binder =
-        key_schedule.resumption_psk_binder_key_and_sign_verify_data(handshake_hash.as_ref());
+    let binders: Vec<PresharedKeyBinder> = offered
+        .iter()
+        .map(|psk| {
+            let handshake_hash =
+                transcript.hash_given(psk.suite.common.hash_provider, &binder_plaintext);
+            let binder = KeyScheduleEarly::new(psk.suite, psk.secret.as_ref())
+                .psk_binder(psk.label, handshake_hash.as_ref());
+            PresharedKeyBinder::new(binder.as_ref().to_vec())
+        })
+        .collect();
 
     if let HandshakePayload::ClientHello(ch) = &mut hmp.0
         && let Some(psk) = &mut ch.extensions.preshared_key
-        && let Some(binder) = psk.binders.first_mut()
     {
-        *binder = PresharedKeyBinder::new(real_binder.as_ref().to_vec());
+        psk.binders = binders;
     }
-    key_schedule
 }
 
 /// Derives `client_early_traffic_secret` from the ClientHello alone and
@@ -134,7 +141,7 @@ pub(super) fn handle_server_hello(
     randoms: ConnectionRandoms,
     suite: &'static Tls13CipherSuite,
     transcript: HandshakeHash,
-    early_key_schedule: Option<KeyScheduleEarly>,
+    offered_psks: Vec<OfferedPsk>,
     hello: ClientHelloDetails,
     our_key_share: OfferedKeyShare,
     mut sent_tls13_fake_ccs: bool,
@@ -170,46 +177,70 @@ pub(super) fn handle_server_hello(
         ));
     }
 
-    let key_schedule_pre = match (
-        server_hello.extensions.pre_shared_key,
-        early_key_schedule,
-        &resuming_session,
-    ) {
-        (Some(selected), Some(early), Some(resuming)) => {
-            // RFC 8446 §4.2.11: we offered exactly one identity.
-            if selected != 0 {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::IllegalParameter,
-                    PeerMisbehaved::SelectedInvalidPsk,
-                ));
-            }
-            if suite.can_resume_from(resuming.suite()).is_none() {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::IllegalParameter,
-                    PeerMisbehaved::ResumptionOfferedWithIncompatibleCipherSuite,
-                ));
-            }
-            // Early data was encrypted with the ticket's suite; the server
-            // may not switch suites and still read it.
-            if cx.data.early_data.is_enabled()
-                && resuming.suite().common.suite != suite.common.suite
-            {
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::IllegalParameter,
-                    PeerMisbehaved::EarlyDataOfferedWithVariedCipherSuite,
-                ));
-            }
-            debug!("Resuming using PSK");
-            cx.common.handshake_kind = Some(HandshakeKind::Resumed);
-            early.into_pre_handshake()
-        }
-        (Some(_), ..) => {
+    let mut external_psk = None;
+    let key_schedule_pre = match server_hello.extensions.pre_shared_key {
+        Some(_) if offered_psks.is_empty() => {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::SelectedUnofferedPsk,
             ));
         }
-        (None, ..) => {
+        Some(selected) => {
+            // RFC 9846 §4.3.11: an identity we offered, whose hash is the
+            // selected suite's (and, for an external PSK restricted to one
+            // suite, that suite).
+            let Some(offered) = offered_psks.get(usize::from(selected)) else {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedInvalidPsk,
+                ));
+            };
+            let pinned_suite_ok = offered
+                .external
+                .as_ref()
+                .and_then(|psk| psk.cipher_suite())
+                .is_none_or(|cs| cs == suite.common.suite);
+            if offered.suite.common.hash_provider.algorithm()
+                != suite.common.hash_provider.algorithm()
+                || !pinned_suite_ok
+            {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::ResumptionOfferedWithIncompatibleCipherSuite,
+                ));
+            }
+            if cx.data.early_data.is_enabled() {
+                if selected != 0 {
+                    // Our early data went out under the first PSK, which
+                    // the server did not take: it cannot have read it.
+                    cx.data.early_data.rejected();
+                    cx.common.early_traffic = false;
+                } else if offered.suite.common.suite != suite.common.suite {
+                    // Early data was encrypted with the PSK's suite; the
+                    // server may not switch suites and still read it.
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::IllegalParameter,
+                        PeerMisbehaved::EarlyDataOfferedWithVariedCipherSuite,
+                    ));
+                }
+            }
+            match &offered.external {
+                None => {
+                    debug!("Resuming using PSK");
+                    cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+                }
+                Some(psk) => {
+                    debug!("Using external PSK");
+                    resuming_session = None;
+                    cx.common.external_psk_identity = Some(psk.identity().to_vec());
+                    external_psk = Some(psk.clone());
+                }
+            }
+            // The schedule continues with the negotiated suite, which may
+            // differ from the binder's in everything but the hash.
+            KeyScheduleEarly::new(suite, offered.secret.as_ref()).into_pre_handshake()
+        }
+        None => {
             debug!("Not resuming");
             // Any early data went out under a PSK the server did not take.
             if cx.data.early_data.is_enabled() {
@@ -220,6 +251,22 @@ pub(super) fn handle_server_hello(
             KeySchedulePreHandshake::new(suite)
         }
     };
+
+    // RFC 8773: the server authenticates with its certificate on top of an
+    // external PSK. It may only say so when it selected one.
+    let cert_with_extern_psk = server_hello.extensions.cert_with_extern_psk.is_some();
+    if cert_with_extern_psk && external_psk.is_none() {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::CertWithExternPskWithoutExternalPsk,
+        ));
+    }
+    if external_psk.is_some() && config.require_cert_with_extern_psk && !cert_with_extern_psk {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::CertWithExternPskRequired,
+        ));
+    }
 
     let shared_secret =
         our_key_share
@@ -252,6 +299,8 @@ pub(super) fn handle_server_hello(
     Ok(Box::new(ExpectEncryptedExtensions {
         config,
         resuming_session,
+        external_psk,
+        cert_with_extern_psk,
         server_name,
         randoms,
         suite,
@@ -265,6 +314,10 @@ pub(super) fn handle_server_hello(
 struct ExpectEncryptedExtensions {
     config: Arc<ClientConfig>,
     resuming_session: Option<persist::Tls13ClientSessionValue>,
+    /// The external PSK the server selected, if it did.
+    external_psk: Option<Arc<ExternalPsk>>,
+    /// Whether RFC 8773 certificate authentication was negotiated.
+    cert_with_extern_psk: bool,
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
     suite: &'static Tls13CipherSuite,
@@ -316,24 +369,57 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             exts.server_certificate_type,
         )?;
 
-        match self.resuming_session {
-            Some(resuming) => {
-                // RFC 8446 §4.2.10: the early_data acknowledgement decides the
-                // fate of what we sent; without it we switch to handshake keys.
-                let was_early_traffic = cx.common.early_traffic;
-                if was_early_traffic {
-                    match exts.early_data {
-                        Some(()) => cx.data.early_data.accepted(),
-                        None => {
-                            cx.data.early_data.rejected();
-                            cx.common.early_traffic = false;
-                        }
-                    }
-                }
-                if was_early_traffic && !cx.common.early_traffic {
+        let psk_selected = self.resuming_session.is_some() || self.external_psk.is_some();
+        // RFC 9846 §4.3.10: early_data here requires a PSK, and the first
+        // one we offered (under which our early data went out).
+        let was_early_traffic = cx.common.early_traffic;
+        if exts.early_data.is_some() && !psk_selected {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnsupportedExtension,
+                PeerMisbehaved::EarlyDataExtensionWithoutResumption,
+            ));
+        }
+        if exts.early_data.is_some() && !was_early_traffic {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::EarlyDataAcceptedWithOtherPsk,
+            ));
+        }
+
+        // An external PSK restricted to an ALPN protocol is used with that
+        // protocol only; with early data, RFC 9846 §4.3.10 requires the
+        // provisioned protocol to be the negotiated one.
+        if let Some(psk) = &self.external_psk {
+            let negotiated = cx.common.alpn_protocol.as_deref();
+            if exts.early_data.is_some() && psk.alpn_protocol() != negotiated {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
+                ));
+            }
+            if psk.alpn_protocol().is_some_and(|p| Some(p) != negotiated) {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::HandshakeFailure,
+                    PeerMisbehaved::SelectedExternalPskWithOtherAlpn,
+                ));
+            }
+        }
+
+        // RFC 9846 §4.3.10: the early_data acknowledgement decides the fate
+        // of what we sent; without it we switch to handshake keys.
+        if was_early_traffic {
+            match exts.early_data {
+                Some(()) => cx.data.early_data.accepted(),
+                None => {
+                    cx.data.early_data.rejected();
+                    cx.common.early_traffic = false;
                     self.key_schedule.set_handshake_encrypter(cx.common);
                 }
+            }
+        }
 
+        match (self.resuming_session, self.external_psk) {
+            (Some(resuming), _) => {
                 // The server authenticated through the PSK; reinstate the
                 // certificates seen when the session was established.
                 cx.common.peer_certificates = Some(resuming.server_cert_chain().clone());
@@ -349,24 +435,32 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
             }
-            None => {
-                // RFC 8446 §4.2.10: early_data here requires a resumed session.
-                if exts.early_data.is_some() {
-                    return Err(cx.common.send_fatal_alert(
-                        AlertDescription::UnsupportedExtension,
-                        PeerMisbehaved::EarlyDataExtensionWithoutResumption,
-                    ));
-                }
-                Ok(Box::new(ExpectCertificateOrCertReq {
+            (None, Some(_)) if !self.cert_with_extern_psk => {
+                // The server authenticated through the external PSK alone:
+                // no certificate follows.
+                Ok(Box::new(ExpectFinished {
                     config: self.config,
                     server_name: self.server_name,
                     randoms: self.randoms,
                     suite: self.suite,
                     transcript: self.transcript,
                     key_schedule: self.key_schedule,
-                    offered_sigschemes: self.hello.offered_sigschemes,
+                    client_auth: None,
+                    cert_verified: ServerCertVerified::assertion(),
+                    sig_verified: HandshakeSignatureValid::assertion(),
                 }))
             }
+            // A full handshake, or RFC 8773 certificate authentication on
+            // top of an external PSK.
+            _ => Ok(Box::new(ExpectCertificateOrCertReq {
+                config: self.config,
+                server_name: self.server_name,
+                randoms: self.randoms,
+                suite: self.suite,
+                transcript: self.transcript,
+                key_schedule: self.key_schedule,
+                offered_sigschemes: self.hello.offered_sigschemes,
+            })),
         }
     }
 }

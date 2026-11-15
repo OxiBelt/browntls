@@ -58,6 +58,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) unknown: Vec<ExtensionType>,
     /// Always encoded last (RFC 8446 §4.2.11).
     pub(crate) preshared_key: Option<PresharedKeyOffer>,
+    /// RFC 8773 `tls_cert_with_extern_psk`: an empty extension.
+    pub(crate) cert_with_extern_psk: Option<()>,
 }
 
 impl ClientExtensions {
@@ -132,6 +134,10 @@ impl ClientExtensions {
         add(
             self.transport_parameters.is_some(),
             ExtensionType::TransportParameters,
+        );
+        add(
+            self.cert_with_extern_psk.is_some(),
+            ExtensionType::TlsCertWithExternPsk,
         );
         for unknown in &self.unknown {
             add(true, *unknown);
@@ -236,6 +242,9 @@ impl Codec<'_> for ClientExtensions {
         if let Some(tp) = &self.transport_parameters {
             encode_extension(ExtensionType::TransportParameters, out, |b| tp.encode(b));
         }
+        if self.cert_with_extern_psk.is_some() {
+            encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
+        }
         if let Some(psk) = &self.preshared_key {
             encode_extension(ExtensionType::PreSharedKey, out, |b| psk.encode(b));
         }
@@ -321,6 +330,7 @@ impl Codec<'_> for ClientExtensions {
                 ExtensionType::PreSharedKey => {
                     out.preshared_key = Some(PresharedKeyOffer::read(body)?);
                 }
+                ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();

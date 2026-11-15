@@ -63,6 +63,8 @@ pub(crate) fn allowed_in(ext: ExtensionType, msg: Tls13Message) -> Option<bool> 
         E::MaxFragmentLength => &[ClientHello, EncryptedExtensions],
         E::SCT => &[ClientHello, CertificateRequest, Certificate],
         E::TransportParametersDraft => &[ClientHello, EncryptedExtensions],
+        // RFC 8773 (RFC 9973).
+        E::TlsCertWithExternPsk => &[ClientHello, ServerHello],
 
         // Defined for TLS 1.2 and earlier only ("-" in the TLS 1.3 column).
         E::ClientCertificateUrl

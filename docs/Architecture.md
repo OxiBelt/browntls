@@ -185,6 +185,83 @@ stateless HelloRetryRequest cookies, and RFC 6066 `max_fragment_length`
 (not "Recommended" in RFC 9846 Table 1; `record_size_limit` and the local
 `max_fragment_size` setting cover the use case).
 
+### TLS 1.3 external PSKs
+
+External pre-shared keys (RFC 9846 §4.3.11) live in `browntls::psk`. An
+`ExternalPsk` carries its identity, key, hash (SHA-256 or SHA-384) and
+optional restrictions: one cipher suite, one server name, one ALPN protocol.
+A client lists its keys in `ClientConfig::external_psks`; a server finds them
+through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
+(`with_external_psks_only` builds a server without a certificate).
+
+- Key exchange: only `psk_dhe_ke`. The `psk_ke` mode, which gives up forward
+  secrecy (RFC 9257), is neither offered nor accepted; a server ignores the
+  PSKs of a client that offers only `psk_ke`.
+- Client: a resumption ticket comes first, then the external PSKs in
+  configuration order, each with an obfuscated ticket age of zero and a
+  binder over the hash of the first offered suite it is usable with, under
+  the `ext binder` label (`imp binder` for imported keys, `res binder` for
+  tickets). After a HelloRetryRequest only the PSKs usable with the selected
+  suite are offered again. The key schedule then continues with the
+  negotiated suite (which may differ from the binder's in everything but
+  the hash).
+- Server: the first offered external PSK usable with a suite the server
+  could select narrows the suite choice to the suites it is usable with (the
+  server "MUST ensure that it selects a compatible PSK (if any) and cipher
+  suite"). Of the first 16 identities (a local bound on lookups and ticket
+  decryption; later ones are ignored), the first that names a usable external
+  PSK or ticket is selected and only its binder is checked, in constant time;
+  a wrong binder is `decrypt_error`. An identity whose binder length is not
+  that of the key's hash is passed over. A handshake that selects an external
+  PSK sends no certificate; with no PSK selected, a server without a
+  certificate fails with `handshake_failure`. A client that offers TLS 1.3
+  only and a PSK may omit `signature_algorithms` (RFC 9846 §4.3.3); it is
+  then served by PSK only. Only servers configured with external PSKs defer
+  the missing-certificate failure to after PSK selection.
+- 0-RTT: off by default for external PSKs (RFC 9257). `with_early_data`
+  enables it per key; the key needs a provisioned suite and must be the first
+  offered, and the server checks suite and ALPN protocol against the
+  provisioned ones (RFC 9846 §4.3.10). There is no anti-replay protection
+  for external PSKs: such early data can be replayed.
+- Importer (RFC 9258): a key configured with `imported(context)` is used
+  only through the importer. The client offers one `ImportedIdentity` per
+  hash of its TLS 1.3 suites (target protocol TLS 1.3, target KDF
+  `HKDF_SHA256` or `HKDF_SHA384`), with `ipskx = HKDF-Expand-Label(
+  HKDF-Extract(0, epsk), "derived psk", Hash(ImportedIdentity), L)` under the
+  EPSK's hash; the server parses the identity, resolves its external identity
+  and requires the same context. The EPSK's hash must be that of one of the
+  provider's TLS 1.3 suites. No published test vectors exist; the derivation
+  is checked against an independent HMAC computation and across providers.
+- Certificate authentication with an external PSK (RFC 8773,
+  `tls_cert_with_extern_psk`, 0x0021): opt-in on both sides
+  (`cert_with_extern_psk`). A client sends the extension only when it offers
+  an external PSK, and then no 0-RTT under one; a server echoes it in its
+  ServerHello only when it selected an external PSK and has a certificate,
+  and then authenticates with Certificate and CertificateVerify (and may
+  request client authentication) on top of the PSK and (EC)DHE. A client
+  rejects the extension without an external PSK (`illegal_parameter`) and,
+  with `require_cert_with_extern_psk`, a server that does not negotiate it.
+- `CommonState::external_psk_identity` reports the key used; such a
+  handshake is `HandshakeKind::Full`.
+
+RFC 9257 guidance and what browntls enforces:
+
+- Keys shorter than 128 bits are refused (`ExternalPsk::MIN_KEY_LEN`); the
+  entropy of a key cannot be measured, and a low-entropy secret such as a
+  password must not be used as a PSK (it needs a PAKE).
+- A PSK must be known to exactly two parties, and a node that acts as client
+  and as server must use distinct PSKs for the two roles: sharing a key more
+  widely lets any holder impersonate any other (including reflection of a
+  connection back to its sender). browntls cannot see this; it is a
+  provisioning rule for the application.
+- Identities are sent in clear and can link connections of one client;
+  choose identities that reveal nothing and, where linkability matters, are
+  not stable. The resolver receives unauthenticated identities and should
+  not leak through timing or errors which identities exist.
+- A server that holds an external PSK and a certificate authenticates with
+  the PSK when one is offered; the PSK proves only possession of the key,
+  not any certificate identity.
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |

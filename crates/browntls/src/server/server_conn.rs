@@ -199,6 +199,19 @@ pub struct ServerConfig {
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
+
+    /// Finds the external PSKs (RFC 9846 §4.3.11) clients may offer; `None`
+    /// (the default) accepts none. See [`crate::psk`].
+    ///
+    /// A TLS 1.3 handshake that selects an external PSK authenticates
+    /// through it and sends no certificate, so [`Self::cert_resolver`] may
+    /// return nothing for a client that offers one.
+    pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
+
+    /// Whether to authenticate with our certificate as well when the
+    /// client asks for it with `tls_cert_with_extern_psk` (RFC 8773) and an
+    /// external PSK is selected. Off by default.
+    pub cert_with_extern_psk: bool,
 }
 
 impl ServerConfig {

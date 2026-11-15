@@ -62,7 +62,8 @@ impl Side {
 /// How the handshake was completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeKind {
-    /// A full handshake with certificate authentication.
+    /// A full handshake: certificate authentication, or (TLS 1.3) an
+    /// external PSK with (EC)DHE, see [`CommonState::external_psk_identity`].
     Full,
     /// A full handshake that needed a HelloRetryRequest (TLS 1.3 only).
     FullWithHelloRetryRequest,
@@ -168,6 +169,8 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
+    /// The identity of the external PSK the handshake used, if any.
+    pub(crate) external_psk_identity: Option<Vec<u8>>,
 }
 
 impl CommonState {
@@ -203,6 +206,7 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
+            external_psk_identity: None,
         }
     }
 
@@ -247,6 +251,18 @@ impl CommonState {
     /// How the handshake completed, once it has.
     pub fn handshake_kind(&self) -> Option<HandshakeKind> {
         self.handshake_kind
+    }
+
+    /// The identity of the external PSK (RFC 9846 §4.3.11) the handshake
+    /// authenticated with, once the server selected one; for an imported
+    /// PSK (RFC 9258), its external identity.
+    ///
+    /// Such a handshake is reported as [`HandshakeKind::Full`] (or
+    /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
+    /// authentication was negotiated on top of it (RFC 8773), there are no
+    /// peer certificates.
+    pub fn external_psk_identity(&self) -> Option<&[u8]> {
+        self.external_psk_identity.as_deref()
     }
 
     /// Whether every negotiated component claims FIPS validation.

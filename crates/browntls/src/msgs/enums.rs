@@ -84,6 +84,7 @@ enum_builder! {
         EncryptThenMac => 0x0016,
         ExtendedMasterSecret => 0x0017,
         CompressCertificate => 0x001b,
+        TlsCertWithExternPsk => 0x0021,
         SessionTicket => 0x0023,
         PreSharedKey => 0x0029,
         EarlyData => 0x002a,

@@ -252,6 +252,7 @@ pub(crate) struct PresharedKeyOffer {
 }
 
 impl PresharedKeyOffer {
+    #[cfg(test)]
     pub(crate) fn new(id: PresharedKeyIdentity, binder: Vec<u8>) -> Self {
         Self {
             identities: alloc::vec![id],
@@ -321,6 +322,8 @@ pub(crate) struct ServerExtensions {
     pub(crate) supported_groups: Option<Vec<NamedGroup>>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
+    /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
+    pub(crate) cert_with_extern_psk: Option<()>,
 }
 
 impl ServerExtensions {
@@ -381,6 +384,10 @@ impl ServerExtensions {
         add(
             self.supported_groups.is_some(),
             ExtensionType::EllipticCurves,
+        );
+        add(
+            self.cert_with_extern_psk.is_some(),
+            ExtensionType::TlsCertWithExternPsk,
         );
         out.extend(self.unknown.iter().copied());
         out
@@ -448,6 +455,9 @@ impl Codec<'_> for ServerExtensions {
                 crate::msgs::codec::encode_vec_u16(b, groups)
             });
         }
+        if self.cert_with_extern_psk.is_some() {
+            encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -495,6 +505,7 @@ impl Codec<'_> for ServerExtensions {
                         "NamedGroups",
                     )?);
                 }
+                ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();

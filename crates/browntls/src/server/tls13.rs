@@ -12,8 +12,9 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::SupportedKxGroup;
 use crate::ct::constant_time_eq;
+use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{
-    AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
+    AlertDescription, CertificateType, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
@@ -546,18 +547,27 @@ impl CompleteClientHelloHandling {
         let doing_client_auth = if let Some(server_key) = server_key {
             let client_auth = !defer_client_auth
                 && emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
+            let delegated = choose_delegated_credential(
+                &self.config,
+                &server_key,
+                client_hello,
+                &sigschemes,
+                self.cert_types,
+            );
             emit_certificate_tls13(
                 &mut self.transcript,
                 cx.common,
                 &self.config,
                 &server_key,
                 client_hello,
+                delegated,
             );
             emit_certificate_verify_tls13(
                 &mut self.transcript,
                 cx.common,
                 &server_key,
                 &sigschemes,
+                delegated,
             )?;
             client_auth
         } else {
@@ -935,12 +945,40 @@ fn certificate_request_message(
     })
 }
 
+/// The first delegated credential (RFC 9345) of `server_key` that the
+/// client accepts, if it offered the extension: its scheme must be in the
+/// client's `delegated_credential` list, the credential's signature scheme
+/// in `signature_algorithms` (§4.1.1), and it must be valid for at most
+/// seven more days (§4.1.3). Only for X.509 certificates.
+fn choose_delegated_credential<'a>(
+    config: &ServerConfig,
+    server_key: &ActiveCertifiedKey<'a>,
+    client_hello: &ClientHelloPayload,
+    sigschemes: &[SignatureScheme],
+    cert_types: hs::NegotiatedCertTypes,
+) -> Option<&'a DelegatedCredentialKey> {
+    let offered = client_hello.extensions.delegated_credential.as_ref()?;
+    let end_entity = server_key.get_cert().first()?;
+    if server_key.get_delegated_credentials().is_empty()
+        || cert_types.server == Some(CertificateType::RawPublicKey)
+    {
+        return None;
+    }
+    let now = config.current_time().ok()?;
+    server_key
+        .get_delegated_credentials()
+        .iter()
+        .map(|dc| &**dc)
+        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
+}
+
 fn emit_certificate_tls13(
     transcript: &mut HandshakeHash,
     common: &mut CommonState,
     config: &ServerConfig,
     server_key: &ActiveCertifiedKey<'_>,
     client_hello: &ClientHelloPayload,
+    delegated: Option<&DelegatedCredentialKey>,
 ) {
     // RFC 6066 §8: staple only when the client asked.
     let ocsp = client_hello
@@ -948,7 +986,11 @@ fn emit_certificate_tls13(
         .certificate_status_request
         .as_ref()
         .and_then(|_| server_key.get_ocsp());
-    let cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+    let mut cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+    // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
+    if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
+        first.delegated_credential = Some(dc.credential().clone());
+    }
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression
@@ -986,9 +1028,18 @@ fn emit_certificate_verify_tls13(
     common: &mut CommonState,
     server_key: &ActiveCertifiedKey<'_>,
     schemes: &[SignatureScheme],
+    delegated: Option<&DelegatedCredentialKey>,
 ) -> Result<(), Error> {
     let message = crate::client::tls13::construct_server_verify_message(&transcript.current_hash());
-    let signer = server_key.get_key().choose_scheme(schemes).ok_or_else(|| {
+    // RFC 9345 §4.1.1: with a delegated credential, its key signs with the
+    // credential's scheme (checked to be possible when it was attached).
+    let signer = match delegated {
+        Some(dc) => dc
+            .key()
+            .choose_scheme(&[dc.credential().credential.dc_cert_verify_algorithm]),
+        None => server_key.get_key().choose_scheme(schemes),
+    };
+    let signer = signer.ok_or_else(|| {
         common.send_fatal_alert(
             AlertDescription::HandshakeFailure,
             PeerIncompatible::NoSignatureSchemesInCommon,
@@ -1117,11 +1168,12 @@ fn check_client_certificate(
             PeerMisbehaved::IllegalCertificateRequestContext,
         ));
     }
-    // We never request stapled responses or SCTs from clients.
+    // We never request stapled responses, SCTs or delegated credentials
+    // (RFC 9345 client credentials are not supported) from clients.
     if certp
         .entries
         .iter()
-        .any(|e| e.status.is_some() || e.sct_list.is_some())
+        .any(|e| e.status.is_some() || e.sct_list.is_some() || e.delegated_credential.is_some())
     {
         return Err(common.send_fatal_alert(
             AlertDescription::UnsupportedExtension,

@@ -29,8 +29,14 @@ pub(crate) struct AuthorityKeyId<'a> {
 }
 
 /// `KeyUsage` bit positions (RFC 5280 §4.2.1.3).
+pub(crate) const KU_DIGITAL_SIGNATURE: usize = 0;
 pub(crate) const KU_KEY_CERT_SIGN: usize = 5;
 pub(crate) const KU_CRL_SIGN: usize = 6;
+
+/// The `DelegationUsage` extension's `extnID` contents: OID
+/// 1.3.6.1.4.1.44363.44 (RFC 9345 §4.2).
+pub(crate) const DELEGATION_USAGE_OID: &[u8] =
+    &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xda, 0x4b, 0x2c];
 
 /// A parsed certificate. Slices borrow from the input DER.
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +72,8 @@ pub(crate) struct Cert<'a> {
     /// `SubjectKeyIdentifier` contents.
     pub(crate) subject_key_id: Option<&'a [u8]>,
     pub(crate) authority_key_id: Option<AuthorityKeyId<'a>>,
+    /// Whether the `DelegationUsage` extension (RFC 9345 §4.2) is present.
+    pub(crate) delegation_usage: Option<()>,
 }
 
 impl<'a> Cert<'a> {
@@ -125,6 +133,7 @@ impl<'a> Cert<'a> {
                 crl_distribution_points: None,
                 subject_key_id: None,
                 authority_key_id: None,
+                delegation_usage: None,
             };
 
             if let Some(wrapped) = tbs.optional(tag::context_constructed(3))? {
@@ -142,6 +151,18 @@ impl<'a> Cert<'a> {
         ext: &Extension<'a>,
         policy: UnknownExtensionPolicy,
     ) -> Result<(), Error> {
+        // RFC 9345 §4.2: `DelegationUsage ::= NULL`, outside `id-ce`.
+        if ext.id == DELEGATION_USAGE_OID {
+            return set_once(&mut self.delegation_usage, || {
+                value(ext, |r| {
+                    if r.expect(tag::NULL)?.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(Error::BadDer)
+                    }
+                })
+            });
+        }
         match ext.id_ce_arc() {
             // id-ce-subjectKeyIdentifier
             Some(14) => set_once(&mut self.subject_key_id, || {

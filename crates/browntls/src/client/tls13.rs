@@ -13,6 +13,7 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState
 use crate::conn::State;
 use crate::crypto::hmac;
 use crate::ct::constant_time_eq;
+use crate::delegated_credential::{self, DelegatedCredential};
 use crate::enums::{
     AlertDescription, CertificateCompressionAlgorithm, ContentType, HandshakeType, ProtocolVersion,
 };
@@ -737,6 +738,26 @@ impl State<ClientConnectionData> for ExpectCertificate {
             ));
         }
 
+        // RFC 9345 §4.1.1: a delegated credential we did not ask for is
+        // unexpected_message; one on any entry but the end entity's is
+        // illegal_parameter (the RFC allows ignoring it; we fail closed).
+        let delegated_credential = cert_chain.end_entity_delegated_credential().cloned();
+        if !self.config.enable_delegated_credentials
+            && (delegated_credential.is_some()
+                || cert_chain.delegated_credential_on_non_end_entity())
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::UnsolicitedDelegatedCredential,
+            ));
+        }
+        if cert_chain.delegated_credential_on_non_end_entity() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DelegatedCredentialNotOnEndEntity,
+            ));
+        }
+
         let end_entity_ocsp = cert_chain.end_entity_ocsp();
         let server_cert = ServerCertDetails::new(
             cert_chain.into_certificate_chain().into_owned(),
@@ -754,6 +775,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             client_auth: self.client_auth,
             client_cert_compression: self.client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
+            delegated_credential,
         }))
     }
 }
@@ -771,6 +793,7 @@ struct ExpectCertificateVerify {
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
+    delegated_credential: Option<DelegatedCredential>,
 }
 
 impl State<ClientConnectionData> for ExpectCertificateVerify {
@@ -814,11 +837,44 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
 
         let message = construct_server_verify_message(&handshake_hash);
-        let sig_verified = self
-            .config
-            .verifier()
-            .verify_tls13_signature(&message, end_entity, cert_verify)
-            .map_err(|err| send_cert_verify_error_alert(cx.common, err))?;
+        let sig_verified = match &self.delegated_credential {
+            None => self
+                .config
+                .verifier()
+                .verify_tls13_signature(&message, end_entity, cert_verify)
+                .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+            Some(dc) => {
+                // RFC 9345 §4.1.3: an invalid credential is illegal_parameter.
+                let offered_dc_schemes = delegated_credential_schemes(&self.config);
+                let presented = delegated_credential::Presented {
+                    side: Side::Server,
+                    end_entity,
+                    offered_dc_schemes: &offered_dc_schemes,
+                    offered_sig_schemes: &self.offered_sigschemes,
+                    cert_verify_scheme: cert_verify.scheme,
+                    now,
+                };
+                delegated_credential::validate(dc, &presented, |msg, dss| {
+                    self.config
+                        .verifier()
+                        .verify_tls13_signature(msg, end_entity, dss)
+                })
+                .map_err(|err| {
+                    cx.common
+                        .send_fatal_alert(AlertDescription::IllegalParameter, err)
+                })?;
+                // Then the credential's key verifies CertificateVerify.
+                self.config
+                    .verifier()
+                    .verify_tls13_signature_with_delegated_key(
+                        &message,
+                        &dc.credential.public_key,
+                        cert_verify,
+                    )
+                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?
+            }
+        };
+        cx.data.delegated_credential = self.delegated_credential;
 
         cx.common.peer_certificates = Some(self.server_cert.cert_chain);
         self.transcript.add_message(&m);
@@ -838,7 +894,20 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
     }
 }
 
-/// Picks the alert for a failed certificate or signature check.
+/// The schemes a client accepts for a server's delegated credential
+/// (RFC 9345 §4.1.1): the verifier's TLS 1.3 schemes, without
+/// `rsa_pss_rsae_*` (RFC 9345 §4 forbids `rsaEncryption` credential keys).
+pub(super) fn delegated_credential_schemes(
+    config: &ClientConfig,
+) -> Vec<crate::enums::SignatureScheme> {
+    config
+        .verifier()
+        .supported_verify_schemes()
+        .into_iter()
+        .filter(|scheme| delegated_credential::credential_scheme_allowed(*scheme))
+        .collect()
+}
+
 /// Sends the alert for a certificate chain that failed validation.
 ///
 /// A signature inside the chain that does not verify, or that uses an

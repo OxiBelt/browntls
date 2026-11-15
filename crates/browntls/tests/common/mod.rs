@@ -158,6 +158,43 @@ pub fn issue_chain<K: rcgen::SigningKey>(
     names: &[&str],
     purpose: ExtendedKeyUsagePurpose,
 ) -> Chain {
+    issue_chain_with(key_type, ca_key, ee_key, ee_pkcs8, names, purpose, |_| {})
+}
+
+/// The `DelegationUsage` extension (RFC 9345 §4.2): OID
+/// 1.3.6.1.4.1.44363.44 with a `NULL` value, non-critical.
+pub fn delegation_usage_extension() -> rcgen::CustomExtension {
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 44363, 44], vec![0x05, 0x00])
+}
+
+/// Like [`server_chain`], with the `DelegationUsage` extension on the end
+/// entity (whose key usage is `digitalSignature`), so it can sign delegated
+/// credentials.
+pub fn delegation_server_chain(key_type: KeyType) -> Chain {
+    let ca_key = key_type.generate_key();
+    let ee_key = key_type.generate_key();
+    let ee_pkcs8 = ee_key.serialize_der();
+    issue_chain_with(
+        key_type,
+        ca_key,
+        &ee_key,
+        ee_pkcs8,
+        &["localhost", "testserver.example"],
+        ExtendedKeyUsagePurpose::ServerAuth,
+        |params| params.custom_extensions.push(delegation_usage_extension()),
+    )
+}
+
+/// [`issue_chain`], letting `customize` adjust the end entity's parameters.
+pub fn issue_chain_with<K: rcgen::SigningKey>(
+    key_type: KeyType,
+    ca_key: K,
+    ee_key: &impl rcgen::PublicKeyData,
+    ee_pkcs8: Vec<u8>,
+    names: &[&str],
+    purpose: ExtendedKeyUsagePurpose,
+    customize: impl FnOnce(&mut CertificateParams),
+) -> Chain {
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -178,6 +215,7 @@ pub fn issue_chain<K: rcgen::SigningKey>(
         DnType::CommonName,
         names.first().copied().unwrap_or("browntls test"),
     );
+    customize(&mut ee_params);
     let ee_cert = ee_params.signed_by(ee_key, &issuer).expect("ee cert");
 
     Chain {
@@ -290,6 +328,15 @@ impl ServerCertVerifier for PinnedServerVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algs.supported_schemes()
+    }
+
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls::crypto::verify_tls13_signature_with_raw_key(message, public_key, dss, &self.algs)
     }
 }
 
@@ -494,6 +541,17 @@ impl ServerCertVerifier for SchemeRecordingServerVerifier {
 
     fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
         self.inner.root_hint_subjects()
+    }
+
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner
+            .verify_tls13_signature_with_delegated_key(message, public_key, dss)
     }
 }
 

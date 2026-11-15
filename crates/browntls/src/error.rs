@@ -209,6 +209,13 @@ pub enum PeerMisbehaved {
     /// entry (RFC 9846 §4.5.1).
     BadCertChainExtensions,
     CipherSuiteDifferedOnRetry,
+    DelegatedCredentialBadSignature,
+    DelegatedCredentialExpired,
+    DelegatedCredentialNotOnEndEntity,
+    DelegatedCredentialSchemeMismatch,
+    DelegatedCredentialValidityTooLong,
+    DelegatedCredentialWithUnofferedScheme,
+    DelegatedCredentialWithoutDelegationUsage,
     DisallowedCertificateRequestExtension,
     DisallowedEncryptedExtension,
     DisallowedHelloRetryRequestExtension,
@@ -274,6 +281,7 @@ pub enum PeerMisbehaved {
     ResumptionOfferedWithVariedCipherSuite,
     ResumptionOfferedWithVariedEms,
     ResumptionOfferedWithIncompatibleCipherSuite,
+    ReusedAuthenticatorContext,
     SelectedDifferentCipherSuiteAfterRetry,
     SelectedInvalidPsk,
     SelectedTls12UsingTls13VersionExtension,
@@ -299,6 +307,7 @@ pub enum PeerMisbehaved {
     TooMuchEarlyDataReceived,
     UnexpectedCleartextExtension,
     UnsolicitedCertExtension,
+    UnsolicitedDelegatedCredential,
     UnsolicitedEncryptedExtension,
     /// A post-handshake CertificateRequest reached a client that did not
     /// offer `post_handshake_auth` (RFC 9846 §4.7.2).

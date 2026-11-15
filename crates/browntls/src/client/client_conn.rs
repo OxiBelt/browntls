@@ -13,6 +13,7 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
+use crate::delegated_credential::DelegatedCredential;
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::key_log::KeyLog;
@@ -150,10 +151,95 @@ pub struct ClientConfig {
     /// ECH extension. [`EchMode::Enable`](crate::ech::EchMode::Enable)
     /// needs TLS 1.3 enabled and limits connections to it.
     pub ech_mode: Option<crate::ech::EchMode>,
+    /// The largest `uncompressed_length` accepted in a peer's
+    /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
+    /// applies to larger values: a message declaring more than 64 KiB does
+    /// not parse and ends the connection with `decode_error`. A message
+    /// declaring more than this limit is refused with `bad_certificate`
+    /// before anything is decompressed. Zero turns reception off: the
+    /// `compress_certificate` extension is then not sent, whatever
+    /// `cert_decompressors` holds.
+    pub cert_decompression_limit: usize,
+
+    /// Whether to accept a TLS 1.3 server authenticating with a delegated
+    /// credential (RFC 9345). When set, the ClientHello carries the
+    /// `delegated_credential` extension listing the verifier's TLS 1.3
+    /// schemes, and a credential the server sends is checked (certificate
+    /// `DelegationUsage`, the signature by the certificate key, at most
+    /// seven days of validity) before its key verifies CertificateVerify.
+    /// The verifier must implement
+    /// [`ServerCertVerifier::verify_tls13_signature_with_delegated_key`].
+    /// Off by default.
+    pub enable_delegated_credentials: bool,
+
+    /// The `record_size_limit` to announce (RFC 8449): the largest record
+    /// plaintext we accept, counting the content type in TLS 1.3. `None`
+    /// sends no extension, and then the server's limit is not learnt
+    /// either. A value above the protocol maximum (2^14 + 1 when TLS 1.3 is
+    /// offered, 2^14 otherwise) is lowered to it; a value below 64 makes
+    /// connection creation fail with [`Error::BadRecordSizeLimit`].
+    ///
+    /// Defaults to `Some(16385)`: no restriction of our own, but a server
+    /// that announces a smaller limit has its limit respected. Records we
+    /// send are limited by the server's limit and by `max_fragment_size`,
+    /// whichever is smaller.
+    pub record_size_limit: Option<u16>,
+
+    /// The `ticket_request` extension (RFC 9149) to send when TLS 1.3 is
+    /// offered: how many NewSessionTicket messages we would like. `None`
+    /// (the default) sends no extension, and the server sends its own
+    /// number of tickets.
+    pub tls13_ticket_request: Option<TicketRequest>,
+
+    /// Whether to send GREASE values (RFC 8701) in the ClientHello: in the
+    /// cipher suites, `supported_groups`, `key_share` (with a one-byte
+    /// share), `supported_versions`, `signature_algorithms` and
+    /// `psk_key_exchange_modes` lists, and as two extensions (one empty,
+    /// one not). The values are random per connection. Off by default
+    /// until interoperability with the GnuTLS peers of the end-to-end
+    /// matrix has been shown; rustls and OpenSSL 3 are tested.
+    pub enable_grease: bool,
+
+    /// How the ClientHello is padded with the `padding` extension (RFC 7685).
+    pub client_hello_padding: ClientHelloPadding,
 
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
+
+    /// External PSKs (RFC 9846 §4.3.11) to offer in TLS 1.3, in preference
+    /// order, after any resumption ticket. Empty by default. See
+    /// [`crate::psk`].
+    ///
+    /// A server that selects one authenticates through it and sends no
+    /// certificate; a server that selects none is authenticated with its
+    /// certificate as usual, through the configured verifier.
+    pub external_psks: Vec<Arc<crate::psk::ExternalPsk>>,
+
+    /// Whether to ask a server that selects an external PSK to authenticate
+    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 8773).
+    /// Off by default. The server may decline; set
+    /// [`Self::require_cert_with_extern_psk`] to refuse a server that does.
+    pub cert_with_extern_psk: bool,
+
+    /// With [`Self::cert_with_extern_psk`], whether a server that selects an
+    /// external PSK without also authenticating with its certificate is
+    /// refused. Off by default.
+    pub require_cert_with_extern_psk: bool,
+
+    /// Whether to refuse a server that does not authenticate through one of
+    /// [`Self::external_psks`]: the handshake fails unless the server selects
+    /// one, or resumes a session that was itself established with one (its
+    /// key still configured here). Only such tickets are offered, and a
+    /// TLS 1.2 server is refused. Off by default.
+    ///
+    /// Without it, a server that selects no external PSK is authenticated
+    /// with its certificate instead; an application that needs PSK
+    /// authentication must then check
+    /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
+    /// once the handshake completes.
+    pub require_external_psk: bool,
 }
 
 impl ClientConfig {
@@ -251,7 +337,7 @@ impl ClientConfig {
             .ok_or(Error::FailedToGetCurrentTime)
     }
 
-    pub(super) fn verifier(&self) -> &dyn ServerCertVerifier {
+    pub(crate) fn verifier(&self) -> &dyn ServerCertVerifier {
         &*self.verifier
     }
 }
@@ -266,6 +352,34 @@ impl TimeProvider for NoTime {
     fn current_time(&self) -> Option<UnixTime> {
         None
     }
+}
+
+/// The client's `ticket_request` (RFC 9149 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TicketRequest {
+    /// Tickets wanted when the server establishes a new session (a full
+    /// handshake, or a resumption it declined).
+    pub new_session_count: u8,
+    /// Tickets wanted when the server resumes the session we offered.
+    pub resumption_count: u8,
+}
+
+/// How the ClientHello is padded with the `padding` extension (RFC 7685).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientHelloPadding {
+    /// Never pad.
+    Disabled,
+    /// Pad a ClientHello whose handshake message (header included) would
+    /// be 256 to 511 bytes long to 512 bytes: some server implementations
+    /// hang on such lengths (RFC 7685 §4). The default; a ClientHello with
+    /// a post-quantum key share is longer anyway.
+    #[default]
+    AvoidProblematicLengths,
+    /// Pad the ClientHello handshake message to at least this many bytes
+    /// (header included), then apply [`Self::AvoidProblematicLengths`].
+    /// The padding body is at most 65535 bytes.
+    AtLeast(u16),
 }
 
 /// Session resumption settings.
@@ -452,11 +566,16 @@ pub struct ClientConnectionData {
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
-    server_name: ServerName<'static>,
+    pub(crate) server_name: ServerName<'static>,
+    /// The delegated credential the server authenticated with (RFC 9345).
+    pub(super) delegated_credential: Option<DelegatedCredential>,
+    /// The configuration, for exported authenticators (RFC 9261).
+    pub(crate) config: Arc<ClientConfig>,
+    pub(crate) authenticators: crate::exported_authenticator::AuthenticatorState,
 }
 
 impl ClientConnectionData {
-    fn new(session_store: Arc<dyn ClientSessionStore>, server_name: ServerName<'static>) -> Self {
+    fn new(config: Arc<ClientConfig>, server_name: ServerName<'static>) -> Self {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
@@ -464,9 +583,29 @@ impl ClientConnectionData {
             post_handshake_auth_responses: 0,
             ech_status: crate::ech::EchStatus::NotOffered,
             ech_retry_configs: None,
-            session_store,
+            session_store: config.resumption.store.clone(),
             server_name,
+            delegated_credential: None,
+            config,
+            authenticators: Default::default(),
         }
+    }
+}
+
+impl ClientConnectionData {
+    /// Whether 0-RTT data may still be written (unbuffered API).
+    pub(crate) fn early_data_writable(&self) -> bool {
+        self.early_data.is_enabled()
+    }
+
+    /// How many more bytes of 0-RTT data the ticket allows.
+    pub(crate) fn early_data_left(&self) -> usize {
+        self.early_data.left
+    }
+
+    /// Charges `len` bytes (at most [`Self::early_data_left`]) of sent 0-RTT data.
+    pub(crate) fn charge_early_data(&mut self, len: usize) {
+        self.early_data.left = self.early_data.left.saturating_sub(len);
     }
 }
 
@@ -492,9 +631,10 @@ impl ConnectionCore<ClientConnectionData> {
     ) -> Result<Self, Error> {
         let mut common_state = CommonState::new(Side::Client);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
-        let mut data = ClientConnectionData::new(config.resumption.store.clone(), name.clone());
+        let mut data = ClientConnectionData::new(config.clone(), name.clone());
         let mut cx = crate::conn::Context {
             common: &mut common_state,
             data: &mut data,
@@ -532,6 +672,13 @@ impl ClientConnection {
     /// How many TLS 1.3 tickets the server has sent so far.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.core.data.tls13_tickets_received
+    }
+
+    /// The delegated credential (RFC 9345) the server authenticated with,
+    /// once its CertificateVerify has been verified with the credential's
+    /// key; `None` when the server signed with its certificate key.
+    pub fn delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.inner.core.data.delegated_credential.as_ref()
     }
 
     /// A writer for TLS 1.3 0-RTT ("early") data, while that is possible.
@@ -658,5 +805,80 @@ impl core::ops::DerefMut for ClientConnection {
 impl From<ClientConnection> for crate::conn::Connection {
     fn from(conn: ClientConnection) -> Self {
         Self::Client(conn)
+    }
+}
+
+/// A client-side TLS connection driven by the caller's buffers; see
+/// [`crate::unbuffered`].
+///
+/// Available without `std`. The ClientHello is queued by [`Self::new`], so
+/// the first `process_tls_records` (with no input) offers it for encoding.
+pub struct UnbufferedClientConnection {
+    inner: crate::unbuffered::UnbufferedConnectionCommon<ClientConnectionData>,
+}
+
+impl UnbufferedClientConnection {
+    /// Starts a connection to `name` with `config`.
+    pub fn new(config: Arc<ClientConfig>, name: ServerName<'static>) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_alpn(config, name, alpn)
+    }
+
+    /// Like [`Self::new`] with ALPN protocols overriding the configuration's.
+    pub fn new_with_alpn(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
+                config,
+                name,
+                alpn_protocols,
+            )?),
+        })
+    }
+
+    /// How many TLS 1.3 tickets the server has sent so far.
+    pub fn tls13_tickets_received(&self) -> u32 {
+        self.inner.core.data.tls13_tickets_received
+    }
+
+    /// Whether the server accepted the 0-RTT data offered.
+    ///
+    /// Meaningful once the handshake has finished.
+    pub fn is_early_data_accepted(&self) -> bool {
+        self.inner.core.data.early_data.is_accepted()
+    }
+
+    /// Whether the connection only uses FIPS-validated components.
+    pub fn fips(&self) -> bool {
+        self.inner.core.common_state.fips()
+    }
+
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
+        self.inner.dangerous_extract_secrets()
+    }
+}
+
+impl fmt::Debug for UnbufferedClientConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnbufferedClientConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for UnbufferedClientConnection {
+    type Target = crate::unbuffered::UnbufferedConnectionCommon<ClientConnectionData>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for UnbufferedClientConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }

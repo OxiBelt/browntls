@@ -12,31 +12,33 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::SupportedKxGroup;
 use crate::ct::constant_time_eq;
+use crate::delegated_credential::DelegatedCredentialKey;
 use crate::ech::server::ServerEch;
 use crate::enums::{
-    AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
+    AlertDescription, CertificateType, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warning};
-use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
+use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, KeyUpdateRequest, NamedGroup, PskKeyExchangeMode};
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
-    ClientHelloPayload, CompressedCertificatePayload, HandshakeMessagePayload, HandshakePayload,
-    HelloRetryRequest, HelloRetryRequestExtensions, KeyShareEntry, NewSessionTicketPayloadTls13,
-    ServerExtensions, ServerHelloPayload, SessionId,
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
+    HelloRetryRequestExtensions, KeyShareEntry, NewSessionTicketPayloadTls13, ServerExtensions,
+    ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
+use crate::psk::{ExternalPskCandidate, MAX_PSK_IDENTITIES_CONSIDERED, PskSecret};
 use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::{
-    KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake, KeyScheduleTraffic,
-    KeyScheduleTrafficWithClientFinishedPending,
+    BinderLabel, KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake,
+    KeyScheduleTraffic, KeyScheduleTrafficWithClientFinishedPending,
 };
 use crate::verify::{DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid};
 
@@ -51,16 +53,19 @@ pub(super) struct CompleteClientHelloHandling {
     pub(super) done_retry: bool,
     pub(super) send_tickets: usize,
     pub(super) cert_types: hs::NegotiatedCertTypes,
+    /// The offered identities that name one of our external PSKs.
+    pub(super) external_psks: Vec<ExternalPskCandidate>,
 }
 
 impl CompleteClientHelloHandling {
-    /// Verifies a PSK binder (RFC 8446 §4.2.11.2) over the transcript so far
-    /// plus the ClientHello without its binders.
+    /// Verifies a PSK binder (RFC 9846 §4.3.11.2) over the transcript so far
+    /// plus the ClientHello without its binders, in constant time.
     fn check_binder(
         &self,
         suite: &'static Tls13CipherSuite,
         client_hello: &Message<'_>,
         psk: &[u8],
+        label: BinderLabel,
         binder: &[u8],
     ) -> bool {
         // Hash the bytes as received, not a re-encoding: the peer may order
@@ -74,8 +79,7 @@ impl CompleteClientHelloHandling {
         };
         let handshake_hash = self.transcript.hash_with(binder_plaintext);
         let key_schedule = KeyScheduleEarly::new(suite, psk);
-        let real_binder =
-            key_schedule.resumption_psk_binder_key_and_sign_verify_data(handshake_hash.as_ref());
+        let real_binder = key_schedule.psk_binder(label, handshake_hash.as_ref());
         constant_time_eq(real_binder.as_ref(), binder)
     }
 
@@ -91,7 +95,7 @@ impl CompleteClientHelloHandling {
     pub(super) fn handle_client_hello(
         mut self,
         cx: &mut ServerContext<'_>,
-        server_key: ActiveCertifiedKey<'_>,
+        server_key: Option<ActiveCertifiedKey<'_>>,
         chm: &Message<'_>,
         client_hello: &ClientHelloPayload,
         selected_kxg: &'static dyn SupportedKxGroup,
@@ -104,16 +108,14 @@ impl CompleteClientHelloHandling {
             )
         })?;
 
+        // Empty when the client sent no signature_algorithms, which it may
+        // only do when offering a PSK (`hs::process_client_hello`); checked
+        // once we know whether we authenticate with a certificate.
+        let sigschemes_sent = !sigschemes_ext.is_empty();
         let sigschemes: Vec<SignatureScheme> = sigschemes_ext
             .into_iter()
             .filter(SignatureScheme::supported_in_tls13)
             .collect();
-        if sigschemes.is_empty() {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::HandshakeFailure,
-                PeerIncompatible::NoSignatureSchemesInCommon,
-            ));
-        }
 
         // RFC 8446 §4.2.9: a PSK offer needs psk_key_exchange_modes.
         if client_hello.extensions.preshared_key.is_some()
@@ -226,9 +228,14 @@ impl CompleteClientHelloHandling {
             });
         };
 
-        // PSK resumption (RFC 8446 §4.2.11).
+        // PSK selection (RFC 9846 §4.3.11): the first of the first
+        // `MAX_PSK_IDENTITIES_CONSIDERED` identities that names an external
+        // PSK or a resumption ticket usable with the suite we selected. Only
+        // that PSK's binder is checked.
+        let mut external_psks = core::mem::take(&mut self.external_psks);
         let mut chosen_psk_index = None;
         let mut resumedata = None;
+        let mut external: Option<(ExternalPskCandidate, PskSecret)> = None;
         if let Some(psk_offer) = &client_hello.extensions.preshared_key {
             let dhe_allowed = client_hello
                 .extensions
@@ -242,7 +249,37 @@ impl CompleteClientHelloHandling {
                 ));
             }
             if dhe_allowed {
-                for (i, psk_id) in psk_offer.identities.iter().enumerate() {
+                for (i, psk_id) in psk_offer
+                    .identities
+                    .iter()
+                    .enumerate()
+                    .take(MAX_PSK_IDENTITIES_CONSIDERED)
+                {
+                    if let Some(pos) = external_psks.iter().position(|c| c.index == i) {
+                        let candidate = &external_psks[pos];
+                        if !candidate.compatible_with(self.suite) {
+                            continue;
+                        }
+                        let Some(secret) = candidate.secret(&self.config.provider.cipher_suites)
+                        else {
+                            continue;
+                        };
+                        if !self.check_binder(
+                            self.suite,
+                            chm,
+                            secret.as_ref(),
+                            candidate.binder_label(),
+                            psk_offer.binders[i].as_ref(),
+                        ) {
+                            return Err(cx.common.send_fatal_alert(
+                                AlertDescription::DecryptError,
+                                PeerMisbehaved::IncorrectBinder,
+                            ));
+                        }
+                        chosen_psk_index = Some(i);
+                        external = Some((external_psks.swap_remove(pos), secret));
+                        break;
+                    }
                     let Some(resume) = self.attempt_tls13_ticket_decryption(&psk_id.identity.0)
                     else {
                         continue;
@@ -258,6 +295,35 @@ impl CompleteClientHelloHandling {
                     {
                         continue;
                     }
+                    // A session established with an external PSK resumes
+                    // only while that PSK still resolves, unchanged, and is
+                    // usable on this connection (ALPN, server name, suite);
+                    // `require_external_psk` passes over other sessions.
+                    let resumed_external = match &resume.external_psk {
+                        Some(binding) => {
+                            let Some(psk) = self
+                                .config
+                                .external_psks
+                                .as_ref()
+                                .and_then(|resolver| resolver.resolve(&binding.identity))
+                                .filter(|psk| {
+                                    binding.matches(psk)
+                                        && psk.usable_by_server(
+                                            cx.data.sni.as_ref(),
+                                            cx.common.alpn_protocol.as_deref(),
+                                        )
+                                        && psk
+                                            .cipher_suite()
+                                            .is_none_or(|cs| cs == self.suite.common.suite)
+                                })
+                            else {
+                                continue;
+                            };
+                            Some(psk)
+                        }
+                        None if self.config.require_external_psk => continue,
+                        None => None,
+                    };
                     // A PSK past the lifetime we announced for it is not
                     // offered resumption (RFC 9846 §4.7.1).
                     let now = self.config.current_time()?;
@@ -270,6 +336,7 @@ impl CompleteClientHelloHandling {
                         self.suite,
                         chm,
                         &resume.master_secret.0,
+                        BinderLabel::Resumption,
                         psk_offer.binders[i].as_ref(),
                     ) {
                         return Err(cx.common.send_fatal_alert(
@@ -278,6 +345,8 @@ impl CompleteClientHelloHandling {
                         ));
                     }
                     chosen_psk_index = Some(i);
+                    // Reported once the client's Finished verifies.
+                    cx.common.external_psk = resumed_external;
                     resumedata =
                         Some(resume.set_freshness(
                             psk_id.obfuscated_ticket_age,
@@ -293,6 +362,56 @@ impl CompleteClientHelloHandling {
         } else if cx.common.handshake_kind.is_none() {
             cx.common.handshake_kind = Some(HandshakeKind::Full);
         }
+        if let Some((candidate, _)) = &external {
+            debug!("Selected external PSK at index {}", candidate.index);
+            // Reported once the client's Finished verifies.
+            cx.common.external_psk = Some(candidate.psk.clone());
+        }
+        if self.config.require_external_psk && cx.common.external_psk.is_none() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::ExternalPskRequired,
+            ));
+        }
+
+        // RFC 8773: certificate authentication on top of an external PSK,
+        // when the client asked and we have a certificate to show.
+        let cert_with_extern_psk = external.is_some()
+            && self.config.cert_with_extern_psk
+            && client_hello.extensions.cert_with_extern_psk.is_some()
+            && server_key.is_some()
+            && !sigschemes.is_empty();
+
+        // Without a PSK (or with RFC 8773) we authenticate with our
+        // certificate, which needs one and a signature scheme for it.
+        let psk_selected = resumedata.is_some() || external.is_some();
+        let server_key = match server_key {
+            Some(key) if !psk_selected || cert_with_extern_psk => {
+                if !sigschemes_sent {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::MissingExtension,
+                        PeerIncompatible::SignatureAlgorithmsExtensionRequired,
+                    ));
+                }
+                if sigschemes.is_empty() {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        PeerIncompatible::NoSignatureSchemesInCommon,
+                    ));
+                }
+                Some(key)
+            }
+            None if !psk_selected => {
+                if self.config.external_psks.is_some() {
+                    return Err(cx.common.send_fatal_alert(
+                        AlertDescription::HandshakeFailure,
+                        PeerIncompatible::NoUsablePskForServerWithoutCertificate,
+                    ));
+                }
+                return Err(hs::no_server_certificate(cx));
+            }
+            _ => None,
+        };
 
         self.transcript.add_message(chm);
 
@@ -306,18 +425,39 @@ impl CompleteClientHelloHandling {
             })?;
         cx.common.kx_state.complete();
 
-        let early_data = decide_if_early_data_allowed(
-            cx,
-            early_data_requested,
-            chosen_psk_index.zip(resumedata.as_ref()),
-            self.suite,
-            &self.config,
-        );
+        let early_data = match &external {
+            Some((candidate, _)) => decide_if_external_early_data_allowed(
+                cx,
+                early_data_requested,
+                candidate,
+                self.suite,
+                cert_with_extern_psk,
+            ),
+            None => decide_if_early_data_allowed(
+                cx,
+                early_data_requested,
+                chosen_psk_index.zip(resumedata.as_ref()),
+                self.suite,
+                &self.config,
+            ),
+        };
+        // How much 0-RTT data we read, or skip when we reject it.
+        let early_data_limit = match &external {
+            Some((candidate, _)) => candidate.psk.max_early_data_size(),
+            None => self.config.max_early_data_size,
+        };
+        let skip_early_data_limit =
+            max_early_data_size(self.config.max_early_data_size).max(early_data_limit as usize);
 
         let client_hello_hash = self.transcript.current_hash();
-        let key_schedule_pre = match &resumedata {
-            Some(resume) => {
-                let early = KeyScheduleEarly::new(self.suite, &resume.master_secret.0);
+        let psk_secret: Option<&[u8]> = match (&resumedata, &external) {
+            (Some(resume), _) => Some(&resume.master_secret.0),
+            (None, Some((_, secret))) => Some(secret.as_ref()),
+            (None, None) => None,
+        };
+        let key_schedule_pre = match psk_secret {
+            Some(psk) => {
+                let early = KeyScheduleEarly::new(self.suite, psk);
                 // Start reading under the early traffic key: it carries any
                 // 0-RTT data, and is replaced below when we do not accept it.
                 early.client_early_traffic_secret(
@@ -351,6 +491,7 @@ impl CompleteClientHelloHandling {
             chosen_psk_index,
             KeyShareEntry::new(selected_kxg.name(), &kx.pub_key),
             ech_accepted,
+            cert_with_extern_psk,
         );
         if !self.done_retry {
             emit_fake_ccs(cx.common);
@@ -375,16 +516,11 @@ impl CompleteClientHelloHandling {
                 // RFC 8446 §4.2.10: skip the client's early data records (we
                 // cannot read them) until its handshake-key records appear.
                 debug!("Client requested early_data, but not accepted: trial decryption");
-                key_schedule.set_handshake_decrypter(
-                    Some(max_early_data_size(self.config.max_early_data_size)),
-                    cx.common,
-                );
+                key_schedule.set_handshake_decrypter(Some(skip_early_data_limit), cx.common);
                 cx.data.early_data.reject();
             }
             EarlyDataDecision::Accepted => {
-                cx.data
-                    .early_data
-                    .accept(self.config.max_early_data_size as usize);
+                cx.data.early_data.accept(early_data_limit as usize);
             }
         }
 
@@ -403,6 +539,12 @@ impl CompleteClientHelloHandling {
             && most_preferred_mutual != Some(selected_kxg.name()))
         .then(|| our_groups.iter().map(|g| g.name()).collect());
 
+        // RFC 9846 §4.7.1 and RFC 9149: how many tickets follow, announced
+        // in EncryptedExtensions when the client sent ticket_request.
+        let (send_tickets, expected_tickets) =
+            hs::tls13_tickets_to_send(&self.config, client_hello, resumedata.is_some());
+        self.send_tickets = send_tickets;
+
         // RFC 9849 §7.1: a client whose ECH extension did not decrypt gets
         // our current configurations to retry with.
         let retry_configs = match (&cx.data.ech, &self.config.ech) {
@@ -412,11 +554,13 @@ impl CompleteClientHelloHandling {
         emit_encrypted_extensions(
             &mut self.transcript,
             cx,
+            &self.config,
             client_hello,
             early_data == EarlyDataDecision::Accepted,
             self.cert_types,
             supported_groups,
             retry_configs,
+            expected_tickets,
         );
 
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
@@ -424,21 +568,30 @@ impl CompleteClientHelloHandling {
         let defer_client_auth =
             self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
 
-        let doing_client_auth = if resumedata.is_none() {
+        let doing_client_auth = if let Some(server_key) = server_key {
             let client_auth = !defer_client_auth
                 && emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
+            let delegated = choose_delegated_credential(
+                &self.config,
+                &server_key,
+                client_hello,
+                &sigschemes,
+                self.cert_types,
+            );
             emit_certificate_tls13(
                 &mut self.transcript,
                 cx.common,
                 &self.config,
                 &server_key,
                 client_hello,
+                delegated,
             );
             emit_certificate_verify_tls13(
                 &mut self.transcript,
                 cx.common,
                 &server_key,
                 &sigschemes,
+                delegated,
             )?;
             client_auth
         } else {
@@ -449,20 +602,6 @@ impl CompleteClientHelloHandling {
             cx.data.received_resumption_data = Some(resume.application_data.0.clone());
             cx.common.peer_certificates = resume.client_cert_chain.clone();
         }
-
-        // RFC 9846 §4.7.1: tickets go only to a client whose ClientHello
-        // carried a suitable psk_key_exchange_modes; psk_dhe_ke is the only
-        // mode we resume with.
-        let client_takes_tickets = client_hello
-            .extensions
-            .psk_modes
-            .as_ref()
-            .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
-        self.send_tickets = if client_takes_tickets {
-            self.config.send_tls13_tickets
-        } else {
-            0
-        };
 
         let key_schedule = emit_finished_tls13(
             &mut self.transcript,
@@ -566,6 +705,33 @@ fn decide_if_early_data_allowed(
     }
 }
 
+/// RFC 9846 §4.3.10 for an external PSK: early data is accepted only when
+/// the key allows it (it is off by default, RFC 9257), was the client's
+/// first PSK, and was provisioned with the suite and ALPN protocol now
+/// negotiated. There is no anti-replay protection for external PSKs.
+fn decide_if_external_early_data_allowed(
+    cx: &mut ServerContext<'_>,
+    early_data_requested: bool,
+    candidate: &ExternalPskCandidate,
+    suite: &'static Tls13CipherSuite,
+    cert_with_extern_psk: bool,
+) -> EarlyDataDecision {
+    if !early_data_requested {
+        return EarlyDataDecision::Disabled;
+    }
+    let psk = &candidate.psk;
+    let possible = candidate.index == 0
+        && psk.max_early_data_size() > 0
+        && psk.cipher_suite() == Some(suite.common.suite)
+        && psk.alpn_protocol() == cx.common.alpn_protocol.as_deref()
+        && !cert_with_extern_psk;
+    if possible && !cx.data.early_data.was_rejected() {
+        EarlyDataDecision::Accepted
+    } else {
+        EarlyDataDecision::RequestedButRejected
+    }
+}
+
 /// Discards a client's early data records (unreadable because its PSK was
 /// not taken) up to a limit, then hands everything else to `next`.
 struct ExpectAndSkipRejectedEarlyData {
@@ -644,11 +810,13 @@ fn emit_server_hello(
     chosen_psk_index: Option<usize>,
     key_share: KeyShareEntry,
     ech_accepted: bool,
+    cert_with_extern_psk: bool,
 ) {
     let extensions = ServerExtensions {
         key_share: Some(key_share),
         pre_shared_key: chosen_psk_index.and_then(|i| u16::try_from(i).ok()),
         supported_versions: Some(ProtocolVersion::TLSv1_3),
+        cert_with_extern_psk: cert_with_extern_psk.then_some(()),
         ..Default::default()
     };
     let mut payload = ServerHelloPayload {
@@ -789,14 +957,17 @@ fn emit_hello_retry_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_encrypted_extensions(
     transcript: &mut HandshakeHash,
     cx: &mut ServerContext<'_>,
+    config: &ServerConfig,
     client_hello: &ClientHelloPayload,
     early_data_accepted: bool,
     cert_types: hs::NegotiatedCertTypes,
     supported_groups: Option<Vec<NamedGroup>>,
     retry_configs: Option<Vec<u8>>,
+    expected_tickets: Option<u8>,
 ) {
     let exts = ServerExtensions {
         supported_groups,
@@ -810,6 +981,14 @@ fn emit_encrypted_extensions(
         early_data: early_data_accepted.then_some(()),
         client_certificate_type: cert_types.client,
         server_certificate_type: cert_types.server,
+        // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
+        record_size_limit: hs::record_size_limit_ack(
+            config,
+            client_hello,
+            ProtocolVersion::TLSv1_3,
+        ),
+        // RFC 9149 §3: `expected_count`.
+        ticket_request: expected_tickets,
         ..Default::default()
     };
     let m = Message {
@@ -862,13 +1041,10 @@ fn certificate_request_message(
         extensions: CertificateRequestExtensions {
             signature_algorithms: Some(schemes),
             authorities: (!authorities.is_empty()).then(|| authorities.to_vec()),
-            certificate_compression: (!config.cert_decompressors.is_empty()).then(|| {
-                config
-                    .cert_decompressors
-                    .iter()
-                    .map(|d| d.algorithm())
-                    .collect()
-            }),
+            certificate_compression: crate::compress::offered_cert_compression(
+                &config.cert_decompressors,
+                config.cert_decompression_limit,
+            ),
             ..Default::default()
         },
     };
@@ -880,12 +1056,40 @@ fn certificate_request_message(
     })
 }
 
+/// The first delegated credential (RFC 9345) of `server_key` that the
+/// client accepts, if it offered the extension: its scheme must be in the
+/// client's `delegated_credential` list, the credential's signature scheme
+/// in `signature_algorithms` (§4.1.1), and it must be valid for at most
+/// seven more days (§4.1.3). Only for X.509 certificates.
+fn choose_delegated_credential<'a>(
+    config: &ServerConfig,
+    server_key: &ActiveCertifiedKey<'a>,
+    client_hello: &ClientHelloPayload,
+    sigschemes: &[SignatureScheme],
+    cert_types: hs::NegotiatedCertTypes,
+) -> Option<&'a DelegatedCredentialKey> {
+    let offered = client_hello.extensions.delegated_credential.as_ref()?;
+    let end_entity = server_key.get_cert().first()?;
+    if server_key.get_delegated_credentials().is_empty()
+        || cert_types.server == Some(CertificateType::RawPublicKey)
+    {
+        return None;
+    }
+    let now = config.current_time().ok()?;
+    server_key
+        .get_delegated_credentials()
+        .iter()
+        .map(|dc| &**dc)
+        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
+}
+
 fn emit_certificate_tls13(
     transcript: &mut HandshakeHash,
     common: &mut CommonState,
     config: &ServerConfig,
     server_key: &ActiveCertifiedKey<'_>,
     client_hello: &ClientHelloPayload,
+    delegated: Option<&DelegatedCredentialKey>,
 ) {
     // RFC 6066 §8: staple only when the client asked.
     let ocsp = client_hello
@@ -893,40 +1097,30 @@ fn emit_certificate_tls13(
         .certificate_status_request
         .as_ref()
         .and_then(|_| server_key.get_ocsp());
-    let cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+    let mut cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+    // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
+    if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
+        first.delegated_credential = Some(dc.credential().clone());
+    }
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
-    let compressor = client_hello
-        .extensions
-        .certificate_compression
-        .as_ref()
-        .and_then(|offered| {
-            config
-                .cert_compressors
-                .iter()
-                .find(|c| offered.contains(&c.algorithm()))
-        });
-    if let Some(compressor) = compressor {
-        let encoded = cert_body.get_encoding();
-        if let Ok(compressed) = config
-            .cert_compression_cache
-            .compression_for(*compressor, &encoded)
-            && let Ok(uncompressed_len) = u32::try_from(encoded.len())
-        {
-            let m = Message {
-                version: ProtocolVersion::TLSv1_3,
-                payload: MessagePayload::handshake(HandshakeMessagePayload(
-                    HandshakePayload::CompressedCertificate(CompressedCertificatePayload {
-                        alg: compressor.algorithm(),
-                        uncompressed_len,
-                        compressed: PayloadU24(Payload::new(compressed)),
-                    }),
-                )),
-            };
-            transcript.add_message(&m);
-            common.send_msg(m, true);
-            return;
-        }
+    if let Some(offered) = &client_hello.extensions.certificate_compression
+        && let Some(compressed) = crate::compress::compress_certificate(
+            &config.cert_compressors,
+            &config.cert_compression_cache,
+            offered,
+            &cert_body.get_encoding(),
+        )
+    {
+        let m = Message {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::CompressedCertificate(compressed),
+            )),
+        };
+        transcript.add_message(&m);
+        common.send_msg(m, true);
+        return;
     }
 
     let m = Message {
@@ -945,9 +1139,18 @@ fn emit_certificate_verify_tls13(
     common: &mut CommonState,
     server_key: &ActiveCertifiedKey<'_>,
     schemes: &[SignatureScheme],
+    delegated: Option<&DelegatedCredentialKey>,
 ) -> Result<(), Error> {
     let message = crate::client::tls13::construct_server_verify_message(&transcript.current_hash());
-    let signer = server_key.get_key().choose_scheme(schemes).ok_or_else(|| {
+    // RFC 9345 §4.1.1: with a delegated credential, its key signs with the
+    // credential's scheme (checked to be possible when it was attached).
+    let signer = match delegated {
+        Some(dc) => dc
+            .key()
+            .choose_scheme(&[dc.credential().credential.dc_cert_verify_algorithm]),
+        None => server_key.get_key().choose_scheme(schemes),
+    };
+    let signer = signer.ok_or_else(|| {
         common.send_fatal_alert(
             AlertDescription::HandshakeFailure,
             PeerIncompatible::NoSignatureSchemesInCommon,
@@ -1009,14 +1212,33 @@ struct ExpectCertificate {
 
 impl State<ServerConnectionData> for ExpectCertificate {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
-        let certp = require_handshake_msg!(
-            m,
-            HandshakeType::Certificate,
-            HandshakePayload::CertificateTls13
-        )?;
+        // RFC 8879 §4: the client may compress with an algorithm that our
+        // CertificateRequest offered.
+        let certp: CertificatePayloadTls13<'static> = match &m.payload {
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::CertificateTls13(chain)),
+                ..
+            } => chain.clone().into_owned(),
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::CompressedCertificate(compressed)),
+                ..
+            } => crate::compress::receive_compressed_certificate(
+                cx.common,
+                &self.config.cert_decompressors,
+                self.config.cert_decompression_limit,
+                compressed,
+            )?,
+            payload => {
+                return Err(crate::check::inappropriate_handshake_message(
+                    payload,
+                    &[ContentType::Handshake],
+                    &[HandshakeType::Certificate],
+                ));
+            }
+        };
         self.transcript.add_message(&m);
 
-        let Some(client_cert) = check_client_certificate(cx.common, &self.config, certp, &[])?
+        let Some(client_cert) = check_client_certificate(cx.common, &self.config, &certp, &[])?
         else {
             debug!("client auth requested but no certificate supplied");
             return Ok(Box::new(ExpectFinished {
@@ -1057,11 +1279,12 @@ fn check_client_certificate(
             PeerMisbehaved::IllegalCertificateRequestContext,
         ));
     }
-    // We never request stapled responses or SCTs from clients.
+    // We never request stapled responses, SCTs or delegated credentials
+    // (RFC 9345 client credentials are not supported) from clients.
     if certp
         .entries
         .iter()
-        .any(|e| e.status.is_some() || e.sct_list.is_some())
+        .any(|e| e.status.is_some() || e.sct_list.is_some() || e.delegated_credential.is_some())
     {
         return Err(common.send_fatal_alert(
             AlertDescription::UnsupportedExtension,
@@ -1210,7 +1433,7 @@ fn emit_ticket(
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
     let now = config.current_time()?;
-    let plain = ServerSessionValue::new(
+    let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
         ProtocolVersion::TLSv1_3,
         suite.common.suite,
@@ -1220,8 +1443,9 @@ fn emit_ticket(
         cx.data.resumption_data.clone(),
         now,
         age_add,
-    )
-    .get_encoding();
+    );
+    value.set_external_psk(cx.common.external_psk_binding());
+    let plain = value.get_encoding();
 
     let ticket = if config.ticketer.enabled() {
         match config.ticketer.encrypt(&plain) {
@@ -1281,6 +1505,9 @@ impl State<ServerConnectionData> for ExpectFinished {
                 .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
         }
         let fin = FinishedMessageVerified::assertion();
+        // The client has proven it holds the external PSK, if one is in use;
+        // tickets issued below record it.
+        cx.common.external_psk_confirmed = true;
 
         st.transcript.add_message(&m);
         let key_schedule = st.key_schedule.into_traffic(cx.common);
@@ -1425,6 +1652,21 @@ impl PostHandshakeAuth {
                     None => ClientAuthStage::Finished(None),
                 }
             }
+            // RFC 8879 §4: our CertificateRequest offers the same
+            // compression algorithms as in the handshake.
+            (ClientAuthStage::Certificate, HandshakePayload::CompressedCertificate(compressed)) => {
+                let certp = crate::compress::receive_compressed_certificate(
+                    cx.common,
+                    &self.config.cert_decompressors,
+                    self.config.cert_decompression_limit,
+                    compressed,
+                )?;
+                pending.transcript.add_message(m);
+                match check_client_certificate(cx.common, &self.config, &certp, &pending.context)? {
+                    Some(chain) => ClientAuthStage::CertificateVerify(chain),
+                    None => ClientAuthStage::Finished(None),
+                }
+            }
             (
                 ClientAuthStage::CertificateVerify(chain),
                 HandshakePayload::CertificateVerify(sig),
@@ -1531,6 +1773,7 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 parsed:
                     HandshakeMessagePayload(
                         HandshakePayload::CertificateTls13(_)
+                        | HandshakePayload::CompressedCertificate(_)
                         | HandshakePayload::CertificateVerify(_)
                         | HandshakePayload::Finished(_),
                     ),

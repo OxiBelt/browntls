@@ -254,6 +254,10 @@ class Scenario:
     connections: int = 1
     # "default", "peer-disabled" (refused) or "peer-disabled-allowed"
     etm: str = "default"
+    # browntls turns on the optional extensions: GREASE (RFC 8701),
+    # ticket_request (RFC 9149) and padding (RFC 7685) as a client, and a
+    # small record_size_limit (RFC 8449) on either side.
+    optional_extensions: bool = False
     roles: tuple[str, ...] = ROLES
     requires: frozenset[str] = frozenset()
     excludes: frozenset[str] = frozenset()
@@ -375,6 +379,24 @@ SCENARIOS: tuple[Scenario, ...] = (
         connections=2,
         roles=("client",),
     ),
+    # The optional extensions, each peer's limit (RFC 8449) respected by
+    # the other where the peer implements it.
+    _tls13(
+        "tls13-optional-extensions",
+        "TLS13_AES_128_GCM_SHA256",
+        "X25519",
+        "ecdsa-p256",
+        optional_extensions=True,
+    ),
+    _tls13(
+        "tls13-optional-extensions-resumption",
+        "TLS13_AES_256_GCM_SHA384",
+        "X25519",
+        "ecdsa-p256",
+        connections=2,
+        roles=("client",),
+        optional_extensions=True,
+    ),
     _tls12(
         "tls12-ecdsa-aes128gcm",
         "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
@@ -433,6 +455,13 @@ SCENARIOS: tuple[Scenario, ...] = (
         client_auth=True,
     ),
     _tls12(
+        "tls12-optional-extensions",
+        "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        ("X25519", "secp256r1"),
+        "ecdsa-p256",
+        optional_extensions=True,
+    ),
+    _tls12(
         "tls12-resumption",
         "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
         ("X25519",),
@@ -448,6 +477,11 @@ def scenarios_for(suite: Suite) -> list[Scenario]:
 
 
 # ------------------------------------------------------- command generation
+
+
+# A record size limit well below the default, so that a peer implementing
+# RFC 8449 has to fragment for it.
+OPTIONAL_RECORD_SIZE_LIMIT = 512
 
 
 def pki(key: str, name: str) -> str:
@@ -497,6 +531,10 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
             args += ["--group", group]
     if sc.etm == "peer-disabled-allowed":
         args.append("--allow-mac-then-encrypt")
+    if sc.optional_extensions:
+        args += ["--record-size-limit", str(OPTIONAL_RECORD_SIZE_LIMIT)]
+        if role == "client":
+            args += ["--grease", "--ticket-request", "1,1", "--padding", "1024"]
     return args
 
 

@@ -1351,3 +1351,79 @@ fn raw_public_keys_both_directions() {
         round_trip(&mut client, &mut server);
     }
 }
+
+/// Turns on every optional ClientHello extension of a browntls client:
+/// GREASE (RFC 8701), a small `record_size_limit` (RFC 8449), which rustls
+/// does not implement and ignores, `ticket_request` (RFC 9149) and padding
+/// (RFC 7685).
+fn with_optional_extensions(mut config: browntls::ClientConfig) -> browntls::ClientConfig {
+    config.enable_grease = true;
+    config.record_size_limit = Some(64);
+    config.tls13_ticket_request = Some(browntls::client::TicketRequest {
+        new_session_count: 1,
+        resumption_count: 1,
+    });
+    config.client_hello_padding = browntls::client::ClientHelloPadding::AtLeast(600);
+    config
+}
+
+#[test]
+fn browntls_client_with_grease_and_optional_extensions_to_rustls_server() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let versions: &[u16] = if cfg!(feature = "tls12") {
+        &[0x0304, 0x0303]
+    } else {
+        &[0x0304]
+    };
+    for &version in versions {
+        // Full handshake, then a resumption with the same configuration
+        // (GREASE in psk_key_exchange_modes, padding before pre_shared_key).
+        let client_config = Arc::new(with_optional_extensions(b_client(
+            &chain, version, None, None,
+        )));
+        let server_config = Arc::new(r_server(&chain, version, None, None));
+        for resumed in [false, true] {
+            let mut client =
+                browntls::ClientConnection::new(client_config.clone(), server_name()).unwrap();
+            let mut server = rustls::ServerConnection::new(server_config.clone()).unwrap();
+            handshake_ok(&mut client, &mut server);
+            assert_eq!(client.version(), Some(version));
+            assert_eq!(Tls::resumed(&client), resumed, "version {version:#06x}");
+            round_trip(&mut client, &mut server);
+            let big = vec![0x5a; 40_000];
+            assert_eq!(exchange(&mut client, &mut server, &big), big);
+            assert_eq!(exchange(&mut server, &mut client, &big), big);
+        }
+    }
+
+    // A HelloRetryRequest: the client's first key share is for P-384, which
+    // this rustls server does not take; the second ClientHello repeats the
+    // GREASE values but carries only the requested key share.
+    let mut provider = prov::default_provider();
+    provider.kx_groups.retain(|g| {
+        matches!(
+            g.name(),
+            browntls::NamedGroup::secp384r1 | browntls::NamedGroup::X25519
+        )
+    });
+    provider
+        .kx_groups
+        .sort_by_key(|g| g.name() != browntls::NamedGroup::secp384r1);
+    let client_config = browntls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(b_versions(0x0304))
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    let mut client = b_connect_client(with_optional_extensions(client_config));
+    let mut server =
+        rustls::ServerConnection::new(Arc::new(r_server(&chain, 0x0304, None, Some(0x001d))))
+            .unwrap();
+    handshake_ok(&mut client, &mut server);
+    assert_eq!(
+        client.handshake_kind(),
+        Some(browntls::HandshakeKind::FullWithHelloRetryRequest)
+    );
+    round_trip(&mut client, &mut server);
+}

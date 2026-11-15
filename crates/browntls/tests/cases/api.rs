@@ -484,7 +484,8 @@ fn server_half_rtt_data_arrives_with_the_handshake() {
 // ------------------------------------------------- certificate compression
 
 /// A toy "compressor" (reverses the bytes) standing in for zlib, so the
-/// RFC 8879 framing can be exercised without a compression dependency.
+/// RFC 8879 framing is exercised whatever compression features are enabled
+/// (the built-in algorithms have their own cases in `cert_compression.rs`).
 #[derive(Debug)]
 struct Reverser;
 
@@ -605,8 +606,10 @@ fn certificates_stay_plain_without_a_common_algorithm() {
     let mut client_config = client_config(&chain);
     client_config.cert_decompressors = vec![&REVERSER];
     // the server has no compressor: it must send a plain Certificate
+    let mut server_config = server_config(&chain);
+    server_config.cert_compressors.clear();
     let mut client = ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
-    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
     do_handshake(&mut client, &mut server).unwrap();
     assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
 }

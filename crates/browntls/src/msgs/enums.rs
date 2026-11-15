@@ -57,7 +57,8 @@ enum_builder! {
 }
 
 enum_builder! {
-    /// The `ExtensionType` TLS protocol enum (RFC 8446 §4.2).
+    /// The `ExtensionType` TLS protocol enum (RFC 9846 §4.3, IANA "TLS
+    /// ExtensionType Values").
     #[repr(u16)]
     pub(crate) enum ExtensionType {
         ServerName => 0x0000,
@@ -77,13 +78,19 @@ enum_builder! {
         UseSRTP => 0x000e,
         Heartbeat => 0x000f,
         ALProtocolNegotiation => 0x0010,
+        StatusRequestV2 => 0x0011,
         SCT => 0x0012,
         ClientCertificateType => 0x0013,
         ServerCertificateType => 0x0014,
         Padding => 0x0015,
         EncryptThenMac => 0x0016,
         ExtendedMasterSecret => 0x0017,
+        TokenBinding => 0x0018,
+        CachedInfo => 0x0019,
         CompressCertificate => 0x001b,
+        RecordSizeLimit => 0x001c,
+        TlsCertWithExternPsk => 0x0021,
+        DelegatedCredential => 0x0022,
         SessionTicket => 0x0023,
         PreSharedKey => 0x0029,
         EarlyData => 0x002a,
@@ -96,7 +103,11 @@ enum_builder! {
         PostHandshakeAuth => 0x0031,
         SignatureAlgorithmsCert => 0x0032,
         KeyShare => 0x0033,
+        TransparencyInfo => 0x0034,
+        ExternalIdHash => 0x0037,
+        ExternalSessionId => 0x0038,
         TransportParameters => 0x0039,
+        TicketRequest => 0x003a,
         NextProtocolNegotiation => 0x3374,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,

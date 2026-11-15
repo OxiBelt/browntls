@@ -17,6 +17,7 @@ use crate::msgs::handshake::CertificateChain;
 use crate::msgs::message::{Message, OutboundChunks, OutboundPlainMessage, PlainMessage};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
+use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
 
 /// Plaintext received from the peer is buffered up to this many bytes before
@@ -25,6 +26,25 @@ pub(crate) const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
 
 /// The default limit on buffered outgoing data (TLS bytes plus unsent plaintext).
 pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// RFC 8449 §4: the smallest record size limit an endpoint may announce;
+/// a smaller one is `illegal_parameter`.
+pub(crate) const MIN_RECORD_SIZE_LIMIT: u16 = 64;
+
+/// RFC 8449 §4: the largest record size limit worth announcing, the
+/// protocol's own limit: 2^14 for TLS 1.2, 2^14 + 1 for TLS 1.3 (whose
+/// limit counts the content type byte).
+pub(crate) const fn max_record_size_limit(tls13: bool) -> u16 {
+    if tls13 { 16_385 } else { 16_384 }
+}
+
+/// Checks a configured `record_size_limit` when a connection is created.
+pub(crate) fn check_record_size_limit_config(limit: Option<u16>) -> Result<(), Error> {
+    match limit {
+        Some(limit) if limit < MIN_RECORD_SIZE_LIMIT => Err(Error::BadRecordSizeLimit),
+        _ => Ok(()),
+    }
+}
 
 /// How many unprotected ChangeCipherSpec records a TLS 1.3 peer may send
 /// during the handshake (RFC 9846 appendix E.4).
@@ -62,7 +82,8 @@ impl Side {
 /// How the handshake was completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeKind {
-    /// A full handshake with certificate authentication.
+    /// A full handshake: certificate authentication, or (TLS 1.3) an
+    /// external PSK with (EC)DHE, see [`CommonState::external_psk_identity`].
     Full,
     /// A full handshake that needed a HelloRetryRequest (TLS 1.3 only).
     FullWithHelloRetryRequest,
@@ -171,6 +192,18 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
+    /// Driven by the unbuffered API: received application data stays in the
+    /// caller's buffer instead of being copied into `received_plaintext`.
+    pub(crate) unbuffered: bool,
+    /// Unbuffered only: the record just processed was application data the
+    /// state machine accepted, left in place for the caller.
+    pub(crate) app_data_in_place: bool,
+    /// The external PSK the handshake uses: the one selected, or the one a
+    /// resumed session was established with.
+    pub(crate) external_psk: Option<Arc<crate::psk::ExternalPsk>>,
+    /// Whether the peer's Finished has verified, which authenticates the
+    /// peer's knowledge of [`Self::external_psk`].
+    pub(crate) external_psk_confirmed: bool,
 }
 
 impl CommonState {
@@ -207,6 +240,10 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
+            unbuffered: false,
+            app_data_in_place: false,
+            external_psk: None,
+            external_psk_confirmed: false,
         }
     }
 
@@ -253,6 +290,38 @@ impl CommonState {
         self.handshake_kind
     }
 
+    /// The identity of the external PSK (RFC 9846 §4.3.11) the handshake
+    /// authenticated with; for an imported PSK (RFC 9258), its external
+    /// identity. `None` until the peer's Finished message has verified (which
+    /// proves the peer holds the key), and for a handshake that used no
+    /// external PSK.
+    ///
+    /// Such a handshake is reported as [`HandshakeKind::Full`] (or
+    /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
+    /// authentication was negotiated on top of it (RFC 8773), there are no
+    /// peer certificates. A session resumed from a ticket issued on such a
+    /// connection ([`HandshakeKind::Resumed`]) reports the same identity.
+    ///
+    /// A peer that offers or accepts external PSKs may still complete a
+    /// handshake without one (with certificates, or by resuming a session
+    /// that used none): unless `require_external_psk` is set in the
+    /// [`ClientConfig`](crate::ClientConfig) or
+    /// [`ServerConfig`](crate::ServerConfig), check this after the handshake.
+    pub fn external_psk_identity(&self) -> Option<&[u8]> {
+        self.external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+            .map(|psk| psk.identity())
+    }
+
+    /// The external PSK to record in a ticket issued on this connection.
+    pub(crate) fn external_psk_binding(&self) -> Option<crate::psk::ExternalPskBinding> {
+        self.external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+            .map(|psk| crate::psk::ExternalPskBinding::of(psk))
+    }
+
     /// Whether every negotiated component claims FIPS validation.
     pub fn fips(&self) -> bool {
         self.fips
@@ -288,6 +357,44 @@ impl CommonState {
 
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
         self.message_fragmenter.set_max_fragment_size(new)
+    }
+
+    /// The largest plaintext fragment we put in one record.
+    pub(crate) fn max_fragment_len(&self) -> usize {
+        self.message_fragmenter.max_fragment_len()
+    }
+
+    /// Puts a negotiated `record_size_limit` (RFC 8449) into effect: `ours`
+    /// is the value we announced, `peers` the value the peer announced.
+    ///
+    /// A peer value below 64 is `illegal_parameter` (RFC 8449 §4). A value
+    /// above the protocol maximum is not an error (a server MUST NOT
+    /// enforce that, and a client MAY abort but we do not): records never
+    /// exceed the protocol maximum anyway. Our records then carry at most
+    /// `peers` bytes of plaintext in TLS 1.2 and `peers - 1` in TLS 1.3,
+    /// whose limit counts the content type (and any padding, of which we
+    /// send none); the local `max_fragment_size` still applies when
+    /// smaller. Protected records the peer sends from now on (except 0-RTT
+    /// data) must respect `ours`, or the connection fails with
+    /// `record_overflow`.
+    pub(crate) fn apply_record_size_limits(
+        &mut self,
+        ours: u16,
+        peers: u16,
+        tls13: bool,
+    ) -> Result<(), Error> {
+        if peers < MIN_RECORD_SIZE_LIMIT {
+            return Err(self.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalRecordSizeLimit,
+            ));
+        }
+        let max = max_record_size_limit(tls13);
+        let peers = usize::from(peers.min(max)) - usize::from(tls13);
+        self.message_fragmenter.set_peer_record_size_limit(peers);
+        self.record_layer
+            .set_inbound_record_size_limit(ours.min(max), tls13);
+        Ok(())
     }
 
     pub(crate) fn current_io_state(&self) -> IoState {
@@ -499,8 +606,14 @@ impl CommonState {
         Ok(())
     }
 
-    /// Buffers received application data for the application.
+    /// Buffers received application data for the application, or, for an
+    /// unbuffered connection, notes that the record's plaintext is to be
+    /// handed to the caller where it was decrypted.
     pub(crate) fn take_received_plaintext(&mut self, bytes: Payload<'_>) {
+        if self.unbuffered {
+            self.app_data_in_place = true;
+            return;
+        }
         self.received_plaintext.append(bytes.into_vec());
     }
 

@@ -575,3 +575,80 @@ fn handshake_signatures() {
     assert!(RawPublicKeyEntity::try_from(&spki_contents).is_err());
     assert!(RawPublicKeyEntity::try_from(&SubjectPublicKeyInfoDer::from(ee_der.to_vec())).is_err());
 }
+
+/// RFC 9345 §4.2: the `DelegationUsage` extension (OID
+/// 1.3.6.1.4.1.44363.44, value `NULL`) and the `digitalSignature` key usage
+/// a delegation certificate needs.
+#[test]
+fn delegation_usage_extension() {
+    const OID: &[u64] = &[1, 3, 6, 1, 4, 1, 44363, 44];
+    let build = |exts: Vec<CustomExtension>, key_usages: Vec<KeyUsagePurpose>| {
+        let mut ee = ee_params(&["example.com"]);
+        ee.custom_extensions = exts;
+        ee.key_usages = key_usages;
+        Chain::build(
+            &rcgen::PKCS_ECDSA_P256_SHA256,
+            ca_params("root"),
+            vec![],
+            &ee,
+        )
+    };
+
+    // Present, with digitalSignature: usable for delegation, and path
+    // validation is unaffected.
+    let chain = build(
+        vec![CustomExtension::from_oid_content(OID, vec![0x05, 0x00])],
+        vec![KeyUsagePurpose::DigitalSignature],
+    );
+    assert_eq!(chain.verify_at(NOW), Ok(()));
+    let der = chain.ee_der();
+    let ee = EndEntityCert::try_from(&der).unwrap();
+    assert!(ee.has_delegation_usage());
+    assert!(ee.has_digital_signature_key_usage());
+    assert!(ee.not_before() < NOW && NOW < ee.not_after());
+
+    // Absent; and a KeyUsage without digitalSignature, or none at all.
+    let chain = build(vec![], vec![KeyUsagePurpose::KeyEncipherment]);
+    let der = chain.ee_der();
+    let ee = EndEntityCert::try_from(&der).unwrap();
+    assert!(!ee.has_delegation_usage());
+    assert!(!ee.has_digital_signature_key_usage());
+    let chain = build(
+        vec![CustomExtension::from_oid_content(OID, vec![0x05, 0x00])],
+        vec![],
+    );
+    let der = chain.ee_der();
+    let ee = EndEntityCert::try_from(&der).unwrap();
+    assert!(ee.has_delegation_usage());
+    assert!(!ee.has_digital_signature_key_usage());
+
+    // A value other than NULL, or a second instance, rejects the certificate.
+    for content in [vec![0x05, 0x01, 0x00], vec![0x04, 0x00], vec![]] {
+        let chain = build(
+            vec![CustomExtension::from_oid_content(OID, content.clone())],
+            vec![KeyUsagePurpose::DigitalSignature],
+        );
+        assert_eq!(
+            EndEntityCert::try_from(&chain.ee_der()).err(),
+            Some(Error::ExtensionValueInvalid),
+            "{content:?}"
+        );
+    }
+    let chain = build(
+        vec![
+            CustomExtension::from_oid_content(OID, vec![0x05, 0x00]),
+            CustomExtension::from_oid_content(OID, vec![0x05, 0x00]),
+        ],
+        vec![KeyUsagePurpose::DigitalSignature],
+    );
+    assert_eq!(
+        EndEntityCert::try_from(&chain.ee_der()).err(),
+        Some(Error::MalformedExtensions)
+    );
+
+    // Recognised, so not rejected as an unknown critical extension.
+    let mut critical = CustomExtension::from_oid_content(OID, vec![0x05, 0x00]);
+    critical.set_criticality(true);
+    let chain = build(vec![critical], vec![KeyUsagePurpose::DigitalSignature]);
+    assert_eq!(chain.verify_at(NOW), Ok(()));
+}

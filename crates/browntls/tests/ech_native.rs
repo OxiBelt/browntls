@@ -633,3 +633,45 @@ fn hello_retry_request_stays_stateful_with_ech() {
         }
     }
 }
+
+#[test]
+fn accepted_with_grease_padding_and_an_external_psk() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(10)]).unwrap());
+    let psk = Arc::new(
+        browntls::psk::ExternalPsk::new(
+            b"inner psk identity".to_vec(),
+            vec![0x42; 32],
+            browntls::crypto::hash::HashAlgorithm::SHA256,
+        )
+        .unwrap(),
+    );
+    let mut client_config = client_config(&certs, enable(ech.ech_config_list()));
+    client_config.enable_grease = true;
+    client_config.client_hello_padding = browntls::client::ClientHelloPadding::AtLeast(1500);
+    client_config.external_psks = vec![psk.clone()];
+    let mut server_config = server_config(&certs, Some(&ech), None);
+    server_config.external_psks = Some(Arc::new(vec![psk]));
+    let (mut client, mut server) = connect(client_config, server_config);
+
+    let mut flight = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut flight).unwrap();
+    }
+    // RFC 7685 padding applies to the outer hello as sent, and the PSK
+    // identity stays inside the encrypted inner hello.
+    assert!(flight.len() >= 5 + 1500, "{}", flight.len());
+    assert!(
+        !flight
+            .windows(b"inner psk identity".len())
+            .any(|w| w == b"inner psk identity")
+    );
+    server.read_tls(&mut &flight[..]).unwrap();
+    server.process_new_packets().unwrap();
+    assert_accepted(&mut client, &mut server);
+    assert_eq!(
+        server.external_psk_identity(),
+        Some(&b"inner psk identity"[..])
+    );
+}

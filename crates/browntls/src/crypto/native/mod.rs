@@ -84,6 +84,7 @@ use crate::sync::Arc;
 use crate::webpki::WebPkiSupportedAlgorithms;
 
 pub mod aead;
+pub mod delegated_credential;
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;

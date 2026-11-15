@@ -4,7 +4,7 @@
 use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::mem;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, Range};
 
 use crate::common_state::{CommonState, IoState};
 use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
@@ -12,7 +12,7 @@ use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader as CodecReader;
-use crate::msgs::deframer::{Deframed, DeframerVecBuffer, MessageDeframer};
+use crate::msgs::deframer::{Deframed, DeframerBuffer, DeframerVecBuffer, MessageDeframer};
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
@@ -81,7 +81,31 @@ pub trait SideData: Debug + Send + Sync {
     /// with a fatal alert cannot be resumed.
     #[doc(hidden)]
     fn on_fatal_error(&mut self, _negotiated_version: Option<ProtocolVersion>) {}
+
+    /// Whether the record just processed was 0-RTT data that an unbuffered
+    /// server left in place (clears the flag).
+    #[doc(hidden)]
+    fn take_early_data_in_place(&mut self) -> bool {
+        false
+    }
 }
+
+/// What [`ConnectionCore::process_one`] consumed.
+#[derive(Debug)]
+pub(crate) enum Processed {
+    /// A message that the state machine dealt with entirely.
+    Message,
+    /// An application data record that an unbuffered connection left in
+    /// place: its plaintext, as a range into the buffer's underlying storage
+    /// (see [`DeframerBuffer::position`]).
+    AppData(Range<usize>),
+    /// Like [`Self::AppData`], for 0-RTT data accepted by a server.
+    EarlyData(Range<usize>),
+}
+
+/// The state after [`ConnectionCore::process_one`], and what it consumed
+/// (`None`: no complete unit was buffered).
+pub(crate) type Step<Data> = (Box<dyn State<Data>>, Option<Processed>);
 
 /// The state machine plus everything it needs.
 pub(crate) struct ConnectionCore<Data> {
@@ -106,13 +130,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         &mut self,
         buffer: &mut DeframerVecBuffer,
     ) -> Result<IoState, Error> {
-        let mut state = match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
-            Ok(state) => state,
-            Err(e) => {
-                self.state = Err(e.clone());
-                return Err(e);
-            }
-        };
+        let mut state = self.take_state()?;
 
         if self.common_state.encrypt_failed {
             return Err(self.fail(Error::EncryptError));
@@ -124,95 +142,10 @@ impl<Data: SideData> ConnectionCore<Data> {
                 break;
             }
 
-            let item = match self.deframer.pop(
-                &mut self.common_state.record_layer,
-                self.common_state.negotiated_version,
-                buffer,
-            ) {
-                Ok(Some(item)) => item,
-                Ok(None) => break,
-                Err(err) => {
-                    let err = self.handle_deframe_error(err, &*state);
-                    return Err(self.fail(err));
-                }
-            };
-
-            let result = match item {
-                Deframed::Handshake { len, version } => {
-                    let decrypt_epoch = self.common_state.record_layer.read_seq();
-                    let was_decrypting = self.common_state.record_layer.is_decrypting();
-                    let bytes = &self.deframer.joiner.buffered()[..len];
-                    let parse_version = self.common_state.negotiated_version.unwrap_or(version);
-                    let result = match HandshakeMessagePayload::read_version(
-                        &mut CodecReader::init(bytes),
-                        parse_version,
-                    ) {
-                        Ok(parsed) => {
-                            let msg = Message {
-                                version,
-                                payload: MessagePayload::Handshake {
-                                    parsed,
-                                    encoded: Payload::Borrowed(bytes),
-                                },
-                            };
-                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
-                        }
-                        Err(err) => {
-                            let err = self
-                                .common_state
-                                .send_fatal_alert(AlertDescription::from(err), Error::from(err));
-                            Err(err)
-                        }
-                    };
-                    self.deframer.joiner.consume(len);
-                    // RFC 8446 §5.1: a handshake message that changes the read
-                    // key must end its record; nothing may follow it under the
-                    // old key.
-                    let key_changed = self.common_state.record_layer.is_decrypting()
-                        != was_decrypting
-                        || (self.common_state.record_layer.is_decrypting()
-                            && self.common_state.record_layer.read_seq() < decrypt_epoch);
-                    match result {
-                        Ok(_) if key_changed && !self.deframer.joiner.is_empty() => {
-                            Err(self.common_state.send_fatal_alert(
-                                AlertDescription::UnexpectedMessage,
-                                PeerMisbehaved::KeyEpochWithPendingFragment,
-                            ))
-                        }
-                        other => other,
-                    }
-                }
-                Deframed::Record {
-                    typ,
-                    version,
-                    plaintext,
-                    consumed,
-                    want_close_before_decrypt,
-                } => {
-                    if want_close_before_decrypt {
-                        self.common_state.send_close_notify();
-                    }
-                    let payload = &buffer.filled()[plaintext];
-                    let result = match Message::try_from(InboundPlainMessage {
-                        typ,
-                        version,
-                        payload,
-                    }) {
-                        Ok(msg) => {
-                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
-                        }
-                        Err(err) => Err(self
-                            .common_state
-                            .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
-                    };
-                    buffer.discard(consumed);
-                    result
-                }
-            };
-
-            match result {
-                Ok(new_state) => state = new_state,
-                Err(err) => return Err(self.fail(err)),
+            let (next, processed) = self.process_one(state, buffer)?;
+            state = next;
+            if processed.is_none() {
+                break;
             }
         }
 
@@ -223,9 +156,138 @@ impl<Data: SideData> ConnectionCore<Data> {
         Ok(self.common_state.current_io_state())
     }
 
+    /// Takes the state machine out of `self.state` for processing, or
+    /// returns the error that ended the connection.
+    pub(crate) fn take_state(&mut self) -> Result<Box<dyn State<Data>>, Error> {
+        match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
+            Ok(state) => Ok(state),
+            Err(e) => {
+                self.state = Err(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    /// Deframes and processes one unit of `buffer`: a whole handshake
+    /// message, or one non-handshake record.
+    ///
+    /// Returns the next state, and `None` instead of a [`Processed`] when
+    /// `buffer` holds no complete unit. On error the connection has failed
+    /// ([`Self::fail`]) and the state is gone.
+    pub(crate) fn process_one(
+        &mut self,
+        state: Box<dyn State<Data>>,
+        buffer: &mut impl DeframerBuffer,
+    ) -> Result<Step<Data>, Error> {
+        let item = match self.deframer.pop(
+            &mut self.common_state.record_layer,
+            self.common_state.negotiated_version,
+            buffer,
+        ) {
+            Ok(Some(item)) => item,
+            Ok(None) => return Ok((state, None)),
+            Err(err) => {
+                let err = self.handle_deframe_error(err, &*state);
+                return Err(self.fail(err));
+            }
+        };
+
+        let mut processed = Processed::Message;
+        let result = match item {
+            Deframed::Handshake { len, version } => {
+                let decrypt_epoch = self.common_state.record_layer.read_seq();
+                let was_decrypting = self.common_state.record_layer.is_decrypting();
+                let bytes = &self.deframer.joiner.buffered()[..len];
+                let parse_version = self.common_state.negotiated_version.unwrap_or(version);
+                let result = match HandshakeMessagePayload::read_version(
+                    &mut CodecReader::init(bytes),
+                    parse_version,
+                ) {
+                    Ok(parsed) => {
+                        let msg = Message {
+                            version,
+                            payload: MessagePayload::Handshake {
+                                parsed,
+                                encoded: Payload::Borrowed(bytes),
+                            },
+                        };
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                    }
+                    Err(err) => {
+                        let err = self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(err), Error::from(err));
+                        Err(err)
+                    }
+                };
+                self.deframer.joiner.consume(len);
+                // RFC 8446 §5.1: a handshake message that changes the read
+                // key must end its record; nothing may follow it under the
+                // old key.
+                let key_changed = self.common_state.record_layer.is_decrypting() != was_decrypting
+                    || (self.common_state.record_layer.is_decrypting()
+                        && self.common_state.record_layer.read_seq() < decrypt_epoch);
+                match result {
+                    Ok(_) if key_changed && !self.deframer.joiner.is_empty() => {
+                        Err(self.common_state.send_fatal_alert(
+                            AlertDescription::UnexpectedMessage,
+                            PeerMisbehaved::KeyEpochWithPendingFragment,
+                        ))
+                    }
+                    other => other,
+                }
+            }
+            Deframed::Record {
+                typ,
+                version,
+                plaintext,
+                consumed,
+                want_close_before_decrypt,
+            } => {
+                if want_close_before_decrypt {
+                    self.common_state.send_close_notify();
+                }
+                // `plaintext` is relative to the buffer as `pop` left it.
+                let position = buffer.position();
+                let in_storage = position + plaintext.start..position + plaintext.end;
+                let payload = &buffer.filled()[plaintext];
+                let result = match Message::try_from(InboundPlainMessage {
+                    typ,
+                    version,
+                    payload,
+                }) {
+                    Ok(msg) => {
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                    }
+                    Err(err) => Err(self
+                        .common_state
+                        .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                };
+                // Unbuffered connections leave application data where it was
+                // decrypted; the state machine only flagged that it took it.
+                let app_data = mem::take(&mut self.common_state.app_data_in_place);
+                let early_data = self.data.take_early_data_in_place();
+                if result.is_ok() {
+                    if app_data {
+                        processed = Processed::AppData(in_storage);
+                    } else if early_data {
+                        processed = Processed::EarlyData(in_storage);
+                    }
+                }
+                buffer.discard(consumed);
+                result
+            }
+        };
+
+        match result {
+            Ok(new_state) => Ok((new_state, Some(processed))),
+            Err(err) => Err(self.fail(err)),
+        }
+    }
+
     /// Records `err` as the connection's final state and lets the side data
     /// forget any session the failed connection was using.
-    fn fail(&mut self, err: Error) -> Error {
+    pub(crate) fn fail(&mut self, err: Error) -> Error {
         self.data
             .on_fatal_error(self.common_state.negotiated_version);
         self.state = Err(err.clone());

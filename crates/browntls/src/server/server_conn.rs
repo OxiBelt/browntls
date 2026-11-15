@@ -233,10 +233,58 @@ pub struct ServerConfig {
     /// ignores ECH. The certificate resolver must also hold a certificate
     /// for each key's public name, so clients can authenticate a rejection.
     pub ech: Option<Arc<crate::ech::EchServerConfig>>,
+    /// The largest `uncompressed_length` accepted in a peer's
+    /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
+    /// applies to larger values: a message declaring more than 64 KiB does
+    /// not parse and ends the connection with `decode_error`. A message
+    /// declaring more than this limit is refused with `bad_certificate`
+    /// before anything is decompressed. Zero turns reception off: the
+    /// `compress_certificate` extension is then not sent, whatever
+    /// `cert_decompressors` holds.
+    pub cert_decompression_limit: usize,
+
+    /// The `record_size_limit` to answer a client's with (RFC 8449): the
+    /// largest record plaintext we accept, counting the content type in TLS
+    /// 1.3. `None` ignores the client's extension, so its limit is not
+    /// respected either. A value above the protocol maximum (2^14 + 1 for
+    /// TLS 1.3, 2^14 for TLS 1.2) is lowered to it; a value below 64 makes
+    /// connection creation fail with [`Error::BadRecordSizeLimit`].
+    ///
+    /// Defaults to `Some(16385)`: no restriction of our own, but a client
+    /// that announces a smaller limit has its limit respected. Records we
+    /// send are limited by the client's limit and by `max_fragment_size`,
+    /// whichever is smaller.
+    pub record_size_limit: Option<u16>,
 
     pub(super) versions: EnabledVersions,
-    pub(super) verifier: Arc<dyn ClientCertVerifier>,
+    pub(crate) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
+
+    /// Finds the external PSKs (RFC 9846 §4.3.11) clients may offer; `None`
+    /// (the default) accepts none. See [`crate::psk`].
+    ///
+    /// A TLS 1.3 handshake that selects an external PSK authenticates
+    /// through it and sends no certificate, so [`Self::cert_resolver`] may
+    /// return nothing for a client that offers one.
+    pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
+
+    /// Whether to authenticate with our certificate as well when the
+    /// client asks for it with `tls_cert_with_extern_psk` (RFC 8773) and an
+    /// external PSK is selected. Off by default.
+    pub cert_with_extern_psk: bool,
+
+    /// Whether to refuse a client that does not authenticate through one of
+    /// [`Self::external_psks`]: the handshake fails unless an external PSK
+    /// is selected, or a ticket issued on a connection that used one (and
+    /// whose key [`Self::external_psks`] still resolves) is resumed. Other
+    /// tickets are passed over, and TLS 1.2 is refused. Off by default.
+    ///
+    /// Useful for a server that has a certificate as well as external PSKs
+    /// but must serve only clients holding a PSK; without it, check
+    /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
+    /// once the handshake completes.
+    pub require_external_psk: bool,
 }
 
 impl ServerConfig {
@@ -347,11 +395,12 @@ impl TimeProvider for NoTime {
 
 /// Where 0-RTT stands on a server connection.
 #[derive(Default)]
-pub(super) enum EarlyDataState {
+enum EarlyDataKind {
     /// No decision yet.
     #[default]
     New,
-    /// Accepted: `received` holds the data, `left` what may still arrive.
+    /// Accepted: `received` holds the data (buffered API only), `left` what
+    /// may still arrive.
     Accepted {
         received: ChunkVecBuffer,
         left: usize,
@@ -360,32 +409,53 @@ pub(super) enum EarlyDataState {
     Rejected,
 }
 
+/// The server's 0-RTT bookkeeping.
+#[derive(Default)]
+pub(super) struct EarlyDataState {
+    kind: EarlyDataKind,
+    /// Unbuffered API: accepted early data stays in the caller's buffer.
+    in_place: bool,
+    /// Unbuffered API: the record just processed was accepted early data.
+    in_place_pending: bool,
+}
+
 impl EarlyDataState {
     pub(super) fn reject(&mut self) {
-        *self = Self::Rejected;
+        self.kind = EarlyDataKind::Rejected;
     }
 
     pub(super) fn accept(&mut self, max_size: usize) {
-        *self = Self::Accepted {
+        self.kind = EarlyDataKind::Accepted {
             received: ChunkVecBuffer::new(Some(max_size)),
             left: max_size,
         };
     }
 
     pub(super) fn was_accepted(&self) -> bool {
-        matches!(self, Self::Accepted { .. })
+        matches!(self.kind, EarlyDataKind::Accepted { .. })
     }
 
     pub(super) fn was_rejected(&self) -> bool {
-        matches!(self, Self::Rejected)
+        matches!(self.kind, EarlyDataKind::Rejected)
     }
 
     /// Stores early data; `false` if it exceeds what was announced.
+    ///
+    /// With the unbuffered API nothing is copied: the record stays where it
+    /// was decrypted and only the budget is charged.
     pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
-        let Self::Accepted { received, left } = self else {
+        let EarlyDataKind::Accepted { received, left } = &mut self.kind else {
             return false;
         };
         let available = bytes.len();
+        if self.in_place {
+            if available > *left {
+                return false;
+            }
+            *left -= available;
+            self.in_place_pending = true;
+            return true;
+        }
         if received.apply_limit(available) != available || available > *left {
             return false;
         }
@@ -394,10 +464,15 @@ impl EarlyDataState {
         true
     }
 
+    /// Unbuffered API: leave accepted early data in the caller's buffer.
+    fn set_in_place(&mut self) {
+        self.in_place = true;
+    }
+
     #[cfg(feature = "std")]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Accepted { received, .. } => Ok(received.read(buf)),
+        match &mut self.kind {
+            EarlyDataKind::Accepted { received, .. } => Ok(received.read(buf)),
             _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
         }
     }
@@ -405,14 +480,14 @@ impl EarlyDataState {
 
 impl fmt::Debug for EarlyDataState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::New => f.write_str("EarlyDataState::New"),
-            Self::Accepted { received, left } => f
+        match &self.kind {
+            EarlyDataKind::New => f.write_str("EarlyDataState::New"),
+            EarlyDataKind::Accepted { received, left } => f
                 .debug_struct("EarlyDataState::Accepted")
                 .field("received", &received.len())
                 .field("left", left)
                 .finish(),
-            Self::Rejected => f.write_str("EarlyDataState::Rejected"),
+            EarlyDataKind::Rejected => f.write_str("EarlyDataState::Rejected"),
         }
     }
 }
@@ -430,6 +505,8 @@ pub struct ServerConnectionData {
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
     /// What was decided about Encrypted Client Hello.
     pub(crate) ech: crate::ech::server::ServerEch,
+    /// State for exported authenticators (RFC 9261).
+    pub(crate) authenticators: crate::exported_authenticator::ServerAuthenticatorState,
     /// Whether the TLS 1.3 ClientHello offered `post_handshake_auth`.
     pub(super) post_handshake_auth_offered: bool,
     /// The most recent post-handshake client authentication, if any.
@@ -462,6 +539,10 @@ impl SideData for ServerConnectionData {
             store.take(&id);
         }
     }
+
+    fn take_early_data_in_place(&mut self) -> bool {
+        core::mem::take(&mut self.early_data.in_place_pending)
+    }
 }
 
 impl ConnectionCore<ServerConnectionData> {
@@ -469,6 +550,7 @@ impl ConnectionCore<ServerConnectionData> {
         config.check_cookie_sealer()?;
         let mut common = CommonState::new(Side::Server);
         common.set_max_fragment_size(config.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common.enable_secret_extraction = config.enable_secret_extraction;
         common.fips = config.fips();
         Ok(Self::new(
@@ -476,6 +558,88 @@ impl ConnectionCore<ServerConnectionData> {
             ServerConnectionData::default(),
             common,
         ))
+    }
+}
+
+/// A server-side TLS connection driven by the caller's buffers; see
+/// [`crate::unbuffered`].
+///
+/// Available without `std`. Accepted 0-RTT data is reported as
+/// [`ConnectionState::ReadEarlyData`](crate::unbuffered::ConnectionState::ReadEarlyData)
+/// records, in place, and is replayable by an attacker (see
+/// [`ServerConfig::max_early_data_size`]).
+pub struct UnbufferedServerConnection {
+    inner: crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>,
+}
+
+impl UnbufferedServerConnection {
+    /// Prepares to accept a connection with `config`.
+    pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        let mut core = ConnectionCore::for_server(config)?;
+        core.data.early_data.set_in_place();
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(core),
+        })
+    }
+
+    /// The server name the client indicated, once its ClientHello was processed.
+    pub fn server_name(&self) -> Option<&str> {
+        self.inner.core.data.sni.as_ref().map(|n| n.as_ref())
+    }
+
+    /// Application data stored with a resumed session, once resumed.
+    pub fn received_resumption_data(&self) -> Option<&[u8]> {
+        self.inner.core.data.received_resumption_data.as_deref()
+    }
+
+    /// Application data to store with the session for later resumption.
+    ///
+    /// Call before the handshake completes; it is written into the tickets.
+    pub fn set_resumption_data(&mut self, data: &[u8]) {
+        self.inner.core.data.resumption_data = data.to_vec();
+    }
+
+    /// Refuses any 0-RTT data on this connection.
+    ///
+    /// Effective only before the ClientHello has been processed; once early
+    /// data was accepted this does nothing (the client is already sending
+    /// it under the early traffic key, RFC 9846 §4.2.10).
+    pub fn reject_early_data(&mut self) {
+        let early_data = &mut self.inner.core.data.early_data;
+        if !early_data.was_accepted() {
+            early_data.reject();
+        }
+    }
+
+    /// Whether the connection only uses FIPS-validated components.
+    pub fn fips(&self) -> bool {
+        self.inner.core.common_state.fips()
+    }
+
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
+        self.inner.dangerous_extract_secrets()
+    }
+}
+
+impl fmt::Debug for UnbufferedServerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnbufferedServerConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for UnbufferedServerConnection {
+    type Target = crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for UnbufferedServerConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -816,10 +980,16 @@ impl Accepted {
         mut self,
         config: Arc<ServerConfig>,
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = config.check_cookie_sealer().and_then(|()| {
-            self.connection
-                .set_max_fragment_size(config.max_fragment_size)
-        }) {
+        if let Err(err) = config
+            .check_cookie_sealer()
+            .and_then(|()| {
+                self.connection
+                    .set_max_fragment_size(config.max_fragment_size)
+            })
+            .and_then(|()| {
+                crate::common_state::check_record_size_limit_config(config.record_size_limit)
+            })
+        {
             return Err((err, AcceptedAlert::from(self.connection)));
         }
         self.connection.enable_secret_extraction = config.enable_secret_extraction;

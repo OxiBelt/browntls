@@ -11,33 +11,39 @@ use super::client_conn::ClientConnectionData;
 use super::common::ClientHelloDetails;
 #[cfg(feature = "tls12")]
 use super::tls12;
-use super::{ClientConfig, tls13};
+use super::{ClientConfig, ClientHelloPadding, tls13};
 use crate::common_state::ConnectionRandoms;
 use crate::common_state::{CommonState, HandshakeKind, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{ActiveKeyExchange, SharedSecret};
 use crate::ech::client::{ClientEch, EchOffer};
 use crate::ech::{self, EchMode, EchStatus};
-use crate::enums::{AlertDescription, CertificateType, CipherSuite, ProtocolVersion};
+use crate::enums::{
+    AlertDescription, CertificateType, CipherSuite, ProtocolVersion, SignatureScheme,
+};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::{
     Compression, ECPointFormat, ExtensionType, NamedGroup, PskKeyExchangeMode,
 };
+use crate::msgs::grease::GreaseValues;
 #[cfg(feature = "tls12")]
 use crate::msgs::handshake::ClientSessionTicket;
 use crate::msgs::handshake::{
-    CertificateStatusRequest, ClientExtensions, ClientHelloPayload, HandshakeMessagePayload,
-    HandshakePayload, HelloRetryRequest, KeyShareEntry, PresharedKeyIdentity, PresharedKeyOffer,
-    ProtocolName, Random, ServerNamePayload, SessionId,
+    CertificateStatusRequest, ClientExtensions, ClientHelloPayload, ClientTicketRequest,
+    HandshakeMessagePayload, HandshakePayload, HelloRetryRequest, KeyShareEntry,
+    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, Random,
+    ServerNamePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{self, Retrieved};
+use crate::psk::{OfferedPsk, PskSecret};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::tls13::extensions::{Tls13Message, first_disallowed};
-use crate::tls13::key_schedule::KeyScheduleEarly;
+use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly};
 
 pub(super) type NextState = Box<dyn State<ClientConnectionData>>;
 pub(super) type NextStateOrError = Result<NextState, Error>;
@@ -205,6 +211,9 @@ pub(super) struct ClientHelloInput {
     /// Encrypted Client Hello, while the server has not decided. With a
     /// real offer, the hello this input builds is the inner one.
     pub(super) ech: Option<ClientEch>,
+    /// The GREASE values (RFC 8701) of this connection, when enabled; the
+    /// same ones go into a second ClientHello.
+    pub(super) grease: Option<GreaseValues>,
 }
 
 impl ClientHelloInput {
@@ -307,6 +316,11 @@ pub(super) fn start_handshake(
     }
 
     let random = Random::new(config.provider.secure_random)?;
+    let grease = if config.enable_grease {
+        Some(GreaseValues::random(config.provider.secure_random)?)
+    } else {
+        None
+    };
     let input = ClientHelloInput {
         config,
         resuming,
@@ -317,6 +331,7 @@ pub(super) fn start_handshake(
         server_name,
         alpn_protocols,
         ech,
+        grease,
     };
     emit_client_hello_for_retry(
         transcript_buffer,
@@ -456,17 +471,21 @@ fn emit_client_hello_for_retry(
             .verifier
             .requires_raw_public_keys()
             .then(|| vec![CertificateType::RawPublicKey]),
-        certificate_compression: (supports_tls13 && !config.cert_decompressors.is_empty()).then(
-            || {
-                config
-                    .cert_decompressors
-                    .iter()
-                    .map(|d| d.algorithm())
-                    .collect()
-            },
-        ),
+        certificate_compression: supports_tls13
+            .then(|| {
+                crate::compress::offered_cert_compression(
+                    &config.cert_decompressors,
+                    config.cert_decompression_limit,
+                )
+            })
+            .flatten(),
         ..Default::default()
     };
+
+    // RFC 9345 §4.1.1: offer to accept a delegated credential (TLS 1.3 only).
+    if supports_tls13 && config.enable_delegated_credentials {
+        exts.delegated_credential = Some(tls13::delegated_credential_schemes(config));
+    }
 
     #[cfg(feature = "tls12")]
     if supports_tls12
@@ -496,6 +515,54 @@ fn emit_client_hello_for_retry(
         input.resuming = None;
     }
 
+    // Our external PSKs, in configuration order (RFC 9846 §4.3.11): whether
+    // we offer any decides which ticket may go with them. Never in the
+    // clear after the server rejected ECH at the HelloRetryRequest (RFC
+    // 9849 §6.1.5): their identities belong to the inner hello.
+    let ech_rejected_at_retry = matches!(input.ech, Some(ClientEch::RejectedAtRetry { .. }));
+    let external_offers =
+        if supports_tls13 && !config.external_psks.is_empty() && !ech_rejected_at_retry {
+            crate::psk::client_external_offers(
+                &config.external_psks,
+                &config.provider.cipher_suites,
+                committed_suite.and_then(|s| s.tls13()),
+                &input.server_name,
+                &input.alpn_protocols,
+            )
+        } else {
+            Vec::new()
+        };
+    // RFC 8773: ask for certificate authentication on top of an external PSK.
+    let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
+    if cert_with_extern_psk {
+        exts.cert_with_extern_psk = Some(());
+    }
+
+    if let Some(Retrieved {
+        value: ClientSessionValue::Tls13(inner),
+        ..
+    }) = &input.resuming
+    {
+        // A session established with an external PSK is resumed only while
+        // that PSK is still configured and usable on this connection: the
+        // resumption carries its authentication forward. With
+        // `require_external_psk`, other sessions are not offered at all.
+        let ticket_usable = match inner.external_psk() {
+            Some(binding) => config.external_psks.iter().any(|psk| {
+                binding.matches(psk)
+                    && psk.usable_by_client(&input.server_name, &input.alpn_protocols)
+            }),
+            None => !config.require_external_psk,
+        };
+        // RFC 8773 asks for certificate authentication with an external PSK;
+        // a server that resumed the ticket instead would skip it. Rather
+        // than let the server choose, the ticket is not offered alongside
+        // (a conservative choice; RFC 8773 does not require it).
+        if !ticket_usable || cert_with_extern_psk {
+            input.resuming = None;
+        }
+    }
+
     // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in below.
     let tls13_session = match &input.resuming {
         Some(retrieved) if supports_tls13 => retrieved.map(|v| match v {
@@ -505,26 +572,76 @@ fn emit_client_hello_for_retry(
         }),
         _ => None,
     };
+    // The ticket goes first, then the external PSKs; their binders are
+    // filled in below.
+    let mut offered_psks: Vec<OfferedPsk> = Vec::new();
     if let Some(resuming) = &tls13_session {
-        // RFC 8446 §4.2.10: offer 0-RTT when the ticket and configuration
-        // allow it, but never in the second ClientHello of a retry.
-        let max_early_data_size = resuming.max_early_data_size();
-        if config.enable_early_data
-            && max_early_data_size > 0
-            && retryreq.is_none()
-            && !ech_tls13_only
-        {
+        offered_psks.push(OfferedPsk {
+            identity: resuming.ticket().to_vec(),
+            obfuscated_ticket_age: resuming.obfuscated_ticket_age(),
+            suite: resuming.suite(),
+            secret: PskSecret::new(resuming.secret()),
+            label: BinderLabel::Resumption,
+            external: None,
+        });
+    }
+    offered_psks.extend(external_offers);
+
+    // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
+    // configuration allow it, but never in the second ClientHello of a
+    // retry. An external PSK needs a provisioned suite, and is not used for
+    // 0-RTT when we ask for certificate authentication (RFC 8773).
+    if let Some(first) = offered_psks.first()
+        && config.enable_early_data
+        && retryreq.is_none()
+        && !ech_tls13_only
+    {
+        let max_early_data_size = match (&first.external, &tls13_session) {
+            (Some(psk), _) => {
+                if psk.cipher_suite() == Some(first.suite.common.suite) && !cert_with_extern_psk {
+                    psk.max_early_data_size()
+                } else {
+                    0
+                }
+            }
+            (None, Some(resuming)) => resuming.max_early_data_size(),
+            (None, None) => 0,
+        };
+        if max_early_data_size > 0 {
             cx.data.early_data.enable(max_early_data_size as usize);
             exts.early_data = Some(());
         }
-
-        let obfuscated_ticket_age = resuming.obfuscated_ticket_age();
-        let binder_len = resuming.suite().common.hash_provider.output_len();
-        exts.preshared_key = Some(PresharedKeyOffer::new(
-            PresharedKeyIdentity::new(resuming.ticket().to_vec(), obfuscated_ticket_age),
-            vec![0u8; binder_len],
-        ));
     }
+
+    if !offered_psks.is_empty() {
+        exts.preshared_key = Some(PresharedKeyOffer {
+            identities: offered_psks
+                .iter()
+                .map(|o| PresharedKeyIdentity::new(o.identity.clone(), o.obfuscated_ticket_age))
+                .collect(),
+            binders: offered_psks
+                .iter()
+                .map(|o| {
+                    PresharedKeyBinder::new(vec![0u8; o.suite.common.hash_provider.output_len()])
+                })
+                .collect(),
+        });
+    }
+
+    // RFC 8449: the largest record we accept. The protocol maximum is that
+    // of the highest version offered; a TLS 1.2 server does not enforce a
+    // larger value (RFC 8449 §4) and we clamp what we enforce.
+    exts.record_size_limit = config
+        .record_size_limit
+        .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    // RFC 9149: a TLS 1.3 extension only.
+    exts.ticket_request = config
+        .tls13_ticket_request
+        .filter(|_| supports_tls13)
+        .map(|request| ClientTicketRequest {
+            new_session_count: request.new_session_count,
+            resumption_count: request.resumption_count,
+        });
 
     let mut cipher_suites: Vec<CipherSuite> = config
         .provider
@@ -539,18 +656,25 @@ fn emit_client_hello_for_retry(
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 
+    // What the server's choices are checked against: never a GREASE value.
+    cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
+    input.hello.offered_sigschemes = offered_sigschemes;
+    input.hello.sent_record_size_limit = exts.record_size_limit;
+
+    if let Some(grease) = &input.grease {
+        add_grease(grease, retryreq, &mut cipher_suites, &mut exts);
+    }
+
     if let Some(ech) = &mut input.ech {
         // Everything but the extensions: version, random, an empty
         // session ID, the suites and the compression methods.
         let other_len = 2 + 32 + 1 + 2 + 2 * cipher_suites.len() + 2;
         ech.prepare(&mut exts, other_len, config.provider.secure_random)?;
     }
-
+    // GREASE extensions are never part of `present_types`.
     input.hello.sent_extensions = exts.present_types();
-    cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
-    input.hello.offered_sigschemes = offered_sigschemes;
 
-    let chp = ClientHelloPayload {
+    let mut chp = ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: input.random,
         session_id: input.session_id,
@@ -558,13 +682,19 @@ fn emit_client_hello_for_retry(
         compression_methods: vec![Compression::Null],
         extensions: exts,
     };
+    // RFC 7685: the length is final here, binders included (they are
+    // zero-filled placeholders of the right size until computed below).
+    // With a real ECH offer this is the inner hello, which RFC 9849 §6.1.3
+    // pads instead; the outer hello is padded when it is sealed.
+    if !matches!(input.ech, Some(ClientEch::Offer(_))) {
+        chp.extensions.padding = padding_len(
+            config.client_hello_padding,
+            HANDSHAKE_HEADER_LEN + chp.get_encoding().len(),
+        );
+    }
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 
-    let resuming_hash_provider = tls13_session
-        .as_ref()
-        .map(|resuming| resuming.suite().common.hash_provider);
-    let early_key_schedule = tls13_session
-        .map(|resuming| tls13::fill_in_psk_binder(&resuming, &transcript_buffer, &mut hmp));
+    tls13::fill_in_psk_binders(&offered_psks, &transcript_buffer, &mut hmp);
 
     let ch = Message {
         // RFC 8446 §5.1: the first ClientHello's record may use the lowest
@@ -587,8 +717,12 @@ fn emit_client_hello_for_retry(
                 ..
             },
         ) => {
-            let outer =
-                offer.seal_outer(inner, retryreq.is_some(), config.provider.secure_random)?;
+            let outer = offer.seal_outer(
+                inner,
+                retryreq.is_some(),
+                |len| padding_len(config.client_hello_padding, HANDSHAKE_HEADER_LEN + len),
+                config.provider.secure_random,
+            )?;
             let outer = Message {
                 version: ch.version,
                 payload: MessagePayload::handshake(HandshakeMessagePayload(
@@ -607,14 +741,15 @@ fn emit_client_hello_for_retry(
 
     // With 0-RTT offered, the early traffic key derives from the ClientHello
     // alone, so early data can go out right behind it.
-    if let (Some(schedule), Some(hash_provider)) = (&early_key_schedule, resuming_hash_provider)
+    if let Some(first) = offered_psks.first()
         && cx.data.early_data.is_enabled()
     {
+        let schedule = KeyScheduleEarly::new(first.suite, first.secret.as_ref());
         tls13::derive_early_traffic_secret(
             &*config.key_log,
             cx,
-            hash_provider,
-            schedule,
+            first.suite.common.hash_provider,
+            &schedule,
             &mut input.sent_tls13_fake_ccs,
             &transcript_buffer,
             &input.random.0,
@@ -624,7 +759,7 @@ fn emit_client_hello_for_retry(
     let next = ExpectServerHello {
         input,
         transcript_buffer,
-        early_key_schedule,
+        offered_psks,
         offered_key_share: key_share,
         suite: committed_suite,
     };
@@ -634,6 +769,87 @@ fn emit_client_hello_for_retry(
     } else {
         Box::new(ExpectServerHelloOrHelloRetryRequest { next })
     })
+}
+
+/// The four-byte handshake message header: type and 24-bit length.
+const HANDSHAKE_HEADER_LEN: usize = 4;
+
+/// Puts the GREASE values (RFC 8701 §3) into the ClientHello, each first in
+/// its list. After a HelloRetryRequest that names a group, the key share
+/// list must hold exactly one share for that group (RFC 9846 §4.1.2), so no
+/// GREASE share goes into that second ClientHello.
+fn add_grease(
+    grease: &GreaseValues,
+    retryreq: Option<&HelloRetryRequest>,
+    cipher_suites: &mut Vec<CipherSuite>,
+    exts: &mut ClientExtensions,
+) {
+    cipher_suites.insert(0, CipherSuite::Unknown(grease.cipher_suite));
+    if let Some(groups) = &mut exts.named_groups {
+        groups.insert(0, NamedGroup::Unknown(grease.group));
+    }
+    let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+    if let Some(shares) = &mut exts.key_shares
+        && !hrr_named_group
+    {
+        // RFC 8701 §3: a GREASE key share carries a single byte.
+        shares.insert(
+            0,
+            KeyShareEntry::new(NamedGroup::Unknown(grease.group), &[0]),
+        );
+    }
+    if let Some(schemes) = &mut exts.signature_schemes {
+        schemes.insert(0, SignatureScheme::Unknown(grease.signature_scheme));
+    }
+    if let Some(versions) = &mut exts.supported_versions {
+        versions.insert(0, ProtocolVersion::Unknown(grease.version));
+    }
+    if let Some(modes) = &mut exts.psk_modes {
+        modes.insert(0, PskKeyExchangeMode::Unknown(grease.psk_mode));
+    }
+    exts.grease_first = Some(grease.first_extension);
+    exts.grease_last = Some(grease.last_extension);
+}
+
+/// The length of the `padding` extension body (RFC 7685) for a ClientHello
+/// handshake message of `unpadded` bytes, or `None` for no extension.
+///
+/// Lengths of 256 to 511 bytes are padded to 512, the workaround RFC 7685
+/// §4 was written for; an `AtLeast` target is reached first. The extension
+/// itself takes four bytes of header.
+fn padding_len(policy: ClientHelloPadding, unpadded: usize) -> Option<usize> {
+    const PROBLEMATIC: core::ops::Range<usize> = 256..512;
+    let mut body = match policy {
+        ClientHelloPadding::Disabled => return None,
+        ClientHelloPadding::AtLeast(target) if unpadded < usize::from(target) => {
+            Some((usize::from(target) - unpadded).saturating_sub(4))
+        }
+        _ => None,
+    };
+    let padded = unpadded + body.map_or(0, |b| 4 + b);
+    if PROBLEMATIC.contains(&padded) {
+        let missing = PROBLEMATIC.end - padded;
+        body = Some(match body {
+            Some(b) => b + missing,
+            None => missing.saturating_sub(4),
+        });
+    }
+    body
+}
+
+/// Puts a `record_size_limit` the server announced (RFC 8449) into
+/// effect. The server can only have sent one when we did (the
+/// unsolicited-extension check runs first).
+pub(super) fn process_record_size_limit(
+    common: &mut CommonState,
+    hello: &ClientHelloDetails,
+    servers: Option<u16>,
+    tls13: bool,
+) -> Result<(), Error> {
+    match (hello.sent_record_size_limit, servers) {
+        (Some(ours), Some(servers)) => common.apply_record_size_limits(ours, servers, tls13),
+        _ => Ok(()),
+    }
 }
 
 /// Checks the server's answers to our RFC 7250 certificate type offers: a
@@ -702,7 +918,8 @@ pub(super) fn process_alpn_protocol(
 struct ExpectServerHello {
     input: ClientHelloInput,
     transcript_buffer: HandshakeHashBuffer,
-    early_key_schedule: Option<KeyScheduleEarly>,
+    /// The PSKs our ClientHello offered, in order.
+    offered_psks: Vec<OfferedPsk>,
     offered_key_share: Option<OfferedKeyShare>,
     /// The suite the HelloRetryRequest committed us to, if any.
     suite: Option<SupportedCipherSuite>,
@@ -854,6 +1071,14 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        // External PSKs exist only in TLS 1.3.
+        if config.require_external_psk && version != ProtocolVersion::TLSv1_3 {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::ExternalPskRequired,
+            ));
+        }
+
         debug!("Using ciphersuite {:?}", suite.suite());
         cx.common.negotiated_version = Some(version);
         cx.common.suite = Some(suite);
@@ -889,7 +1114,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
                     cx.data.ech_status = EchStatus::Rejected;
                     self.input.switch_to_outer(&offer);
                     self.transcript_buffer = offer.outer_transcript;
-                    self.early_key_schedule = None;
+                    self.offered_psks.clear();
                 }
             }
             other => self.input.ech = other,
@@ -928,7 +1153,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
                     randoms,
                     suite,
                     transcript,
-                    self.early_key_schedule,
+                    self.offered_psks,
                     self.input.hello,
                     our_key_share,
                     self.input.sent_tls13_fake_ccs,

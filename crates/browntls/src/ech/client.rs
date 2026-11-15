@@ -146,6 +146,7 @@ impl EchOffer {
         &mut self,
         inner: &ClientHelloPayload,
         retry: bool,
+        padding: impl FnOnce(usize) -> Option<usize>,
         rng: &dyn SecureRandom,
     ) -> Result<ClientHelloPayload, Error> {
         let mut outer = inner.clone();
@@ -157,6 +158,8 @@ impl EchOffer {
         // Sensitive, and not needed to authenticate a rejection.
         exts.protocols = None;
         exts.early_data = None;
+        // RFC 8773: says that the inner hello offers an external PSK.
+        exts.cert_with_extern_psk = None;
         exts.encrypted_client_hello = None;
         // §6.1.2: a PSK in the inner hello is mirrored by a GREASE one.
         exts.preshared_key = match &inner.extensions.preshared_key {
@@ -184,6 +187,10 @@ impl EchOffer {
             payload: PayloadU16::new(vec![0; payload_len]),
         };
         outer.extensions.encrypted_client_hello = Some(EchClientHello::Outer(ech.clone()));
+        // RFC 7685 padding, if any, applies to the outer hello as sent; it
+        // is part of the AAD, so it is decided before sealing.
+        outer.extensions.padding = None;
+        outer.extensions.padding = padding(outer.get_encoding().len());
         let aad = outer.get_encoding();
         let payload = self.sealer.seal(&aad, &encoded_inner)?;
         if payload.len() != payload_len {

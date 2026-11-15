@@ -82,6 +82,9 @@ pub enum Error {
     /// `max_fragment_size` is outside the allowed range.
     BadMaxFragmentSize,
 
+    /// A configured `record_size_limit` is below 64 (RFC 8449 §4).
+    BadRecordSizeLimit,
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -216,6 +219,13 @@ pub enum PeerMisbehaved {
     /// entry (RFC 9846 §4.5.1).
     BadCertChainExtensions,
     CipherSuiteDifferedOnRetry,
+    DelegatedCredentialBadSignature,
+    DelegatedCredentialExpired,
+    DelegatedCredentialNotOnEndEntity,
+    DelegatedCredentialSchemeMismatch,
+    DelegatedCredentialValidityTooLong,
+    DelegatedCredentialWithUnofferedScheme,
+    DelegatedCredentialWithoutDelegationUsage,
     DisallowedCertificateRequestExtension,
     DisallowedEncryptedExtension,
     DisallowedHelloRetryRequestExtension,
@@ -262,6 +272,8 @@ pub enum PeerMisbehaved {
     IllegalClientHelloLegacyVersion,
     IllegalMiddleboxChangeCipherSpec,
     IllegalProtectedChangeCipherSpec,
+    /// A `record_size_limit` below 64 (RFC 8449 §4).
+    IllegalRecordSizeLimit,
     IllegalServerHelloLegacyVersion,
     IllegalTlsInnerPlaintext,
     IncorrectBinder,
@@ -301,6 +313,7 @@ pub enum PeerMisbehaved {
     ResumptionOfferedWithVariedCipherSuite,
     ResumptionOfferedWithVariedEms,
     ResumptionOfferedWithIncompatibleCipherSuite,
+    ReusedAuthenticatorContext,
     SelectedDifferentCipherSuiteAfterRetry,
     SelectedInvalidPsk,
     SelectedTls12UsingTls13VersionExtension,
@@ -326,6 +339,7 @@ pub enum PeerMisbehaved {
     TooMuchEarlyDataReceived,
     UnexpectedCleartextExtension,
     UnsolicitedCertExtension,
+    UnsolicitedDelegatedCredential,
     /// An ECH extension in a HelloRetryRequest when we sent none, or ECH
     /// retry configurations after the server accepted ECH (RFC 9849 §5).
     UnsolicitedEchExtension,
@@ -336,6 +350,15 @@ pub enum PeerMisbehaved {
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
+    /// The server accepted 0-RTT although it did not select the first PSK
+    /// we offered (RFC 9846 §4.3.10).
+    EarlyDataAcceptedWithOtherPsk,
+    /// The server selected an external PSK and an ALPN protocol other than
+    /// the one the key is restricted to.
+    SelectedExternalPskWithOtherAlpn,
+    /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
+    /// selecting an external PSK.
+    CertWithExternPskWithoutExternalPsk,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -372,6 +395,15 @@ pub enum PeerIncompatible {
     Tls13RequiredForQuic,
     UncompressedEcPointsRequired,
     UnsolicitedCertificateTypeExtension,
+    /// The client offered neither a PSK we could use nor anything a server
+    /// without a certificate could authenticate with.
+    NoUsablePskForServerWithoutCertificate,
+    /// The server selected an external PSK without the certificate
+    /// authentication (RFC 8773) our configuration requires.
+    CertWithExternPskRequired,
+    /// The peer completed (or would complete) the handshake without the
+    /// external PSK our configuration requires (`require_external_psk`).
+    ExternalPskRequired,
 }
 
 impl From<PeerIncompatible> for Error {
@@ -632,6 +664,9 @@ impl fmt::Display for Error {
             Self::FailedToGetRandomBytes => f.write_str("failed to get random bytes"),
             Self::BadMaxFragmentSize => {
                 f.write_str("the supplied max_fragment_size was too small or large")
+            }
+            Self::BadRecordSizeLimit => {
+                f.write_str("the supplied record_size_limit was smaller than 64")
             }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),

@@ -6,6 +6,8 @@ members = [
   "crates/browntls",
   "crates/browntls-e2e",
 ]
+# The cargo-fuzz project has its own manifest and lockfile (fuzz/README.md).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0-dev"

@@ -41,9 +41,9 @@ intent.
 | TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection` or `Acceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | Delegated credentials (RFC 9345), server side in TLS 1.3: issuing with the native provider, `DelegationUsage` parsing, client validation with the RFC 9345 alerts; tests on both providers (`crates/browntls/tests/delegated_credentials*.rs`), browntls to browntls only. Client credentials not implemented | done |
 | Exported authenticators (RFC 9261) for TLS 1.3 and TLS 1.2 with EMS: requests, authenticators, spontaneous server authenticators, the empty authenticator, validation through the configured verifiers; tests on both providers (`crates/browntls/tests/exported_authenticators*.rs`), browntls to browntls only | done |
-| Built-in certificate compressors (zlib, brotli, zstd) | planned |
+| Built-in certificate compressors (zlib, brotli, zstd) | done: optional features `zlib` (`miniz_oxide`), `brotli` (`brotli`) and `zstd` (`ruzstd`, single compression level), default lists when enabled; both directions in TLS 1.3 (client certificates included); declared length bounded by a 64 KiB cap and a configurable limit and enforced exactly; unit and handshake tests on both providers and across them. zlib and Brotli interoperate with rustls 0.23 (zlib-rs, brotli) in both roles and both directions; Zstandard has no second implementation in the test suite and accepts frames with a window of at most 128 KiB (below the RFC 8878 recommendation; see [Architecture](Architecture.md#certificate-compression-rfc-8879)), and nothing is tested against OpenSSL (the OpenSSL 3.0 command-line tool of the interop suite has no certificate compression; OpenSSL 3.2 and later do) |
 | Unbuffered API, QUIC, Encrypted Client Hello | planned |
-| Fuzzing targets for codecs, PKI and handshake state | planned |
+| Fuzzing targets for codecs, PKI and handshake state | done: eight cargo-fuzz targets in `fuzz/` (handshake messages, deframer, certificate decompression, X.509 path validation, PEM, CRLs, client and server connections with a genuine in-process peer and identity TLS 1.3 record protection); built and run over generated seeds in CI on the stable toolchain. Fuzzing itself is manual: the only campaign so far ran each target for 60 seconds from the generated seeds when the targets were added (nightly 1.102, libFuzzer with AddressSanitizer, x86-64; between 3.5 thousand executions for the connection targets and 4.5 million for `pki_crl`) and found no crash, which is evidence of little beyond the harnesses working |
 | Kernel integration design | planned |
 
 ## Governance gaps
@@ -51,7 +51,15 @@ intent.
 These requirements from [Maintenance](Maintenance.md) are not yet met:
 
 - `cargo vet` admission with real audits for every dependency.
-- Fuzzing of DER, PEM, X.509 and TLS message parsers and of protocol state.
+- Continuous fuzzing. The targets in `fuzz/` exist and are run by hand; no
+  service runs them, no corpus is kept between runs, and CI only smoke-tests
+  the harnesses. The connection targets do not reach states behind a
+  Finished or CertificateVerify they would have to forge, TLS 1.2 after
+  ChangeCipherSpec, or the RustCrypto provider; `browntls-crypto` primitives
+  have no fuzz target.
+- `cargo vet` audits are also missing for the optional compression crates
+  (`miniz_oxide`, `brotli`, `ruzstd` and their dependencies), which parse
+  peer data when their features are enabled; `ruzstd` contains `unsafe`.
 - Named, non-author review of `unsafe` code, constant-time properties and
   cryptographic correctness, with Miri or sanitizer evidence where applicable.
 - `deny.toml` ignores RUSTSEC-2023-0071 (`rsa` 0.9, Marvin) for public-key
@@ -117,8 +125,8 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   warning alerts; the RFC 6066 `max_fragment_length` extension is not
   offered or accepted; a server keeps at most one post-handshake
   CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
-  answer must not be a CompressedCertificate (as in the handshake: client
-  certificate decompression is not implemented); a client answers at most
+  answer may be a CompressedCertificate with an algorithm the request
+  offered, as in the handshake (RFC 8879 §4); a client answers at most
   eight post-handshake CertificateRequests without application data from
   the server in between and then aborts with `unexpected_message` (a local
   resource bound: each answer costs a signature); a HelloRetryRequest cookie

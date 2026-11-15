@@ -141,6 +141,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
+            cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
             enable_delegated_credentials: false,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
             tls13_ticket_request: None,

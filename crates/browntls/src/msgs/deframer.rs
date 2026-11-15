@@ -56,6 +56,7 @@ impl DeframerVecBuffer {
     }
 
     /// Appends `bytes`, failing if the buffer limit would be exceeded.
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if self.used + bytes.len() > MAX_BUFFER {
             return Err(Error::general("received TLS data exceeds the buffer limit"));
@@ -314,8 +315,10 @@ impl MessageDeframer {
     }
 }
 
-/// Feeds arbitrary bytes through the plaintext deframer; used by fuzz targets.
-pub fn fuzz_deframer(data: &[u8]) {
+/// Feeds arbitrary bytes through the plaintext deframer; used by fuzz targets
+/// (`crate::fuzzing::deframer`).
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn fuzz_deframer(data: &[u8]) {
     let mut buffer = DeframerVecBuffer::default();
     let mut rl = RecordLayer::new();
     let mut d = MessageDeframer::default();

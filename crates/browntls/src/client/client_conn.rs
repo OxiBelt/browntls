@@ -105,6 +105,18 @@ pub struct ClientConfig {
     /// Whether to send 0-RTT data when a session allows it.
     pub enable_early_data: bool,
 
+    /// Whether to offer TLS 1.3 post-handshake client authentication
+    /// (RFC 9846 §4.7.2, the `post_handshake_auth` extension). Off by
+    /// default. When on, and [`Self::client_auth_cert_resolver`] has
+    /// certificates, the server may ask for a certificate at any time after
+    /// the handshake; the connection answers at once from the resolver, with
+    /// an empty Certificate when it has none suitable.
+    ///
+    /// RFC 8740 forbids post-handshake authentication over HTTP/2; an
+    /// application speaking HTTP/2 should leave this off. The library does
+    /// not tie the setting to the negotiated ALPN protocol.
+    pub enable_post_handshake_auth: bool,
+
     /// Whether TLS 1.2 servers must support the extended master secret (RFC 7627).
     pub require_ems: bool,
 
@@ -133,6 +145,37 @@ pub struct ClientConfig {
 
     /// Decompressors to offer for the server's certificate (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
+
+    /// The `record_size_limit` to announce (RFC 8449): the largest record
+    /// plaintext we accept, counting the content type in TLS 1.3. `None`
+    /// sends no extension, and then the server's limit is not learnt
+    /// either. A value above the protocol maximum (2^14 + 1 when TLS 1.3 is
+    /// offered, 2^14 otherwise) is lowered to it; a value below 64 makes
+    /// connection creation fail with [`Error::BadRecordSizeLimit`].
+    ///
+    /// Defaults to `Some(16385)`: no restriction of our own, but a server
+    /// that announces a smaller limit has its limit respected. Records we
+    /// send are limited by the server's limit and by `max_fragment_size`,
+    /// whichever is smaller.
+    pub record_size_limit: Option<u16>,
+
+    /// The `ticket_request` extension (RFC 9149) to send when TLS 1.3 is
+    /// offered: how many NewSessionTicket messages we would like. `None`
+    /// (the default) sends no extension, and the server sends its own
+    /// number of tickets.
+    pub tls13_ticket_request: Option<TicketRequest>,
+
+    /// Whether to send GREASE values (RFC 8701) in the ClientHello: in the
+    /// cipher suites, `supported_groups`, `key_share` (with a one-byte
+    /// share), `supported_versions`, `signature_algorithms` and
+    /// `psk_key_exchange_modes` lists, and as two extensions (one empty,
+    /// one not). The values are random per connection. Off by default
+    /// until interoperability with the GnuTLS peers of the end-to-end
+    /// matrix has been shown; rustls and OpenSSL 3 are tested.
+    pub enable_grease: bool,
+
+    /// How the ClientHello is padded with the `padding` extension (RFC 7685).
+    pub client_hello_padding: ClientHelloPadding,
 
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
@@ -249,6 +292,34 @@ impl TimeProvider for NoTime {
     fn current_time(&self) -> Option<UnixTime> {
         None
     }
+}
+
+/// The client's `ticket_request` (RFC 9149 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TicketRequest {
+    /// Tickets wanted when the server establishes a new session (a full
+    /// handshake, or a resumption it declined).
+    pub new_session_count: u8,
+    /// Tickets wanted when the server resumes the session we offered.
+    pub resumption_count: u8,
+}
+
+/// How the ClientHello is padded with the `padding` extension (RFC 7685).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientHelloPadding {
+    /// Never pad.
+    Disabled,
+    /// Pad a ClientHello whose handshake message (header included) would
+    /// be 256 to 511 bytes long to 512 bytes: some server implementations
+    /// hang on such lengths (RFC 7685 §4). The default; a ClientHello with
+    /// a post-quantum key share is longer anyway.
+    #[default]
+    AvoidProblematicLengths,
+    /// Pad the ClientHello handshake message to at least this many bytes
+    /// (header included), then apply [`Self::AvoidProblematicLengths`].
+    /// The padding body is at most 65535 bytes.
+    AtLeast(u16),
 }
 
 /// Session resumption settings.
@@ -424,6 +495,10 @@ impl EarlyData {
 pub struct ClientConnectionData {
     pub(super) tls13_tickets_received: u32,
     pub(super) early_data: EarlyData,
+    /// Whether our ClientHello offered `post_handshake_auth`.
+    pub(super) offered_post_handshake_auth: bool,
+    /// How many post-handshake CertificateRequests we have answered.
+    pub(super) post_handshake_auth_responses: u32,
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
@@ -435,6 +510,8 @@ impl ClientConnectionData {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
+            offered_post_handshake_auth: false,
+            post_handshake_auth_responses: 0,
             session_store,
             server_name,
         }
@@ -480,6 +557,7 @@ impl ConnectionCore<ClientConnectionData> {
     ) -> Result<Self, Error> {
         let mut common_state = CommonState::new(Side::Client);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
         let mut data = ClientConnectionData::new(config.resumption.store.clone(), name.clone());
@@ -537,6 +615,12 @@ impl ClientConnection {
         } else {
             None
         }
+    }
+
+    /// How many post-handshake CertificateRequests (RFC 9846 §4.7.2) this
+    /// connection has answered, with or without a certificate.
+    pub fn post_handshake_auth_responses(&self) -> u32 {
+        self.inner.core.data.post_handshake_auth_responses
     }
 
     /// Whether the server accepted the early data sent so far.

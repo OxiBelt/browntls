@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use browntls_pki::DnsName;
 
 use super::common::ActiveCertifiedKey;
+use super::cookie::RetryCookie;
 use super::server_conn::{ClientHello, ServerConfig, ServerConnectionData};
 use super::tls13;
 use crate::common_state::{ConnectionRandoms, KxState};
@@ -18,9 +19,13 @@ use crate::enums::{
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace};
-use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup};
-use crate::msgs::handshake::{ClientHelloPayload, HandshakePayload, Random, SessionId};
-use crate::msgs::message::Message;
+use crate::msgs::codec::Codec;
+use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup, PskKeyExchangeMode};
+use crate::msgs::grease::is_grease_u16;
+use crate::msgs::handshake::{
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, Random, SessionId,
+};
+use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -83,6 +88,9 @@ pub(super) struct ExpectClientHello {
     /// What our HelloRetryRequest selected, which the second ClientHello
     /// must follow (RFC 9846 §4.2.4).
     pub(super) retry_choice: Option<RetryChoice>,
+    /// The cookie our HelloRetryRequest carried, which the second
+    /// ClientHello must echo (RFC 9846 §4.3.2).
+    pub(super) sent_cookie: Option<Vec<u8>>,
     pub(super) send_tickets: usize,
 }
 
@@ -105,19 +113,152 @@ impl ExpectClientHello {
             session_id: SessionId::empty(),
             done_retry: false,
             retry_choice: None,
+            sent_cookie: None,
             send_tickets: 0,
         }
+    }
+
+    /// Checks the cookie of a second ClientHello, or continues a stateless
+    /// retry (RFC 9846 §4.3.2) when a first message carries one of ours.
+    fn process_cookie(
+        &mut self,
+        client_hello: &ClientHelloPayload,
+        cx: &mut ServerContext<'_>,
+    ) -> Result<(), Error> {
+        let received = client_hello.extensions.cookie.as_ref().map(|c| &c.0);
+        if self.done_retry {
+            // The client MUST copy the cookie it was sent.
+            return match (&self.sent_cookie, received) {
+                (None, _) => Ok(()),
+                (Some(_), None) => Err(cx.common.send_fatal_alert(
+                    AlertDescription::MissingExtension,
+                    PeerMisbehaved::MissingCookieInSecondClientHello,
+                )),
+                (Some(sent), Some(received)) if sent == received => Ok(()),
+                (Some(_), Some(_)) => Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::InvalidHelloRetryRequestCookie,
+                )),
+            };
+        }
+        match (received, &self.config.hello_retry_cookies) {
+            (Some(cookie), Some(sealer)) => {
+                let sealer = sealer.clone();
+                self.resume_from_cookie(&*sealer, cookie, client_hello, cx)
+            }
+            // RFC 9846 §4.3.2: a stateless server ignores change_cipher_spec
+            // records ahead of a second ClientHello; ahead of any other it
+            // is unexpected.
+            _ if cx.common.received_middlebox_ccs > 0 => Err(cx.common.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::IllegalMiddleboxChangeCipherSpec,
+            )),
+            // Without a sealer we issue no cookies, and ignore one a client
+            // sends in its first ClientHello.
+            _ => Ok(()),
+        }
+    }
+
+    /// Restores the state a HelloRetryRequest left in its cookie, so this
+    /// connection continues the handshake from the second ClientHello.
+    fn resume_from_cookie(
+        &mut self,
+        sealer: &dyn super::server_conn::ProducesTickets,
+        cookie: &[u8],
+        client_hello: &ClientHelloPayload,
+        cx: &mut ServerContext<'_>,
+    ) -> Result<(), Error> {
+        // Without a clock the cookie cannot be checked: fail closed, with
+        // an explicit alert also on the Acceptor path.
+        let now = match self.config.current_time() {
+            Ok(now) => now.as_secs(),
+            Err(err) => {
+                return Err(cx
+                    .common
+                    .send_fatal_alert(AlertDescription::InternalError, err));
+            }
+        };
+        let invalid = |cx: &mut ServerContext<'_>| {
+            cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::InvalidHelloRetryRequestCookie,
+            )
+        };
+        let Some(state) = RetryCookie::open(sealer, cookie, now) else {
+            return Err(invalid(cx));
+        };
+        // The configuration may have changed since the cookie was issued.
+        let Some(suite) = self
+            .config
+            .find_cipher_suite(state.suite)
+            .and_then(|s| s.tls13())
+        else {
+            return Err(invalid(cx));
+        };
+        let Some(group) =
+            self.config.kx_groups().iter().copied().find(|g| {
+                g.name() == state.group && g.usable_for_version(ProtocolVersion::TLSv1_3)
+            })
+        else {
+            return Err(invalid(cx));
+        };
+        if state.client_hello_hash.len() != suite.common.hash_provider.output_len() {
+            return Err(invalid(cx));
+        }
+        // RFC 9846 §4.2.2: the second ClientHello repeats the first, apart
+        // from what the HelloRetryRequest asked to change.
+        if client_hello.session_id != state.session_id {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::RefusedToFollowHelloRetryRequest,
+            ));
+        }
+        let sni = cx
+            .data
+            .sni
+            .as_ref()
+            .map(|name| name.as_ref().as_bytes())
+            .unwrap_or_default();
+        if sni != state.server_name.as_slice() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::ServerNameDifferedOnRetry,
+            ));
+        }
+
+        // RFC 9846 §4.5: message_hash(Hash(ClientHello1)), then the
+        // HelloRetryRequest exactly as sent (it is rebuilt from the cookie).
+        let mut transcript = HandshakeHashBuffer::new().start_hash(suite.common.hash_provider);
+        transcript.add(
+            &HandshakeMessagePayload::build_handshake_hash(&state.client_hello_hash).get_encoding(),
+        );
+        transcript.add_message(&tls13::hello_retry_request_message(
+            suite,
+            state.session_id,
+            group.name(),
+            Some(cookie.to_vec()),
+        ));
+        debug!("continuing a stateless HelloRetryRequest from its cookie");
+        self.transcript = HandshakeHashOrBuffer::Hash(transcript);
+        self.done_retry = true;
+        self.retry_choice = Some(RetryChoice { suite, group });
+        self.sent_cookie = Some(cookie.to_vec());
+        cx.common.handshake_kind =
+            Some(crate::common_state::HandshakeKind::FullWithHelloRetryRequest);
+        Ok(())
     }
 
     /// Negotiates version, suite and key exchange group, chooses the
     /// certificate and hands off to the version-specific handler.
     pub(super) fn with_certified_key(
-        self,
+        mut self,
         sig_schemes: Vec<SignatureScheme>,
         client_hello: &ClientHelloPayload,
         m: &Message<'_>,
         cx: &mut ServerContext<'_>,
     ) -> NextStateOrError {
+        self.process_cookie(client_hello, cx)?;
+
         let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3);
         let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2);
 
@@ -175,7 +316,13 @@ impl ExpectClientHello {
                 .extensions
                 .supported_versions
                 .as_ref()
-                .and_then(|versions| versions.iter().map(|v| u16::from(*v)).max())
+                .and_then(|versions| {
+                    versions
+                        .iter()
+                        .map(|v| u16::from(*v))
+                        .filter(|v| !is_grease_u16(*v))
+                        .max()
+                })
                 .unwrap_or_else(|| u16::from(client_hello.client_version));
             let our_max = if tls13_enabled {
                 ProtocolVersion::TLSv1_3
@@ -213,6 +360,21 @@ impl ExpectClientHello {
                 AlertDescription::UnsupportedExtension,
                 PeerMisbehaved::OfferedEarlyDataWithOldProtocolVersion,
             ));
+        }
+
+        // RFC 8449: once we answer the client's record_size_limit (in the
+        // TLS 1.3 EncryptedExtensions or the TLS 1.2 ServerHello), each
+        // side's protected records respect the other's limit. This runs
+        // again for a second ClientHello.
+        if let (Some(ours), Some(theirs)) = (
+            record_size_limit_ack(&self.config, client_hello, version),
+            client_hello.extensions.record_size_limit,
+        ) {
+            cx.common.apply_record_size_limits(
+                ours,
+                theirs,
+                version == ProtocolVersion::TLSv1_3,
+            )?;
         }
 
         // Choose the certificate.
@@ -503,6 +665,57 @@ impl ExpectClientHello {
     }
 }
 
+/// The `record_size_limit` to send for `version` (RFC 8449 §4): our
+/// configured value, clamped to the protocol maximum, when the client sent
+/// the extension and the configuration has one.
+pub(super) fn record_size_limit_ack(
+    config: &ServerConfig,
+    client_hello: &ClientHelloPayload,
+    version: ProtocolVersion,
+) -> Option<u16> {
+    client_hello.extensions.record_size_limit?;
+    let max = crate::common_state::max_record_size_limit(version == ProtocolVersion::TLSv1_3);
+    config.record_size_limit.map(|limit| limit.min(max))
+}
+
+/// How many TLS 1.3 tickets to send, and the RFC 9149 `expected_count` to
+/// announce in EncryptedExtensions when the client sent `ticket_request`.
+///
+/// RFC 9846 §4.7.1: tickets go only to a client whose ClientHello carried a
+/// suitable `psk_key_exchange_modes`; `psk_dhe_ke` is the only mode we
+/// resume with. RFC 9149 §3: no more tickets than the client asked for, for
+/// a resumed session (`resumption_count`) or a new one
+/// (`new_session_count`, also when we declined the offered PSK), and never
+/// more than `send_tls13_tickets`, our own maximum.
+pub(super) fn tls13_tickets_to_send(
+    config: &ServerConfig,
+    client_hello: &ClientHelloPayload,
+    resumed: bool,
+) -> (usize, Option<u8>) {
+    let client_takes_tickets = client_hello
+        .extensions
+        .psk_modes
+        .as_ref()
+        .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
+    let ours = if client_takes_tickets {
+        config.send_tls13_tickets
+    } else {
+        0
+    };
+    match client_hello.extensions.ticket_request {
+        Some(request) => {
+            let wanted = match resumed {
+                true => request.resumption_count,
+                false => request.new_session_count,
+            };
+            let count = ours.min(usize::from(wanted));
+            // `count` is at most `wanted`, a u8.
+            (count, u8::try_from(count).ok())
+        }
+        None => (ours, None),
+    }
+}
+
 /// The RFC 7250 certificate types to announce, one per direction; `None`
 /// when the client did not raise the question.
 #[derive(Clone, Copy, Debug, Default)]
@@ -585,6 +798,16 @@ pub(super) fn kx_groups_by_preference(
 
 impl State<ServerConnectionData> for ExpectClientHello {
     fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 9846 §4.3.2: a stateless server may see the client's
+        // change_cipher_spec ahead of a second ClientHello on a fresh
+        // connection; `process_cookie` refuses it ahead of any other.
+        if let MessagePayload::ChangeCipherSpec(_) = &m.payload
+            && !self.done_retry
+            && self.config.hello_retry_cookies.is_some()
+        {
+            cx.common.process_middlebox_ccs()?;
+            return Ok(self);
+        }
         let (client_hello, sig_schemes) = process_client_hello(&m, self.done_retry, cx)?;
         self.with_certified_key(sig_schemes, client_hello, &m, cx)
     }

@@ -133,6 +133,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             key_log: Arc::new(NoKeyLog {}),
             enable_secret_extraction: false,
             enable_early_data: false,
+            enable_post_handshake_auth: false,
             require_ems,
             require_secure_renegotiation: true,
             allow_mac_then_encrypt: false,
@@ -140,6 +141,10 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
+            record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
+            tls13_ticket_request: None,
+            enable_grease: false,
+            client_hello_padding: super::ClientHelloPadding::default(),
         }
     }
 }

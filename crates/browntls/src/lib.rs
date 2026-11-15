@@ -135,8 +135,8 @@ pub mod client {
 
     pub use builder::WantsClientCert;
     pub use client_conn::{
-        ClientConfig, ClientConnectionData, ClientSessionStore, ResolvesClientCert, Resumption,
-        Tls12Resumption, UnbufferedClientConnection,
+        ClientConfig, ClientConnectionData, ClientHelloPadding, ClientSessionStore,
+        ResolvesClientCert, Resumption, TicketRequest, Tls12Resumption, UnbufferedClientConnection,
     };
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};
@@ -168,6 +168,7 @@ pub use client::ClientConnection;
 pub mod server {
     pub(crate) mod builder;
     mod common;
+    mod cookie;
     pub(crate) mod handy;
     mod hs;
     mod server_conn;
@@ -182,8 +183,8 @@ pub mod server {
     #[cfg(feature = "std")]
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
-        ClientHello, ProducesTickets, ResolvesServerCert, ServerConfig, ServerConnectionData,
-        StoresServerSessions, UnbufferedServerConnection,
+        ClientHello, PostHandshakeAuthStatus, ProducesTickets, ResolvesServerCert, ServerConfig,
+        ServerConnectionData, StoresServerSessions, UnbufferedServerConnection,
     };
 
     pub use crate::verify::NoClientAuth;

@@ -17,8 +17,8 @@ pub(crate) use certs::{
     CertificateStatusRequest, CompressedCertificatePayload,
 };
 pub(crate) use extensions::{
-    ClientSessionTicket, KeyShareEntry, PresharedKeyBinder, PresharedKeyIdentity,
-    PresharedKeyOffer, ProtocolName, ServerExtensions, ServerNamePayload,
+    ClientSessionTicket, ClientTicketRequest, KeyShareEntry, PresharedKeyBinder,
+    PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, ServerExtensions, ServerNamePayload,
 };
 pub(crate) use hello::{
     ClientExtensions, HelloRetryRequest, HelloRetryRequestExtensions, ServerHelloPayload,

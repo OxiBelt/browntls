@@ -360,14 +360,25 @@ enum Etm {
 /// An OpenSSL configuration file that disables Encrypt-then-MAC for every
 /// `SSL_CTX` of the process (`OPENSSL_CONF`), next to the PKI files.
 fn no_etm_conf(pki: &Pki) -> String {
+    // Tests run in parallel and share the cached `Pki`, so an OpenSSL
+    // process may read this file while another test writes it. Writing in
+    // place truncates it first, and a process that read the empty file kept
+    // encrypt_then_mac on; write a private file and rename it into place,
+    // which replaces the file atomically.
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let path = pki.path("no-etm.cnf");
+    let tmp = pki.path(&format!(
+        "no-etm.cnf.{}.tmp",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(
-        &path,
+        &tmp,
         "openssl_conf = openssl_init\n\n[openssl_init]\nssl_conf = ssl_sect\n\n\
          [ssl_sect]\nsystem_default = system_default_sect\n\n[system_default_sect]\n\
          Options = -EncryptThenMac\n",
     )
     .unwrap();
+    std::fs::rename(&tmp, &path).unwrap();
     path
 }
 

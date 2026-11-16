@@ -116,6 +116,7 @@ sources = [
   "crates/browntls-crypto/src/hkdf.rs",
   "crates/browntls-crypto/src/tls12_prf.rs",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/cpu/**",
 ]
 
@@ -131,6 +132,7 @@ sources = [
   "crates/browntls-crypto/src/tls_cbc.rs",
   "crates/browntls-crypto/src/ct.rs",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/cpu/**",
 ]
 
@@ -142,6 +144,7 @@ sources = [
   "crates/browntls-crypto/src/nist/**",
   "crates/browntls-crypto/src/hash/**",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/cpu/**",
 ]
 
@@ -152,6 +155,7 @@ sources = [
   "crates/browntls-crypto/src/der.rs",
   "crates/browntls-crypto/src/hash/**",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/cpu/**",
 ]
 
@@ -162,6 +166,7 @@ sources = [
   "crates/browntls-crypto/src/ffdhe/**",
   "crates/browntls-crypto/src/hash/**",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/cpu/**",
 ]
 
@@ -187,6 +192,7 @@ sources = [
   "crates/browntls-crypto/src/sys.rs",
   "crates/browntls-crypto/src/cpu/**",
   "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/accel/**",
   "crates/browntls-crypto/src/error.rs",
   "crates/browntls-crypto/src/lib.rs",
 ]

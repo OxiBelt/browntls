@@ -9,6 +9,7 @@ use browntls_crypto::rand::FixedRng;
 use ed25519_dalek::{Signer as _, Verifier as _};
 
 use super::{edit, flip_bit, message};
+use crate::crypto_hash::with_fixed_share;
 use crate::input::Input;
 
 /// Op: the X25519 function on a fuzzed scalar and u-coordinate.
@@ -16,7 +17,8 @@ pub fn x25519_function(input: &mut Input<'_>) {
     let k: [u8; 32] = input.array();
     let u: [u8; 32] = input.array();
     let want = x25519_dalek::x25519(k, u);
-    assert_eq!(x25519::x25519(&k, &u), want, "X25519");
+    let got = x25519::x25519(&k, &u);
+    assert_eq!(got, want, "X25519");
     for backend in Backend::ALL {
         match x25519::x25519_with_backend(backend, &k, &u) {
             Some(out) => {
@@ -39,6 +41,14 @@ pub fn x25519_function(input: &mut Input<'_>) {
         accel::set_policy(Algorithm::X25519, Policy::PREFERRED).expect("policy");
         assert_eq!(portable, Backend::Portable);
     }
+    // Load-aware routing moves calls to the other backend and never changes
+    // them: with a fuzzed share fixed on a fuzzed alternate the output is
+    // the one computed above without routing.
+    let (alternate, percent) = (input.byte(), input.byte());
+    let routed = with_fixed_share(Algorithm::X25519, alternate, percent, || {
+        x25519::x25519(&k, &u)
+    });
+    assert_eq!(routed, got, "X25519 with load-aware routing");
 }
 
 /// Op: an X25519 private key (from bytes, a slice or a byte source),

@@ -5,13 +5,15 @@
 //! Every result is checked against an independent implementation:
 //! `x25519-dalek`, `ed25519-dalek`, `x448`, `ed448-goldilocks` and the
 //! RustCrypto `p256`, `p384` and `p521` crates. Beyond that: X25519 on every
-//! backend; NIST public keys, ECDH, signing and verification also under the
-//! portable backend (acceleration policy `NONE`); agreement is symmetric;
-//! signatures round trip through every encoding and verification path; a
-//! flipped bit is rejected by both sides; on fuzzed keys, points, DER
-//! documents and signatures browntls and the oracle reach the same verdict
-//! (browntls is allowed to be stricter only where its documentation says
-//! so: Ed25519 and Ed448 keys of small order, non-canonical Ed25519 keys).
+//! backend, and with load-aware routing (`accel::load`) sending a fuzzed
+//! share of the calls to a fuzzed alternate backend; NIST public keys, ECDH,
+//! signing and verification also under the portable backend (acceleration
+//! policy `NONE`); agreement is symmetric; signatures round trip through
+//! every encoding and verification path; a flipped bit is rejected by both
+//! sides; on fuzzed keys, points, DER documents and signatures browntls and
+//! the oracle reach the same verdict (browntls is allowed to be stricter
+//! only where its documentation says so: Ed25519 and Ed448 keys of small
+//! order, non-canonical Ed25519 keys).
 //!
 //! The input is a program of up to [`MAX_OPS`] operations, each a selector
 //! byte (25 operations) followed by its arguments (fields have a 16-bit
@@ -19,7 +21,7 @@
 //!
 //! | Op | Operation | Arguments |
 //! |---|---|---|
-//! | 0 | X25519 function, backends, base point | scalar, u, policy flag |
+//! | 0 | X25519 function, backends, base point, routing | scalar, u, policy flag, routing alternate and share |
 //! | 1 | X25519 keys and agreement | key source, peer scalar, fuzzed peer u |
 //! | 2 | Ed25519 sign and verify, PKCS #8 | seed or byte source, message, bit, message edit |
 //! | 3 | Ed25519 verification of fuzzed keys and signatures | message, mode, key and signature or seed and mask |
@@ -153,9 +155,23 @@ pub fn seeds() -> Vec<Vec<u8>> {
     base448[0] = 5;
     let mut seeds: Vec<Seed> = vec![
         // X25519: the base point and a zero u (all-zero output), with the
-        // policy flag.
-        Seed::op(0).bytes(&[0x11; 32]).bytes(&base25519).bytes(&[1]),
-        Seed::op(0).bytes(&[0x22; 32]).bytes(&[0; 32]).bytes(&[0]),
+        // policy flag, then a routing alternate and its share of the calls
+        // (all, none, some).
+        Seed::op(0)
+            .bytes(&[0x11; 32])
+            .bytes(&base25519)
+            .bytes(&[1])
+            .bytes(&[0, 100]),
+        Seed::op(0)
+            .bytes(&[0x22; 32])
+            .bytes(&[0; 32])
+            .bytes(&[0])
+            .bytes(&[1, 0]),
+        Seed::op(0)
+            .bytes(&[0x33; 32])
+            .bytes(&base25519)
+            .bytes(&[0])
+            .bytes(&[0, 50]),
         // X25519 keys from bytes, a slice and a byte source; a fuzzed u of
         // zero (rejected) and a random one.
         Seed::op(1)

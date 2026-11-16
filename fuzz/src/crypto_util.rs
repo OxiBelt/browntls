@@ -24,11 +24,22 @@
 //!   algorithms; success, failure (`Required` without hardware leaves the
 //!   policy unchanged) and the reported status must be consistent. Every
 //!   policy is restored to `Policy::PREFERRED` before `run` returns.
+//! - `accel::load`: between those policy changes, load-aware routing is
+//!   enabled with fuzzed configurations (reported back clamped) and disabled
+//!   (every stream steady, statistics forgotten), fixed shares are set with
+//!   fuzzed lanes, alternates and percentages and cleared, and an X25519 key
+//!   exchange is run (timed exactly while routing is enabled). A call
+//!   succeeds exactly when its documentation says so and a failed one
+//!   changes nothing; after every operation each stream's status agrees with
+//!   `lanes`, `status_all`, the acceleration status and the configuration.
+//!   Routing is disabled before `run` returns.
 
 use browntls_crypto::Error;
+use browntls_crypto::accel::load::{self, Phase};
 use browntls_crypto::accel::{self, Acceleration, Algorithm, Kind, Policy, Uses};
 use browntls_crypto::cpu::{self, Features};
 use browntls_crypto::ct::{self, Choice};
+use browntls_crypto::curve25519::x25519;
 use browntls_crypto::der::{self, Reader, Writer, tag};
 use browntls_crypto::rand::{self, FixedRng, OsRng};
 use browntls_crypto::zeroize::{self, Zeroize, Zeroizing};
@@ -59,6 +70,22 @@ const LEVELS: [Acceleration; 3] = [
     Acceleration::None,
 ];
 
+/// The `accel` call that runs one `accel::load` call (see [`load_op`]).
+const ACCEL_LOAD: u8 = 6;
+/// Calls of `accel` operations.
+const ACCEL_CALLS: usize = 7;
+
+const LOAD_ENABLE: u8 = 0;
+const LOAD_DISABLE: u8 = 1;
+const LOAD_SET_FIXED: u8 = 2;
+const LOAD_CLEAR_FIXED: u8 = 3;
+const LOAD_KEY_EXCHANGE: u8 = 4;
+const LOAD_CALLS: usize = 5;
+
+/// Lanes and alternates a fuzzed index selects from: more than any family
+/// has, so that missing ones are asked for as well.
+const LOAD_INDEXES: u8 = 4;
+
 /// The `crypto_util` fuzz target.
 pub fn run(data: &[u8]) {
     let mut input = Input::new(data);
@@ -84,6 +111,7 @@ pub fn run(data: &[u8]) {
         }
     }
     accel::set_policy_all(Policy::PREFERRED).expect("PREFERRED is always satisfiable");
+    disable_load();
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +805,7 @@ fn accel_op(input: &mut Input<'_>) {
     let kind = *input.pick(&Kind::ALL);
     let level = *input.pick(&LEVELS);
     let policy = Policy::new(*input.pick(&LEVELS), *input.pick(&LEVELS));
-    match input.choose(6) {
+    match input.choose(ACCEL_CALLS) {
         0 => {
             let before = accel::policy(alg);
             let result = accel::set_policy(alg, policy);
@@ -858,8 +886,11 @@ fn accel_op(input: &mut Input<'_>) {
             assert_eq!(Policy::default(), Policy::PREFERRED);
             assert!(!format!("{policy} {u}").is_empty());
         }
-        _ => {
+        5 => {
             // Names and parsing.
+            for phase in [Phase::Steady, Phase::Probing, Phase::Shifting, Phase::Fixed] {
+                assert_eq!(phase.name(), phase.to_string());
+            }
             assert_eq!(kind.name(), kind.to_string());
             assert_eq!(level.name(), level.to_string());
             assert_eq!(alg.name(), alg.to_string());
@@ -882,8 +913,162 @@ fn accel_op(input: &mut Input<'_>) {
             };
             assert_eq!(text.parse::<Acceleration>(), expected, "{text:?}");
         }
+        _ => load_op(input, alg),
     }
     check_status();
+    check_load();
+}
+
+/// Turns load-aware routing off and checks that nothing of it is left: no
+/// configuration, and every stream steady without statistics.
+fn disable_load() {
+    load::disable();
+    assert_eq!(load::config(), None);
+    for s in load::status_all() {
+        assert_eq!(
+            (s.phase, s.alternate, s.shifted_percent),
+            (Phase::Steady, None, 0),
+            "{s}"
+        );
+        assert_eq!(
+            (s.primary_cost, s.baseline_cost, s.alternate_cost),
+            (None, None, None),
+            "{s}"
+        );
+    }
+}
+
+/// Every `accel::load` report agrees with the others, with the acceleration
+/// status and with the configuration.
+fn check_load() {
+    let config = load::config();
+    let mut all = Vec::new();
+    for alg in Algorithm::ALL {
+        let lanes = load::lanes(alg);
+        let selected = accel::status(alg);
+        for lane in 0..lanes {
+            let s = load::status(alg, lane).expect("a lane below `lanes`");
+            assert_eq!((s.algorithm, s.lane), (alg, lane));
+            assert_eq!(s.primary, selected.backend, "{s}");
+            assert!(!s.name.is_empty(), "{s}");
+            assert!(matches!(s.unit, "byte" | "op"), "{s}");
+            assert!(s.to_string().contains(s.phase.name()), "{s}");
+            assert!(s.shifted_percent <= 100, "{s}");
+            if s.phase == Phase::Steady {
+                assert_eq!(
+                    (s.alternate, s.shifted_percent, s.alternate_cost),
+                    (None, 0, None),
+                    "{s}"
+                );
+            } else {
+                assert!(config.is_some(), "{s} while routing is disabled");
+                assert!(s.alternates > 0, "{s}");
+                assert!(s.alternate.is_some_and(|a| a != s.primary), "{s}");
+            }
+            // The portable backend is every family's last choice, so nothing
+            // is left to take its work; and when it may not take shifted
+            // work, every alternate is an accelerated backend.
+            if !selected.accelerated() {
+                assert_eq!(s.alternates, 0, "{s}");
+            }
+            if config.is_some_and(|c| !c.portable) && s.alternates > 0 {
+                assert!(selected.available.any(), "{s}");
+            }
+            all.push(s);
+        }
+        assert_eq!(load::status(alg, lanes), None, "{alg}");
+    }
+    assert_eq!(load::status_all().collect::<Vec<_>>(), all);
+}
+
+/// One fuzzed `accel::load` call on a stream of `alg`, with its outcome
+/// checked against the documented conditions.
+fn load_op(input: &mut Input<'_>, alg: Algorithm) {
+    let lane = usize::from(input.byte() % LOAD_INDEXES);
+    let alternate = usize::from(input.byte() % LOAD_INDEXES);
+    let percent = input.byte();
+    let before = load::status(alg, lane);
+    assert_eq!(
+        before.is_some(),
+        lane < load::lanes(alg),
+        "{alg} lane {lane}"
+    );
+    match u8::try_from(input.choose(LOAD_CALLS)).unwrap_or(0) {
+        LOAD_ENABLE => {
+            let config = load::Config {
+                threshold_percent: input.byte(),
+                max_shift_percent: input.byte(),
+                portable: input.bool(),
+            };
+            // The fuzz project builds `browntls-crypto` with `std`, which
+            // provides the clock.
+            assert_eq!(load::enable(config), Ok(()));
+            assert_eq!(
+                load::config(),
+                Some(load::Config {
+                    threshold_percent: config.threshold_percent.clamp(20, 200),
+                    max_shift_percent: config.max_shift_percent.clamp(1, 93),
+                    portable: config.portable,
+                })
+            );
+            assert_eq!(load::Config::default(), load::Config::DEFAULT);
+            // Statistics gathered so far are kept.
+            let costs =
+                |s: Option<load::StreamStatus>| s.map(|s| (s.primary_cost, s.baseline_cost));
+            assert_eq!(costs(load::status(alg, lane)), costs(before));
+        }
+        LOAD_DISABLE => disable_load(),
+        LOAD_SET_FIXED => {
+            let possible = load::config().is_some()
+                && percent <= 100
+                && before.is_some_and(|s| alternate < s.alternates);
+            let result = load::set_fixed(alg, lane, alternate, percent);
+            let after = load::status(alg, lane);
+            let call = format!("{alg}: set_fixed({lane}, {alternate}, {percent})");
+            match result {
+                Ok(()) => {
+                    assert!(possible, "{call} succeeded");
+                    let s = after.expect("a share was fixed on this stream");
+                    assert_eq!(s.phase, Phase::Fixed, "{s}");
+                    assert_eq!(s.shifted_percent, percent, "{s}");
+                    assert!(s.alternate.is_some_and(|a| a != s.primary), "{s}");
+                }
+                Err(e) => {
+                    assert_eq!(e, Error::Unsupported);
+                    assert!(!possible, "{call} failed");
+                    assert_eq!(after, before, "{call} failed and changed the stream");
+                }
+            }
+        }
+        LOAD_CLEAR_FIXED => {
+            load::clear_fixed(alg, lane);
+            let after = load::status(alg, lane);
+            if before.is_some_and(|s| s.phase == Phase::Fixed) {
+                let s = after.expect("the stream had a fixed share");
+                assert_eq!(
+                    (s.phase, s.alternate, s.shifted_percent),
+                    (Phase::Steady, None, 0),
+                    "{s}"
+                );
+            } else {
+                // Only a fixed share ends; one hidden by a later policy or
+                // configuration was reported as steady already.
+                assert_eq!(after, before, "{alg}: clear_fixed({lane})");
+            }
+        }
+        _ => {
+            // Every key exchange is timed while routing is enabled, on the
+            // primary or on the alternate holding a fixed share, and nothing
+            // is timed while it is disabled.
+            let _ = x25519::x25519(&[0x42; 32], &x25519::BASEPOINT);
+            let s = load::status(Algorithm::X25519, 0).expect("X25519 has a stream");
+            assert_eq!(
+                s.primary_cost.is_some() || s.alternate_cost.is_some(),
+                load::config().is_some(),
+                "{s}"
+            );
+        }
+    }
 }
 
 fn error_op() {
@@ -1068,6 +1253,94 @@ pub fn seeds() -> Vec<Vec<u8>> {
         seeds.push(seed);
     }
     seeds.push(vec![OP_ACCEL, 0, 1, 0, 1, 1, 4, 1, 0]);
+    // accel::load. One `accel` operation making the load call `call` on
+    // stream `lane` of algorithm `alg`, and one setting a policy.
+    let call = |alg: u8, lane: u8, alternate: u8, percent: u8, call: u8| {
+        vec![
+            OP_ACCEL, alg, 0, 1, 1, 1, ACCEL_LOAD, lane, alternate, percent, call,
+        ]
+    };
+    let enable = |threshold: u8, max_shift: u8, portable: u8| {
+        [
+            call(0, 0, 0, 0, LOAD_ENABLE),
+            vec![threshold, max_shift, portable],
+        ]
+        .concat()
+    };
+    let policy = |alg: u8, simd: u8, dedicated: u8| vec![OP_ACCEL, alg, 0, 1, simd, dedicated, 0];
+    // The two families with streams.
+    let index = |alg: Algorithm| {
+        let at = Algorithm::ALL.iter().position(|a| *a == alg);
+        u8::try_from(at.expect("every algorithm is in ALL")).expect("few algorithms")
+    };
+    for alg in [index(Algorithm::ChaCha20), index(Algorithm::X25519)] {
+        seeds.push(
+            [
+                // Disabled: no share, an untimed key exchange.
+                call(alg, 0, 0, 50, LOAD_SET_FIXED),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+                // The default configuration; every share on each alternate,
+                // with a key exchange under it.
+                enable(25, 90, 1),
+                call(alg, 0, 0, 100, LOAD_SET_FIXED),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+                call(alg, 0, 1, 50, LOAD_SET_FIXED),
+                call(alg, 0, 1, 1, LOAD_SET_FIXED),
+                call(alg, 0, 0, 0, LOAD_SET_FIXED),
+                // No such alternate, share or lane.
+                call(alg, 0, 3, 50, LOAD_SET_FIXED),
+                call(alg, 0, 0, 101, LOAD_SET_FIXED),
+                call(alg, 1, 0, 50, LOAD_SET_FIXED),
+                // Cleared, also where nothing is fixed.
+                call(alg, 1, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+                // Clamped configurations, then off.
+                enable(0, 255, 0),
+                enable(255, 0, 1),
+                call(alg, 0, 0, 100, LOAD_SET_FIXED),
+                call(alg, 0, 0, 0, LOAD_DISABLE),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+            ]
+            .concat(),
+        );
+        // A share under one policy is ignored under another (portable only,
+        // then without SIMD), reappears with the policy and is cleared; a
+        // share on the portable backend is hidden once it may take no work.
+        seeds.push(
+            [
+                enable(25, 90, 1),
+                call(alg, 0, 0, 100, LOAD_SET_FIXED),
+                policy(alg, 2, 2),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+                call(alg, 0, 0, 100, LOAD_SET_FIXED),
+                policy(alg, 2, 1),
+                call(alg, 0, 0, 100, LOAD_SET_FIXED),
+                policy(alg, 1, 1),
+                call(alg, 0, 0, 0, LOAD_KEY_EXCHANGE),
+                call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 1, 75, LOAD_SET_FIXED),
+                enable(25, 90, 0),
+                call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 1, 75, LOAD_SET_FIXED),
+                call(alg, 0, 0, 75, LOAD_SET_FIXED),
+            ]
+            .concat(),
+        );
+    }
+    // Every algorithm, most of them without a stream.
+    for alg in 0..15u8 {
+        seeds.push(
+            [
+                enable(25, 90, 1),
+                call(alg, 0, 0, 50, LOAD_SET_FIXED),
+                call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
+                call(alg, 0, 0, 0, LOAD_DISABLE),
+            ]
+            .concat(),
+        );
+    }
     seeds.push(vec![OP_ERROR]);
     seeds
 }

@@ -17,6 +17,9 @@
 //! - seal/open round trips; a flipped ciphertext, tag or AAD bit, and any
 //!   fuzzed ciphertext the oracle rejects, fails to open and wipes the
 //!   buffer; fuzzed ciphertexts the oracle accepts open to its plaintext;
+//! - ChaCha20-Poly1305 keys pass the same checks with load-aware routing
+//!   (`accel::load`) enabled and a fuzzed share of their records fixed on a
+//!   fuzzed alternate ChaCha20 backend: routing never changes a record;
 //! - TLS 1.2 CBC records (MAC-then-encrypt and encrypt-then-MAC, every MAC):
 //!   sealed records equal an independent construction, records with extra
 //!   padding open, and tampered bits, sequence numbers, padding or MACs are
@@ -50,7 +53,7 @@ use ccm::aead::consts::{U4, U6, U7, U8, U9, U10, U11, U12, U13, U14, U16};
 use hmac::Mac as _;
 use num_bigint::BigUint;
 
-use crate::crypto_hash::{across_policies, chunks, message};
+use crate::crypto_hash::{across_policies, chunks, message, with_fixed_share};
 use crate::input::{Input, put_field, put_short_field};
 
 /// Most operations one input runs.
@@ -85,7 +88,8 @@ const OP_TLS_CBC: u8 = 8;
 /// - 4 ChaCha20: key (32), counter (u32), nonce (12), data (message);
 /// - 5 Poly1305: key (32), message, chunk plan, flip position (u16);
 /// - 6 ChaCha20-Poly1305: key (32), nonce, AAD, plaintext, tamper, wrong key
-///   length, fuzzed ciphertext and tag;
+///   length, fuzzed ciphertext and tag, routing alternate and share (one
+///   byte each);
 /// - 7 AES-CBC: key length, key (32), IV (16), buffer (message), fuzzed
 ///   ciphertext (field);
 /// - 8 TLS 1.2 CBC: MAC, order, width, backend, AES key (32), MAC key flag
@@ -978,6 +982,7 @@ fn op_chacha_poly(input: &mut Input<'_>) {
     let bad = input.byte();
     let fct = input.field();
     let ftag: [u8; TAG_LEN] = input.array();
+    let (alternate, percent) = (input.byte(), input.byte());
 
     let mut want_ct = pt.clone();
     let want_tag = chacha_poly_ref_seal(&key, &nonce, aad, &mut want_ct);
@@ -1006,6 +1011,29 @@ fn op_chacha_poly(input: &mut Input<'_>) {
         tamper,
         fuzzed(),
     );
+    // Load-aware routing moves records to another ChaCha20 backend and never
+    // changes them: with a share fixed on an alternate, the key made above
+    // and one made now give the records made above without routing
+    // (`want_ct`, `want_tag`), open them and reject what was rejected.
+    with_fixed_share(Algorithm::ChaCha20, alternate, percent, || {
+        let fresh = <ChaCha20Poly1305 as Aead>::new(&key).expect("32-byte key");
+        for (what, aead) in [
+            ("ChaCha20-Poly1305 routed", &default),
+            ("ChaCha20-Poly1305 routed, new key", &fresh),
+        ] {
+            check_typed(
+                what,
+                aead,
+                &nonce,
+                aad,
+                &pt,
+                &want_ct,
+                &want_tag,
+                tamper,
+                fuzzed(),
+            );
+        }
+    });
     let long_key = [key, key].concat();
     let bad_key = &long_key[..bad_len(bad, 32)];
     assert_eq!(
@@ -1457,17 +1485,28 @@ pub fn seeds() -> Vec<Vec<u8>> {
     put_short_field(&mut s, &[3, 0x82, 17]);
     s.extend_from_slice(&[0, 77]);
     seeds.push(s);
-    // ChaCha20-Poly1305.
-    let mut s = vec![OP_CHACHA_POLY];
-    s.extend_from_slice(key);
-    s.extend_from_slice(&bytes[..12]);
-    put_short_field(&mut s, &bytes[..12]);
-    put_field(&mut s, &bytes[..65]);
-    s.push(0);
-    s.extend_from_slice(&[2, 0, 16]);
-    put_field(&mut s, &bytes[..7]);
-    s.extend_from_slice(&bytes[..16]);
-    seeds.push(s);
+    // ChaCha20-Poly1305: routing shares of none, all and some of the records
+    // on each alternate backend; the last plaintext is long enough for its
+    // records to be timed.
+    for (alternate, percent, ext) in [
+        (0u8, 0u8, 0u8),
+        (0, 100, 0),
+        (1, 100, 0),
+        (2, 50, 0),
+        (1, 100, 255),
+    ] {
+        let mut s = vec![OP_CHACHA_POLY];
+        s.extend_from_slice(key);
+        s.extend_from_slice(&bytes[..12]);
+        put_short_field(&mut s, &bytes[..12]);
+        put_field(&mut s, &bytes[..65]);
+        s.push(ext);
+        s.extend_from_slice(&[2, 0, 16]);
+        put_field(&mut s, &bytes[..7]);
+        s.extend_from_slice(&bytes[..16]);
+        s.extend_from_slice(&[alternate, percent]);
+        seeds.push(s);
+    }
     // AES-CBC: both key sizes, an unaligned buffer, a bad key length.
     for (key_sel, len) in [(0u8, 48usize), (2, 64), (0, 20), (3, 32)] {
         let mut s = vec![OP_CBC, key_sel];

@@ -15,6 +15,11 @@
 //! x86-64), plus a four-way radix-2^26 AVX2 path on x86-64 for inputs of at
 //! least 1 KiB (it is slower below that).
 //!
+//! [`ChaCha20Poly1305`] keys take part in load-aware routing
+//! ([`crate::accel::load`]): while it is enabled and the selected ChaCha20
+//! backend runs slower than usual, a share of the records is encrypted with
+//! another backend.
+//!
 //! The ChaCha20 block counter is 32 bits and wraps modulo 2^32 in
 //! [`chacha20_xor`]; [`ChaCha20Poly1305`] rejects messages that would wrap it.
 
@@ -149,7 +154,15 @@ impl crate::accel::Backends for Backend {
             Self::Rvv => "RVV",
         }
     }
+
+    fn streams() -> &'static [crate::accel::load::Stream] {
+        &LOAD
+    }
 }
+
+/// Load-aware routing state: the records sealed and opened by
+/// [`ChaCha20Poly1305`].
+static LOAD: [crate::accel::load::Stream; 1] = [crate::accel::load::Stream::bulk("records")];
 
 /// Expanded ChaCha20 key (little-endian words), zeroised on drop.
 #[derive(Clone)]

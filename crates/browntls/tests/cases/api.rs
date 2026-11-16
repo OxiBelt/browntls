@@ -137,6 +137,65 @@ fn connection_enum_wraps_either_side() {
     assert!(!server.wants_write());
 }
 
+// ---------------------------------------------------------------- complete_io
+
+/// A transport that replays fixed bytes, then reports EOF, and swallows writes.
+struct ScriptedIo {
+    incoming: std::io::Cursor<Vec<u8>>,
+}
+
+impl Read for ScriptedIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.incoming.read(buf)
+    }
+}
+
+impl Write for ScriptedIo {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `complete_io` on another thread and fails the test if it does not
+/// return within a few seconds.
+fn complete_io_with_deadline(
+    mut conn: Connection,
+    incoming: Vec<u8>,
+) -> std::io::Result<(usize, usize)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut io = ScriptedIo {
+            incoming: std::io::Cursor::new(incoming),
+        };
+        let _ignored = tx.send(conn.complete_io(&mut io));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("complete_io did not return")
+}
+
+/// A plaintext `close_notify` alert record.
+const CLOSE_NOTIFY_RECORD: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x01, 0x00];
+
+#[test]
+fn complete_io_returns_when_close_notify_arrives_during_the_handshake() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let server: Connection = ServerConnection::new(Arc::new(server_config(&chain)))
+        .unwrap()
+        .into();
+    let client: Connection = ClientConnection::new(Arc::new(client_config(&chain)), server_name())
+        .unwrap()
+        .into();
+    for conn in [server, client] {
+        let err = complete_io_with_deadline(conn, CLOSE_NOTIFY_RECORD.to_vec()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+}
+
 // ---------------------------------------------------------------- key log
 
 /// `(label, client_random, secret)` as handed to the key log.

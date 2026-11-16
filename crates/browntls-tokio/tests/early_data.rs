@@ -27,9 +27,15 @@ struct Setup {
 
 impl Setup {
     fn new() -> Self {
+        Self::with_alpn(&[])
+    }
+
+    /// A client offering `alpn`; the server selects the first it supports.
+    fn with_alpn(alpn: &[&[u8]]) -> Self {
         let pki = Pki::new();
         let mut client_config = pki.client_config(&browntls::version::TLS13);
         client_config.enable_early_data = true;
+        client_config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         Self {
             connector: TlsConnector::from(Arc::new(client_config)).early_data(true),
             cache: ServerSessionMemoryCache::new(8),
@@ -41,6 +47,7 @@ impl Setup {
         let mut config: ServerConfig = self.pki.server_config(&browntls::version::TLS13);
         config.max_early_data_size = max_early_data_size;
         config.session_storage = self.cache.clone();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         TlsAcceptor::from(Arc::new(config))
     }
 
@@ -189,4 +196,107 @@ async fn without_a_ticket_connect_waits_for_the_handshake() {
     );
     assert!(!client.unwrap().get_ref().1.is_handshaking());
     server.unwrap();
+}
+
+#[tokio::test]
+async fn declined_early_data_is_not_resent_when_the_protocol_may_differ() {
+    let setup = Setup::with_alpn(&[b"h2", b"http/1.1"]);
+    setup.first_connection().await;
+
+    let (c, s) = duplex(64 * 1024);
+    let client_side = async {
+        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        client.write_all(b"early request").await.unwrap();
+        let err = client.flush().await.unwrap_err();
+        let not_resent = err
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<browntls_tokio::client::EarlyDataNotResent>())
+            .expect("EarlyDataNotResent");
+        assert_eq!(not_resent.len, 13);
+        assert!(!client.get_ref().1.is_early_data_accepted());
+        // The stream stays usable.
+        client.write_all(b"chosen again").await.unwrap();
+        client.shutdown().await.unwrap();
+        client
+    };
+    let server_side = async {
+        let mut server = setup.acceptor(0).accept(s).await.unwrap();
+        let mut got = Vec::new();
+        server.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"chosen again");
+    };
+    timeout(LIMIT, async { tokio::join!(client_side, server_side) })
+        .await
+        .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_split_reader_waiting_in_the_early_phase_is_woken_by_the_writer() {
+    let setup = Arc::new(Setup::new());
+    setup.first_connection().await;
+    let (c, s) = duplex(64 * 1024);
+    let client = setup.connector.connect(localhost(), c).await.unwrap();
+    let (mut rd, mut wr) = tokio::io::split(client);
+    // The reader starts the handshake and waits on the transport.
+    let reader = tokio::spawn(async move {
+        let mut reply = [0; 5];
+        rd.read_exact(&mut reply).await.map(|_| reply)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let server_setup = setup.clone();
+    let server = tokio::spawn(async move {
+        // Let the writer's flush take over the transport first.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut server = server_setup.acceptor(1024).accept(s).await.unwrap();
+        server.write_all(b"reply").await.unwrap();
+        server.flush().await.unwrap();
+        server
+    });
+    wr.write_all(b"early").await.unwrap();
+    wr.flush().await.unwrap();
+    let reply = timeout(Duration::from_secs(10), reader)
+        .await
+        .expect("the reader was never woken")
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"reply");
+    drop(server.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_failed_early_phase_fails_every_later_operation() {
+    let setup = Setup::new();
+    setup.first_connection().await;
+    let (c, mut s) = duplex(64 * 1024);
+    let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+    let peer = tokio::spawn(async move {
+        let mut hello = [0; 4096];
+        let _ = s.read(&mut hello).await;
+        s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            .await
+            .unwrap();
+        // Stays open: only the TLS state can end the operations below.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        s
+    });
+    let err = timeout(LIMIT, client.read(&mut [0; 4]))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    for _ in 0..2 {
+        let err = timeout(LIMIT, client.write(b"more"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
+        let err = timeout(LIMIT, client.flush()).await.unwrap().unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
+    }
+    let err = timeout(LIMIT, client.shutdown())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(tls_error(&err).is_some(), "{err:?}");
+    peer.abort();
 }

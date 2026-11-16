@@ -15,6 +15,7 @@ use crate::common::{self, IoSession, MidHandshake, StreamState};
 
 mod early;
 use early::EarlyData;
+pub use early::EarlyDataNotResent;
 
 /// Starts client handshakes with a shared [`ClientConfig`].
 ///
@@ -31,12 +32,15 @@ impl TlsConnector {
     ///
     /// It does when the configuration enables early data
     /// ([`ClientConfig::enable_early_data`]) and a resumable TLS 1.3 session
-    /// allows it. Writes then go out as early data, up to the server's
-    /// allowance, with the ClientHello at the first flush. The first read,
-    /// flush or shutdown (or a write beyond the allowance) completes the
-    /// handshake; early data the server declined is then sent again as
-    /// ordinary data. [`ClientConnection::is_early_data_accepted`] tells
-    /// which happened.
+    /// allows it. Writes then take early data, up to the server's allowance.
+    /// The first read, flush or shutdown, or a write beyond the allowance,
+    /// sends the ClientHello with the early data and completes the handshake.
+    /// Early data the server declined is then sent again as ordinary data
+    /// when the same application protocol is certain to be in use (no ALPN
+    /// offered, or exactly one offered and selected); otherwise that
+    /// operation fails with [`EarlyDataNotResent`] and the stream stays
+    /// usable (RFC 9846 §4.2.10).
+    /// [`ClientConnection::is_early_data_accepted`] tells which happened.
     ///
     /// Early data is **replayable** by an attacker and has no forward
     /// secrecy with respect to the resumption secret: send only requests
@@ -93,6 +97,7 @@ impl TlsConnector {
         F: FnOnce(&mut ClientConnection),
     {
         let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
+        let alpn_offered = alpn.clone();
         let mut session = match ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn) {
             Ok(session) => session,
             Err(error) => {
@@ -104,7 +109,8 @@ impl TlsConnector {
         };
         f(&mut session);
 
-        let early = (self.early_data && session.early_data().is_some()).then(EarlyData::default);
+        let early = (self.early_data && session.early_data().is_some())
+            .then(|| EarlyData::new(alpn_offered));
         Connect(MidHandshake::Handshaking(TlsStream {
             io: stream,
             session,
@@ -317,12 +323,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     }
 
     /// Ends the early-data phase for a read, which may have taken over the
-    /// writer's registration while doing so.
+    /// writer's registration while doing so. A read left waiting is woken
+    /// when another operation ends the phase.
     fn poll_finish_early_for_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.early.is_none() {
             return Poll::Ready(Ok(()));
         }
         let poll = self.poll_finish_early(cx);
+        if poll.is_pending()
+            && let Some(early) = &mut self.early
+        {
+            early.park_reader(cx);
+        }
         if poll.is_ready()
             && let Some(waker) = self.st.write_waker.take()
         {

@@ -533,10 +533,15 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   allows 0-RTT, `Connect` resolves before the handshake
   (`IoSession::skip_handshake`). Writes go to `ClientConnection::early_data`
   and are kept; the first read, flush or shutdown, or a write the allowance
-  cannot take, completes the handshake, flushes our last flight
-  (EndOfEarlyData, Finished), and resends the kept bytes as 1-RTT data if
-  the server declined them. Servers read accepted early data from the
-  connection after `Accept`; the streams never mix it into ordinary reads.
+  cannot take, completes the handshake and flushes our last flight
+  (EndOfEarlyData, Finished). Declined early data is resent as 1-RTT data
+  only when the same ALPN protocol is certain (none offered, or one offered
+  and selected; RFC 9846 §4.2.10); otherwise that operation fails once with
+  `EarlyDataNotResent`. A handshake failure in this phase is kept and fails
+  every later operation. Whichever operation ends the phase wakes a read
+  waiting in it, whose transport registration it may have replaced.
+  Servers read accepted early data from the connection after `Accept`; the
+  streams never mix it into ordinary reads.
 - Reads return plaintext through `Reader::into_first_chunk`, which lends the
   first buffered chunk for the connection's lifetime so `poll_fill_buf` can
   return it. A read whose records queue an answer (an alert, a KeyUpdate

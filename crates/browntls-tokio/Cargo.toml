@@ -1,0 +1,51 @@
+[package]
+name = "browntls-tokio"
+description = "Asynchronous TLS streams for Tokio, built on browntls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Kept unpublished like the rest of the workspace until the release
+# prerequisites in docs/Maintenance.md are met; the metadata below is complete
+# so that flipping this is the only manifest change publishing needs.
+publish.workspace = true
+documentation = "https://docs.rs/browntls-tokio"
+readme = "README.md"
+keywords = ["tls", "tokio", "async", "ssl", "browntls"]
+categories = ["asynchronous", "cryptography", "network-programming"]
+include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["native", "tls12", "logging", "prefer-post-quantum"]
+# Feature pass-through to `browntls`; see its manifest for what each does.
+native = ["browntls/native"]
+rustcrypto = ["browntls/rustcrypto"]
+tls12 = ["browntls/tls12"]
+logging = ["browntls/logging"]
+prefer-post-quantum = ["browntls/prefer-post-quantum"]
+zlib = ["browntls/zlib"]
+brotli = ["browntls/brotli"]
+zstd = ["browntls/zstd"]
+
+[dependencies]
+browntls = { workspace = true, features = ["std"] }
+# Only the I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`),
+# which need no tokio feature: the runtime is the caller's.
+tokio = { version = "1.47", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1.47", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+# Certificates generated at test run time (no committed private keys).
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# Interoperability oracle: tokio-rustls over rustls with the ring provider.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+
+[lints]
+workspace = true

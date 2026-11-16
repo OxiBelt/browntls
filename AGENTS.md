@@ -21,6 +21,8 @@ Current layout:
   crate permitted to contain `unsafe`, confined to backend modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
+- `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls`
+  (`TlsConnector`, `TlsAcceptor`).
 - `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
   (test tooling, not published).
 - `crates/browntls-entropy/`: statistical entropy checks of generated keys,

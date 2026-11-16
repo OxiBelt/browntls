@@ -3,7 +3,7 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
-and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
+`browntls-tokio`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
@@ -78,6 +78,23 @@ dependencies (`safe-to-deploy`), are reached only when a feature is enabled,
 and run under the length limits described in
 [Architecture](Architecture.md#certificate-compression-rfc-8879) and under the
 `cert_decompress` fuzz target. None has a `cargo vet` audit yet.
+
+### Tokio dependency
+
+`browntls-tokio` depends on `tokio` with no features enabled: it uses only the
+I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), and the
+runtime is the application's. That build of `tokio` pulls in
+`pin-project-lite` only (MIT, and Apache-2.0 OR MIT); both are pure Rust, and `tokio`
+contains `unsafe` code (none of it reached by browntls data parsing, which
+stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
+`browntls-tokio` alone, with no `cargo vet` audit yet. The test-only
+features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
+`bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
+are dev-dependencies (`safe-to-run`). The crate's manifest carries the
+metadata a crates.io release needs (description, documentation, readme,
+keywords, categories, an `include` list and the licence file), but it stays
+`publish = false` with the rest of the workspace until the release
+prerequisites below are met.
 
 ### Fuzzing
 

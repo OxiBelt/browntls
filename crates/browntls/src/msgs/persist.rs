@@ -77,6 +77,9 @@ pub struct Tls13ClientSessionValue {
     pub(crate) common: ClientSessionCommon,
     /// The external PSK the session was established with, if any.
     external_psk: Option<ExternalPskBinding>,
+    /// The absolute expiry of the delegated credential that authenticated the
+    /// original full handshake. Descendant tickets preserve it unchanged.
+    delegated_credential_expiry: Option<UnixTime>,
 }
 
 impl Tls13ClientSessionValue {
@@ -103,6 +106,7 @@ impl Tls13ClientSessionValue {
                 server_cert_chain,
             ),
             external_psk: None,
+            delegated_credential_expiry: None,
         }
     }
 
@@ -114,6 +118,20 @@ impl Tls13ClientSessionValue {
 
     pub(crate) fn external_psk(&self) -> Option<&ExternalPskBinding> {
         self.external_psk.as_ref()
+    }
+
+    pub(crate) fn with_delegated_credential_expiry(mut self, expiry: Option<UnixTime>) -> Self {
+        self.delegated_credential_expiry = expiry;
+        self
+    }
+
+    pub(crate) fn delegated_credential_expiry(&self) -> Option<UnixTime> {
+        self.delegated_credential_expiry
+    }
+
+    pub(crate) fn delegated_credential_expired_at(&self, now: UnixTime) -> bool {
+        self.delegated_credential_expiry
+            .is_some_and(|expiry| now >= expiry)
     }
 
     /// The identity of the external PSK (RFC 9846 §4.3.11) the session was
@@ -155,6 +173,10 @@ impl fmt::Debug for Tls13ClientSessionValue {
             .field("max_early_data_size", &self.max_early_data_size)
             .field("common", &self.common)
             .field("external_psk", &self.external_psk.is_some())
+            .field(
+                "delegated_credential_expiry",
+                &self.delegated_credential_expiry,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -308,6 +330,9 @@ pub(crate) struct ServerSessionValue {
     /// The external PSK a TLS 1.3 session was established with: resuming
     /// it requires that PSK to still be configured and usable.
     pub(crate) external_psk: Option<ExternalPskBinding>,
+    /// The absolute expiry of the server delegated credential that
+    /// authenticated the original TLS 1.3 full handshake.
+    pub(crate) delegated_credential_expiry: Option<UnixTime>,
 }
 
 impl ServerSessionValue {
@@ -336,11 +361,16 @@ impl ServerSessionValue {
             age_obfuscation_offset,
             freshness: None,
             external_psk: None,
+            delegated_credential_expiry: None,
         }
     }
 
     pub(crate) fn set_external_psk(&mut self, external_psk: Option<ExternalPskBinding>) {
         self.external_psk = external_psk;
+    }
+
+    pub(crate) fn set_delegated_credential_expiry(&mut self, expiry: Option<UnixTime>) {
+        self.delegated_credential_expiry = expiry;
     }
 
     pub(crate) fn set_extended_ms_used(&mut self) {
@@ -391,6 +421,10 @@ impl fmt::Debug for ServerSessionValue {
             .field("alpn", &self.alpn)
             .field("creation_time_sec", &self.creation_time_sec)
             .field("external_psk", &self.external_psk.is_some())
+            .field(
+                "delegated_credential_expiry",
+                &self.delegated_credential_expiry,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -436,6 +470,13 @@ impl Codec<'_> for ServerSessionValue {
                 if let Some(context) = &binding.import_context {
                     PayloadU16::encode_slice(context, bytes);
                 }
+            }
+        }
+        match self.delegated_credential_expiry {
+            None => 0u8.encode(bytes),
+            Some(expiry) => {
+                1u8.encode(bytes);
+                expiry.as_secs().encode(bytes);
             }
         }
     }
@@ -491,6 +532,16 @@ impl Codec<'_> for ServerSessionValue {
             }
             _ => return Err(InvalidMessage::IllegalEmptyValue),
         };
+        let delegated_credential_expiry = match u8::read(r)? {
+            0 => None,
+            1 => Some(UnixTime::since_unix_epoch(core::time::Duration::from_secs(
+                u64::read(r)?,
+            ))),
+            _ => return Err(InvalidMessage::IllegalEmptyValue),
+        };
+        if delegated_credential_expiry.is_some() && version != ProtocolVersion::TLSv1_3 {
+            return Err(InvalidMessage::IllegalEmptyValue);
+        }
         Ok(Self {
             sni,
             version,
@@ -504,6 +555,7 @@ impl Codec<'_> for ServerSessionValue {
             age_obfuscation_offset,
             freshness: None,
             external_psk,
+            delegated_credential_expiry,
         })
     }
 }
@@ -551,6 +603,30 @@ mod tests {
         assert!(ServerSessionValue::read_bytes(&enc[..enc.len() - 1]).is_err());
         assert!(alloc::format!("{back:?}").contains("example.com"));
         assert_eq!(back.external_psk, None);
+        assert_eq!(back.delegated_credential_expiry, None);
+    }
+
+    #[test]
+    fn server_value_delegated_credential_expiry_roundtrip() {
+        let mut v = sample();
+        let expiry = UnixTime::since_unix_epoch(core::time::Duration::from_secs(1_234));
+        v.set_delegated_credential_expiry(Some(expiry));
+        let enc = v.get_encoding();
+        let back = ServerSessionValue::read_bytes(&enc).unwrap();
+        assert_eq!(back.delegated_credential_expiry, Some(expiry));
+
+        let mut invalid_tag = sample().get_encoding();
+        *invalid_tag.last_mut().unwrap() = 2;
+        assert!(ServerSessionValue::read_bytes(&invalid_tag).is_err());
+
+        let mut legacy = sample().get_encoding();
+        assert_eq!(legacy.pop(), Some(0));
+        assert!(ServerSessionValue::read_bytes(&legacy).is_err());
+
+        let mut tls12 = sample();
+        tls12.version = ProtocolVersion::TLSv1_2;
+        tls12.set_delegated_credential_expiry(Some(expiry));
+        assert!(ServerSessionValue::read_bytes(&tls12.get_encoding()).is_err());
     }
 
     #[test]
@@ -599,11 +675,18 @@ mod tests {
         let suite: &'static Tls13CipherSuite =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));
         let created = UnixTime::since_unix_epoch(core::time::Duration::from_secs(100));
-        let v = Tls13ClientSessionValue::new(suite, alloc::vec![1], &[2], chain, created, 60, 5, 0);
+        let expiry = UnixTime::since_unix_epoch(core::time::Duration::from_secs(200));
+        let mut v =
+            Tls13ClientSessionValue::new(suite, alloc::vec![1], &[2], chain, created, 60, 5, 0)
+                .with_delegated_credential_expiry(Some(expiry));
         assert_eq!(v.max_early_data_size(), 0);
+        assert!(!v.delegated_credential_expired_at(created));
         let later = UnixTime::since_unix_epoch(core::time::Duration::from_secs(130));
         let r = Retrieved::new(&v, later);
         assert_eq!(r.obfuscated_ticket_age(), 30_000 + 5);
+        v.rewind_epoch(10);
+        assert_eq!(v.delegated_credential_expiry(), Some(expiry));
+        assert!(v.delegated_credential_expired_at(expiry));
         let r2 = Retrieved::new(v, later);
         assert!(!r2.has_expired());
         let much_later = UnixTime::since_unix_epoch(core::time::Duration::from_secs(1000));

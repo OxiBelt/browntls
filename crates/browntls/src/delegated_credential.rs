@@ -393,7 +393,8 @@ pub(crate) struct Presented<'a> {
 /// Validates a received delegated credential (RFC 9345 §4.1.1, §4.1.3)
 /// after the certificate chain itself has been verified. `verify_signature`
 /// checks the credential's signature with the end-entity certificate's key
-/// (through the configured certificate verifier).
+/// (through the configured certificate verifier). Returns the validated
+/// absolute expiry for resumption state.
 ///
 /// Every failure is a `PeerMisbehaved` error that RFC 9345 §4.1.3 answers
 /// with `illegal_parameter`.
@@ -404,7 +405,7 @@ pub(crate) fn validate(
         &[u8],
         &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error>,
-) -> Result<HandshakeSignatureValid, Error> {
+) -> Result<UnixTime, Error> {
     let cred = &dc.credential;
     // §4.1.1: both schemes must be ones we offered, in the right list; §4:
     // never an rsaEncryption key, whatever was offered.
@@ -419,15 +420,18 @@ pub(crate) fn validate(
 
     let cert = EndEntityCert::try_from(presented.end_entity)
         .map_err(|_| PeerMisbehaved::DelegatedCredentialWithoutDelegationUsage)?;
-    let expiry = expiry_from(cert.not_before(), cred.valid_time).as_secs();
+    let expiry = expiry_from(cert.not_before(), cred.valid_time);
+    let expiry_secs = expiry.as_secs();
     let now = presented.now.as_secs();
     // §4.1.3 check 1: not expired (the start is implied by the
     // certificate's own validity, already checked).
-    if now >= expiry {
+    if now >= expiry_secs {
         return Err(PeerMisbehaved::DelegatedCredentialExpired.into());
     }
     // Check 2: at most seven days left, and not beyond the certificate.
-    if expiry > now.saturating_add(MAX_VALIDITY.as_secs()) || expiry > cert.not_after().as_secs() {
+    if expiry_secs > now.saturating_add(MAX_VALIDITY.as_secs())
+        || expiry_secs > cert.not_after().as_secs()
+    {
         return Err(PeerMisbehaved::DelegatedCredentialValidityTooLong.into());
     }
     // Check 3: the CertificateVerify uses the credential's scheme.
@@ -447,7 +451,8 @@ pub(crate) fn validate(
     );
     let dss = DigitallySignedStruct::new(dc.algorithm, dc.signature.clone());
     verify_signature(&message, &dss)
-        .map_err(|_| PeerMisbehaved::DelegatedCredentialBadSignature.into())
+        .map_err(|_| PeerMisbehaved::DelegatedCredentialBadSignature)?;
+    Ok(expiry)
 }
 
 #[cfg(test)]
@@ -624,7 +629,7 @@ mod validate_tests {
         dc_schemes: &[SignatureScheme],
         cv_scheme: SignatureScheme,
         now: u64,
-    ) -> Result<HandshakeSignatureValid, Error> {
+    ) -> Result<UnixTime, Error> {
         let presented = Presented {
             side: Side::Server,
             end_entity,
@@ -656,7 +661,10 @@ mod validate_tests {
         let now = UnixTime::now().as_secs();
         let (ee, key) = cert(true, true);
         let dc = credential(&ee, &*key, now + 3600);
-        assert!(check(&dc, &ee, &[P256], P256, now).is_ok());
+        assert_eq!(
+            check(&dc, &ee, &[P256], P256, now).unwrap().as_secs(),
+            now + 3600
+        );
 
         let err = |e: PeerMisbehaved| Err(Error::PeerMisbehaved(e));
         // §4.1.1: the credential's scheme must be one we offered.

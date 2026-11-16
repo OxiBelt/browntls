@@ -530,6 +530,9 @@ pub struct ServerConnectionData {
     pub(super) received_resumption_data: Option<Vec<u8>>,
     pub(super) resumption_data: Vec<u8>,
     pub(super) early_data: EarlyDataState,
+    /// The absolute expiry of the server delegated credential that
+    /// authenticated this TLS 1.3 connection or its resumed ancestor.
+    pub(super) delegated_credential_expiry: Option<UnixTime>,
     /// The session cache entry this TLS 1.2 connection resumed or created,
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).

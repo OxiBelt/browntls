@@ -487,6 +487,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 // for a session authenticated by an external PSK alone).
                 let chain = resuming.server_cert_chain();
                 cx.common.peer_certificates = (!chain.0.is_empty()).then(|| chain.clone());
+                cx.data.delegated_credential_expiry = resuming.delegated_credential_expiry();
                 Ok(Box::new(ExpectFinished {
                     config: self.config,
                     server_name: self.server_name,
@@ -860,12 +861,14 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
 
         let message = construct_server_verify_message(&handshake_hash);
-        let sig_verified = match &self.delegated_credential {
-            None => self
-                .config
-                .verifier()
-                .verify_tls13_signature(&message, end_entity, cert_verify)
-                .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+        let (sig_verified, delegated_credential_expiry) = match &self.delegated_credential {
+            None => (
+                self.config
+                    .verifier()
+                    .verify_tls13_signature(&message, end_entity, cert_verify)
+                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+                None,
+            ),
             Some(dc) => {
                 // RFC 9345 §4.1.3: an invalid credential is illegal_parameter.
                 let offered_dc_schemes = delegated_credential_schemes(&self.config);
@@ -877,7 +880,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                     cert_verify_scheme: cert_verify.scheme,
                     now,
                 };
-                delegated_credential::validate(dc, &presented, |msg, dss| {
+                let expiry = delegated_credential::validate(dc, &presented, |msg, dss| {
                     self.config
                         .verifier()
                         .verify_tls13_signature(msg, end_entity, dss)
@@ -887,17 +890,20 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                         .send_fatal_alert(AlertDescription::IllegalParameter, err)
                 })?;
                 // Then the credential's key verifies CertificateVerify.
-                self.config
+                let verified = self
+                    .config
                     .verifier()
                     .verify_tls13_signature_with_delegated_key(
                         &message,
                         &dc.credential.public_key,
                         cert_verify,
                     )
-                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?
+                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?;
+                (verified, Some(expiry))
             }
         };
         cx.data.delegated_credential = self.delegated_credential;
+        cx.data.delegated_credential_expiry = delegated_credential_expiry;
 
         cx.common.peer_certificates = Some(self.server_cert.cert_chain);
         self.transcript.add_message(&m);
@@ -1101,6 +1107,14 @@ impl State<ClientConnectionData> for ExpectFinished {
                 .common
                 .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
         }
+        if let Some(expiry) = cx.data.delegated_credential_expiry
+            && st.config.current_time()? >= expiry
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::DelegatedCredentialExpired,
+            ));
+        }
         let fin = FinishedMessageVerified::assertion();
         // The server has proven it holds the external PSK, if one is in use.
         cx.common.external_psk_confirmed = true;
@@ -1256,6 +1270,14 @@ impl ExpectTraffic {
             .key_schedule
             .resumption_master_secret_and_derive_ticket_psk(self.final_hash.as_ref(), &nst.nonce.0);
         let now = self.config.current_time()?;
+        if cx
+            .data
+            .delegated_credential_expiry
+            .is_some_and(|expiry| now >= expiry)
+        {
+            debug!("Discarding NewSessionTicket after delegated credential expiry");
+            return Ok(());
+        }
 
         let server_cert_chain = cx.common.peer_certificates.clone().unwrap_or_default();
 
@@ -1269,7 +1291,8 @@ impl ExpectTraffic {
             nst.age_add,
             nst.exts.max_early_data_size.unwrap_or(0),
         )
-        .with_external_psk(cx.common.external_psk_binding());
+        .with_external_psk(cx.common.external_psk_binding())
+        .with_delegated_credential_expiry(cx.data.delegated_credential_expiry);
         self.config
             .resumption
             .store

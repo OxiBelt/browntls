@@ -4,6 +4,8 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use browntls_pki::UnixTime;
+
 use super::common::ActiveCertifiedKey;
 use super::cookie::RetryCookie;
 use super::hs::{self, HandshakeHashOrBuffer, NextStateOrError, ServerContext};
@@ -334,6 +336,12 @@ impl CompleteClientHelloHandling {
                     {
                         continue;
                     }
+                    if resume
+                        .delegated_credential_expiry
+                        .is_some_and(|expiry| now >= expiry)
+                    {
+                        continue;
+                    }
                     if !self.check_binder(
                         self.suite,
                         chm,
@@ -349,11 +357,8 @@ impl CompleteClientHelloHandling {
                     chosen_psk_index = Some(i);
                     // Reported once the client's Finished verifies.
                     cx.common.external_psk = resumed_external;
-                    resumedata =
-                        Some(resume.set_freshness(
-                            psk_id.obfuscated_ticket_age,
-                            self.config.current_time()?,
-                        ));
+                    cx.data.delegated_credential_expiry = resume.delegated_credential_expiry;
+                    resumedata = Some(resume.set_freshness(psk_id.obfuscated_ticket_age, now));
                     break;
                 }
             }
@@ -580,6 +585,7 @@ impl CompleteClientHelloHandling {
                 &sigschemes,
                 self.cert_types,
             );
+            cx.data.delegated_credential_expiry = delegated.map(DelegatedCredentialKey::expiry);
             emit_certificate_tls13(
                 &mut self.transcript,
                 cx.common,
@@ -1414,6 +1420,21 @@ fn tls13_ticket_lifetime(config: &ServerConfig) -> u32 {
     lifetime.min(crate::msgs::persist::MAX_TICKET_LIFETIME)
 }
 
+fn bound_ticket_lifetime_by_delegated_credential(
+    configured_lifetime: u32,
+    now: UnixTime,
+    delegated_credential_expiry: Option<UnixTime>,
+) -> u32 {
+    let Some(expiry) = delegated_credential_expiry else {
+        return configured_lifetime;
+    };
+    if now >= expiry {
+        return 0;
+    }
+    let remaining = expiry.as_secs().saturating_sub(now.as_secs());
+    configured_lifetime.min(u32::try_from(remaining).unwrap_or(u32::MAX))
+}
+
 fn emit_ticket(
     transcript: &HandshakeHash,
     suite: &'static Tls13CipherSuite,
@@ -1423,9 +1444,9 @@ fn emit_ticket(
 ) -> Result<(), Error> {
     // RFC 9846 §4.7.1: a zero lifetime tells the client to discard the
     // ticket at once, so such a ticket is not worth sending.
-    let lifetime = tls13_ticket_lifetime(config);
+    let configured_lifetime = tls13_ticket_lifetime(config);
     // RFC 9846 §6.1: nothing follows our close_notify.
-    if lifetime == 0 || cx.common.has_sent_close_notify() {
+    if configured_lifetime == 0 || cx.common.has_sent_close_notify() {
         return Ok(());
     }
     let rng = config.provider.secure_random;
@@ -1435,6 +1456,14 @@ fn emit_ticket(
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
     let now = config.current_time()?;
+    let lifetime = bound_ticket_lifetime_by_delegated_credential(
+        configured_lifetime,
+        now,
+        cx.data.delegated_credential_expiry,
+    );
+    if lifetime == 0 {
+        return Ok(());
+    }
     let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
         ProtocolVersion::TLSv1_3,
@@ -1447,6 +1476,7 @@ fn emit_ticket(
         age_add,
     );
     value.set_external_psk(cx.common.external_psk_binding());
+    value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
     let plain = value.get_encoding();
 
     let ticket = if config.ticketer.enabled() {
@@ -1835,4 +1865,39 @@ impl State<ServerConnectionData> for ExpectTraffic {
 #[allow(dead_code)]
 fn unused() -> Vec<u8> {
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use super::*;
+
+    fn at(secs: u64) -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn delegated_credential_bounds_ticket_lifetime() {
+        assert_eq!(
+            bound_ticket_lifetime_by_delegated_credential(100, at(1_000), None),
+            100
+        );
+        assert_eq!(
+            bound_ticket_lifetime_by_delegated_credential(100, at(1_000), Some(at(1_200))),
+            100
+        );
+        assert_eq!(
+            bound_ticket_lifetime_by_delegated_credential(100, at(1_000), Some(at(1_050))),
+            50
+        );
+        assert_eq!(
+            bound_ticket_lifetime_by_delegated_credential(100, at(1_000), Some(at(1_000))),
+            0
+        );
+        assert_eq!(
+            bound_ticket_lifetime_by_delegated_credential(100, at(1_001), Some(at(1_000))),
+            0
+        );
+    }
 }

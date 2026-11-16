@@ -531,7 +531,25 @@ be built with a struct literal; `CertifiedKey::new` remains.
   its key through
   `ServerCertVerifier::verify_tls13_signature_with_delegated_key` (the
   default implementation refuses). `ClientConnection::delegated_credential`
-  returns the credential used.
+  returns the credential used by a full handshake; it remains `None` on a
+  resumed connection.
+- Resumption: the client and server save the absolute expiry of the delegated
+  credential that authenticated the original full handshake. A ticket is not
+  offered or accepted, including for 0-RTT, when the current time is at or
+  after that deadline. The client checks again after the resumed server
+  Finished so a handshake that crossed the deadline cannot complete. Every
+  descendant ticket carries the original deadline unchanged; the server also
+  caps its advertised ticket lifetime to the remaining credential lifetime
+  and sends no ticket when none remains. This is independent of an RFC 8773
+  external-PSK binding; both properties are retained when both authenticated
+  the session.
+- Persistence: the private client session value carries the deadline without
+  changing `ClientSessionStore`. The server session encoding has a mandatory
+  tagged deadline field. Because the old encoding cannot distinguish sessions
+  authenticated with a delegated credential, an upgrade deliberately rejects
+  every pre-change server session value (TLS 1.3 and TLS 1.2); old and new
+  members of a mixed-version fleet therefore cold-miss each other's cached
+  sessions and tickets rather than resuming ambiguous authentication state.
 - Alerts (§4.1.3): an invalid credential is `illegal_parameter`; one the
   client did not ask for is `unexpected_message`; one on an entry other than
   the end entity's is `illegal_parameter`; a CertificateVerify that fails

@@ -569,6 +569,9 @@ pub struct ClientConnectionData {
     pub(crate) server_name: ServerName<'static>,
     /// The delegated credential the server authenticated with (RFC 9345).
     pub(super) delegated_credential: Option<DelegatedCredential>,
+    /// The absolute expiry of the delegated credential that authenticated
+    /// this connection, including when it was restored from a TLS 1.3 ticket.
+    pub(super) delegated_credential_expiry: Option<UnixTime>,
     /// The configuration, for exported authenticators (RFC 9261).
     pub(crate) config: Arc<ClientConfig>,
     pub(crate) authenticators: crate::exported_authenticator::AuthenticatorState,
@@ -586,6 +589,7 @@ impl ClientConnectionData {
             session_store: config.resumption.store.clone(),
             server_name,
             delegated_credential: None,
+            delegated_credential_expiry: None,
             config,
             authenticators: Default::default(),
         }

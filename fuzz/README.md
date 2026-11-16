@@ -36,19 +36,20 @@ Each API target is a module `src/<target>.rs` (with private submodules in
 arguments, repeated up to a fixed number of operations. Results are checked,
 not only produced: against an independent implementation where one exists
 (the RustCrypto crates, `std::net`, a model written in the harness), between
-the portable and every accelerated backend the CPU has (`accel` policies and
-explicit backends), and by round trips, tamper rejection and re-encoding
-stability.
+the portable and every accelerated backend the CPU has (`accel` policies,
+explicit backends, and `accel::load` routing with a fuzzed share of the calls
+fixed on a fuzzed alternate backend), and by round trips, tamper rejection
+and re-encoding stability.
 
 | Target | Topic | Reaches |
 |---|---|---|
 | `crypto_hash` | crypto-symmetric | SHA-1, SHA-2, SHA-3, SHAKE and the 4-way SHAKE, Keccak-f, HMAC, HKDF, the TLS 1.2 PRF; one-shot, chunked and cloned states against the oracles under every acceleration policy |
-| `crypto_cipher` | crypto-symmetric | AES (every backend), AES-GCM, AES-CCM (every parameter set), ChaCha20, Poly1305, ChaCha20-Poly1305, AES-CBC and the TLS 1.2 CBC record transform; oracle outputs, tamper rejection, wiped buffers on failure |
-| `crypto_ecc` | crypto-asymmetric | X25519, X448, Ed25519, Ed448, P-256, P-384 and P-521 ECDH and ECDSA; key and signature decoding, agreement and verdicts against the oracles and between backends |
+| `crypto_cipher` | crypto-symmetric | AES (every backend), AES-GCM, AES-CCM (every parameter set), ChaCha20, Poly1305, ChaCha20-Poly1305 (also with load-aware routing between its ChaCha20 backends), AES-CBC and the TLS 1.2 CBC record transform; oracle outputs, tamper rejection, wiped buffers on failure |
+| `crypto_ecc` | crypto-asymmetric | X25519 (also with load-aware routing between its backends), X448, Ed25519, Ed448, P-256, P-384 and P-521 ECDH and ECDSA; key and signature decoding, agreement and verdicts against the oracles and between backends |
 | `crypto_rsa` | crypto-asymmetric | RSA public and private keys (DER, components), PKCS#1 v1.5 and PSS signing and verification on every backend, against a num-bigint reference |
 | `crypto_kem` | crypto-asymmetric | ML-KEM-512/768/1024 key generation, encapsulation, decapsulation (implicit rejection) and key parsing against the `ml-kem` oracle; FFDHE peer validation and agreement against num-bigint |
 | `crypto_hpke` | crypto-asymmetric | HPKE identifiers, keys and sessions (seal, open, export, sequence numbers) byte for byte against the `hpke` oracle; the TLS-side HPKE provider |
-| `crypto_util` | crypto-util | The DER reader and writer against a reference TLV parser, constant-time helpers, zeroization, random sources, CPU feature detection and acceleration policies |
+| `crypto_util` | crypto-util | The DER reader and writer against a reference TLV parser, constant-time helpers, zeroization, random sources, CPU feature detection, acceleration policies and the load-aware routing controls (`accel::load`: configurations, stream status, fixed shares) |
 | `pki_api` | pki | Server names and IP addresses against `std::net`, times, algorithm identifiers, RSASSA-PSS parameters, DER containers, PEM, certificates and path validation against a model, signatures and CRLs with real providers |
 | `tls_config` | tls-config | Client and server configuration builders, providers and cipher suites, signers, verifiers and root stores, ticketers, certificate compression, key logs, session caches and certificate resolvers |
 | `tls_conn` | tls-connection | An in-process client and server driven by API calls: transfers with damaged bytes, reader and writer, early data, close_notify, key updates, exporters, `complete_io`, `Stream`, `Acceptor`, accessors, secret extraction |

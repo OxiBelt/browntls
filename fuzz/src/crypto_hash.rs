@@ -26,7 +26,7 @@
 use std::fmt::Debug;
 
 use browntls_crypto::Error;
-use browntls_crypto::accel::{self, Acceleration, Algorithm, Policy};
+use browntls_crypto::accel::{self, Acceleration, Algorithm, Policy, load};
 use browntls_crypto::hash::sha3::{keccak_f1600, keccak_f1600_x4};
 use browntls_crypto::hash::{
     DynHash, DynOutput, HashAlgorithm, HashFunction, MAX_BLOCK_LEN, MAX_OUTPUT_LEN, Sha1, Sha3_256,
@@ -154,6 +154,28 @@ pub(crate) fn across_policies<R: PartialEq + Debug>(alg: Algorithm, f: impl Fn()
     }
     accel::set_policy(alg, Policy::PREFERRED).expect("default policy");
     first.expect("at least one policy")
+}
+
+/// Computes `f` with load-aware routing (`accel::load`) enabled and, when
+/// `alg` has an alternate backend on this CPU, `percent` (modulo 101) of the
+/// calls of its first stream fixed on alternate number `alternate` (modulo
+/// their number). Turns routing off again and returns the result, which the
+/// caller compares with the one computed without routing.
+pub(crate) fn with_fixed_share<R>(
+    alg: Algorithm,
+    alternate: u8,
+    percent: u8,
+    f: impl FnOnce() -> R,
+) -> R {
+    load::enable(load::Config::DEFAULT).expect("built with `std`, which provides the clock");
+    let alternates = load::status(alg, 0).map_or(0, |s| s.alternates);
+    if alternates > 0 {
+        load::set_fixed(alg, 0, usize::from(alternate) % alternates, percent % 101)
+            .expect("an existing alternate and a share of at most 100%");
+    }
+    let r = f();
+    load::disable();
+    r
 }
 
 /// A message: a field and up to `17 * 255` appended pattern bytes, so that

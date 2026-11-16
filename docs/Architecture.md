@@ -893,6 +893,98 @@ Keyed objects (AES-GCM, ML-KEM and RSA private keys) keep the backend chosen
 when they were created or loaded. Hardware feature checks that guard `unsafe` code are
 independent of the policy.
 
+### Load-aware backend routing
+
+The policy's choice is static: one backend per family, the *primary*.
+`accel::load` (off by default, `load::enable(Config)`; needs the `std`
+feature for its clock and per-thread state) can move part of a family's
+work to another backend while the primary runs slower than it usually does.
+The premise is that a processor's hardware for one kind of instruction is a
+fixed resource, so when other work is using it, calls that depend on it take
+longer, and instructions of another kind may then be the faster way to the
+same result.
+
+Work is grouped in *streams*, one per homogeneous kind of work of a family
+(for example the records of an AEAD), and each stream runs this loop:
+
+| Phase | What happens |
+|---|---|
+| Steady | Everything runs on the primary. Some calls are timed (about one record of at least 4096 bytes in sixteen; every key exchange), giving a short-term average cost and a baseline, the cost in normal operation. The baseline follows slow drift (weight 1/1024 upwards, 1/256 downwards) but not a run of slow calls |
+| Probing | The short-term cost exceeded the baseline by `threshold_percent` (default 25, at least 20) and five of the last eight timed calls were each that slow. One call in eight goes to the next permitted backend in preference order, until at least four of them and sixteen calls of the primary were timed |
+| Shifting | The probed backend measured at least 5% cheaper than the congested primary. Every eight timed calls of the primary its share grows by 1/16 of the work while that holds (up to `max_shift_percent`, default 90), or shrinks by as much when the primary has recovered to within half the threshold of its baseline or the alternate is the slower one |
+
+When no alternate is cheaper, the present cost is accepted as the baseline
+(at most doubling it per episode). An episode that moved nothing, or that
+ended with nothing left on the alternate while the primary was still slow,
+is followed by a pause of 256 timed calls of the primary, doubled for each
+such episode up to 65536; a doubling is forgotten after 4096 uneventful
+timed calls. A probe or a shift that ends because the primary recovered is
+followed by a quarter of that pause. `load::status_all` reports, per
+stream, the phase, both backends, the shifted share and the costs;
+`load::set_fixed` pins a share by hand for experiments.
+
+Which calls are timed, probed or shifted is decided by a per-thread call
+counter mixed (SplitMix64) with a per-thread random key, using separate bits
+for the three choices. No state is shared between threads on that path, and
+a peer cannot tell in advance where a call will run.
+
+Properties this design keeps:
+
+- Every backend of a family computes the same function bit for bit (the
+  differential tests compare each with the portable one), so routing never
+  changes an output, a negotiated parameter or a record on the wire.
+- Alternates are the backends the family's `Policy` permits and the CPU can
+  run, so `Acceleration::None` and `Required` bind shifted work too.
+  `Config::portable` says whether the portable backend is one of them.
+- Decisions use call counters, input lengths and measured durations, never
+  secret values. The durations are those of code written to run in constant
+  time; if a backend's time did depend on a secret, routing could make that
+  dependence visible in which backend runs later, so it adds no leak of its
+  own but relies on the backends as much as their direct use does.
+- An alternate takes work only while its timed calls are cheaper than the
+  primary's. Load that slows every backend alike moves little: it costs a
+  few probes per alternate and then the growing pause. In simulations of
+  such load (steady, random and periodic bursts) under 1% of the calls ran
+  on an alternate, and the time lost stayed under 1% even with an
+  alternate three times slower.
+- A keyed object is routed only while the policy still selects the backend
+  it was created for, and one created with explicit backends never is.
+
+Limits:
+
+- Costs are wall-clock times. A slowdown that hits every backend alike (too
+  few cores, a descheduled virtual machine) is probed and then accepted as
+  the baseline. Pauses are counted in timed calls, so a stream with little
+  traffic pauses for long.
+- The baseline settles somewhat below the mean of a jittery cost. Very
+  noisy timings, or timed calls that alternate between two cost levels,
+  cause fruitless episodes and long pauses; an alternate that is nearly as
+  slow as the congested primary is given up when timings are noisy.
+- Someone able to slow the primary's calls but not the alternate's moves
+  work to the alternate, which may be slower than an undisturbed primary
+  (by at most the factor of the slowdown). Contention for the primary's
+  instructions does exactly that, which is the case routing exists for;
+  doing it call by call would need the schedule, which is keyed with a
+  non-cryptographic mixing function.
+- Records shorter than 4096 bytes are too short to time and always run on
+  the primary, unless a share was fixed by hand. A record whose additional
+  data exceeds 1/64 of its length is routed but not timed.
+- The cost per byte depends somewhat on the record length (about 10%
+  between 4096 and 16384 bytes for ChaCha20-Poly1305 on one machine), which
+  is why the threshold cannot be set below 20%.
+- The controller's constants were chosen by reasoning and simulation (the
+  `accel::load` unit tests drive the state machine with synthetic costs,
+  including the fixed-capacity model of the premise with jitter of up to
+  20%, where it stays within a few percent of the best fixed split for
+  alternates that help by a fifth or more); they were not tuned on
+  contended hardware.
+- `load::status` exposes average durations of recent calls, including
+  secret-key operations; it is diagnostic data for the operator.
+
+Routed so far: ChaCha20-Poly1305 records (ChaCha20 backends) and the X25519
+ladder, including their uses by the native TLS provider once an application
+calls `load::enable`.
+
 ### Operating-system interface
 
 On Linux x86-64, aarch64 and riscv64, `browntls-crypto` issues `getrandom(2)`

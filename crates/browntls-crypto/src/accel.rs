@@ -34,6 +34,10 @@
 //! hardware checks that guard `unsafe` backend code are independent of the
 //! policy, and `--cfg browntls_force_soft` removes every accelerated backend.
 //!
+//! The policy's choice is static. [`load`] can additionally move a share of
+//! a family's work to another permitted backend while the selected one runs
+//! slower than usual (off by default).
+//!
 //! ```
 //! use browntls_crypto::accel::{self, Acceleration, Algorithm, Kind, Policy};
 //!
@@ -448,6 +452,11 @@ pub(crate) trait Backends: Copy + PartialEq + 'static {
     fn uses(self) -> Uses;
     /// A display name such as `"AES-NI"` or `"portable"`.
     fn name(self) -> &'static str;
+    /// The family's streams of work for load-aware routing ([`load`]); none
+    /// when its calls are never routed.
+    fn streams() -> &'static [load::Stream] {
+        &[]
+    }
 }
 
 fn portable<B: Backends>() -> B {
@@ -513,6 +522,8 @@ macro_rules! for_family {
         }
     };
 }
+
+pub mod load;
 
 /// Every algorithm's policy in one word: algorithm `i` occupies bits
 /// `4 * i .. 4 * i + 4` with the [`Policy::to_bits`] encoding. All-preferred

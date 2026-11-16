@@ -296,6 +296,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "browntls-entropy"
+version = "0.1.0-dev"
+dependencies = [
+ "browntls",
+ "browntls-crypto",
+ "rcgen",
+]
+
+[[package]]
 name = "browntls-pki"
 version = "0.1.0-dev"
 dependencies = [

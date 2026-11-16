@@ -70,6 +70,18 @@ emulation with `scripts/cross-test.sh <profile> -p browntls-crypto`; the script
 header lists the profiles and the Ubuntu packages it needs. CI additionally
 runs native aarch64 and riscv64 jobs, `no_std` builds and `cargo deny`.
 
+The entropy checks draw millions of private keys, seeds, nonces, key shares and
+handshake secrets from the public generators and test each stream for low
+entropy (duplicates, biased bits, per-byte min-entropy and Shannon entropy,
+collision entropy, repeated blocks, serial correlation). `cargo test` runs them
+at smoke size; CI runs every topic with millions of samples per generator on
+x86-64, aarch64 and riscv64. See [entropy checks](crates/browntls-entropy/README.md):
+
+```sh
+BROWNTLS_ENTROPY_SAMPLES=4194304 \
+  cargo test -p browntls-entropy --test os_rng -- --nocapture --test-threads=1
+```
+
 The Docker end-to-end matrix runs browntls against OpenSSL, GnuTLS and itself
 in separate containers for x86-64-v3, aarch64 and riscv64 (natively and under
 QEMU with vector crypto). It needs Docker and the musl target of the

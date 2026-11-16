@@ -1,0 +1,132 @@
+name: Entropy
+
+# Draws millions of keys, seeds, nonces, key shares and handshake secrets
+# from browntls's public generators and checks each stream statistically for
+# low entropy: duplicates, biased or stuck bits, per-byte min-entropy and
+# Shannon entropy, collision entropy of bit windows, repeated blocks and
+# serial correlation (crates/browntls-entropy/README.md). Each topic is a
+# separate job, on every architecture whose OS-entropy path differs.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/entropy.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/browntls/**'
+      - 'crates/browntls-crypto/**'
+      - 'crates/browntls-entropy/**'
+      - 'rust-toolchain.toml'
+  pull_request:
+    paths:
+      - '.github/workflows/entropy.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/browntls/**'
+      - 'crates/browntls-crypto/**'
+      - 'crates/browntls-entropy/**'
+      - 'rust-toolchain.toml'
+  schedule:
+    - cron: '7 4 * * 3'
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Base sample count per generator (costly generators divide it)
+        required: false
+        default: ''
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  entropy:
+    name: Entropy ${{ matrix.topic }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86-64
+          - aarch64
+        topic:
+          - os_rng
+          - curve25519
+          - curve448
+          - nist
+          - mlkem
+          - hpke
+          - ffdhe
+          - rsa
+          - tls_kx
+          - tls_ticketer
+          - tls_handshake
+        include:
+          # 2^22 samples per generator; costly generators divide this
+          # (see each test's `sample_count` call).
+          - arch: x86-64
+            runner: ubuntu-26.04
+            samples: '4194304'
+            timeout: 120
+          # Native Arm: the aarch64 getrandom(2) system call path.
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            samples: '4194304'
+            timeout: 120
+          # Native RISC-V (RISE, RV64GC): the riscv64 getrandom(2) system
+          # call path and the scalar backends. The runner is far slower,
+          # so the cheap topics run with 2^20 samples.
+          - arch: riscv64
+            topic: os_rng
+            runner: ubuntu-24.04-riscv
+            samples: '1048576'
+            timeout: 180
+          - arch: riscv64
+            topic: curve25519
+            runner: ubuntu-24.04-riscv
+            samples: '1048576'
+            timeout: 180
+          - arch: riscv64
+            topic: mlkem
+            runner: ubuntu-24.04-riscv
+            samples: '1048576'
+            timeout: 180
+          - arch: riscv64
+            topic: tls_ticketer
+            runner: ubuntu-24.04-riscv
+            samples: '1048576'
+            timeout: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Report CPU
+        run: |
+          nproc
+          grep -m1 -E '^(model name|Features|isa|uarch)' /proc/cpuinfo || true
+
+      # The checks must still catch known-bad generators on this machine.
+      - name: Self-test the detectors
+        run: cargo test -p browntls-entropy --lib --locked
+
+      - name: Check ${{ matrix.topic }}
+        env:
+          BROWNTLS_ENTROPY_SAMPLES: ${{ inputs.samples || matrix.samples }}
+          TOPIC: ${{ matrix.topic }}
+        # One test at a time: each test already uses every core.
+        run: cargo test -p browntls-entropy --locked --test "${TOPIC}" -- --nocapture --test-threads=1

@@ -3,7 +3,7 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
-and the unpublished test tool `browntls-e2e`) described in
+and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.

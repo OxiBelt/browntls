@@ -736,6 +736,74 @@ Not implemented: ECH with DTLS or QUIC, and a client-facing server that
 inspects anything after the back-end server's ServerHello (by design: it
 relays the encrypted handshake unmodified).
 
+### QUIC-TLS (RFC 9001)
+
+`browntls::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a QUIC
+implementation feeds the contents of CRYPTO frames to `read_hs`, takes the
+bytes to send from `write_hs`, and receives the keys of each encryption level
+as a `KeyChange`. Packets, frames, transport parameters, loss recovery and
+the choice of packet number space stay with the QUIC implementation; browntls
+does not implement QUIC transport (RFC 9000). Only QUIC version 1 is
+supported.
+
+- Connections: `quic::ClientConnection` and `quic::ServerConnection` share
+  the TLS 1.3 state machines through `CommonState::quic`. In that mode
+  handshake messages are queued with the level that protects them (Initial,
+  Handshake or 1-RTT) instead of being written as records; no record layer
+  keys are installed, no ChangeCipherSpec is sent (§8.4), no EndOfEarlyData
+  is sent or expected (§8.3) and `legacy_session_id` is empty.
+- Levels: `write_hs` emits one level's bytes per call and returns the next
+  level's keys once they exist; the bytes written by that call belong to the
+  previous level. `read_hs` refuses bytes that continue past a message that
+  changes the peer's level (§4.1.3, `KeyEpochWithPendingFragment`).
+- Packet protection: each TLS 1.3 suite names a `quic::Algorithm` in its
+  `quic` field: AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 on both
+  providers, AES-128-CCM on the native one; TLS_AES_128_CCM_8_SHA256 has none
+  (§5.3) and is never offered. The RustCrypto provider computes the ChaCha20
+  header protection block itself, since the `chacha20` crate refuses block
+  counter 0xffffffff, which a peer can choose. Keys come from "quic key", "quic iv" and
+  "quic hp" (§5.1); Initial keys from the client's Destination Connection ID
+  (§5.2). Header protection masks the packet number without branching on its
+  length (§9.5). Each packet key reports the §6.6 confidentiality and
+  integrity limits; counting packets is the QUIC implementation's job.
+- Key update: `Secrets::next_packet_keys` derives the next phase with
+  "quic ku" (§6); a TLS KeyUpdate message is `unexpected_message`.
+- Other TLS extensions: `record_size_limit` is neither offered nor
+  acknowledged, since QUIC has no TLS records. An external PSK can
+  authenticate a QUIC handshake but never carries 0-RTT, because 0-RTT
+  needs the transport parameters remembered with a ticket (RFC 9000
+  §7.4.1). Encrypted Client Hello (shared mode or as a split-mode back-end
+  server) is refused on QUIC connections for now:
+  the outer ClientHello has no ALPN, so a QUIC server rejecting ECH could
+  not complete the handshake that delivers retry configurations.
+- Post-handshake client authentication (§4.4): a QUIC client never offers
+  `post_handshake_auth`, and a QUIC server ignores the offer, so
+  `request_client_auth_after_handshake` does not defer client
+  authentication there. A post-handshake CertificateRequest is a
+  PROTOCOL_VIOLATION, without an alert.
+- Transport parameters: the `quic_transport_parameters` extension (0x39) is
+  required in QUIC (`missing_extension`) and refused by a TLS server
+  (`unsupported_extension`); the pre-RFC code point 0xffa5 is not recognised.
+  A client keeps the server's parameters with its ticket for 0-RTT.
+- ALPN: if either side configures protocols and none is agreed, the
+  handshake fails with `no_application_protocol` (§8.1).
+- 0-RTT: a server allows it only with `max_early_data_size` 0 or `u32::MAX`
+  (§4.6.1), and a client refuses a ticket announcing any other early data
+  size. A server exposes 0-RTT keys only when it accepted early data; a
+  client drops them after a HelloRetryRequest or a refusal. Whether to
+  accept 0-RTT is decided before the stored resumption data is visible, and
+  needs stateful session storage, as for TLS.
+- Errors: the first fatal alert is available from `alert`, and
+  `crypto_error_code` maps it to CRYPTO_ERROR `0x0100 + alert` (§4.8).
+  The violations RFC 9001 makes a PROTOCOL_VIOLATION (data left over at a
+  level change, a ticket without the 0-RTT sentinel, a ClientHello with a
+  session ID) fail without an alert, so `alert` stays `None`.
+- `read_hs` takes no encryption level: apart from level changes, the QUIC
+  implementation checks which level CRYPTO data may arrive at.
+- Retry: `retry_integrity_tag` and `verify_retry_integrity` compute and check
+  the §5.8 tag with a provider's TLS_AES_128_GCM_SHA256 suite (any other
+  suite is refused).
+
 ### Cargo features (`browntls`)
 
 | Feature | Default | Effect |
@@ -1086,7 +1154,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
 | Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and one API-sequence target per topic that together reach every public function ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and daily |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |

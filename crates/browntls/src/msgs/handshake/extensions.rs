@@ -543,7 +543,9 @@ impl Codec<'_> for ServerExtensions {
                     out.supported_versions = Some(ProtocolVersion::read(body)?);
                 }
                 ExtensionType::EarlyData => out.early_data = Some(()),
-                ExtensionType::TransportParameters | ExtensionType::TransportParametersDraft => {
+                // RFC 9001 §8.2 only; the pre-RFC draft code point 0xffa5 is
+                // left unrecognised.
+                ExtensionType::TransportParameters => {
                     out.transport_parameters = Some(Payload::read(body).into_owned());
                 }
                 ExtensionType::ClientCertificateType => {

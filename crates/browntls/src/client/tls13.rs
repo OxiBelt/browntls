@@ -95,8 +95,10 @@ pub(super) fn derive_early_traffic_secret(
 }
 
 /// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446 appendix D.4).
+///
+/// Never on QUIC, which has no such record (RFC 9001 §8.4).
 pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {
-    if *sent {
+    if *sent || common.is_quic() {
         return;
     }
     let m = Message {
@@ -258,6 +260,9 @@ pub(super) fn handle_server_hello(
                 cx.data.early_data.rejected();
             }
             cx.common.early_traffic = false;
+            if let Some(quic) = cx.common.quic.as_mut() {
+                quic.clear_early_secret();
+            }
             cx.common.early_exporter = None;
             resuming_session = None;
             KeySchedulePreHandshake::new(suite)
@@ -400,6 +405,24 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             &self.alpn_protocols,
             exts.alpn.as_ref().map(|p| p.as_ref()),
         )?;
+
+        if let Some(quic) = &mut cx.common.quic {
+            // RFC 9001 §8.2: the server MUST send its transport parameters.
+            let Some(params) = &exts.transport_parameters else {
+                return Err(cx
+                    .common
+                    .missing_extension(PeerMisbehaved::MissingQuicTransportParameters));
+            };
+            quic.peer_params = Some(params.bytes().to_vec());
+            // RFC 9001 §8.1: with ALPN offered, a server that selects no
+            // protocol ends the connection (no_application_protocol).
+            if !self.alpn_protocols.is_empty() && cx.common.alpn_protocol.is_none() {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::NoApplicationProtocol,
+                    Error::NoApplicationProtocol,
+                ));
+            }
+        }
         hs::process_cert_type_extensions(
             cx.common,
             &self.config,
@@ -458,6 +481,9 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 None => {
                     cx.data.early_data.rejected();
                     cx.common.early_traffic = false;
+                    if let Some(quic) = cx.common.quic.as_mut() {
+                        quic.clear_early_secret();
+                    }
                     cx.common.early_exporter = None;
                     self.key_schedule.set_handshake_encrypter(cx.common);
                 }

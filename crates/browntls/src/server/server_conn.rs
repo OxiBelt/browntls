@@ -585,11 +585,75 @@ impl SideData for ServerConnectionData {
     }
 }
 
+impl ServerConnectionData {
+    pub(crate) fn server_name(&self) -> Option<&str> {
+        self.sni.as_ref().map(|n| n.as_ref())
+    }
+
+    pub(crate) fn received_resumption_data(&self) -> Option<&[u8]> {
+        self.received_resumption_data.as_deref()
+    }
+
+    pub(crate) fn set_resumption_data(&mut self, data: &[u8]) {
+        self.resumption_data = data.to_vec();
+    }
+
+    pub(crate) fn reject_early_data(&mut self) {
+        self.early_data.reject();
+    }
+
+    pub(crate) fn early_data_accepted(&self) -> bool {
+        self.early_data.was_accepted()
+    }
+}
+
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
+        Self::for_server_with(config, None)
+    }
+
+    /// A QUIC server (RFC 9001): TLS 1.3 only, with a QUIC-capable suite,
+    /// and 0-RTT announced only with the sentinel size (§4.6.1).
+    pub(crate) fn for_quic_server(
+        config: Arc<ServerConfig>,
+        quic: crate::quic::Quic,
+    ) -> Result<Self, Error> {
+        if !config.supports_version(ProtocolVersion::TLSv1_3) {
+            return Err(Error::General(
+                "TLS 1.3 support is required for QUIC".into(),
+            ));
+        }
+        if !config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.usable_for_quic())
+        {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with QUIC".into(),
+            ));
+        }
+        if config.max_early_data_size != 0 && config.max_early_data_size != u32::MAX {
+            return Err(Error::General(
+                "QUIC servers must set max_early_data_size to 0 or u32::MAX".into(),
+            ));
+        }
+        if config.ech.is_some() || config.ech_backend {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over QUIC".into(),
+            ));
+        }
+        Self::for_server_with(config, Some(quic))
+    }
+
+    fn for_server_with(
+        config: Arc<ServerConfig>,
+        quic: Option<crate::quic::Quic>,
+    ) -> Result<Self, Error> {
         config.check_cookie_sealer()?;
         config.check_ech_role()?;
         let mut common = CommonState::new(Side::Server);
+        common.quic = quic.map(alloc::boxed::Box::new);
         common.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common.enable_secret_extraction = config.enable_secret_extraction;

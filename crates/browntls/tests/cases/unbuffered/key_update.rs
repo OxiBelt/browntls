@@ -73,6 +73,7 @@ fn suite_with_limit(limit: u64) -> browntls::SupportedCipherSuite {
             },
             hkdf_provider: orig.hkdf_provider,
             aead_alg: orig.aead_alg,
+            quic: orig.quic,
         }));
     browntls::SupportedCipherSuite::Tls13(suite)
 }
@@ -249,6 +250,7 @@ fn trailing_key_update_that_does_not_fit_stays_queued() {
             },
             hkdf_provider: orig.hkdf_provider,
             aead_alg: Box::leak(Box::new(UnderstatesKeyUpdates(orig.aead_alg))),
+            quic: None,
         }));
     let chain = server_chain(KeyType::Ed25519);
     let mut p = prov::default_provider();

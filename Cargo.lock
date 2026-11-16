@@ -229,6 +229,7 @@ dependencies = [
 name = "browntls"
 version = "0.1.0-dev"
 dependencies = [
+ "aes",
  "aes-gcm",
  "brotli 9.1.2",
  "browntls-crypto",

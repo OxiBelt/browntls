@@ -411,7 +411,9 @@ impl Codec<'_> for ClientExtensions {
                     out.server_certificate_types =
                         Some(read_nonempty_vec_u8(body, "ServerCertificateTypes")?);
                 }
-                ExtensionType::TransportParameters | ExtensionType::TransportParametersDraft => {
+                // RFC 9001 §8.2 only; the pre-RFC draft code point 0xffa5 is
+                // left unrecognised.
+                ExtensionType::TransportParameters => {
                     out.transport_parameters = Some(Payload::read(body).into_owned());
                 }
                 ExtensionType::RecordSizeLimit => {

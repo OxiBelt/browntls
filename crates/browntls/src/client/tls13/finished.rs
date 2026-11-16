@@ -185,7 +185,11 @@ impl State<ClientConnectionData> for ExpectFinished {
 
         // RFC 8446 §4.5: EndOfEarlyData is still protected by the early
         // traffic key but follows the server Finished in the transcript.
-        if cx.common.early_traffic {
+        // QUIC clients MUST NOT send it (RFC 9001 §8.3).
+        if cx.common.early_traffic && cx.common.is_quic() {
+            cx.common.early_traffic = false;
+            cx.data.early_data.finished();
+        } else if cx.common.early_traffic {
             emit_end_of_early_data_tls13(&mut st.transcript, cx.common);
             cx.common.early_traffic = false;
             cx.data.early_data.finished();
@@ -318,6 +322,18 @@ impl ExpectTraffic {
             ));
         }
 
+        // RFC 9001 §4.6.1: on QUIC, early_data in a ticket carries the
+        // sentinel 0xffffffff; any other value is a QUIC PROTOCOL_VIOLATION,
+        // which is not a TLS alert.
+        if cx.common.is_quic()
+            && nst
+                .exts
+                .max_early_data_size
+                .is_some_and(|size| size != u32::MAX)
+        {
+            return Err(PeerMisbehaved::InvalidMaxEarlyDataSize.into());
+        }
+
         // RFC 9846 §4.7.1: a lifetime of zero means the ticket must be
         // discarded immediately.
         if nst.lifetime == 0 {
@@ -340,7 +356,7 @@ impl ExpectTraffic {
 
         let server_cert_chain = cx.common.peer_certificates.clone().unwrap_or_default();
 
-        let value = persist::Tls13ClientSessionValue::new(
+        let mut value = persist::Tls13ClientSessionValue::new(
             self.suite,
             nst.ticket.0.clone(),
             &secret,
@@ -352,6 +368,9 @@ impl ExpectTraffic {
         )
         .with_external_psk(cx.common.external_psk_binding())
         .with_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+        if let Some(params) = cx.common.quic.as_ref().and_then(|q| q.peer_params.as_ref()) {
+            value.set_quic_params(params);
+        }
         self.config
             .resumption
             .store
@@ -370,6 +389,11 @@ impl ExpectTraffic {
         m: &Message<'_>,
     ) -> Result<(), Error> {
         let Some(base) = &self.post_handshake_transcript else {
+            // RFC 9001 §4.4: in QUIC this is a PROTOCOL_VIOLATION, which
+            // has no TLS alert.
+            if cx.common.is_quic() {
+                return Err(PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest.into());
+            }
             // RFC 9846 §4.7.2: without our post_handshake_auth offer this
             // is unexpected_message.
             return Err(cx.common.send_fatal_alert(
@@ -493,6 +517,17 @@ impl State<ClientConnectionData> for ExpectTraffic {
                 parsed: HandshakeMessagePayload(HandshakePayload::NewSessionTicketTls13(ref nst)),
                 ..
             } => self.handle_new_ticket_tls13(cx, nst)?,
+            // RFC 9001 §6: QUIC has its own key update; a TLS KeyUpdate is
+            // a connection error equivalent to unexpected_message.
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(_)),
+                ..
+            } if cx.common.is_quic() => {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::KeyUpdateReceivedInQuicConnection,
+                ));
+            }
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(request)),
                 ..

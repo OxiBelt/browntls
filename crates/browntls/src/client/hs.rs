@@ -272,6 +272,9 @@ impl State<ClientConnectionData> for ExpectServerHello {
             },
         };
 
+        // RFC 9001 §4.2: QUIC requires TLS 1.3; we offered nothing else.
+        crate::quic::tls::require_tls13(cx.common, version)?;
+
         // RFC 8446 §4.2.10: a server that answers a 0-RTT offer with TLS 1.2
         // cannot have read the early data; fail rather than fall back.
         if version == ProtocolVersion::TLSv1_2
@@ -356,6 +359,14 @@ impl State<ClientConnectionData> for ExpectServerHello {
                     PeerMisbehaved::SelectedUnofferedCipherSuite,
                 )
             })?;
+        // RFC 9001 §5.3: on QUIC only the suites we offered, those with a
+        // header protection scheme, may be selected.
+        if cx.common.is_quic() && !suite.usable_for_quic() {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::SelectedUnofferedCipherSuite,
+            ));
+        }
         if suite.version().version != version {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
@@ -660,6 +671,9 @@ impl ExpectServerHelloOrHelloRetryRequest {
             cx.data.early_data.rejected();
         }
         cx.common.early_traffic = false;
+        if let Some(quic) = cx.common.quic.as_mut() {
+            quic.clear_early_secret();
+        }
         cx.common.early_exporter = None;
 
         // The retry must repeat the PSK offer (with a new binder) or drop it;

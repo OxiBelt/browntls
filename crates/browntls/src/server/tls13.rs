@@ -513,6 +513,13 @@ impl CompleteClientHelloHandling {
             cx.common,
         );
 
+        // A QUIC server exposes 0-RTT keys only when it accepts early data.
+        if !matches!(early_data, EarlyDataDecision::Accepted)
+            && let Some(quic) = cx.common.quic.as_mut()
+        {
+            quic.clear_early_secret();
+        }
+
         // Which key the client's next records are read under.
         match early_data {
             EarlyDataDecision::Disabled => {
@@ -525,6 +532,11 @@ impl CompleteClientHelloHandling {
                 debug!("Client requested early_data, but not accepted: trial decryption");
                 key_schedule.set_handshake_decrypter(Some(skip_early_data_limit), cx.common);
                 cx.data.early_data.reject();
+            }
+            // QUIC carries 0-RTT data in its own packets (RFC 9001 §4.6.1);
+            // nothing arrives through TLS.
+            EarlyDataDecision::Accepted if cx.common.is_quic() => {
+                cx.data.early_data.accept(0);
             }
             EarlyDataDecision::Accepted => {
                 cx.data.early_data.accept(early_data_limit as usize);
@@ -571,7 +583,11 @@ impl CompleteClientHelloHandling {
         );
 
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
-        cx.data.post_handshake_auth_offered = client_hello.extensions.post_handshake_auth.is_some();
+        // RFC 9001 §4.4: QUIC has no post-handshake client authentication,
+        // so an offer over QUIC is ignored and client auth stays in the
+        // handshake.
+        cx.data.post_handshake_auth_offered =
+            client_hello.extensions.post_handshake_auth.is_some() && !cx.common.is_quic();
         let defer_client_auth =
             self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
 
@@ -636,7 +652,9 @@ impl CompleteClientHelloHandling {
                 send_tickets: self.send_tickets,
                 offered_sigschemes,
             }))
-        } else if early_data == EarlyDataDecision::Accepted {
+        } else if early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
+            // RFC 9001 §8.3: on QUIC no EndOfEarlyData ends the early data;
+            // the client's Finished follows directly.
             Ok(Box::new(ExpectEarlyData {
                 config: self.config,
                 transcript: self.transcript,

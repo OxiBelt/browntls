@@ -35,6 +35,7 @@ pub static TLS13_AES_128_GCM_SHA256: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
         aead_alg: &AES_128_GCM,
+        quic: Some(super::quic::AES_128_GCM),
     });
 
 /// `TLS13_AES_256_GCM_SHA384`.
@@ -47,6 +48,7 @@ pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA384_IMPL,
         aead_alg: &AES_256_GCM,
+        quic: Some(super::quic::AES_256_GCM),
     });
 
 /// `TLS13_CHACHA20_POLY1305_SHA256`.
@@ -60,6 +62,7 @@ pub static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
         aead_alg: &CHACHA20_POLY1305,
+        quic: Some(super::quic::CHACHA20_POLY1305),
     });
 
 /// `TLS13_AES_128_CCM_SHA256` (RFC 9846 Appendix B.4).
@@ -76,6 +79,7 @@ pub static TLS13_AES_128_CCM_SHA256: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
         aead_alg: &ccm::AES_128_CCM,
+        quic: Some(super::quic::AES_128_CCM),
     });
 
 /// `TLS13_AES_128_CCM_8_SHA256` (RFC 9846 Appendix B.4).
@@ -95,6 +99,8 @@ pub static TLS13_AES_128_CCM_8_SHA256: SupportedCipherSuite =
         },
         hkdf_provider: &hkdf::HKDF_SHA256_IMPL,
         aead_alg: &ccm::AES_128_CCM_8,
+        // RFC 9001 §5.3: no header protection is defined for CCM_8.
+        quic: None,
     });
 
 /// A TLS 1.3 AEAD over a `browntls-crypto` [`Aead`].

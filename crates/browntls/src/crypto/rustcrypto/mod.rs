@@ -24,6 +24,7 @@ pub mod sign;
 pub(crate) mod hash;
 pub(crate) mod hmac;
 pub(crate) mod kx;
+pub(crate) mod quic;
 pub mod ticketer;
 #[cfg(feature = "std")]
 pub use ticketer::Ticketer;

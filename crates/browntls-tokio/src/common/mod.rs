@@ -299,8 +299,16 @@ where
         let answer = self.session.wants_write() && (st.answering || !had_queued_tls);
         if answer || error.is_some() {
             st.answering = answer;
-            self.answer_peer(cx);
-            if let Some(waker) = st.write_waker.take() {
+            // Only a write that moved bytes calls for the writer: then the
+            // queue it waits on changed. A write that met `Pending` left
+            // this task registered for writability, and it wakes the
+            // writer once that write goes through; waking it at every
+            // `Pending` would spin a task that polls both directions. A
+            // failed read is final: the writer must see the error.
+            let wrote = self.answer_peer(cx);
+            if (wrote || error.is_some())
+                && let Some(waker) = st.write_waker.take()
+            {
                 waker.wake();
             }
         }
@@ -328,15 +336,18 @@ where
     }
 
     /// Writes and flushes queued TLS bytes as far as the transport takes them
-    /// now. Errors are left for the next write to report.
-    fn answer_peer(&mut self, cx: &mut Context<'_>) {
+    /// now; returns whether any were written. Errors are left for the next
+    /// write to report.
+    fn answer_peer(&mut self, cx: &mut Context<'_>) -> bool {
+        let mut wrote = false;
         while self.session.wants_write() {
             match self.write_io(cx) {
-                Poll::Ready(Ok(n)) if n > 0 => {}
+                Poll::Ready(Ok(n)) if n > 0 => wrote = true,
                 _ => break,
             }
         }
         let _ = Pin::new(&mut *self.io).poll_flush(cx);
+        wrote
     }
 }
 

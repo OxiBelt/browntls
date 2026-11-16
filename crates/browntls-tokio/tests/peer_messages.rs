@@ -7,14 +7,20 @@
 
 mod common;
 
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use browntls::server::PostHandshakeAuthStatus;
 use browntls::{HandshakeKind, NamedGroup};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf, duplex,
+};
 use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(30);
@@ -179,4 +185,51 @@ async fn a_small_send_buffer_still_moves_everything() {
         let ((), got) = timeout(LIMIT, run).await.expect("timed out");
         assert!(got == data, "{version:?}: corrupt data");
     }
+}
+
+#[tokio::test]
+async fn a_task_polling_both_directions_does_not_spin_while_answering() {
+    let pki = Pki::new();
+    let version = &browntls::version::TLS13;
+    let mut client_config = pki.client_config_with_cert(version);
+    client_config.enable_post_handshake_auth = true;
+    let mut server_config = pki.server_config_with_client_auth(version);
+    server_config.request_client_auth_after_handshake = true;
+    // A small transport: the certificate answer only goes out in part.
+    let (c, s) = duplex(300);
+    let (client, server) = tokio::join!(
+        TlsConnector::from(Arc::new(client_config)).connect(localhost(), c),
+        TlsAcceptor::from(Arc::new(server_config)).accept(s),
+    );
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    server.get_mut().1.request_client_auth().unwrap();
+    let mut buf = [0u8; 16];
+    let (flushed, _) = tokio::join!(
+        server.flush(),
+        timeout(Duration::from_millis(100), client.read(&mut buf))
+    );
+    flushed.unwrap();
+
+    // Park a write, then poll writes and reads from one task while the
+    // server reads nothing.
+    let big = vec![0u8; 256 * 1024];
+    poll_fn(|cx| match Pin::new(&mut client).poll_write(cx, &big) {
+        Poll::Pending => Poll::Ready(()),
+        _ => {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+    let polls = AtomicUsize::new(0);
+    let both = poll_fn(|cx| {
+        polls.fetch_add(1, Ordering::Relaxed);
+        let _ = Pin::new(&mut client).poll_write(cx, &big);
+        let _ = Pin::new(&mut client).poll_read(cx, &mut ReadBuf::new(&mut buf));
+        Poll::<()>::Pending
+    });
+    let _ = timeout(Duration::from_millis(300), both).await;
+    let polls = polls.load(Ordering::Relaxed);
+    assert!(polls < 100, "the task spun: {polls} polls in 300 ms");
+    drop(server);
 }

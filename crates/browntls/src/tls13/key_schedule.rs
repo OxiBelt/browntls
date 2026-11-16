@@ -190,7 +190,12 @@ impl KeySchedule {
         self.suite.hkdf_provider.hmac_sign(&finished_key, hs_hash)
     }
 
+    /// Installs a record encrypter; QUIC connections have no record layer
+    /// and take their secrets from the stage that derives them.
     fn set_encrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        if common.is_quic() {
+            return;
+        }
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
         common.record_layer.set_message_encrypter(
@@ -200,6 +205,9 @@ impl KeySchedule {
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        if common.is_quic() {
+            return;
+        }
         common
             .record_layer
             .set_message_decrypter(self.derive_decrypter(secret));
@@ -307,6 +315,11 @@ impl KeyScheduleEarly {
             key_log,
             client_random,
         );
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the 0-RTT packet keys.
+            quic.set_early_secret(secret, self.ks.suite);
+            return;
+        }
         match common.side {
             Side::Client => self.ks.set_encrypter(&secret, common),
             Side::Server => common
@@ -395,6 +408,10 @@ impl KeyScheduleHandshakeStart {
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
         let (client_secret, server_secret) = self.derive(hs_hash, key_log, client_random);
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the Handshake packet keys, both directions.
+            quic.set_handshake_secrets(client_secret.clone(), server_secret.clone(), self.ks.suite);
+        }
         // The server starts encrypting immediately; the client starts
         // decrypting with the server's secret.
         match common.side {
@@ -456,6 +473,9 @@ impl KeyScheduleHandshake {
         skip_requested: Option<usize>,
         common: &mut CommonState,
     ) {
+        if common.is_quic() {
+            return;
+        }
         let decrypter = self
             .ks
             .derive_decrypter(&self.client_handshake_traffic_secret);
@@ -484,6 +504,16 @@ impl KeyScheduleHandshake {
     ) -> KeyScheduleTrafficWithClientFinishedPending {
         self.ks.input_empty();
         let traffic = KeyScheduleTraffic::new(self.ks, hs_hash, key_log, client_random);
+        let side = common.side;
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the 1-RTT packet keys, both directions.
+            quic.set_traffic_secrets(
+                traffic.current_client_traffic_secret.clone(),
+                traffic.current_server_traffic_secret.clone(),
+                traffic.ks.suite,
+                side,
+            );
+        }
         if common.side == Side::Server {
             traffic
                 .ks
@@ -512,6 +542,13 @@ impl KeyScheduleTrafficWithClientFinishedPending {
     }
 
     pub(crate) fn into_traffic(self, common: &mut CommonState) -> KeyScheduleTraffic {
+        let side = common.side;
+        if let Some(quic) = &mut common.quic {
+            match side {
+                Side::Client => quic.start_local_traffic(),
+                Side::Server => quic.start_remote_traffic(),
+            }
+        }
         match common.side {
             Side::Client => self
                 .traffic
@@ -536,6 +573,9 @@ impl KeyScheduleTrafficWithClientFinishedPending {
     /// Installs the server application decrypter on the client, which may
     /// happen before the client sends its Finished.
     pub(crate) fn set_server_application_decrypter(&self, common: &mut CommonState) {
+        if let Some(quic) = &mut common.quic {
+            quic.start_remote_traffic();
+        }
         self.traffic
             .ks
             .set_decrypter(&self.traffic.current_server_traffic_secret, common);

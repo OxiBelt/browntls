@@ -115,6 +115,7 @@ fn provider(plain: bool) -> Arc<CryptoProvider> {
                     },
                     hkdf_provider: real.hkdf_provider,
                     aead_alg: &PlainAead,
+                    quic: None,
                 }));
                 *suite = SupportedCipherSuite::Tls13(fake);
             }

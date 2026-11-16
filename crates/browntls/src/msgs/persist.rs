@@ -74,6 +74,9 @@ pub struct Tls13ClientSessionValue {
     suite: &'static Tls13CipherSuite,
     age_add: u32,
     max_early_data_size: u32,
+    /// QUIC: the server's transport parameters, remembered for 0-RTT
+    /// (RFC 9000 §7.4.1); empty otherwise.
+    quic_params: PayloadU16,
     pub(crate) common: ClientSessionCommon,
     /// The external PSK the session was established with, if any.
     external_psk: Option<ExternalPskBinding>,
@@ -98,6 +101,7 @@ impl Tls13ClientSessionValue {
             suite,
             age_add,
             max_early_data_size,
+            quic_params: PayloadU16::empty(),
             common: ClientSessionCommon::new(
                 ticket,
                 secret,
@@ -144,6 +148,15 @@ impl Tls13ClientSessionValue {
     /// How much early data the server will accept with this ticket.
     pub fn max_early_data_size(&self) -> u32 {
         self.max_early_data_size
+    }
+
+    /// QUIC: the server's transport parameters when the ticket was issued.
+    pub fn quic_params(&self) -> &[u8] {
+        &self.quic_params.0
+    }
+
+    pub(crate) fn set_quic_params(&mut self, params: &[u8]) {
+        self.quic_params = PayloadU16::new(params.to_vec());
     }
 
     /// The suite the session used.
@@ -671,6 +684,7 @@ mod tests {
             },
             hkdf_provider: &DummyHkdf,
             aead_alg: &DummyAead,
+            quic: None,
         };
         let suite: &'static Tls13CipherSuite =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));

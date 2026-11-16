@@ -166,7 +166,7 @@ impl HandshakeJoiner {
     /// of fragments that arrived in the same record as its end.
     const MAX_BUFFERED: usize = MAX_HANDSHAKE_SIZE as usize + 4 + super::message::MAX_PLAINTEXT_LEN;
 
-    fn push(&mut self, fragment: &[u8]) -> Result<(), Error> {
+    pub(crate) fn push(&mut self, fragment: &[u8]) -> Result<(), Error> {
         if self.buf.len() + fragment.len() > Self::MAX_BUFFERED {
             return Err(InvalidMessage::HandshakePayloadTooLarge.into());
         }
@@ -189,13 +189,18 @@ impl HandshakeJoiner {
     }
 
     /// The length of the first complete message, if one is buffered.
-    fn complete_message_len(&self) -> Option<usize> {
+    pub(crate) fn complete_message_len(&self) -> Option<usize> {
         if self.buf.len() < 4 {
             return None;
         }
         let declared = u24::read(&mut Reader::init(&self.buf[1..4])).ok()?;
         let total = 4 + usize::from(declared);
         (self.buf.len() >= total).then_some(total)
+    }
+
+    /// How many more bytes may be buffered.
+    pub(crate) fn room(&self) -> usize {
+        Self::MAX_BUFFERED.saturating_sub(self.buf.len())
     }
 
     /// Whether anything at all is buffered.

@@ -162,6 +162,95 @@ impl<Data: SideData> ConnectionCore<Data> {
         Ok(self.common_state.current_io_state())
     }
 
+    /// QUIC (RFC 9001 §4.1.3): processes in-order handshake bytes taken from
+    /// CRYPTO frames. There is no record layer; the bytes are TLS handshake
+    /// messages, possibly fragmented or coalesced.
+    pub(crate) fn read_quic_handshake(&mut self, mut data: &[u8]) -> Result<(), Error> {
+        let mut state = match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
+            Ok(state) => state,
+            Err(e) => {
+                self.state = Err(e.clone());
+                return Err(e);
+            }
+        };
+
+        loop {
+            let take = data.len().min(self.deframer.joiner.room());
+            if take > 0 {
+                if let Err(err) = self.deframer.joiner.push(&data[..take]) {
+                    let err = match err {
+                        Error::InvalidMessage(e) => self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(e), err),
+                        other => other,
+                    };
+                    return Err(self.fail(err));
+                }
+                data = &data[take..];
+            }
+
+            let mut progressed = false;
+            while let Some(len) = self.deframer.joiner.complete_message_len() {
+                progressed = true;
+                let read_level = self.common_state.quic.as_ref().map(|q| q.read_level);
+                let version = self
+                    .common_state
+                    .negotiated_version
+                    .unwrap_or(ProtocolVersion::TLSv1_2);
+                let bytes = &self.deframer.joiner.buffered()[..len];
+                let result = match HandshakeMessagePayload::read_version(
+                    &mut CodecReader::init(bytes),
+                    version,
+                ) {
+                    Ok(parsed) => {
+                        let msg = Message {
+                            version,
+                            payload: MessagePayload::Handshake {
+                                parsed,
+                                encoded: Payload::Borrowed(bytes),
+                            },
+                        };
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                    }
+                    Err(err) => Err(self
+                        .common_state
+                        .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                };
+                self.deframer.joiner.consume(len);
+                state = match result {
+                    Ok(next) => next,
+                    Err(err) => return Err(self.fail(err)),
+                };
+
+                // RFC 9001 §4.1.3: once the peer moves to a new encryption
+                // level, no data of the previous level may remain
+                // unconsumed. That is a QUIC PROTOCOL_VIOLATION, not a TLS
+                // alert.
+                let level_changed =
+                    self.common_state.quic.as_ref().map(|q| q.read_level) != read_level;
+                if level_changed && (!self.deframer.joiner.is_empty() || !data.is_empty()) {
+                    return Err(self.fail(PeerMisbehaved::KeyEpochWithPendingFragment.into()));
+                }
+            }
+
+            if data.is_empty() {
+                break;
+            }
+            if take == 0 && !progressed {
+                // Unreachable: the joiner rejects a declared length that
+                // does not fit before it fills up.
+                let err = self.common_state.send_fatal_alert(
+                    AlertDescription::DecodeError,
+                    InvalidMessage::HandshakePayloadTooLarge,
+                );
+                return Err(self.fail(err));
+            }
+        }
+
+        self.state = Ok(state);
+        Ok(())
+    }
+
     /// Takes the state machine out of `self.state` for processing, or
     /// returns the error that ended the connection.
     pub(crate) fn take_state(&mut self) -> Result<Box<dyn State<Data>>, Error> {
@@ -350,6 +439,21 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// Makes sure every fatal error is accompanied by an alert.
     pub(crate) fn ensure_alert_sent(common: &mut CommonState, err: Error) -> Error {
         if common.sent_fatal_alert {
+            return err;
+        }
+        // RFC 9001 makes these a QUIC PROTOCOL_VIOLATION, which has no TLS
+        // alert: `quic::ConnectionCommon::alert` stays `None`.
+        if common.is_quic()
+            && matches!(
+                err,
+                Error::PeerMisbehaved(
+                    PeerMisbehaved::InvalidMaxEarlyDataSize
+                        | PeerMisbehaved::NonEmptySessionIdInQuicClientHello
+                        | PeerMisbehaved::KeyEpochWithPendingFragment
+                        | PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest
+                )
+            )
+        {
             return err;
         }
         let desc = match &err {

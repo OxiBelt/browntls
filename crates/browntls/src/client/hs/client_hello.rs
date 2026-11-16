@@ -46,7 +46,8 @@ fn find_session(
     cx: &mut ClientContext<'_>,
 ) -> Option<Retrieved<ClientSessionValue>> {
     let now = config.current_time().ok()?;
-    let _ = &cx;
+    // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume.
+    let quic = cx.common.is_quic();
 
     let found = config
         .resumption
@@ -56,7 +57,9 @@ fn find_session(
         .or_else(|| {
             #[cfg(feature = "tls12")]
             {
-                if config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled {
+                if quic
+                    || config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled
+                {
                     return None;
                 }
                 config
@@ -67,6 +70,7 @@ fn find_session(
             }
             #[cfg(not(feature = "tls12"))]
             {
+                let _ = quic;
                 None
             }
         })
@@ -165,6 +169,9 @@ pub(in crate::client) fn start_handshake(
             value: ClientSessionValue::Tls12(inner),
             ..
         }) if !inner.session_id.is_empty() => inner.session_id,
+        // RFC 9001 §8.4: a QUIC client MUST NOT request the middlebox
+        // compatibility mode, so its legacy_session_id is empty.
+        _ if cx.common.is_quic() => SessionId::empty(),
         // RFC 8446 §4.1.2: a non-empty legacy_session_id helps middleboxes;
         // for TLS 1.2 ticket resumption a random ID lets us detect acceptance.
         _ if supports_tls13 || resuming.is_some() => {
@@ -259,13 +266,16 @@ pub(super) fn emit_client_hello_for_retry(
     cx: &mut ClientContext<'_>,
 ) -> NextStateOrError {
     let config = &input.config;
+    // RFC 9001 §4.2: a QUIC client MUST NOT offer TLS versions older than 1.3.
+    let quic = cx.common.is_quic();
     let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
     // RFC 9849 §6.1: with ECH, both ClientHellos offer TLS 1.3 only.
     let ech_tls13_only = input
         .ech
         .as_ref()
         .is_some_and(ClientEch::restricts_to_tls13);
-    let supports_tls12 = config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
+    let supports_tls12 =
+        !quic && config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
     let offers_version = |v: ProtocolVersion| {
         config.supports_version(v) && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
     };
@@ -361,7 +371,9 @@ pub(super) fn emit_client_hello_for_retry(
         key_shares,
         cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
         // RFC 9846 §4.3.6: willing to authenticate after the handshake.
+        // RFC 9001 §4.4: never in QUIC.
         post_handshake_auth: (supports_tls13
+            && !quic
             && config.enable_post_handshake_auth
             && config.client_auth_cert_resolver.has_certs())
         .then_some(()),
@@ -382,6 +394,12 @@ pub(super) fn emit_client_hello_for_retry(
                 )
             })
             .flatten(),
+        // RFC 9001 §8.2: our transport parameters, on QUIC connections only.
+        transport_parameters: cx
+            .common
+            .quic
+            .as_ref()
+            .map(|q| crate::msgs::base::Payload::new(q.local_params.clone())),
         ..Default::default()
     };
 
@@ -510,9 +528,22 @@ pub(super) fn emit_client_hello_for_retry(
             (None, Some(resuming)) => resuming.max_early_data_size(),
             (None, None) => 0,
         };
+        // RFC 9001 §4.6.1: in QUIC a ticket allows 0-RTT only with the
+        // sentinel size, and 0-RTT needs the server's remembered transport
+        // parameters (RFC 9000 §7.4.1), which an external PSK does not have.
+        let max_early_data_size = match (quic, &first.external) {
+            (false, _) => max_early_data_size,
+            (true, None) if max_early_data_size == u32::MAX => max_early_data_size,
+            (true, _) => 0,
+        };
         if max_early_data_size > 0 {
             cx.data.early_data.enable(max_early_data_size as usize);
             exts.early_data = Some(());
+            // RFC 9000 §7.4.1: 0-RTT runs under the server's remembered
+            // transport parameters until EncryptedExtensions brings new ones.
+            if let (Some(quic), Some(resuming)) = (&mut cx.common.quic, &tls13_session) {
+                quic.peer_params = Some(resuming.quic_params().to_vec());
+            }
         }
     }
 
@@ -534,8 +565,10 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 8449: the largest record we accept. The protocol maximum is that
     // of the highest version offered; a TLS 1.2 server does not enforce a
     // larger value (RFC 8449 §4) and we clamp what we enforce.
+    // QUIC has no TLS records, so no limit is offered there.
     exts.record_size_limit = config
         .record_size_limit
+        .filter(|_| !quic)
         .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
     // RFC 9149: a TLS 1.3 extension only.
     exts.ticket_request = config
@@ -551,6 +584,8 @@ pub(super) fn emit_client_hello_for_retry(
         .cipher_suites
         .iter()
         .filter(|cs| offers_version(cs.version().version))
+        // RFC 9001 §5.3: only suites with a QUIC header protection scheme.
+        .filter(|cs| !quic || cs.usable_for_quic())
         .map(|cs| cs.suite())
         .collect();
     // RFC 5746 §3.3: signal secure renegotiation support (we never

@@ -19,6 +19,11 @@ pub struct Tls13CipherSuite {
 
     /// The record protection algorithm.
     pub aead_alg: &'static dyn Tls13AeadAlgorithm,
+
+    /// QUIC packet and header protection for this suite (RFC 9001 §5), or
+    /// `None` if the suite cannot be used with QUIC (TLS_AES_128_CCM_8_SHA256,
+    /// RFC 9001 §5.3).
+    pub quic: Option<&'static dyn crate::quic::Algorithm>,
 }
 
 impl Tls13CipherSuite {
@@ -27,6 +32,12 @@ impl Tls13CipherSuite {
     pub fn can_resume_from(&self, prev: &'static Self) -> Option<&'static Self> {
         (prev.common.hash_provider.algorithm() == self.common.hash_provider.algorithm())
             .then_some(prev)
+    }
+
+    /// The suite with its QUIC algorithm, if it can be used with QUIC.
+    pub fn quic_suite(&'static self) -> Option<crate::quic::Suite> {
+        self.quic
+            .map(|quic| crate::quic::Suite { suite: self, quic })
     }
 
     /// Whether every component claims FIPS validation.

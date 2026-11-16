@@ -94,7 +94,10 @@ pub(super) fn decide_if_external_early_data_allowed(
         && psk.max_early_data_size() > 0
         && psk.cipher_suite() == Some(suite.common.suite)
         && psk.alpn_protocol() == cx.common.alpn_protocol.as_deref()
-        && !cert_with_extern_psk;
+        && !cert_with_extern_psk
+        // RFC 9000 §7.4.1: QUIC 0-RTT runs under transport parameters
+        // remembered from a ticket, which an external PSK does not have.
+        && !cx.common.is_quic();
     if possible && !cx.data.early_data.was_rejected() {
         EarlyDataDecision::Accepted
     } else {

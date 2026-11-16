@@ -553,7 +553,7 @@ impl EarlyData {
 /// Per-connection client data.
 #[derive(Debug)]
 pub struct ClientConnectionData {
-    pub(super) tls13_tickets_received: u32,
+    pub(crate) tls13_tickets_received: u32,
     pub(super) early_data: EarlyData,
     /// Whether our ClientHello offered `post_handshake_auth`.
     pub(super) offered_post_handshake_auth: bool,
@@ -627,13 +627,63 @@ impl SideData for ClientConnectionData {
     }
 }
 
+impl ClientConnectionData {
+    /// Whether the server accepted 0-RTT.
+    pub(crate) fn early_data_accepted(&self) -> bool {
+        self.early_data.is_accepted()
+    }
+}
+
 impl ConnectionCore<ClientConnectionData> {
     pub(crate) fn for_client(
         config: Arc<ClientConfig>,
         name: ServerName<'static>,
         alpn_protocols: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
+        Self::for_client_with(config, name, alpn_protocols, None)
+    }
+
+    /// A QUIC client (RFC 9001): TLS 1.3 only, with a QUIC-capable suite.
+    pub(crate) fn for_quic_client(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        alpn_protocols: Vec<Vec<u8>>,
+        quic: crate::quic::Quic,
+    ) -> Result<Self, Error> {
+        if !config.supports_version(ProtocolVersion::TLSv1_3) {
+            return Err(Error::General(
+                "TLS 1.3 support is required for QUIC".into(),
+            ));
+        }
+        if !config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.usable_for_quic())
+        {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with QUIC".into(),
+            ));
+        }
+        // ECH over QUIC is not supported yet: the outer ClientHello carries
+        // no ALPN, so a QUIC server rejecting ECH could not complete the
+        // handshake that delivers retry configurations (RFC 9001 §8.1).
+        if config.ech_mode.is_some() {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over QUIC".into(),
+            ));
+        }
+        Self::for_client_with(config, name, alpn_protocols, Some(quic))
+    }
+
+    fn for_client_with(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        alpn_protocols: Vec<Vec<u8>>,
+        quic: Option<crate::quic::Quic>,
+    ) -> Result<Self, Error> {
         let mut common_state = CommonState::new(Side::Client);
+        common_state.quic = quic.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;

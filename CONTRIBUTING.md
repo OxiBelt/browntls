@@ -56,11 +56,9 @@ documented actionlint result does not depend on host-installed analyzers.
 
 The line count check fails when a Git-tracked `.rs` file has more than 1000
 lines. It counts every line, including comments, blank lines, tests and
-generated tables. Files that were larger when the limit was introduced are
-listed with their size in `tests/scripts/rust_line_count_baseline.txt`; a listed
-file may not grow, and its entry must be removed once the file is split. Do not
-add entries to that list. CI enforces the limit on every push and pull request
-in the `Rust file line limit` job of the repository checks workflow.
+generated tables, and has no exceptions: split a file that would grow past the
+limit. CI enforces the limit on every push and pull request in the
+`Rust file line limit` job of the repository checks workflow.
 
 These checks validate repository maintenance files, not TLS correctness.
 

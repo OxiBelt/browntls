@@ -11,6 +11,3 @@
 1062 crates/browntls/src/msgs/handshake/hello.rs
 1125 crates/browntls/src/server/server_conn.rs
 1903 crates/browntls/src/server/tls13.rs
-1443 fuzz/src/tls_auth.rs
-1397 fuzz/src/tls_conn.rs
-1767 fuzz/src/tls_ech.rs

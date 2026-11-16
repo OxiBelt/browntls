@@ -1,5 +1,0 @@
-# Rust files that exceeded the 1000-line limit when it was introduced.
-#
-# Format: `<lines> <path>`. `check_rust_line_count.py` fails when a listed file
-# grows, when its recorded size is stale, and when an entry is no longer
-# needed. Do not add entries: split the file instead.

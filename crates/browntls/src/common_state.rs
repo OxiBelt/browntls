@@ -478,6 +478,12 @@ impl CommonState {
             Limit::Yes => self.sendable_tls.apply_limit(payload.len()),
             Limit::No => payload.len(),
         };
+        // Nothing to send (an empty write, or a full send buffer): the
+        // fragmenter would still make one empty record of it, letting the
+        // buffer grow past its limit with every retried write.
+        if len == 0 {
+            return 0;
+        }
         let payload = payload.split_at(len).0;
         let fragments = len
             .div_ceil(self.message_fragmenter.max_fragment_len())

@@ -75,7 +75,7 @@ handshake secrets from the public generators and test each stream for low
 entropy (duplicates, biased bits, per-byte min-entropy and Shannon entropy,
 collision entropy, repeated blocks, serial correlation). `cargo test` runs them
 at smoke size; CI runs every topic with millions of samples per generator on
-x86-64, aarch64 and riscv64. See [entropy checks](crates/browntls-entropy/README.md):
+x86-64. See [entropy checks](crates/browntls-entropy/README.md):
 
 ```sh
 BROWNTLS_ENTROPY_SAMPLES=4194304 \

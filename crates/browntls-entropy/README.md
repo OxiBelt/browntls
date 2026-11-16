@@ -11,9 +11,11 @@ Each test draws millions of values from one public generator of
 `browntls-crypto` or `browntls`, keeps only the bits that the specification
 leaves free (clamped and range-limited bits are masked out), and runs the
 checks below on every resulting stream. [`entropy.yml`](../../.github/workflows/entropy.yml)
-runs every topic as its own job on x86-64 and aarch64, and the cheap topics on
-native riscv64, because `browntls-crypto` issues the `getrandom(2)` system
-call with separate inline assembly on each architecture.
+runs every topic as its own job on one x86-64 runner (`ubuntu-26.04`).
+`browntls-crypto` issues the `getrandom(2)` system call with separate inline
+assembly on each architecture; the aarch64 and riscv64 paths are checked only
+at smoke size, by `cargo test --workspace` in the native aarch64 and riscv64
+jobs of the [Rust workflow](../../.github/workflows/rust.yml).
 
 ## Checks and thresholds
 
@@ -44,7 +46,7 @@ fail the intended check. CI runs these first on every runner.
 
 ## Topics
 
-| Test | Generators | Streams | CI samples (x86-64, aarch64) |
+| Test | Generators | Streams | CI samples (x86-64) |
 | --- | --- | --- | --- |
 | `os_rng` | `OsRng` (32-byte, one-byte and odd-length fills, both ends of 64 KiB fills), the native and RustCrypto providers' `secure_random` | raw output | 2^22 (64 KiB fills: 2^16) |
 | `curve25519` | X25519 `PrivateKey::generate`, Ed25519 `SigningKey::generate` | private keys and seeds, public keys | 2^22 |
@@ -57,9 +59,6 @@ fail the intended check. CI runs these first on every runner.
 | `tls_kx` | `start`, `start_and_complete` and `complete` of every native key-exchange group up to FFDHE3072 | client share, server share, shared secret | 2^18 to 2^22 (FFDHE: 2^17, 2^15) |
 | `tls_ticketer` | `AeadTicketProducer` of both providers | nonces under one key; nonce, keystream and tag of a fresh key per sample (and fresh keys must not open each other's tickets) | 2^22 |
 | `tls_handshake` | full in-memory TLS 1.3 and TLS 1.2 handshakes, native client and server, default configuration | both `random`s, session IDs, key shares, every TLS 1.3 traffic and exporter secret, the TLS 1.2 master secret | 2^20 handshakes per version |
-
-Native riscv64 runs `os_rng`, `curve25519`, `mlkem` and `tls_ticketer` with
-2^20 samples per generator.
 
 ## Running locally
 

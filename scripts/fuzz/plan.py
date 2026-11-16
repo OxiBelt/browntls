@@ -7,10 +7,11 @@
         the same targets, and that every entry is well formed.
 
     plan.py matrix [--granularity target|topic] [--changed-files FILE]
-                   [--targets a,b] [--arches x86_64,aarch64]
+                   [--targets a,b]
         Prints a GitHub Actions matrix as JSON: {"include": [...]}, one entry
-        per (target, architecture) or, with `topic`, per (topic, architecture)
-        running that topic's targets one after another. With --changed-files
+        per target or, with `topic`, per topic running that topic's targets
+        one after another. Every entry runs on the workflow's single x86-64
+        runner, so the matrix has no architecture axis. With --changed-files
         (one repository-relative path per line, as `git diff --name-only`
         prints them) only the targets whose sources, harness or target file
         changed are planned; a change to the shared fuzz infrastructure plans
@@ -29,11 +30,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 FUZZ = REPO / "fuzz"
-ARCHES = {
-    "x86_64": "ubuntu-26.04",
-    "aarch64": "ubuntu-26.04-arm",
-    "riscv64": "ubuntu-24.04-riscv",
-}
 # Changes here can affect every target.
 SHARED = (
     "fuzz/Cargo.toml",
@@ -50,7 +46,7 @@ SHARED = (
     "Cargo.toml",
     "Cargo.lock",
 )
-KEYS = {"topic", "sources", "arches", "args", "harness"}
+KEYS = {"topic", "sources", "args", "harness"}
 
 
 def glob_match(path: str, pattern: str) -> bool:
@@ -124,9 +120,6 @@ def check() -> list[str]:
             errors.append(f"{name}: topic must be a non-empty string")
         if not spec.get("sources") or not all(isinstance(s, str) for s in spec["sources"]):
             errors.append(f"{name}: sources must be a non-empty list of globs")
-        arches = spec.get("arches") or []
-        if not arches or any(a not in ARCHES for a in arches):
-            errors.append(f"{name}: arches must be a non-empty subset of {sorted(ARCHES)}")
         if not all(isinstance(a, str) and a.startswith("-") for a in spec["args"]):
             errors.append(f"{name}: args must be libFuzzer flags")
         for pattern in spec.get("sources", []) + spec["harness"][:1]:
@@ -162,30 +155,18 @@ def selected(targets: dict[str, dict], changed: list[str] | None) -> list[str]:
     ]
 
 
-def matrix(granularity: str, changed: list[str] | None, only: set[str] | None,
-           arches: set[str] | None) -> dict:
+def matrix(granularity: str, changed: list[str] | None, only: set[str] | None) -> dict:
     targets = load_targets()
     if only:
         unknown = only - set(targets)
         if unknown:
             raise SystemExit(f"unknown targets: {', '.join(sorted(unknown))}")
     names = [n for n in selected(targets, changed) if not only or n in only]
-    groups: dict[tuple[str, str], list[str]] = {}
+    groups: dict[str, list[str]] = {}
     for name in names:
-        for arch in targets[name]["arches"]:
-            if arches and arch not in arches:
-                continue
-            key = (targets[name]["topic"] if granularity == "topic" else name, arch)
-            groups.setdefault(key, []).append(name)
-    include = [
-        {
-            "name": label,
-            "targets": " ".join(group),
-            "arch": arch,
-            "runner": ARCHES[arch],
-        }
-        for (label, arch), group in groups.items()
-    ]
+        label = targets[name]["topic"] if granularity == "topic" else name
+        groups.setdefault(label, []).append(name)
+    include = [{"name": label, "targets": " ".join(group)} for label, group in groups.items()]
     return {"include": include}
 
 
@@ -197,7 +178,6 @@ def main() -> int:
     p.add_argument("--granularity", choices=("target", "topic"), default="target")
     p.add_argument("--changed-files", type=Path)
     p.add_argument("--targets", default="", help="comma-separated target names")
-    p.add_argument("--arches", default="", help="comma-separated architectures")
     p.add_argument("--args", metavar="TARGET", help="print TARGET's extra libFuzzer arguments instead")
     args = parser.parse_args()
     if args.command == "check":
@@ -212,10 +192,7 @@ def main() -> int:
     if args.changed_files:
         changed = [line.strip() for line in args.changed_files.read_text().splitlines() if line.strip()]
     only = {t for t in args.targets.replace(" ", ",").split(",") if t} or None
-    arches = {a for a in args.arches.replace(" ", ",").split(",") if a} or None
-    if arches and arches - set(ARCHES):
-        raise SystemExit(f"unknown architectures: {', '.join(sorted(arches - set(ARCHES)))}")
-    print(json.dumps(matrix(args.granularity, changed, only, arches), separators=(",", ":")))
+    print(json.dumps(matrix(args.granularity, changed, only), separators=(",", ":")))
     return 0
 
 

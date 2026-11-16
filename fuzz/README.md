@@ -156,23 +156,27 @@ case is known.
 
 The [Fuzz workflow](../.github/workflows/fuzz.yml) runs the targets as a GitHub
 Actions matrix built by `scripts/fuzz/plan.py` from `targets.toml`, which
-gives each target a topic, the source files it covers and the architectures it
-runs on (the crypto targets on x86-64, aarch64 and riscv64, the others on
-x86-64):
+gives each target a topic and the source files it covers. Every job runs on
+one x86-64 runner (`ubuntu-26.04`):
 
-- Pull requests fuzz, for two minutes each on x86-64 and aarch64, the targets
-  whose sources or harness changed; a change to the shared fuzz
-  infrastructure selects every target.
-- A daily run fuzzes every target on every architecture for twenty minutes
-  and keeps each target's minimized corpus in the Actions cache, which later
-  runs start from.
-- A manual run chooses the targets, the architectures, the time per target
-  and the granularity: one job per target, or one per topic running its
-  targets one after another.
+- Pull requests fuzz, for two minutes each, the targets whose sources or
+  harness changed; a change to the shared fuzz infrastructure selects every
+  target.
+- A daily run fuzzes every target for twenty minutes and keeps each target's
+  minimized corpus in the Actions cache, which later runs start from.
+- A manual run chooses the targets, the time per target and the
+  granularity: one job per target, or one per topic running its targets one
+  after another.
 
-Every job builds with AddressSanitizer (none on riscv64, where Rust has no
-AddressSanitizer runtime) and debug assertions, which include overflow
-checks. The `api-coverage` job runs the coverage check above.
+Every job builds with AddressSanitizer and debug assertions, which include
+overflow checks. The `api-coverage` job runs the coverage check above.
+
+CI therefore fuzzes the x86-64 backends and the portable code only. The
+aarch64 and riscv64 backends are compared with the portable code by the
+native and QEMU test jobs of the [Rust workflow](../.github/workflows/rust.yml)
+instead; to fuzz them, run `scripts/fuzz/run-targets.sh` on such a machine
+(`FUZZ_SANITIZER=none` on riscv64, where Rust has no AddressSanitizer
+runtime).
 
 `scripts/fuzz/run-targets.sh SECONDS TARGET...` is what each job runs and
 works the same locally (set `FUZZ_TOOLCHAIN` to the workflow's nightly). Since

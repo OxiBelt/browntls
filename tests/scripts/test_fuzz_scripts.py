@@ -32,55 +32,48 @@ class PlanTests(unittest.TestCase):
     def test_repository_target_lists_agree(self):
         self.assertEqual(PLAN.check(), [])
 
-    def test_full_matrix_has_one_entry_per_target_and_arch(self):
-        targets = PLAN.load_targets()
-        include = PLAN.matrix("target", None, None, None)["include"]
-        expected = sum(len(spec["arches"]) for spec in targets.values())
-        self.assertEqual(len(include), expected)
+    def test_full_matrix_has_one_entry_per_target(self):
+        include = PLAN.matrix("target", None, None)["include"]
+        self.assertEqual([e["name"] for e in include], list(PLAN.load_targets()))
         for entry in include:
-            self.assertEqual(entry["runner"], PLAN.ARCHES[entry["arch"]])
+            self.assertEqual(set(entry), {"name", "targets"})
             self.assertEqual(entry["name"], entry["targets"])
 
     def test_topic_matrix_groups_targets(self):
-        include = PLAN.matrix("topic", None, None, {"x86_64"})["include"]
+        include = PLAN.matrix("topic", None, None)["include"]
         names = [e["name"] for e in include]
         self.assertEqual(len(names), len(set(names)))
         grouped = sorted(t for e in include for t in e["targets"].split())
         self.assertEqual(grouped, sorted(PLAN.load_targets()))
 
     def test_changed_sources_select_their_targets(self):
-        include = PLAN.matrix(
-            "target", ["crates/browntls-crypto/src/rsa/mod.rs"], None, {"x86_64"}
-        )["include"]
+        include = PLAN.matrix("target", ["crates/browntls-crypto/src/rsa/mod.rs"], None)["include"]
         self.assertEqual({e["targets"] for e in include}, {"crypto_rsa"})
 
     def test_changed_harness_selects_its_targets(self):
-        include = PLAN.matrix("target", ["fuzz/src/pki.rs"], None, None)["include"]
+        include = PLAN.matrix("target", ["fuzz/src/pki.rs"], None)["include"]
         self.assertEqual({e["targets"] for e in include}, {"pki_cert", "pki_pem", "pki_crl"})
 
     def test_crate_manifest_selects_that_crates_targets(self):
-        include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None, None)["include"]
+        include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None)["include"]
         self.assertEqual(
             {e["targets"] for e in include}, {"pki_cert", "pki_pem", "pki_crl", "pki_api"}
         )
 
     def test_shared_infrastructure_selects_everything(self):
         for path in ("fuzz/Cargo.lock", "fuzz/src/input.rs", ".github/workflows/fuzz.yml"):
-            include = PLAN.matrix("target", [path], None, {"x86_64"})["include"]
+            include = PLAN.matrix("target", [path], None)["include"]
             self.assertEqual(len(include), len(PLAN.load_targets()), path)
 
     def test_unrelated_change_selects_nothing(self):
-        self.assertEqual(PLAN.matrix("target", ["README.md"], None, None), {"include": []})
+        self.assertEqual(PLAN.matrix("target", ["README.md"], None), {"include": []})
         self.assertEqual(json.dumps({"include": []}, separators=(",", ":")), '{"include":[]}')
 
-    def test_target_and_arch_filters(self):
-        include = PLAN.matrix("target", None, {"crypto_hash"}, {"aarch64"})["include"]
-        self.assertEqual(include, [{
-            "name": "crypto_hash", "targets": "crypto_hash",
-            "arch": "aarch64", "runner": PLAN.ARCHES["aarch64"],
-        }])
+    def test_target_filter(self):
+        include = PLAN.matrix("target", None, {"crypto_hash"})["include"]
+        self.assertEqual(include, [{"name": "crypto_hash", "targets": "crypto_hash"}])
         with self.assertRaises(SystemExit):
-            PLAN.matrix("target", None, {"no_such_target"}, None)
+            PLAN.matrix("target", None, {"no_such_target"})
 
 
 class ScanTests(unittest.TestCase):

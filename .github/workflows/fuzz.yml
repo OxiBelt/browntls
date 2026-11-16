@@ -1,20 +1,19 @@
 name: Fuzz
 
 # Coverage-guided fuzzing of the public API, one matrix job per fuzz target
-# (or per topic) and architecture. fuzz/targets.toml lists the targets, their
-# topics, the sources each one covers and the architectures it runs on;
-# scripts/fuzz/plan.py turns that into the matrix. fuzz/README.md explains
-# the targets and how to reproduce a run locally.
+# (or per topic), all on one x86-64 runner. fuzz/targets.toml lists the
+# targets, their topics and the sources each one covers; scripts/fuzz/plan.py
+# turns that into the matrix. fuzz/README.md explains the targets and how to
+# reproduce a run locally.
 #
 # * Pull requests fuzz, for a short time, the targets whose sources or
-#   harnesses changed (every target when the fuzz infrastructure changed),
-#   on x86-64 and aarch64.
-# * The daily schedule fuzzes every target on every architecture for longer,
-#   and keeps each target's minimized corpus in the Actions cache, which
-#   later runs (including pull requests) start from. Topic-granularity runs
-#   keep a corpus per topic instead.
-# * Manual runs choose the targets, the architectures, the duration and
-#   whether a job runs one target or a whole topic.
+#   harnesses changed (every target when the fuzz infrastructure changed).
+# * The daily schedule fuzzes every target for longer, and keeps each
+#   target's minimized corpus in the Actions cache, which later runs
+#   (including pull requests) start from. Topic-granularity runs keep a
+#   corpus per topic instead.
+# * Manual runs choose the targets, the duration and whether a job runs one
+#   target or a whole topic.
 #
 # The api-coverage job checks that the harnesses reach every public function
 # of the library crates (scripts/fuzz/api_coverage.py).
@@ -32,10 +31,6 @@ on:
         default: target
       targets:
         description: 'Comma-separated targets (empty: all)'
-        type: string
-        default: ''
-      arches:
-        description: 'Comma-separated architectures: x86_64, aarch64, riscv64 (empty: each target''s own)'
         type: string
         default: ''
       seconds:
@@ -84,18 +79,17 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GRANULARITY: ${{ inputs.granularity }}
           TARGETS: ${{ inputs.targets }}
-          ARCHES: ${{ inputs.arches }}
           SECONDS_INPUT: ${{ inputs.seconds }}
         run: |
           args=()
           case "${EVENT}" in
             pull_request)
               git diff --name-only "${BASE_SHA}...HEAD" > "${RUNNER_TEMP}/changed-files"
-              args+=(--changed-files "${RUNNER_TEMP}/changed-files" --arches x86_64,aarch64)
+              args+=(--changed-files "${RUNNER_TEMP}/changed-files")
               seconds=120
               ;;
             workflow_dispatch)
-              args+=(--granularity "${GRANULARITY}" --targets "${TARGETS}" --arches "${ARCHES}")
+              args+=(--granularity "${GRANULARITY}" --targets "${TARGETS}")
               seconds="${SECONDS_INPUT}"
               ;;
             *)
@@ -130,12 +124,11 @@ jobs:
         run: python3 -B scripts/fuzz/api_coverage.py run --work-dir "${RUNNER_TEMP}/api-coverage"
 
   fuzz:
-    name: Fuzz ${{ matrix.name }} (${{ matrix.arch }})
+    name: Fuzz ${{ matrix.name }} (x86_64)
     needs: plan
     if: needs.plan.outputs.matrix != '{"include":[]}'
-    runs-on: ${{ matrix.runner }}
-    # The RISC-V runners build the instrumented targets natively.
-    timeout-minutes: ${{ matrix.arch == 'riscv64' && 300 || 150 }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
     permissions:
       contents: read
     strategy:
@@ -157,7 +150,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ matrix.runner }}-${{ env.FUZZ_TOOLCHAIN }}
+          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-ubuntu-26.04-${{ env.FUZZ_TOOLCHAIN }}
 
       - name: Install cargo-fuzz
         if: steps.cargo-fuzz.outputs.cache-hit != 'true'
@@ -170,17 +163,17 @@ jobs:
           path: ~/.cargo/bin/cargo-fuzz
           key: ${{ steps.cargo-fuzz.outputs.cache-primary-key }}
 
+      # The key keeps the x86_64 part it had while the matrix also covered
+      # aarch64 and riscv64, so the corpora saved since then keep restoring.
       - name: Restore corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ matrix.name }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: fuzz-corpus-${{ matrix.name }}-${{ matrix.arch }}-
+          key: fuzz-corpus-${{ matrix.name }}-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.name }}-x86_64-
 
       - name: Fuzz
         env:
-          # AddressSanitizer is not available for riscv64 Rust targets.
-          FUZZ_SANITIZER: ${{ matrix.arch == 'riscv64' && 'none' || 'address' }}
           FUZZ_FINDINGS: ${{ runner.temp }}/fuzz-findings
           # Only runs that save their corpus minimize it.
           FUZZ_MINIMIZE: ${{ github.event_name != 'pull_request' && '1' || '0' }}
@@ -201,4 +194,4 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ matrix.name }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: fuzz-corpus-${{ matrix.name }}-x86_64-${{ github.run_id }}-${{ github.run_attempt }}

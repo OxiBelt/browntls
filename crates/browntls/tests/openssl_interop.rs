@@ -799,6 +799,63 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Bind attempts of [`start_s_server`].
+const BIND_ATTEMPTS: usize = 8;
+
+/// Starts `openssl s_server` with `args(port)` on a free port and waits until
+/// it listens; returns the child, its stdout lines and the port.
+///
+/// Finding a free port and binding it are separate steps, so a test running
+/// in parallel can take the port in between: a server that fails with
+/// `Address already in use` is retried on another port.
+fn start_s_server(
+    openssl: &Path,
+    args: &dyn Fn(&str) -> Vec<String>,
+    envs: &[(&'static str, String)],
+) -> Result<(Child, mpsc::Receiver<String>, String), String> {
+    let mut last = String::new();
+    for _ in 0..BIND_ATTEMPTS {
+        let port = free_port().to_string();
+        let mut child = Command::new(openssl)
+            .args(args(&port))
+            .envs(envs.iter().map(|(k, v)| (*k, v)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        // `s_server` prints ACCEPT once it listens.
+        let (tx, rx) = mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = Instant::now() + STEP;
+        let started = loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(line) if line.trim() == "ACCEPT" => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        if started {
+            return Ok((child, rx, port));
+        }
+        let (_, out, err) = finish(child, Some(rx));
+        last = format!("s_server did not start\n{out}\n{err}");
+        if !err.contains("Address already in use") {
+            break;
+        }
+    }
+    Err(last)
+}
+
 // --------------------------------------------------------------- directions
 
 /// browntls client against `openssl s_server -rev` (which echoes each line
@@ -834,47 +891,19 @@ fn browntls_client_with(
     tweak: fn(&mut ClientConfig),
 ) -> Result<(), String> {
     let pki = pki(openssl, case.key);
-    let port = free_port().to_string();
     let (cert, key) = (pki.path("server.pem"), pki.path("server.key"));
     let ca = pki.path("ca.pem");
-    let mut args = vec![
-        "s_server", "-accept", &port, "-naccept", "1", "-rev", "-cert", &cert, "-key", &key,
-    ];
-    args.extend(case.openssl_args());
-    if client_auth {
-        args.extend_from_slice(&["-Verify", "1", "-verify_return_error", "-CAfile", &ca]);
-    }
-    let mut child = Command::new(openssl)
-        .args(&args)
-        .envs(case.openssl_env(&pki))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    // `s_server` prints ACCEPT once it listens.
-    let (tx, rx) = mpsc::channel();
-    let stdout = child.stdout.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                break;
-            }
+    let args = |port: &str| {
+        let mut args = vec![
+            "s_server", "-accept", port, "-naccept", "1", "-rev", "-cert", &cert, "-key", &key,
+        ];
+        args.extend(case.openssl_args());
+        if client_auth {
+            args.extend_from_slice(&["-Verify", "1", "-verify_return_error", "-CAfile", &ca]);
         }
-    });
-    let deadline = Instant::now() + STEP;
-    loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(line) if line.trim() == "ACCEPT" => break,
-            Ok(_) => {}
-            Err(_) => {
-                let (_, out, err) = finish(child, Some(rx));
-                return Err(format!("s_server did not start\n{out}\n{err}"));
-            }
-        }
-    }
+        args.into_iter().map(String::from).collect()
+    };
+    let (child, rx, port) = start_s_server(openssl, &args, &case.openssl_env(&pki))?;
 
     let result = (|| -> Result<(), String> {
         let builder = ClientConfig::builder_with_provider(case.provider())
@@ -1293,53 +1322,28 @@ fn external_psk() -> Arc<browntls::psk::ExternalPsk> {
 /// -nocert`, which can only authenticate with the PSK. `server_suites` is
 /// the s_server TLS 1.3 suite list (`None`: its default).
 fn browntls_psk_client(openssl: &Path, server_suites: Option<&str>) -> Result<(), String> {
-    let port = free_port().to_string();
     let hex = psk_hex();
-    let mut args = vec![
-        "s_server",
-        "-accept",
-        &port,
-        "-naccept",
-        "1",
-        "-rev",
-        "-nocert",
-        "-tls1_3",
-        "-psk",
-        &hex,
-        "-psk_identity",
-        PSK_IDENTITY,
-    ];
-    if let Some(suites) = server_suites {
-        args.extend_from_slice(&["-ciphersuites", suites]);
-    }
-    let mut child = Command::new(openssl)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let stdout = child.stdout.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                break;
-            }
+    let args = |port: &str| {
+        let mut args = vec![
+            "s_server",
+            "-accept",
+            port,
+            "-naccept",
+            "1",
+            "-rev",
+            "-nocert",
+            "-tls1_3",
+            "-psk",
+            &hex,
+            "-psk_identity",
+            PSK_IDENTITY,
+        ];
+        if let Some(suites) = server_suites {
+            args.extend_from_slice(&["-ciphersuites", suites]);
         }
-    });
-    let deadline = Instant::now() + STEP;
-    loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(line) if line.trim() == "ACCEPT" => break,
-            Ok(_) => {}
-            Err(_) => {
-                let (_, out, err) = finish(child, Some(rx));
-                return Err(format!("s_server did not start\n{out}\n{err}"));
-            }
-        }
-    }
+        args.into_iter().map(String::from).collect()
+    };
+    let (child, rx, port) = start_s_server(openssl, &args, &[])?;
 
     let result = (|| -> Result<(), String> {
         // No trust anchors: the server has no certificate, and any it might

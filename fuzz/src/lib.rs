@@ -9,15 +9,49 @@
 //! Every harness takes untrusted bytes and must return without panicking.
 //! A panic, an abort (for example an allocation beyond the fuzzer's memory
 //! limit) or a timeout is a finding.
+//!
+//! The first targets reach the untrusted-input parsers. The API targets
+//! (one module per target, each with `run` and `seeds`) decode their input as
+//! a sequence of calls into the public API of one topic, check results
+//! against independent implementations or algebraic properties where those
+//! exist, and together reach every public function (`fuzz/README.md`,
+//! "Public API coverage").
 
 mod codec;
 mod connection;
+pub mod input;
 mod pki;
 pub mod seeds;
+
+pub mod crypto_cipher;
+pub mod crypto_ecc;
+pub mod crypto_hash;
+pub mod crypto_hpke;
+pub mod crypto_kem;
+pub mod crypto_rsa;
+pub mod crypto_util;
+pub mod pki_api;
+pub mod tls_auth;
+pub mod tls_codec;
+pub mod tls_config;
+pub mod tls_conn;
+pub mod tls_ech;
+pub mod tls_psk;
+pub mod tls_unbuffered;
 
 pub use codec::{cert_decompress, deframer, handshake_message};
 pub use connection::{client, server};
 pub use pki::{pki_cert, pki_crl, pki_pem};
+
+/// Installs the native provider as the process default.
+///
+/// The fuzz project enables both the `native` and the `rustcrypto`
+/// providers, so the library has no implicit default; every harness that
+/// uses a `builder()` without a provider calls this first. Idempotent.
+pub fn init() {
+    // Err means a provider is installed already.
+    let _ = browntls::crypto::native::default_provider().install_default();
+}
 
 /// Splits the next length-prefixed field off `data`: a 16-bit big-endian
 /// length (clamped to what remains) and that many bytes.

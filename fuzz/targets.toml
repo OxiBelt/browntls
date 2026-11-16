@@ -1,0 +1,217 @@
+# Fuzz targets for the GitHub Actions matrix (.github/workflows/fuzz.yml).
+#
+# Every `[[bin]]` in Cargo.toml has one entry here, and `scripts/fuzz/plan.py
+# check` keeps the two (and `src/seeds.rs`) in step.
+#
+#   topic    groups targets for `granularity: topic` runs, one job per topic.
+#   sources  glob patterns (repository-relative; `**` spans directories). On
+#            pull requests a target runs when a changed file matches one of
+#            its sources; changes to the fuzz infrastructure run every target.
+#   arches   where the target runs: x86_64, aarch64, riscv64. The crypto
+#            targets run on every architecture because each has its own
+#            accelerated backends; the protocol targets run on x86_64.
+#   args     extra libFuzzer arguments.
+#   harness  the harness sources under fuzz/ (default: src/<target>.rs and
+#            src/<target>/); fuzz_targets/<target>.rs is always included.
+
+[targets.handshake_message]
+harness = ["fuzz/src/codec.rs"]
+topic = "tls-codec"
+sources = ["crates/browntls/src/msgs/**", "crates/browntls/src/fuzzing.rs"]
+arches = ["x86_64"]
+
+[targets.deframer]
+harness = ["fuzz/src/codec.rs"]
+topic = "tls-codec"
+sources = ["crates/browntls/src/msgs/**", "crates/browntls/src/fuzzing.rs"]
+arches = ["x86_64"]
+
+[targets.cert_decompress]
+harness = ["fuzz/src/codec.rs"]
+topic = "tls-codec"
+sources = ["crates/browntls/src/compress.rs", "crates/browntls/src/msgs/**", "crates/browntls/src/fuzzing.rs"]
+arches = ["x86_64"]
+# The decompressors must never make an allocation above 4 MiB (fuzz/README.md).
+args = ["-malloc_limit_mb=4"]
+
+[targets.tls_codec]
+topic = "tls-codec"
+sources = ["crates/browntls/src/msgs/**", "crates/browntls/src/fuzzing.rs", "crates/browntls/src/crypto/cipher.rs"]
+arches = ["x86_64"]
+
+[targets.client]
+harness = ["fuzz/src/connection.rs"]
+topic = "tls-connection"
+sources = ["crates/browntls/src/**"]
+arches = ["x86_64"]
+
+[targets.server]
+harness = ["fuzz/src/connection.rs"]
+topic = "tls-connection"
+sources = ["crates/browntls/src/**"]
+arches = ["x86_64"]
+
+[targets.tls_conn]
+topic = "tls-connection"
+sources = ["crates/browntls/src/**"]
+arches = ["x86_64"]
+
+[targets.tls_unbuffered]
+topic = "tls-connection"
+sources = ["crates/browntls/src/**"]
+arches = ["x86_64"]
+
+[targets.tls_config]
+topic = "tls-config"
+sources = [
+  "crates/browntls/src/builder.rs",
+  "crates/browntls/src/client/**",
+  "crates/browntls/src/server/**",
+  "crates/browntls/src/suites.rs",
+  "crates/browntls/src/crypto/**",
+  "crates/browntls/src/webpki/**",
+  "crates/browntls/src/verify.rs",
+  "crates/browntls/src/ticketer.rs",
+  "crates/browntls/src/compress.rs",
+  "crates/browntls/src/key_log*.rs",
+  "crates/browntls/src/enums.rs",
+  "crates/browntls/src/error.rs",
+  "crates/browntls/src/tls12/**",
+  "crates/browntls/src/tls13/**",
+  "crates/browntls/src/versions.rs",
+  "crates/browntls/src/time_provider*",
+  "crates/browntls/src/x509.rs",
+]
+arches = ["x86_64"]
+
+[targets.tls_ech]
+topic = "tls-extensions"
+sources = ["crates/browntls/src/ech/**", "crates/browntls/src/crypto/hpke.rs", "crates/browntls-crypto/src/hpke/**"]
+arches = ["x86_64"]
+
+[targets.tls_psk]
+topic = "tls-extensions"
+sources = ["crates/browntls/src/psk.rs", "crates/browntls/src/tls13/**", "crates/browntls/src/client/**", "crates/browntls/src/server/**"]
+arches = ["x86_64"]
+
+[targets.tls_auth]
+topic = "tls-extensions"
+sources = [
+  "crates/browntls/src/delegated_credential.rs",
+  "crates/browntls/src/crypto/native/delegated_credential.rs",
+  "crates/browntls/src/exported_authenticator.rs",
+]
+arches = ["x86_64"]
+
+[targets.pki_cert]
+harness = ["fuzz/src/pki.rs"]
+topic = "pki"
+sources = ["crates/browntls-pki/**"]
+arches = ["x86_64"]
+
+[targets.pki_pem]
+harness = ["fuzz/src/pki.rs"]
+topic = "pki"
+sources = ["crates/browntls-pki/**"]
+arches = ["x86_64"]
+
+[targets.pki_crl]
+harness = ["fuzz/src/pki.rs"]
+topic = "pki"
+sources = ["crates/browntls-pki/**"]
+arches = ["x86_64"]
+
+[targets.pki_api]
+topic = "pki"
+sources = ["crates/browntls-pki/**"]
+arches = ["x86_64"]
+
+[targets.crypto_hash]
+topic = "crypto-symmetric"
+sources = [
+  "crates/browntls-crypto/src/hash/**",
+  "crates/browntls-crypto/src/hmac.rs",
+  "crates/browntls-crypto/src/hkdf.rs",
+  "crates/browntls-crypto/src/tls12_prf.rs",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/cpu/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_cipher]
+topic = "crypto-symmetric"
+sources = [
+  "crates/browntls-crypto/src/aes/**",
+  "crates/browntls-crypto/src/gcm/**",
+  "crates/browntls-crypto/src/ccm.rs",
+  "crates/browntls-crypto/src/chacha/**",
+  "crates/browntls-crypto/src/aead/**",
+  "crates/browntls-crypto/src/cbc.rs",
+  "crates/browntls-crypto/src/tls_cbc.rs",
+  "crates/browntls-crypto/src/ct.rs",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/cpu/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_ecc]
+topic = "crypto-asymmetric"
+sources = [
+  "crates/browntls-crypto/src/curve25519/**",
+  "crates/browntls-crypto/src/curve448/**",
+  "crates/browntls-crypto/src/nist/**",
+  "crates/browntls-crypto/src/hash/**",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/cpu/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_rsa]
+topic = "crypto-asymmetric"
+sources = [
+  "crates/browntls-crypto/src/rsa/**",
+  "crates/browntls-crypto/src/der.rs",
+  "crates/browntls-crypto/src/hash/**",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/cpu/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_kem]
+topic = "crypto-asymmetric"
+sources = [
+  "crates/browntls-crypto/src/mlkem/**",
+  "crates/browntls-crypto/src/ffdhe/**",
+  "crates/browntls-crypto/src/hash/**",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/cpu/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_hpke]
+topic = "crypto-asymmetric"
+sources = [
+  "crates/browntls-crypto/src/hpke/**",
+  "crates/browntls/src/crypto/hpke.rs",
+  "crates/browntls-crypto/src/curve25519/**",
+  "crates/browntls-crypto/src/nist/**",
+  "crates/browntls-crypto/src/aes/**",
+  "crates/browntls-crypto/src/gcm/**",
+  "crates/browntls-crypto/src/chacha/**",
+]
+arches = ["x86_64", "aarch64", "riscv64"]
+
+[targets.crypto_util]
+topic = "crypto-util"
+sources = [
+  "crates/browntls-crypto/src/der.rs",
+  "crates/browntls-crypto/src/ct.rs",
+  "crates/browntls-crypto/src/zeroize.rs",
+  "crates/browntls-crypto/src/rand.rs",
+  "crates/browntls-crypto/src/sys.rs",
+  "crates/browntls-crypto/src/cpu/**",
+  "crates/browntls-crypto/src/accel.rs",
+  "crates/browntls-crypto/src/error.rs",
+  "crates/browntls-crypto/src/lib.rs",
+]
+arches = ["x86_64", "aarch64", "riscv64"]

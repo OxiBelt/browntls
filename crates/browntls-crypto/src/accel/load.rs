@@ -119,6 +119,13 @@
 //!   primary.
 //! * A keyed object (for example an AEAD key) is routed only while the
 //!   policy still selects the backend it was created for.
+//! * A keyed object whose key is expanded per backend (an AES-GCM key) can
+//!   only be routed to backends it holds an expanded key for. It expands its
+//!   key for the alternates when it is created, and only if routing is
+//!   enabled at that moment and the crate has the `alloc` feature: a key
+//!   created earlier stays on its primary, and one created under another
+//!   policy or [`Config::portable`] setting holds the alternates of that
+//!   moment. Each alternate costs memory per key (see [`crate::gcm`]).
 //!
 //! ```
 //! use browntls_crypto::accel::{Algorithm, load};
@@ -390,6 +397,35 @@ fn candidates<B: Backends>(stream: &Stream, cfg: u32) -> Option<Candidates> {
         .cache
         .store(key | ((primary as u32) << 8) | u32::from(mask), Relaxed);
     Some(Candidates { primary, mask })
+}
+
+/// The alternates of the family of `own` under its current policy and the
+/// configuration in force, most preferred first: the backends for which a
+/// keyed object created for `own` expands its key as well, so that
+/// [`route`] can move its calls to them.
+///
+/// Nothing while routing is disabled, or when `own` is not the backend the
+/// policy selects (such an object is never routed).
+#[cfg(feature = "alloc")]
+pub(crate) fn alternates<B: Backends>(stream: &Stream, own: B) -> impl Iterator<Item = B> {
+    alternates_under(stream, own, CONFIG.load(Relaxed))
+}
+
+#[cfg(feature = "alloc")]
+fn alternates_under<B: Backends>(stream: &Stream, own: B, cfg: u32) -> impl Iterator<Item = B> {
+    let mask = if cfg & ENABLED == 0 {
+        0
+    } else {
+        candidates::<B>(stream, cfg)
+            .filter(|c| B::PREFERENCE.get(c.primary) == Some(&own))
+            .map_or(0, |c| c.mask)
+    };
+    B::PREFERENCE
+        .iter()
+        .enumerate()
+        .take(SLOTS)
+        .filter(move |(slot, _)| mask & (1 << slot) != 0)
+        .map(|(_, b)| *b)
 }
 
 /// The measurement of one routed call.
@@ -751,6 +787,57 @@ mod tests {
     #[test]
     fn candidates_follow_the_policy() {
         candidates_match::<crate::chacha::Backend>();
+        candidates_match::<crate::aes::Backend>();
+    }
+
+    /// A keyed object's alternates are the candidates of its backend, in
+    /// preference order, and there are none while routing is disabled or
+    /// for a backend the policy does not select. Read-only, like
+    /// `candidates_match`.
+    #[cfg(feature = "alloc")]
+    fn alternates_match<B: Backends + fmt::Debug>() {
+        use std::vec::Vec;
+        let Some(stream) = B::streams().first() else {
+            return;
+        };
+        let alternates = |own, cfg| alternates_under::<B>(stream, own, cfg).collect::<Vec<B>>();
+        for portable in [0, PORTABLE] {
+            let cfg = ENABLED | portable;
+            let c = candidates::<B>(stream, cfg).unwrap();
+            let primary = B::PREFERENCE[c.primary];
+            let expected: Vec<B> = B::PREFERENCE
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| c.mask & (1 << slot) != 0)
+                .map(|(_, b)| *b)
+                .collect();
+            let found = alternates(primary, cfg);
+            assert_eq!(found, expected);
+            assert_eq!(found.len(), c.mask.count_ones() as usize);
+            for b in &found {
+                assert!(b.available() && *b != primary, "{b:?}");
+                assert!(b.uses().any() || portable != 0, "{b:?}");
+            }
+            // The portable backend is last, and an alternate only if asked.
+            let last = B::PREFERENCE[B::PREFERENCE.len() - 1];
+            assert_eq!(found.contains(&last), portable != 0 && last != primary);
+            // Disabled (whatever the other bits say): nothing.
+            assert_eq!(alternates(primary, portable), []);
+            // Another backend than the primary is not routed.
+            for own in B::PREFERENCE.iter().filter(|b| **b != primary) {
+                assert_eq!(alternates(*own, cfg), [], "{own:?}");
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn alternates_are_the_candidates_of_the_primary() {
+        alternates_match::<crate::chacha::Backend>();
+        alternates_match::<crate::aes::Backend>();
+        // Routing is never enabled in this test binary.
+        let own = crate::aes::Backend::select();
+        assert_eq!(alternates(&crate::aes::LOAD[1], own).count(), 0);
     }
 
     #[test]

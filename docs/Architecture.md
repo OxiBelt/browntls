@@ -949,6 +949,20 @@ Properties this design keeps:
   alternate three times slower.
 - A keyed object is routed only while the policy still selects the backend
   it was created for, and one created with explicit backends never is.
+- A keyed object whose key is expanded per backend (an AES-GCM key) is
+  routed only to backends it holds an expanded key for. It expands its key
+  for the alternates when it is created, if routing is enabled at that
+  moment and the crate has the `alloc` feature; a key created earlier stays
+  on its primary, at no cost on the record path. Each alternate AES backend
+  runs with the GHASH backend of its own instruction class (VAES with
+  VPCLMULQDQ of the same width, AES-NI with PCLMULQDQ, and so on), so a
+  moved record leaves the primary's instructions for both halves of the
+  work; where the GHASH policy forbids that backend or the CPU lacks it,
+  the next permitted one in GHASH preference order is used, and without one
+  that AES backend is not an alternate. On x86-64 an expanded AES-GCM key
+  takes 1664 bytes, which is the size of the key types with or without
+  routing; each alternate adds as much on the heap (4992 bytes per key for
+  the three alternates of AVX-512 VAES), zeroised on drop like the rest.
 
 Limits:
 
@@ -981,9 +995,12 @@ Limits:
 - `load::status` exposes average durations of recent calls, including
   secret-key operations; it is diagnostic data for the operator.
 
-Routed so far: ChaCha20-Poly1305 records (ChaCha20 backends) and the X25519
-ladder, including their uses by the native TLS provider once an application
-calls `load::enable`.
+Routed so far: ChaCha20-Poly1305 records (ChaCha20 backends), AES-GCM
+records (AES backends, each with its GHASH companion; one stream per key
+size, since 256-bit keys cost more per byte) and the X25519 ladder,
+including their uses by the native TLS provider once an application calls
+`load::enable`; for AES-GCM that means keys created after the call. AES-CCM,
+AES-CBC and the AES block types are not routed.
 
 ### Operating-system interface
 

@@ -44,7 +44,7 @@ and re-encoding stability.
 | Target | Topic | Reaches |
 |---|---|---|
 | `crypto_hash` | crypto-symmetric | SHA-1, SHA-2, SHA-3, SHAKE and the 4-way SHAKE, Keccak-f, HMAC, HKDF, the TLS 1.2 PRF; one-shot, chunked and cloned states against the oracles under every acceleration policy |
-| `crypto_cipher` | crypto-symmetric | AES (every backend), AES-GCM, AES-CCM (every parameter set), ChaCha20, Poly1305, ChaCha20-Poly1305 (also with load-aware routing between its ChaCha20 backends), AES-CBC and the TLS 1.2 CBC record transform; oracle outputs, tamper rejection, wiped buffers on failure |
+| `crypto_cipher` | crypto-symmetric | AES (every backend), AES-GCM (also with load-aware routing between its AES backends), AES-CCM (every parameter set), ChaCha20, Poly1305, ChaCha20-Poly1305 (also with load-aware routing between its ChaCha20 backends), AES-CBC and the TLS 1.2 CBC record transform; oracle outputs, tamper rejection, wiped buffers on failure |
 | `crypto_ecc` | crypto-asymmetric | X25519 (also with load-aware routing between its backends), X448, Ed25519, Ed448, P-256, P-384 and P-521 ECDH and ECDSA; key and signature decoding, agreement and verdicts against the oracles and between backends |
 | `crypto_rsa` | crypto-asymmetric | RSA public and private keys (DER, components), PKCS#1 v1.5 and PSS signing and verification on every backend, against a num-bigint reference |
 | `crypto_kem` | crypto-asymmetric | ML-KEM-512/768/1024 key generation, encapsulation, decapsulation (implicit rejection) and key parsing against the `ml-kem` oracle; FFDHE peer validation and agreement against num-bigint |

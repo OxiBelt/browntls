@@ -27,12 +27,36 @@
 //! briefly hold unauthenticated plaintext, as with other fused
 //! implementations.
 //!
+//! Keys made by [`Aead::new`] take part in load-aware routing
+//! ([`crate::accel::load`]): while it is enabled and the selected AES backend
+//! runs slower than usual, a share of the records is sealed and opened with
+//! another AES backend. Records under 128-bit and under 256-bit keys are
+//! separate streams, since they cost differently per byte. An expanded key
+//! serves one backend only, so a key
+//! that is created while routing is enabled (and only then; this needs the
+//! `alloc` feature) is expanded for each alternate AES backend as well. An
+//! alternate runs with the GHASH backend of its own instruction class (VAES
+//! with VPCLMULQDQ of the same width, AES-NI with PCLMULQDQ, FEAT_AES with
+//! FEAT_PMULL, Zvkned with Zvkg, Zkne with Zbc/Zbkc, portable with
+//! portable), so that a moved record leaves the selected backends'
+//! instructions for both halves of the work; if the GHASH policy forbids
+//! that backend or the CPU lacks it, with the next one in GHASH preference
+//! order that is permitted and available, and an AES backend left without
+//! one is not an alternate. Like the selected backends, the alternates and
+//! their GHASH backends are those of the moment the key is created. On
+//! x86-64 an expanded key takes 1664 bytes: that is the size of
+//! [`Aes128Gcm`] and [`Aes256Gcm`] with or without routing, and each
+//! alternate adds as much on the heap (three of them, 4992 bytes per key,
+//! on a CPU with AVX-512 VAES under the default policy and configuration).
+//! All of it is zeroised on drop.
+//!
 //! Messages are limited to `2^36 - 32` bytes and additional data to
 //! `2^61 - 1` bytes (SP 800-38D §5.2.1.1). Authentication failures zero the
 //! buffer and never release plaintext; tag comparison is constant time.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+mod keys;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 mod soft;
@@ -48,6 +72,7 @@ use crate::aead::{Aead, NONCE_LEN, TAG_LEN};
 use crate::aes;
 use crate::cpu::features;
 use crate::zeroize::zeroize_bytes;
+use keys::Keys;
 
 /// Maximum plaintext length in bytes (2^39 - 256 bits).
 const P_MAX: u64 = (1 << 36) - 32;
@@ -119,6 +144,49 @@ impl GhashBackend {
     #[must_use]
     pub fn select() -> Self {
         crate::accel::select::<Self>()
+    }
+
+    /// The GHASH backend of the same instruction class as an AES backend.
+    #[cfg(feature = "alloc")]
+    fn class_of(aes: aes::Backend) -> Self {
+        match aes {
+            aes::Backend::VaesAvx512 => Self::VpclmulAvx512,
+            aes::Backend::Vaes => Self::Vpclmul,
+            aes::Backend::AesNi => Self::Clmul,
+            aes::Backend::ArmAes => Self::Pmull,
+            aes::Backend::RvZvkned => Self::RvZvkg,
+            aes::Backend::RvZkne => Self::RvClmul,
+            aes::Backend::Soft => Self::Soft,
+        }
+    }
+
+    /// [`Self::companion`] with `usable` in place of the policy and the CPU.
+    #[cfg(feature = "alloc")]
+    fn companion_where(aes: aes::Backend, usable: impl Fn(Self) -> bool) -> Option<Self> {
+        use crate::accel::Backends as _;
+        let class = Self::class_of(aes);
+        Self::PREFERENCE
+            .iter()
+            .copied()
+            .skip_while(|b| *b != class)
+            .find(|b| usable(*b))
+    }
+
+    /// The GHASH backend that runs beside the alternate AES backend `aes`
+    /// when load-aware routing moves a record to it.
+    ///
+    /// That is the backend of the same instruction class as `aes`, so that a
+    /// moved record leaves the primary's class for GHASH as well; or, when
+    /// the GHASH policy forbids that one or the CPU lacks it, the next
+    /// backend after it in GHASH preference order that is permitted and
+    /// available (never a more preferred one, which would be back in a class
+    /// the record was meant to leave). `None` when there is none: `aes` is
+    /// then not used as an alternate.
+    #[cfg(feature = "alloc")]
+    fn companion(aes: aes::Backend) -> Option<Self> {
+        use crate::accel::Backends as _;
+        let policy = crate::accel::policy(crate::accel::Algorithm::Ghash);
+        Self::companion_where(aes, |b| policy.permits(b.uses()) && b.is_available())
     }
 }
 
@@ -270,10 +338,18 @@ pub(crate) fn polyval_key(h: &[u8; 16]) -> [u8; 16] {
     v.to_le_bytes()
 }
 
-/// A keyed AES-GCM instance of either key size.
+/// A key of either size expanded for one AES and one GHASH backend. Both
+/// parts zeroise their key material when dropped.
 struct Gcm {
     aes: aes::Key,
     ghash: GhashKey,
+}
+
+/// A keyed AES-GCM instance: an expanded key, wherever it is stored.
+#[derive(Clone, Copy)]
+struct Instance<'a> {
+    aes: &'a aes::Key,
+    ghash: &'a GhashKey,
 }
 
 fn j0(nonce: &[u8; NONCE_LEN]) -> [u8; 16] {
@@ -309,8 +385,17 @@ impl Gcm {
         Ok(Self { aes, ghash: ghash? })
     }
 
+    fn instance(&self) -> Instance<'_> {
+        Instance {
+            aes: &self.aes,
+            ghash: &self.ghash,
+        }
+    }
+}
+
+impl<'a> Instance<'a> {
     /// GHASHes `data` followed by zero padding to a block boundary.
-    fn ghash_padded(&self, y: &mut [u8; 16], data: &[u8]) {
+    fn ghash_padded(self, y: &mut [u8; 16], data: &[u8]) {
         let full = data.len() - data.len() % 16;
         self.ghash.update(y, &data[..full]);
         let rest = &data[full..];
@@ -322,7 +407,7 @@ impl Gcm {
     }
 
     /// Computes the tag for `aad` and ciphertext `ct` under `nonce`.
-    fn tag(&self, nonce: &[u8; NONCE_LEN], aad: &[u8], ct: &[u8]) -> [u8; TAG_LEN] {
+    fn tag(self, nonce: &[u8; NONCE_LEN], aad: &[u8], ct: &[u8]) -> [u8; TAG_LEN] {
         let mut y = [0u8; 16];
         self.ghash_padded(&mut y, aad);
         self.ghash_padded(&mut y, ct);
@@ -338,7 +423,7 @@ impl Gcm {
         tag
     }
 
-    fn ctr(&self, nonce: &[u8; NONCE_LEN], in_out: &mut [u8]) {
+    fn ctr(self, nonce: &[u8; NONCE_LEN], in_out: &mut [u8]) {
         let mut counter = j0(nonce);
         inc32(&mut counter);
         self.aes.ctr32_xor(&counter, in_out);
@@ -346,15 +431,15 @@ impl Gcm {
 
     /// The ZMM keys when both ZMM backends are in use.
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-    fn fused(&self) -> Option<(&aes::x86_vaes512::Key, &x86_avx512::Key)> {
-        match (&self.ghash, self.aes.vaes_avx512()) {
+    fn fused(self) -> Option<(&'a aes::x86_vaes512::Key, &'a x86_avx512::Key)> {
+        match (self.ghash, self.aes.vaes_avx512()) {
             (GhashKey::VpclmulAvx512(g), Some(a)) => Some((a, g)),
             _ => None,
         }
     }
 
     fn seal(
-        &self,
+        self,
         nonce: &[u8; NONCE_LEN],
         aad: &[u8],
         in_out: &mut [u8],
@@ -369,7 +454,7 @@ impl Gcm {
     }
 
     fn open(
-        &self,
+        self,
         nonce: &[u8; NONCE_LEN],
         aad: &[u8],
         in_out: &mut [u8],
@@ -394,7 +479,7 @@ macro_rules! gcm_variant {
     ($(#[$m:meta])* $name:ident, $len:literal) => {
         $(#[$m])*
         pub struct $name {
-            inner: Gcm,
+            inner: Keys<{ $len / 32 }>,
         }
 
         impl $name {
@@ -410,14 +495,16 @@ macro_rules! gcm_variant {
                 aes_backend: aes::Backend,
                 ghash_backend: GhashBackend,
             ) -> Result<Self, Error> {
-                Gcm::new(key, aes_backend, ghash_backend).map(|inner| Self { inner })
+                Keys::pinned(key, aes_backend, ghash_backend).map(|inner| Self { inner })
             }
 
-            /// The AES and GHASH backends in use.
+            /// The AES and GHASH backends the instance was created for. With
+            /// load-aware routing ([`crate::accel::load`]) a record may be
+            /// processed by another AES backend and its GHASH companion.
             #[doc(hidden)]
             #[must_use]
             pub fn backends(&self) -> (aes::Backend, GhashBackend) {
-                (self.inner.aes.backend(), self.inner.ghash.backend())
+                self.inner.backends()
             }
         }
 
@@ -428,8 +515,7 @@ macro_rules! gcm_variant {
                 if key.len() != $len {
                     return Err(Error::InvalidKey);
                 }
-                Gcm::new(key, aes::Backend::select(), GhashBackend::select())
-                    .map(|inner| Self { inner })
+                Keys::selected(key).map(|inner| Self { inner })
             }
 
             fn seal_in_place(
@@ -488,7 +574,75 @@ mod tests {
                     continue;
                 };
                 let zmm = ab == aes::Backend::VaesAvx512 && gb == GhashBackend::VpclmulAvx512;
-                assert_eq!(gcm.fused().is_some(), zmm, "{ab:?}/{gb:?}");
+                assert_eq!(gcm.instance().fused().is_some(), zmm, "{ab:?}/{gb:?}");
+            }
+        }
+    }
+
+    /// A routed record leaves the primary's instruction class for GHASH
+    /// too, and a companion that cannot be used is replaced only by a less
+    /// preferred backend.
+    #[test]
+    fn companions_follow_the_instruction_class() {
+        use crate::aes::Backend as A;
+        use GhashBackend as G;
+        let classes = [
+            (A::VaesAvx512, G::VpclmulAvx512),
+            (A::Vaes, G::Vpclmul),
+            (A::AesNi, G::Clmul),
+            (A::ArmAes, G::Pmull),
+            (A::RvZvkned, G::RvZvkg),
+            (A::RvZkne, G::RvClmul),
+            (A::Soft, G::Soft),
+        ];
+        assert_eq!(classes.len(), A::ALL.len());
+        for (ab, gb) in classes {
+            assert_eq!(G::companion_where(ab, |_| true), Some(gb), "{ab:?}");
+            assert_eq!(G::companion_where(ab, |_| false), None, "{ab:?}");
+            // Without its own class and the portable code, only less
+            // preferred backends are left.
+            let rest = G::companion_where(ab, |b| b != gb && b != G::Soft);
+            let after = |b| {
+                use crate::accel::Backends as _;
+                let at = |x| G::PREFERENCE.iter().position(|p| *p == x).unwrap();
+                at(b) > at(gb)
+            };
+            assert!(rest.is_none_or(after), "{ab:?}: {rest:?}");
+        }
+        // Fallbacks: the next backend in GHASH preference order.
+        let without = |ab, gone: &[G]| G::companion_where(ab, |b| !gone.contains(&b));
+        assert_eq!(
+            without(A::VaesAvx512, &[G::VpclmulAvx512]),
+            Some(G::Vpclmul)
+        );
+        assert_eq!(
+            without(A::VaesAvx512, &[G::VpclmulAvx512, G::Vpclmul]),
+            Some(G::Clmul)
+        );
+        assert_eq!(without(A::Vaes, &[G::Vpclmul]), Some(G::Clmul));
+        assert_eq!(without(A::RvZvkned, &[G::RvZvkg]), Some(G::RvZvbc));
+        assert_eq!(
+            without(A::RvZvkned, &[G::RvZvkg, G::RvZvbc]),
+            Some(G::RvClmul)
+        );
+        assert_eq!(without(A::RvZkne, &[G::RvClmul]), Some(G::Soft));
+        assert_eq!(without(A::Soft, &[G::Soft]), None);
+        // What GHASH policies leave usable on x86-64: the portable code
+        // when both kinds of acceleration are forbidden, PCLMULQDQ when SIMD
+        // is, and nothing for AES-NI when SIMD is required.
+        let x86 = |ab, usable: &[G]| G::companion_where(ab, |b| usable.contains(&b));
+        assert_eq!(x86(A::AesNi, &[G::Soft]), Some(G::Soft));
+        assert_eq!(x86(A::Vaes, &[G::Clmul, G::Soft]), Some(G::Clmul));
+        assert_eq!(x86(A::AesNi, &[G::VpclmulAvx512, G::Vpclmul]), None);
+
+        // On this CPU, under the default policy (which no test of this
+        // binary changes): the class itself where the CPU has it, else
+        // something it can run.
+        for ab in A::ALL {
+            let companion = G::companion(ab).unwrap();
+            assert!(companion.is_available(), "{ab:?}: {companion:?}");
+            if G::class_of(ab).is_available() {
+                assert_eq!(companion, G::class_of(ab));
             }
         }
     }

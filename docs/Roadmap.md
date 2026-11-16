@@ -90,8 +90,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   reasoning and simulation and have not been evaluated on contended
   hardware, and its statistics are updated without locks, so concurrent
   samples can be lost (by design; a multi-threaded stress test checks
-  ranges, with no loom or sanitizer evidence). One independent review
-  covered the controller and its claims.
+  ranges, with no loom or sanitizer evidence). Two independent reviews
+  covered the controller and its claims; the simulations they and the
+  final revision rest on are not part of the test suite, apart from the
+  cases the unit tests reproduce.
 - Accelerated backends for extensions without available hardware or emulation
   (for example the x86 SHA512 extension) remain unimplemented until they can
   be executed in tests. Backends that only native hardware can execute (the

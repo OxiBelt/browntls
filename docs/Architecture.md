@@ -909,22 +909,24 @@ Work is grouped in *streams*, one per homogeneous kind of work of a family
 
 | Phase | What happens |
 |---|---|
-| Steady | Everything runs on the primary. Some calls are timed (about one record of at least 4096 bytes in sixteen; every key exchange), giving a short-term average cost and a baseline, the cost in normal operation. The baseline follows slow drift (weight 1/1024 upwards, 1/64 downwards) but not a timed call that is itself slower than the threshold |
-| Probing | The short-term cost exceeded the baseline by `threshold_percent` (default 25, at least 20) and four timed calls in a row were each that slow. One call in eight goes to the next permitted backend in preference order, until four of them are timed |
-| Shifting | The probed backend measured at least 5% cheaper than the congested primary. Its share grows by 1/16 of the work per timed call while that holds (up to `max_shift_percent`, default 90, and never above 15/16), and shrinks when the primary recovers to within half the threshold of its baseline or the alternate becomes the slower one |
+| Steady | Everything runs on the primary. Some calls are timed (about one record of at least 4096 bytes in sixteen; every key exchange), giving a short-term average cost and a baseline, the cost in normal operation. The baseline follows slow drift (weight 1/1024 upwards, 1/256 downwards) but not a run of slow calls |
+| Probing | The short-term cost exceeded the baseline by `threshold_percent` (default 25, at least 20) and five of the last eight timed calls were each that slow. One call in eight goes to the next permitted backend in preference order, until at least four of them and sixteen calls of the primary were timed |
+| Shifting | The probed backend measured at least 5% cheaper than the congested primary. Every eight timed calls of the primary its share grows by 1/16 of the work while that holds (up to `max_shift_percent`, default 90), or shrinks by as much when the primary has recovered to within half the threshold of its baseline or the alternate is the slower one |
 
 When no alternate is cheaper, the present cost is accepted as the baseline
-(at most doubling it per episode) and the stream pauses for 256 timed calls,
-doubling after each episode that shifted nothing up to 65536; a doubling is
-forgotten after 4096 uneventful timed calls. A probe that ends because the
-primary recovered pauses a quarter as long. `load::status_all` reports, per
+(at most doubling it per episode). An episode that moved nothing, or that
+ended with nothing left on the alternate while the primary was still slow,
+is followed by a pause of 256 timed calls of the primary, doubled for each
+such episode up to 65536; a doubling is forgotten after 4096 uneventful
+timed calls. A probe or a shift that ends because the primary recovered is
+followed by a quarter of that pause. `load::status_all` reports, per
 stream, the phase, both backends, the shifted share and the costs;
 `load::set_fixed` pins a share by hand for experiments.
 
 Which calls are timed, probed or shifted is decided by a per-thread call
 counter mixed (SplitMix64) with a per-thread random key, using separate bits
 for the three choices. No state is shared between threads on that path, and
-the schedule cannot be predicted from outside the process.
+a peer cannot tell in advance where a call will run.
 
 Properties this design keeps:
 
@@ -940,16 +942,24 @@ Properties this design keeps:
   dependence visible in which backend runs later, so it adds no leak of its
   own but relies on the backends as much as their direct use does.
 - An alternate takes work only while its timed calls are cheaper than the
-  primary's. Load that slows every backend alike moves nothing; it costs
-  four probes per alternate and then the growing pause.
+  primary's. Load that slows every backend alike moves little: it costs a
+  few probes per alternate and then the growing pause. In simulations of
+  such load (steady, random and periodic bursts) under 1% of the calls ran
+  on an alternate, and the time lost stayed under 1% even with an
+  alternate three times slower.
 - A keyed object is routed only while the policy still selects the backend
   it was created for, and one created with explicit backends never is.
 
 Limits:
 
 - Costs are wall-clock times. A slowdown that hits every backend alike (too
-  few cores, a descheduled virtual machine) is probed once and then accepted
-  as the baseline.
+  few cores, a descheduled virtual machine) is probed and then accepted as
+  the baseline. Pauses are counted in timed calls, so a stream with little
+  traffic pauses for long.
+- The baseline settles somewhat below the mean of a jittery cost. Very
+  noisy timings, or timed calls that alternate between two cost levels,
+  cause fruitless episodes and long pauses; an alternate that is nearly as
+  slow as the congested primary is given up when timings are noisy.
 - Someone able to slow the primary's calls but not the alternate's moves
   work to the alternate, which may be slower than an undisturbed primary
   (by at most the factor of the slowdown). Contention for the primary's
@@ -964,7 +974,9 @@ Limits:
   is why the threshold cannot be set below 20%.
 - The controller's constants were chosen by reasoning and simulation (the
   `accel::load` unit tests drive the state machine with synthetic costs,
-  including the fixed-capacity model above); they were not tuned on
+  including the fixed-capacity model of the premise with jitter of up to
+  20%, where it stays within a few percent of the best fixed split for
+  alternates that help by a fifth or more); they were not tuned on
   contended hardware.
 - `load::status` exposes average durations of recent calls, including
   secret-key operations; it is diagnostic data for the operator.

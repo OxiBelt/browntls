@@ -112,7 +112,9 @@ fn load_aware_routing() {
     );
     load::enable(Config::DEFAULT).unwrap();
     assert_eq!(load::config(), Some(Config::DEFAULT));
-    assert_eq!(records(&aead, ROUNDS), baseline);
+    // Enough long records that some were timed: each is with probability
+    // 1/16.
+    assert_eq!(records(&aead, 4 * ROUNDS)[..baseline.len()], baseline);
     assert_eq!(x25519_outputs(), kx_baseline);
     // Long records and every key exchange were timed.
     let s = status(Algorithm::ChaCha20);
@@ -159,14 +161,23 @@ fn load_aware_routing() {
         assert_eq!(status(alg).phase, Phase::Steady);
     }
 
-    // A key created with explicit backends is never rerouted.
+    // A key created with explicit backends is never rerouted: with every
+    // record of the family sent to an alternate, its records do not reach
+    // the alternate, whose cost stays unmeasured.
     if status(Algorithm::ChaCha20).alternates > 0 {
+        load::disable();
+        load::enable(Config::DEFAULT).unwrap();
         load::set_fixed(Algorithm::ChaCha20, 0, 0, 100).unwrap();
         let pinned =
             ChaCha20Poly1305::with_backends(&KEY, chacha::Backend::best(), PolyBackend::best())
                 .unwrap();
-        assert_eq!(records(&pinned, 2), records(&aead, 2));
+        assert_eq!(records(&pinned, ROUNDS), baseline);
         assert_eq!(pinned.backends().0, chacha::Backend::best());
+        let s = status(Algorithm::ChaCha20);
+        assert_eq!((s.phase, s.alternate_cost), (Phase::Fixed, None), "{s}");
+        // Unlike those of a routed key.
+        assert_eq!(records(&aead, 4 * ROUNDS)[..baseline.len()], baseline);
+        assert!(status(Algorithm::ChaCha20).alternate_cost.is_some());
         load::clear_fixed(Algorithm::ChaCha20, 0);
     }
 
@@ -201,17 +212,19 @@ fn load_aware_routing() {
     // A fixed share made under one policy is ignored under another, and the
     // policy is obeyed at once.
     if status(Algorithm::X25519).alternates > 0 {
+        load::disable();
+        load::enable(Config::DEFAULT).unwrap();
         load::set_fixed(Algorithm::X25519, 0, 0, 100).unwrap();
         accel::set_policy(Algorithm::X25519, Policy::NONE).unwrap();
         let s = status(Algorithm::X25519);
         assert_eq!(
-            (s.phase, s.primary, s.alternates),
-            (Phase::Steady, "portable", 0),
+            (s.phase, s.primary, s.alternates, s.primary_cost),
+            (Phase::Steady, "portable", 0, None),
             "{s}"
         );
         assert_eq!(x25519_outputs(), kx_baseline);
-        // The portable ladder ran, as the policy says: its cost was
-        // measured, as the primary's.
+        // The portable ladder ran, as the policy says: its cost, unmeasured
+        // a moment ago, now is.
         assert!(status(Algorithm::X25519).primary_cost.is_some());
         accel::set_policy(Algorithm::X25519, Policy::PREFERRED).unwrap();
         // The share is in force again under the policy it was made for.

@@ -19,20 +19,30 @@
 //!    every key exchange or signature). Per backend, a short-term average
 //!    cost and a *baseline*, its cost in normal operation, are kept in
 //!    nanoseconds per unit of work. The baseline follows slow drift and
-//!    improvements, but not samples that are slow by themselves.
+//!    improvements, but not a run of slow calls.
 //! 2. **Detect.** The primary is *congested* when its short-term cost exceeds
-//!    its baseline by more than [`Config::threshold_percent`] and the last
-//!    four timed calls were each that slow.
-//! 3. **Probe.** A few calls then go to the next alternate, in the family's
-//!    preference order, to measure it under the same conditions.
+//!    its baseline by more than [`Config::threshold_percent`] and at least
+//!    five of its last eight timed calls were each that slow.
+//! 3. **Probe.** One call in eight then goes to the next alternate, in the
+//!    family's preference order, to measure it under the same conditions,
+//!    until at least four such calls and sixteen calls of the primary were
+//!    timed.
 //! 4. **Shift.** If the alternate measured cheaper than the congested
-//!    primary, a share of the calls moves to it, growing step by step while
-//!    that stays true (up to [`Config::max_shift_percent`]) and shrinking
-//!    when the primary recovers or the alternate becomes the slower one.
-//!    Otherwise the next alternate is probed; when none helps, the present
-//!    cost is accepted as the baseline (at most doubling it at a time) and
-//!    the stream pauses, twice as long after each such episode (up to 256
-//!    times; a doubling is forgotten after 4096 uneventful timed calls).
+//!    primary, a share of the calls moves to it. The share is reconsidered
+//!    after every eight timed calls of the primary: it grows while the
+//!    primary is still congested and the alternate cheaper (up to
+//!    [`Config::max_shift_percent`]) and shrinks when the primary recovers
+//!    or the alternate is the slower one. If the alternate did not measure
+//!    cheaper, the next one is probed; when none helps, the present cost is
+//!    accepted as the baseline (at most doubling it at a time).
+//!
+//! An episode that moved nothing, or that ended with nothing left on the
+//! alternate while the primary was still slow, is followed by a pause of
+//! 256 timed calls of the primary, doubled for each such episode up to
+//! 65536; a doubling is forgotten after 4096 uneventful timed calls. A
+//! probe or a shift that ended because the primary recovered is followed
+//! by a quarter of that pause. Pauses are counted in timed calls, not in
+//! time: a stream with little traffic pauses for long.
 //!
 //! Only backends that the family's [`Policy`](super::Policy) permits and the
 //! CPU can run are alternates, so policies keep their meaning: forbidding a
@@ -40,7 +50,7 @@
 //!
 //! Which calls are timed, probed or shifted is decided by a per-thread
 //! counter mixed with a per-thread random key, so the calls are spread
-//! evenly and their fate is not predictable from outside the process.
+//! evenly and a peer cannot tell in advance where a call will run.
 //!
 //! # What does not change
 //!
@@ -67,28 +77,36 @@
 //!   for the operator, not something to publish to peers.
 //! * An alternate takes work only while its timed calls are cheaper than the
 //!   primary's timed calls. Load that slows every backend alike therefore
-//!   moves nothing: it costs a few probes per alternate and then a growing
-//!   pause. Someone who can slow the primary's calls and not the
-//!   alternate's does move work, and the alternate is then slower than an
-//!   undisturbed primary would be, by at most the factor to which the
-//!   primary was slowed. Contention for the primary's instructions has that
-//!   effect, by design. Slowing individual calls by their backend would
-//!   need the schedule, which is why it is keyed; the mixing function is not
-//!   a cryptographic one.
+//!   moves little: in simulations of such load (steady, random and periodic
+//!   bursts) under 1% of the calls ran on an alternate, and the time lost
+//!   to them stayed under 1% even with an alternate three times slower.
+//!   Someone who can slow the primary's calls and not the alternate's does
+//!   move work, and the alternate is then slower than an undisturbed
+//!   primary would be, by at most the factor to which the primary was
+//!   slowed. Contention for the primary's instructions has that effect, by
+//!   design. Slowing individual calls by their backend would need the
+//!   schedule, which is why it is keyed; the mixing function is not a
+//!   cryptographic one, so this resists peers, not someone who can observe
+//!   many routing decisions exactly.
 //! * Which backend handles a call, and so its duration, depends on the
 //!   machine's load. Call durations already do.
 //!
 //! # Limits
 //!
 //! * Timing needs a clock and the schedule needs per-thread state: routing
-//!   requires the `std` feature. Without it [`enable`] fails and nothing is
-//!   routed.
+//!   requires the `std` feature on a target whose `std` has a clock.
+//!   Otherwise [`enable`] fails and nothing is routed.
 //! * A slowdown that affects every backend alike (too few cores, a
-//!   descheduled virtual machine) is detected, probed once and then accepted
-//!   as the new baseline; routing cannot help there.
+//!   descheduled virtual machine) is detected, probed and then accepted as
+//!   the new baseline; routing cannot help there.
 //! * Costs are measured in wall-clock time, so they include preemption. A
-//!   sample is clamped to four times its backend's baseline once that
-//!   backend has one.
+//!   sample is clamped to four times its backend's baseline, and a first
+//!   sample that turns out four times slower than the second is discarded.
+//! * With jittery costs the baseline settles below their mean, so the
+//!   threshold is relative to a good day rather than an average one; very
+//!   noisy timings (half-width of 30% and more) or timed calls that
+//!   alternate between two cost levels cause fruitless episodes and, with
+//!   them, long pauses.
 //! * Calls shorter than 4096 bytes are too short to time: outside a fixed
 //!   share they always run on the primary, and a workload of short records
 //!   alone is never shifted.
@@ -96,6 +114,9 @@
 //!   10% between 4096 and 16384 bytes for ChaCha20-Poly1305 on one
 //!   machine), so a change of record sizes looks like a small change of
 //!   speed; the smallest threshold is 20% for that reason.
+//! * A marginal alternate (one that is nearly as slow as the congested
+//!   primary) is given up when timings are noisy; work then stays on the
+//!   primary.
 //! * A keyed object (for example an AEAD key) is routed only while the
 //!   policy still selects the backend it was created for.
 //!
@@ -212,7 +233,11 @@ const PORTABLE: u32 = 2;
 /// The configuration: 0 while routing is disabled, else [`Config::to_bits`].
 static CONFIG: AtomicU32 = AtomicU32::new(0);
 
-#[cfg(feature = "std")]
+// `std` on bare WebAssembly has no clock (`Instant::now` panics there).
+#[cfg(all(
+    feature = "std",
+    not(all(target_family = "wasm", target_os = "unknown"))
+))]
 mod clock {
     use std::cell::Cell;
     use std::collections::hash_map::RandomState;
@@ -235,7 +260,7 @@ mod clock {
     std::thread_local! {
         /// The thread's schedule: a secret key and a call counter with a
         /// secret starting point, both from the standard library's
-        /// per-process random hasher keys.
+        /// randomly keyed hasher.
         static SCHEDULE: (u64, Cell<u64>) = {
             let random = RandomState::new();
             (random.hash_one(0u8), Cell::new(random.hash_one(1u8)))
@@ -256,15 +281,21 @@ mod clock {
     }
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(all(
+    feature = "std",
+    not(all(target_family = "wasm", target_os = "unknown"))
+)))]
 mod clock {
     //! No clock and no per-thread state: routing cannot be enabled, so
     //! these are never reached.
-    pub(super) type Stamp = ();
+    #[derive(Clone, Copy)]
+    pub(super) struct Stamp;
 
     pub(super) const AVAILABLE: bool = false;
 
-    pub(super) fn now() -> Stamp {}
+    pub(super) fn now() -> Stamp {
+        Stamp
+    }
 
     pub(super) fn nanos_since(_start: Stamp) -> u64 {
         0
@@ -281,7 +312,8 @@ mod clock {
 /// # Errors
 ///
 /// Returns [`Error::Unsupported`] when the crate is built without the `std`
-/// feature, which provides the clock and the per-thread schedule.
+/// feature, which provides the clock and the per-thread schedule, or for a
+/// target whose `std` has no clock.
 pub fn enable(config: Config) -> Result<(), Error> {
     if !clock::AVAILABLE {
         return Err(Error::Unsupported);
@@ -446,6 +478,9 @@ fn route_enabled<B: Backends>(
     usable: impl Fn(B) -> bool,
     cfg: u32,
 ) -> Route<B> {
+    if stream.passes(units) {
+        return Route::fixed(own);
+    }
     let Some(candidates) = candidates::<B>(stream, cfg) else {
         return Route::fixed(own);
     };

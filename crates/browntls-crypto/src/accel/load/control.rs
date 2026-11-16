@@ -23,19 +23,26 @@ const MAX_COST: u64 = 1 << 56;
 /// Weight `1/8` for the short-term average of a channel.
 const FAST_WEIGHT: u64 = 8;
 /// Weight of a sample above the baseline: the baseline follows a slow drift
-/// upwards (and never a sample that is itself slow; see `Stream::observe`).
+/// upwards (and never a run of slow samples; see `Stream::observe`).
 const BASELINE_UP_WEIGHT: u64 = 1024;
 /// Weight of a sample below the baseline: improvements count sooner, so a
-/// slow level that was once accepted is left behind when it ends.
-const BASELINE_DOWN_WEIGHT: u64 = 64;
+/// slow level that was once accepted is left behind when it ends. The
+/// price is a baseline somewhat below the mean of a jittery cost (about a
+/// third of the jitter's half-width when it is uniform).
+const BASELINE_DOWN_WEIGHT: u64 = 256;
 /// Samples a channel needs before its baseline is trusted.
 const MIN_BASELINE: u32 = 32;
 /// A sample is clamped to this multiple of the baseline, so that one call
 /// interrupted by the scheduler cannot dominate the averages.
 const OUTLIER: u64 = 4;
-/// Consecutive slow samples of the primary needed, besides a slow average,
-/// before it counts as congested: one interrupted call is not congestion.
-const STREAK: u32 = 4;
+/// Of the last eight timed calls of the primary, how many must be slow,
+/// besides a slow average, before it counts as congested: one interrupted
+/// call is not congestion, slow calls mixed with a few normal ones are.
+const RUN: u32 = 5;
+/// Primary samples to see after a change of the share before the next.
+const SETTLE: u32 = 8;
+/// Primary samples to see while probing before the comparison.
+const PROBE_SETTLE: u32 = 16;
 /// Samples of an alternate taken before it is compared with the primary.
 const PROBES: u32 = 4;
 /// While probing, one call in this many goes to the alternate.
@@ -126,8 +133,9 @@ pub(crate) struct Ctl {
     /// The primary's slot when the phase began.
     pub(crate) primary: usize,
     pub(crate) phase: Phase,
-    /// While steady, the run of slow primary samples; while probing, the
-    /// primary samples seen waiting for the probes.
+    /// While steady, the last eight primary samples, one bit each (set when
+    /// slow); while probing, the primary samples seen so far; while
+    /// shifting, those seen since the share last changed.
     patience: u32,
     /// Episodes that shifted nothing, less those forgotten since.
     backoff: u32,
@@ -277,6 +285,12 @@ fn cheaper(alt: u64, primary: u64) -> bool {
     alt != 0 && u128::from(alt) * 100 < u128::from(primary) * (100 - MARGIN_PERCENT)
 }
 
+/// The last eight primary samples, one bit each (set when slow), after one
+/// more.
+fn history(recent: u32, slow_sample: bool) -> u32 {
+    ((recent << 1) | u32::from(slow_sample)) & 0xff
+}
+
 /// The lowest slot of `mask` above `after` (any slot when `after` is `None`).
 fn next_slot(mask: u8, after: Option<usize>) -> Option<usize> {
     let from = after.map_or(0, |a| a + 1);
@@ -349,6 +363,13 @@ impl Stream {
 
     pub(crate) fn unit(&self) -> &'static str {
         self.unit
+    }
+
+    /// Whether a call of `units` units is neither timed nor moved whatever
+    /// its word: it is too short to time and no share is fixed. Such a call
+    /// needs no decision.
+    pub(crate) fn passes(&self, units: usize) -> bool {
+        units < self.min_units && Ctl::unpack(self.ctl.load(Relaxed)).phase != Phase::Fixed
     }
 
     /// Chooses the slot for a call of `units` units and whether to time it.
@@ -426,9 +447,9 @@ impl Stream {
         let ch = &self.channels[slot];
         let mut seen = ch.samples.load(Relaxed);
         let mut slow = ch.slow.load(Relaxed);
-        if seen < MIN_BASELINE && cost.saturating_mul(OUTLIER) < slow {
-            // The first samples were dominated by an interrupted call or a
-            // cold start: begin again from this one.
+        if seen == 1 && cost.saturating_mul(OUTLIER) < slow {
+            // The first sample was an interrupted call or a cold start:
+            // begin again from this one.
             seen = 0;
             slow = 0;
         }
@@ -437,23 +458,25 @@ impl Stream {
         }
         let slow_sample = exceeds(cost, slow, params.threshold);
         average(&ch.fast, seen, cost, FAST_WEIGHT);
-        // The baseline is the channel's cost in normal operation. For the
-        // primary it stands still while the primary is congested and ignores
-        // each sample that is slow by itself, so a slowdown is never
-        // absorbed unnoticed: it is either acted on or accepted on purpose
-        // (`Effect::Rebase`).
+        let own = slot == primary && ctl.primary == primary;
+        let run = own
+            && ctl.phase == Phase::Steady
+            && history(ctl.patience, slow_sample).count_ones() >= RUN;
         let held = slot == primary
             && seen >= MIN_BASELINE
-            && (slow_sample
-                || (ctl.primary == primary
-                    && matches!(ctl.phase, Phase::Probing | Phase::Shifting)));
+            && ((slow_sample && run)
+                || (own && matches!(ctl.phase, Phase::Probing | Phase::Shifting)));
         if !held {
-            let weight = if cost < slow {
+            let mut level = cost;
+            if slot == primary && slow_sample && seen >= MIN_BASELINE {
+                level = level.min(slow + slow / 100 * u64::from(params.threshold));
+            }
+            let weight = if level < slow {
                 BASELINE_DOWN_WEIGHT
             } else {
                 BASELINE_UP_WEIGHT
             };
-            average(&ch.slow, seen, cost, weight);
+            average(&ch.slow, seen, level, weight);
         }
         ch.samples.store(seen.saturating_add(1), Relaxed);
 
@@ -505,23 +528,19 @@ impl Stream {
                 if slot != primary {
                     return (ctl, Effect::None);
                 }
+                let recent = history(ctl.patience, slow_sample);
                 if ctl.cooldown > 0 {
                     let next = Ctl {
                         cooldown: ctl.cooldown - 1,
-                        patience: 0,
+                        patience: recent,
                         ..ctl
                     };
                     return (next, Effect::None);
                 }
-                if p.samples.load(Relaxed) < MIN_BASELINE {
-                    return (ctl, Effect::None);
-                }
-                let streak = if slow_sample {
-                    (ctl.patience + 1).min(STREAK)
-                } else {
-                    0
-                };
-                if congested && streak >= STREAK {
+                if p.samples.load(Relaxed) >= MIN_BASELINE
+                    && congested
+                    && recent.count_ones() >= RUN
+                {
                     return match next_slot(mask, None) {
                         Some(alt) => Self::probe(ctl, alt),
                         None => Self::accept(ctl, fast_p, slow_p),
@@ -534,7 +553,7 @@ impl Stream {
                     (b, q) => (b, q),
                 };
                 let next = Ctl {
-                    patience: streak,
+                    patience: recent,
                     backoff,
                     quiet,
                     ..ctl
@@ -542,31 +561,31 @@ impl Stream {
                 (next, Effect::None)
             }
             Phase::Probing => {
-                let probes = a.samples.load(Relaxed);
-                if probes >= PROBES {
-                    return if cheaper(a.fast.load(Relaxed), fast_p) {
-                        let next = Ctl {
-                            phase: Phase::Shifting,
-                            share: STEP.min(params.max_share),
-                            ..ctl
-                        };
-                        (next, Effect::None)
-                    } else {
-                        Self::advance(ctl, mask, fast_p, slow_p)
-                    };
-                }
-                if slot != primary {
-                    return (ctl, Effect::None);
-                }
                 if recovered {
                     // A blip. A short pause keeps a load that comes and goes
                     // from holding the stream in this phase.
                     return (ctl.paused(BASE_COOLDOWN / 4), Effect::None);
                 }
+                if a.samples.load(Relaxed) >= PROBES && ctl.patience >= PROBE_SETTLE {
+                    return if cheaper(a.fast.load(Relaxed), fast_p) {
+                        let next = Ctl {
+                            phase: Phase::Shifting,
+                            share: STEP.min(params.max_share),
+                            patience: 0,
+                            ..ctl
+                        };
+                        (next, Effect::None)
+                    } else {
+                        Self::advance(ctl, mask, Some((fast_p, slow_p)))
+                    };
+                }
+                if slot != primary {
+                    return (ctl, Effect::None);
+                }
                 if ctl.patience >= PROBE_PATIENCE {
                     // No probe was timed (for example, no caller holds this
                     // backend).
-                    return Self::advance(ctl, mask, fast_p, slow_p);
+                    return Self::advance(ctl, mask, Some((fast_p, slow_p)));
                 }
                 let next = Ctl {
                     patience: ctl.patience + 1,
@@ -575,6 +594,18 @@ impl Stream {
                 (next, Effect::None)
             }
             Phase::Shifting => {
+                // The share changes on evidence from the primary that
+                // postdates the last change.
+                if slot != primary {
+                    return (ctl, Effect::None);
+                }
+                if ctl.patience + 1 < SETTLE {
+                    let next = Ctl {
+                        patience: ctl.patience + 1,
+                        ..ctl
+                    };
+                    return (next, Effect::None);
+                }
                 let fast_a = a.fast.load(Relaxed);
                 let share = if recovered || fast_a > fast_p {
                     ctl.share.saturating_sub(STEP)
@@ -583,12 +614,28 @@ impl Stream {
                 } else {
                     ctl.share.min(params.max_share)
                 };
-                if share > 0 {
-                    (Ctl { share, ..ctl }, Effect::None)
+                if share == ctl.share {
+                    let next = Ctl {
+                        patience: SETTLE,
+                        ..ctl
+                    };
+                    (next, Effect::None)
+                } else if share > 0 {
+                    let next = Ctl {
+                        share,
+                        patience: 0,
+                        ..ctl
+                    };
+                    (next, Effect::None)
                 } else if recovered {
-                    (Ctl::steady(primary), Effect::None)
+                    let next = Ctl {
+                        cooldown: BASE_COOLDOWN / 4,
+                        backoff: ctl.backoff,
+                        ..Ctl::steady(primary)
+                    };
+                    (next, Effect::None)
                 } else {
-                    Self::advance(ctl, mask, fast_p, slow_p)
+                    Self::advance(ctl, mask, None)
                 }
             }
             Phase::Fixed => (ctl, Effect::None),
@@ -608,12 +655,16 @@ impl Stream {
         (next, Effect::Restart(alt))
     }
 
-    /// The current alternate does not help: tries the next one, or accepts
-    /// the primary's present cost.
-    fn advance(ctl: Ctl, mask: u8, fast_p: u64, slow_p: u64) -> (Ctl, Effect) {
-        match next_slot(mask, Some(ctl.alt)) {
-            Some(alt) => Self::probe(ctl, alt),
-            None => Self::accept(ctl, fast_p, slow_p),
+    /// The current alternate does not help (any more): tries the next one,
+    /// or pauses. With `accept`, the primary's short-term cost and baseline,
+    /// the episode moved nothing and the present cost is accepted as well;
+    /// after a shift that did help for a while the baseline stays, so the
+    /// congestion is looked at again after the pause.
+    fn advance(ctl: Ctl, mask: u8, accept: Option<(u64, u64)>) -> (Ctl, Effect) {
+        match (next_slot(mask, Some(ctl.alt)), accept) {
+            (Some(alt), _) => Self::probe(ctl, alt),
+            (None, Some((fast_p, slow_p))) => Self::accept(ctl, fast_p, slow_p),
+            (None, None) => (ctl.paused(BASE_COOLDOWN), Effect::None),
         }
     }
 
@@ -717,6 +768,12 @@ mod tests {
         (picos(s.snapshot().channels[0].1).unwrap() + 500) / 1000
     }
 
+    /// Whether the primary's baseline is within 1% of `nanos`. (The first
+    /// slow samples of a run move it by a thousandth each.)
+    fn baseline_is(s: &Stream, nanos: u64) -> bool {
+        baseline(s).abs_diff(nanos) <= nanos / 100
+    }
+
     /// Runs `n` calls through the stream with the given cost per slot,
     /// returning how many went to each slot.
     fn drive(s: &Stream, calls: &mut Calls, n: u64, cost: [u64; SLOTS]) -> [u64; SLOTS] {
@@ -790,7 +847,7 @@ mod tests {
         assert!(used[1] > used[0], "{used:?}");
         assert_eq!(used[3], 0, "the second alternate is not needed");
         // The baseline did not follow the congestion.
-        assert_eq!(baseline(&s), 1000);
+        assert!(baseline_is(&s, 1000), "{}", baseline(&s));
         // The share is the fraction of calls, on average.
         let window = drive(&s, &mut calls, 25_600, cost);
         let expected = 100 * u64::from(MAX_AUTO_SHARE);
@@ -815,18 +872,18 @@ mod tests {
         let used = drive(&s, &mut calls, 4000, cost);
         // Each alternate got its probes and nothing else.
         for alt in [1, 3] {
-            assert!((u64::from(PROBES)..=2 * u64::from(PROBES)).contains(&used[alt]));
+            assert!((u64::from(PROBES)..=3 * u64::from(PROBES)).contains(&used[alt]));
         }
         let c = ctl(&s);
         assert_eq!((c.phase, c.share, c.backoff), (Phase::Steady, 0, 1));
         // The slow level is the new baseline, so it is not probed again.
-        assert_eq!(baseline(&s), 2000);
+        assert!(baseline_is(&s, 2000), "{}", baseline(&s));
         let used = drive(&s, &mut calls, 4000, cost);
         assert_eq!(used[0], 4000);
         // When the slow level ends the baseline follows it down again, long
         // before it would follow a rise.
         cost[0] = 1000;
-        drive(&s, &mut calls, 400, cost);
+        drive(&s, &mut calls, 2000, cost);
         assert!(baseline(&s) < 1010, "{}", baseline(&s));
     }
 
@@ -850,9 +907,10 @@ mod tests {
                 left -= 1;
                 assert!(left > 0, "episode {episode} did not end");
             }
-            assert_eq!((ctl(&s).backoff, baseline(&s)), (episode, expected));
+            assert_eq!(ctl(&s).backoff, episode);
+            assert!(baseline_is(&s, expected), "{}", baseline(&s));
         }
-        assert!(probes <= 4 * 4 * u64::from(PROBES), "{probes}");
+        assert!(probes <= 4 * 2 * 3 * u64::from(PROBES), "{probes}");
         // Accepted: nothing more happens, and the pauses are forgotten one
         // doubling per quiet stretch.
         let n = 5 * u64::from(QUIET) + (u64::from(BASE_COOLDOWN) << 4);
@@ -879,7 +937,7 @@ mod tests {
         cost[0] = 1600;
         let n = u64::from(paused.cooldown);
         assert_eq!(drive(&s, &mut calls, n, cost)[0], n);
-        assert_eq!(baseline(&s), 1000);
+        assert!(baseline_is(&s, 1000), "{}", baseline(&s));
         // Once the pause is over the congestion is still seen and acted on.
         drive(&s, &mut calls, 2000, cost);
         let c = ctl(&s);
@@ -915,33 +973,84 @@ mod tests {
         assert!(used[3] > used[0], "{used:?}");
     }
 
-    #[test]
-    fn the_share_settles_where_the_costs_meet() {
-        // The premise of the balancer: a channel has a fixed capacity, so
-        // its cost falls as work leaves it. The primary costs 2000 with all
-        // of the work and 1000 with none; the alternate always costs 1400.
-        let s = Stream::op("test");
+    /// The premise of the balancer: a channel has a fixed capacity, so its
+    /// cost falls as work leaves it. The primary costs 2000 with all of the
+    /// work and 1000 with none; the alternate always costs `alt`. Every
+    /// timed call is off by up to `jitter` percent. Returns the mean cost of
+    /// a call over the second half of the run.
+    fn capacity_model(stream: &Stream, units: usize, alt: u64, jitter: u64) -> u64 {
         let mut calls = Calls(0);
-        feed(&s, 0, 1000, 200);
-        let mut shares = 0u64;
-        let rounds = 40_000u64;
+        let mut noise = Calls(1 << 40);
+        let rounds = 400_000u64;
+        let mut total = 0u64;
         for i in 0..rounds {
-            let share = u64::from(ctl(&s).share);
-            let primary = 1000 + 1000 * (256 - share) / 256;
-            let (slot, sample) = s.decide(calls.next(), 1, 0, MASK);
+            let share = u64::from(ctl(stream).share);
+            let primary = if i < 4000 {
+                1000
+            } else {
+                1000 + 1000 * (256 - share) / 256
+            };
+            let (slot, sample) = stream.decide(calls.next(), units, 0, MASK);
+            let cost = if slot == 0 { primary } else { alt };
             if sample {
-                let nanos = if slot == 0 { primary } else { 1400 };
-                s.observe(slot, 1, nanos, 0, MASK, PARAMS);
+                let off = cost * jitter / 100;
+                let nanos = cost - off + (noise.next() >> 32) % (2 * off + 1);
+                stream.observe(slot, units, nanos * units as u64, 0, MASK, PARAMS);
             }
             if i >= rounds / 2 {
-                shares += share;
+                total += cost;
             }
         }
-        // Costs meet at a share of 60% (154/256); the controller hunts
-        // between the recovery and congestion thresholds below that.
-        let mean = shares / (rounds / 2);
-        assert!((64..=224).contains(&mean), "mean share {mean}/256");
-        assert_eq!(ctl(&s).phase, Phase::Shifting);
+        total / (rounds / 2)
+    }
+
+    #[test]
+    fn the_share_settles_where_the_costs_meet() {
+        // Without routing every call costs 2000. The best fixed split makes
+        // both backends cost the same: the alternate's cost.
+        for (alt, jitter, bound) in [
+            (1200, 0, 1230),
+            (1400, 0, 1440),
+            (1400, 10, 1440),
+            (1600, 0, 1650),
+            (1600, 10, 1660),
+            (1600, 20, 1700),
+        ] {
+            let op = capacity_model(&Stream::op("test"), 1, alt, jitter);
+            let bulk = capacity_model(&Stream::bulk("test"), 16384, alt, jitter);
+            assert!(
+                (alt..=bound).contains(&op) && (alt..=bound).contains(&bulk),
+                "alternate {alt}, jitter {jitter}%: {op} (op), {bulk} (bulk)"
+            );
+        }
+        // An alternate that barely helps is given up in bad conditions;
+        // routing then costs what no routing costs, not more.
+        let cost = capacity_model(&Stream::op("test"), 1, 1900, 20);
+        assert!((1900..=2010).contains(&cost), "{cost}");
+    }
+
+    #[test]
+    fn a_helpful_shift_is_not_accepted_as_the_baseline() {
+        let s = Stream::op("test");
+        capacity_model(&s, 1, 1600, 10);
+        let c = ctl(&s);
+        assert_eq!(c.phase, Phase::Shifting);
+        // With jitter the baseline sits a little below the mean cost.
+        assert!((930..=1010).contains(&baseline(&s)), "{}", baseline(&s));
+    }
+
+    #[test]
+    fn slow_calls_that_alternate_with_normal_ones_are_congestion() {
+        let s = Stream::op("test");
+        feed(&s, 0, 1000, 200);
+        // Three slow calls, one normal one, again and again: no run of slow
+        // calls is ever long, but most calls are slow.
+        for _ in 0..8 {
+            feed(&s, 0, 2000, 3);
+            feed(&s, 0, 1000, 1);
+        }
+        assert_eq!(ctl(&s).phase, Phase::Probing);
+        assert!(baseline(&s) < 1010, "{}", baseline(&s));
     }
 
     #[test]
@@ -976,7 +1085,7 @@ mod tests {
             }
         }
         let probes = used[1] + used[3];
-        assert!(probes * 500 < used[0], "{used:?}");
+        assert!(probes * 200 < used[0], "{used:?}");
     }
 
     #[test]
@@ -989,7 +1098,7 @@ mod tests {
         let c = ctl(&s);
         assert_eq!((c.phase, c.backoff), (Phase::Steady, 1));
         assert!(c.cooldown > 0 && c.cooldown < BASE_COOLDOWN);
-        assert_eq!(baseline(&s), 1000);
+        assert!(baseline_is(&s, 1000), "{}", baseline(&s));
     }
 
     #[test]
@@ -997,17 +1106,17 @@ mod tests {
         let s = Stream::op("test");
         feed(&s, 0, 1000, 200);
         // One call descheduled for 10 ms counts as four times the baseline,
-        // never reaches the baseline itself, and is not congestion.
+        // moves the baseline by a thousandth at most, and is not congestion.
         for _ in 0..50 {
             s.observe(0, 1, 10_000_000, 0, MASK, PARAMS);
             let (fast, _, _) = s.snapshot().channels[0];
             assert!(picos(fast).unwrap() < 1_500_000, "{fast}");
-            assert_eq!(baseline(&s), 1000);
+            assert!(baseline(&s) < 1020, "{}", baseline(&s));
             feed(&s, 0, 1000, 15);
             assert_eq!(ctl(&s).phase, Phase::Steady);
         }
         // A run of them is.
-        feed(&s, 0, 10_000_000, STREAK as usize);
+        feed(&s, 0, 10_000_000, RUN as usize);
         assert_eq!(ctl(&s).phase, Phase::Probing);
     }
 
@@ -1017,7 +1126,7 @@ mod tests {
         let s = Stream::op("test");
         s.observe(0, 1, 100_000, 0, MASK, PARAMS);
         feed(&s, 0, 1000, 39);
-        assert_eq!(baseline(&s), 1000);
+        assert!(baseline_is(&s, 1000), "{}", baseline(&s));
         // So is one of the next few: it is clamped.
         let s = Stream::op("test");
         feed(&s, 0, 1000, 3);
@@ -1027,6 +1136,14 @@ mod tests {
         // A real congestion is then still found.
         feed(&s, 0, 2000, 40);
         assert_eq!(ctl(&s).phase, Phase::Probing);
+        // Only a first sample is ever discarded: a workload that keeps
+        // alternating between two levels still gets a baseline.
+        let s = Stream::op("test");
+        for _ in 0..100 {
+            feed(&s, 0, 1000, 1);
+            feed(&s, 0, 10_000, 2);
+        }
+        assert_eq!(s.snapshot().channels[0].2, 300);
     }
 
     #[test]
@@ -1135,7 +1252,7 @@ mod tests {
             used
         };
         run(&s, 2000, 16384, 100);
-        let used = run(&s, 4000, 16384, 200);
+        let used = run(&s, 12_000, 16384, 200);
         assert_eq!(ctl(&s).phase, Phase::Shifting);
         assert!(used[1] > used[0], "{used:?}");
         // Short records are never timed, so they stay on the primary while
@@ -1143,8 +1260,10 @@ mod tests {
         let before = ctl(&s);
         assert_eq!(run(&s, 1000, 4095, 200)[0], 1000);
         assert_eq!(ctl(&s), before);
+        assert!(s.passes(4095) && !s.passes(4096));
         // Unless the share was fixed by hand.
         s.fix(0, 1, FULL_SHARE);
+        assert!(!s.passes(1));
         assert_eq!(run(&s, 100, 1, 200)[1], 100);
     }
 

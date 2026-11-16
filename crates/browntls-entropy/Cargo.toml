@@ -1,0 +1,19 @@
+[package]
+name = "browntls-entropy"
+description = "Statistical entropy checks of the secret material browntls generates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+browntls-crypto = { workspace = true, features = ["std"] }
+browntls = { path = "../browntls", default-features = false, features = ["std", "native", "rustcrypto", "tls12", "prefer-post-quantum"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[lints]
+workspace = true

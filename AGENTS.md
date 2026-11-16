@@ -23,6 +23,8 @@ Current layout:
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
 - `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
   (test tooling, not published).
+- `crates/browntls-entropy/`: statistical entropy checks of generated keys,
+  nonces and handshake secrets (test tooling, not published).
 - `docs/`: technical and maintenance documentation.
 - `scripts/`: QEMU cross-testing and CI helpers.
 - `tests/scripts/`: portable repository checks and their regression tests.

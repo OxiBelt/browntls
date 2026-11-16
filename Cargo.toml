@@ -5,6 +5,7 @@ members = [
   "crates/browntls-pki",
   "crates/browntls",
   "crates/browntls-e2e",
+  "crates/browntls-entropy",
 ]
 # The cargo-fuzz project has its own manifest and lockfile (fuzz/README.md).
 exclude = ["fuzz"]

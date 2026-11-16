@@ -29,9 +29,6 @@ jobs:
       - name: Check Markdown links and anchors
         run: python3 -B tests/scripts/check_markdown_links.py --repo-root .
 
-      - name: Check Rust file line counts
-        run: python3 -B tests/scripts/check_rust_line_count.py --repo-root .
-
       - name: Check whitespace
         run: git show --format= --check HEAD
 
@@ -50,3 +47,20 @@ jobs:
           printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${tool_dir}/${archive}" | sha256sum --check --strict
           tar -xzf "${tool_dir}/${archive}" -C "${tool_dir}" actionlint
           "${tool_dir}/actionlint" -shellcheck= -pyflakes=
+
+  # A job of its own, so the limit shows up as a separate check that branch
+  # protection can require.
+  rust-line-limit:
+    name: Rust file line limit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check Rust file line counts
+        run: python3 -B tests/scripts/check_rust_line_count.py --repo-root .

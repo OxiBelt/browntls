@@ -1,0 +1,430 @@
+//! The messages of the TLS 1.3 server's handshake flight: ServerHello or
+//! HelloRetryRequest through Finished.
+
+use alloc::vec::Vec;
+
+use crate::common_state::{CommonState, ConnectionRandoms};
+use crate::delegated_credential::DelegatedCredentialKey;
+use crate::enums::{AlertDescription, CertificateType, ProtocolVersion, SignatureScheme};
+use crate::error::{Error, PeerIncompatible};
+use crate::hash_hs::HandshakeHash;
+use crate::log::trace;
+use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
+use crate::msgs::ccs::ChangeCipherSpecPayload;
+use crate::msgs::codec::Codec;
+use crate::msgs::enums::{Compression, NamedGroup};
+use crate::msgs::handshake::{
+    CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
+    ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
+    HelloRetryRequestExtensions, KeyShareEntry, ServerExtensions, ServerHelloPayload, SessionId,
+};
+use crate::msgs::message::{Message, MessagePayload};
+use crate::server::common::ActiveCertifiedKey;
+use crate::server::hs::{self, ServerContext};
+use crate::server::server_conn::ServerConfig;
+use crate::tls13::Tls13CipherSuite;
+use crate::tls13::key_schedule::{
+    KeyScheduleHandshake, KeyScheduleTrafficWithClientFinishedPending,
+};
+use crate::verify::DigitallySignedStruct;
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_server_hello(
+    transcript: &mut HandshakeHash,
+    randoms: &mut ConnectionRandoms,
+    suite: &'static Tls13CipherSuite,
+    common: &mut CommonState,
+    session_id: &SessionId,
+    chosen_psk_index: Option<usize>,
+    key_share: KeyShareEntry,
+    ech_accepted: bool,
+    cert_with_extern_psk: bool,
+) {
+    let extensions = ServerExtensions {
+        key_share: Some(key_share),
+        pre_shared_key: chosen_psk_index.and_then(|i| u16::try_from(i).ok()),
+        supported_versions: Some(ProtocolVersion::TLSv1_3),
+        cert_with_extern_psk: cert_with_extern_psk.then_some(()),
+        ..Default::default()
+    };
+    let mut payload = ServerHelloPayload {
+        legacy_version: ProtocolVersion::TLSv1_2,
+        random: randoms.server.into(),
+        session_id: *session_id,
+        cipher_suite: suite.common.suite,
+        compression_method: Compression::Null,
+        extensions,
+    };
+    // RFC 9849 §7.2: confirm ECH in the last 8 bytes of the random,
+    // computed over the inner transcript with those bytes zeroed. The
+    // client random is the inner ClientHello's.
+    if ech_accepted {
+        payload.random.0[24..].fill(0);
+        let zeroed = HandshakeMessagePayload(HandshakePayload::ServerHello(payload.clone()));
+        let hash = transcript.hash_with(&zeroed.get_encoding());
+        let confirmation = crate::ech::accept_confirmation(
+            suite.hkdf_provider,
+            &randoms.client,
+            crate::ech::ACCEPT_LABEL,
+            hash.as_ref(),
+        );
+        payload.random.0[24..].copy_from_slice(&confirmation);
+        randoms.server = payload.random.0;
+    }
+    let sh = Message {
+        version: ProtocolVersion::TLSv1_2,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::ServerHello(
+            payload,
+        ))),
+    };
+    trace!("sending server hello {:?}", sh);
+    transcript.add_message(&sh);
+    common.send_msg(sh, false);
+}
+
+/// Sends the middlebox-compatibility ChangeCipherSpec (RFC 8446 appendix D.4).
+pub(super) fn emit_fake_ccs(common: &mut CommonState) {
+    let m = Message {
+        version: ProtocolVersion::TLSv1_2,
+        payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload),
+    };
+    common.send_msg(m, false);
+}
+
+/// The HelloRetryRequest selecting `suite` and `group`, with `cookie` and
+/// no ECH extension.
+pub(super) fn hello_retry_request(
+    suite: &'static Tls13CipherSuite,
+    session_id: SessionId,
+    group: NamedGroup,
+    cookie: Option<Vec<u8>>,
+) -> HelloRetryRequest {
+    HelloRetryRequest {
+        legacy_version: ProtocolVersion::TLSv1_2,
+        session_id,
+        cipher_suite: suite.common.suite,
+        compression_method: Compression::Null,
+        extensions: HelloRetryRequestExtensions {
+            key_share: Some(group),
+            cookie: cookie.map(PayloadU16::new),
+            supported_versions: Some(ProtocolVersion::TLSv1_3),
+            encrypted_client_hello: None,
+            unknown: Vec::new(),
+        },
+    }
+}
+
+/// The HelloRetryRequest selecting `suite` and `group`, with `cookie`, as
+/// a stateless retry sends it (never with ECH). Also used to rebuild it for
+/// the transcript.
+pub(in crate::server) fn hello_retry_request_message(
+    suite: &'static Tls13CipherSuite,
+    session_id: SessionId,
+    group: NamedGroup,
+    cookie: Option<Vec<u8>>,
+) -> Message<'static> {
+    Message {
+        version: ProtocolVersion::TLSv1_2,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::HelloRetryRequest(hello_retry_request(
+                suite, session_id, group, cookie,
+            )),
+        )),
+    }
+}
+
+/// What a HelloRetryRequest says about ECH (RFC 9849 §7).
+pub(super) enum HrrEch {
+    /// Nothing: the client sent no ECH extension, or we have no keys.
+    None,
+    /// ECH is rejected: 8 random bytes, so the message looks the same as
+    /// an acceptance (§7.1, §10.10.4).
+    Random,
+    /// ECH is accepted: the confirmation, keyed by the first inner
+    /// ClientHello's random (§7.2.1).
+    Confirm([u8; 32]),
+}
+
+/// Sends `hrr` with the ECH extension `ech` calls for.
+pub(super) fn emit_hello_retry_request(
+    transcript: &mut HandshakeHash,
+    mut hrr: HelloRetryRequest,
+    suite: &'static Tls13CipherSuite,
+    ech: HrrEch,
+    common: &mut CommonState,
+    rng: &dyn crate::crypto::SecureRandom,
+) -> Result<(), Error> {
+    match ech {
+        HrrEch::None => {}
+        HrrEch::Random => {
+            let mut random = [0u8; 8];
+            rng.fill(&mut random)?;
+            hrr.extensions.encrypted_client_hello = Some(random);
+        }
+        HrrEch::Confirm(inner_random) => {
+            hrr.extensions.encrypted_client_hello = Some([0; 8]);
+            let zeroed = HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(hrr.clone()));
+            let hash = transcript.hash_with(&zeroed.get_encoding());
+            hrr.extensions.encrypted_client_hello = Some(crate::ech::accept_confirmation(
+                suite.hkdf_provider,
+                &inner_random,
+                crate::ech::HRR_ACCEPT_LABEL,
+                hash.as_ref(),
+            ));
+        }
+    }
+    let m = Message {
+        version: ProtocolVersion::TLSv1_2,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::HelloRetryRequest(hrr),
+        )),
+    };
+    trace!("Requesting retry {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, false);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_encrypted_extensions(
+    transcript: &mut HandshakeHash,
+    cx: &mut ServerContext<'_>,
+    config: &ServerConfig,
+    client_hello: &ClientHelloPayload,
+    early_data_accepted: bool,
+    cert_types: hs::NegotiatedCertTypes,
+    supported_groups: Option<Vec<NamedGroup>>,
+    retry_configs: Option<Vec<u8>>,
+    expected_tickets: Option<u8>,
+) {
+    let exts = ServerExtensions {
+        supported_groups,
+        encrypted_client_hello: retry_configs,
+        alpn: cx
+            .common
+            .alpn_protocol
+            .clone()
+            .map(crate::msgs::handshake::ProtocolName::from),
+        server_name_ack: client_hello.sni().map(|_| ()),
+        early_data: early_data_accepted.then_some(()),
+        client_certificate_type: cert_types.client,
+        server_certificate_type: cert_types.server,
+        // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
+        record_size_limit: hs::record_size_limit_ack(
+            config,
+            client_hello,
+            ProtocolVersion::TLSv1_3,
+        ),
+        // RFC 9149 §3: `expected_count`.
+        ticket_request: expected_tickets,
+        ..Default::default()
+    };
+    let m = Message {
+        version: ProtocolVersion::TLSv1_3,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::EncryptedExtensions(exts),
+        )),
+    };
+    trace!("sending encrypted extensions {:?}", m);
+    transcript.add_message(&m);
+    cx.common.send_msg(m, true);
+}
+
+/// Sends a CertificateRequest if the configuration wants client authentication.
+pub(super) fn emit_certificate_req_tls13(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    config: &ServerConfig,
+) -> Result<bool, Error> {
+    if !config.verifier.offer_client_auth() {
+        return Ok(false);
+    }
+    let m = certificate_request_message(config, Vec::new())?;
+    trace!("Sending CertificateRequest {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, true);
+    Ok(true)
+}
+
+/// A CertificateRequest with `context` (empty during the handshake, RFC
+/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities.
+pub(super) fn certificate_request_message(
+    config: &ServerConfig,
+    context: Vec<u8>,
+) -> Result<Message<'static>, Error> {
+    let schemes: Vec<SignatureScheme> = config
+        .verifier
+        .supported_verify_schemes()
+        .into_iter()
+        .filter(SignatureScheme::supported_in_tls13)
+        .collect();
+    if schemes.is_empty() {
+        return Err(Error::general(
+            "client certificate verifier supports no TLS 1.3 signature schemes",
+        ));
+    }
+    let authorities = config.verifier.root_hint_subjects();
+    let cr = CertificateRequestPayloadTls13 {
+        context: PayloadU8::new(context),
+        extensions: CertificateRequestExtensions {
+            signature_algorithms: Some(schemes),
+            authorities: (!authorities.is_empty()).then(|| authorities.to_vec()),
+            certificate_compression: crate::compress::offered_cert_compression(
+                &config.cert_decompressors,
+                config.cert_decompression_limit,
+            ),
+            ..Default::default()
+        },
+    };
+    Ok(Message {
+        version: ProtocolVersion::TLSv1_3,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::CertificateRequestTls13(cr),
+        )),
+    })
+}
+
+/// The first delegated credential (RFC 9345) of `server_key` that the
+/// client accepts, if it offered the extension: its scheme must be in the
+/// client's `delegated_credential` list, the credential's signature scheme
+/// in `signature_algorithms` (§4.1.1), and it must be valid for at most
+/// seven more days (§4.1.3). Only for X.509 certificates.
+pub(super) fn choose_delegated_credential<'a>(
+    config: &ServerConfig,
+    server_key: &ActiveCertifiedKey<'a>,
+    client_hello: &ClientHelloPayload,
+    sigschemes: &[SignatureScheme],
+    cert_types: hs::NegotiatedCertTypes,
+) -> Option<&'a DelegatedCredentialKey> {
+    let offered = client_hello.extensions.delegated_credential.as_ref()?;
+    let end_entity = server_key.get_cert().first()?;
+    if server_key.get_delegated_credentials().is_empty()
+        || cert_types.server == Some(CertificateType::RawPublicKey)
+    {
+        return None;
+    }
+    let now = config.current_time().ok()?;
+    server_key
+        .get_delegated_credentials()
+        .iter()
+        .map(|dc| &**dc)
+        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
+}
+
+pub(super) fn emit_certificate_tls13(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    config: &ServerConfig,
+    server_key: &ActiveCertifiedKey<'_>,
+    client_hello: &ClientHelloPayload,
+    delegated: Option<&DelegatedCredentialKey>,
+) {
+    // RFC 6066 §8: staple only when the client asked.
+    let ocsp = client_hello
+        .extensions
+        .certificate_status_request
+        .as_ref()
+        .and_then(|_| server_key.get_ocsp());
+    let mut cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+    // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
+    if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
+        first.delegated_credential = Some(dc.credential().clone());
+    }
+
+    // RFC 8879 §4: compress when the client offered an algorithm we have.
+    if let Some(offered) = &client_hello.extensions.certificate_compression
+        && let Some(compressed) = crate::compress::compress_certificate(
+            &config.cert_compressors,
+            &config.cert_compression_cache,
+            offered,
+            &cert_body.get_encoding(),
+        )
+    {
+        let m = Message {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload(
+                HandshakePayload::CompressedCertificate(compressed),
+            )),
+        };
+        transcript.add_message(&m);
+        common.send_msg(m, true);
+        return;
+    }
+
+    let m = Message {
+        version: ProtocolVersion::TLSv1_3,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::CertificateTls13(cert_body),
+        )),
+    };
+    trace!("sending certificate {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, true);
+}
+
+pub(super) fn emit_certificate_verify_tls13(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    server_key: &ActiveCertifiedKey<'_>,
+    schemes: &[SignatureScheme],
+    delegated: Option<&DelegatedCredentialKey>,
+) -> Result<(), Error> {
+    let message = crate::client::tls13::construct_server_verify_message(&transcript.current_hash());
+    // RFC 9345 §4.1.1: with a delegated credential, its key signs with the
+    // credential's scheme (checked to be possible when it was attached).
+    let signer = match delegated {
+        Some(dc) => dc
+            .key()
+            .choose_scheme(&[dc.credential().credential.dc_cert_verify_algorithm]),
+        None => server_key.get_key().choose_scheme(schemes),
+    };
+    let signer = signer.ok_or_else(|| {
+        common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            PeerIncompatible::NoSignatureSchemesInCommon,
+        )
+    })?;
+    let scheme = signer.scheme();
+    let sig = signer.sign(&message)?;
+    let cv = DigitallySignedStruct::new(scheme, sig);
+    let m = Message {
+        version: ProtocolVersion::TLSv1_3,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(
+            HandshakePayload::CertificateVerify(cv),
+        )),
+    };
+    trace!("sending certificate-verify {:?}", m);
+    transcript.add_message(&m);
+    common.send_msg(m, true);
+    Ok(())
+}
+
+pub(super) fn emit_finished_tls13(
+    transcript: &mut HandshakeHash,
+    randoms: &ConnectionRandoms,
+    cx: &mut ServerContext<'_>,
+    key_schedule: KeyScheduleHandshake,
+    config: &ServerConfig,
+) -> KeyScheduleTrafficWithClientFinishedPending {
+    let handshake_hash = transcript.current_hash();
+    let verify_data = key_schedule.sign_server_finish(handshake_hash.as_ref());
+    let m = Message {
+        version: ProtocolVersion::TLSv1_3,
+        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Finished(
+            Payload::new(verify_data.as_ref().to_vec()),
+        ))),
+    };
+    trace!("sending finished {:?}", m);
+    transcript.add_message(&m);
+    let hash_at_server_fin = transcript.current_hash();
+    cx.common.send_msg(m, true);
+
+    // The server starts sending application data under the application
+    // traffic secret right away.
+    key_schedule.into_traffic_with_client_finished_pending(
+        hash_at_server_fin.as_ref(),
+        &*config.key_log,
+        &randoms.client,
+        cx.common,
+    )
+}

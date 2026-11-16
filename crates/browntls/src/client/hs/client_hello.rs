@@ -1,0 +1,741 @@
+//! Building and sending the ClientHello: the first one, and the answer to a
+//! HelloRetryRequest.
+
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use browntls_pki::ServerName;
+
+use super::super::common::ClientHelloDetails;
+use super::super::{ClientConfig, ClientHelloPadding, tls13};
+use super::{
+    ClientContext, ClientHelloInput, ClientSessionValue, ExpectServerHello,
+    ExpectServerHelloOrHelloRetryRequest, NextStateOrError, OfferedKeyShare,
+};
+use crate::common_state::KxState;
+use crate::crypto::ActiveKeyExchange;
+use crate::ech::EchMode;
+use crate::ech::client::ClientEch;
+use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureScheme};
+use crate::error::Error;
+use crate::hash_hs::HandshakeHashBuffer;
+use crate::log::{debug, trace};
+use crate::msgs::codec::Codec;
+use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup, PskKeyExchangeMode};
+use crate::msgs::grease::GreaseValues;
+#[cfg(feature = "tls12")]
+use crate::msgs::handshake::ClientSessionTicket;
+use crate::msgs::handshake::{
+    CertificateStatusRequest, ClientExtensions, ClientHelloPayload, ClientTicketRequest,
+    HandshakeMessagePayload, HandshakePayload, HelloRetryRequest, KeyShareEntry,
+    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, Random,
+    ServerNamePayload, SessionId,
+};
+use crate::msgs::message::{Message, MessagePayload};
+use crate::msgs::persist::Retrieved;
+use crate::psk::{OfferedPsk, PskSecret};
+use crate::suites::SupportedCipherSuite;
+use crate::sync::Arc;
+use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly};
+
+/// Looks up and validates a session to offer for `server_name`.
+fn find_session(
+    server_name: &ServerName<'static>,
+    config: &ClientConfig,
+    cx: &mut ClientContext<'_>,
+) -> Option<Retrieved<ClientSessionValue>> {
+    let now = config.current_time().ok()?;
+    let _ = &cx;
+
+    let found = config
+        .resumption
+        .store
+        .take_tls13_ticket(server_name)
+        .map(ClientSessionValue::Tls13)
+        .or_else(|| {
+            #[cfg(feature = "tls12")]
+            {
+                if config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled {
+                    return None;
+                }
+                config
+                    .resumption
+                    .store
+                    .tls12_session(server_name)
+                    .map(ClientSessionValue::Tls12)
+            }
+            #[cfg(not(feature = "tls12"))]
+            {
+                None
+            }
+        })
+        .map(|value| Retrieved::new(value, now))?;
+
+    if found.has_expired() {
+        debug!("Not resuming expired session");
+        return None;
+    }
+
+    if matches!(
+        &found.value,
+        ClientSessionValue::Tls13(inner) if inner.delegated_credential_expired_at(now)
+    ) {
+        debug!("Not resuming session authenticated by an expired delegated credential");
+        return None;
+    }
+
+    let usable = match &found.value {
+        ClientSessionValue::Tls13(inner) => {
+            config.supports_version(ProtocolVersion::TLSv1_3)
+                && config
+                    .find_cipher_suite(inner.suite().common.suite)
+                    .is_some()
+        }
+        #[cfg(feature = "tls12")]
+        ClientSessionValue::Tls12(inner) => {
+            config.supports_version(ProtocolVersion::TLSv1_2)
+                && config
+                    .find_cipher_suite(inner.suite().common.suite)
+                    .is_some()
+                && (!config.require_ems || inner.extended_ms())
+        }
+    };
+    if !usable {
+        debug!("Not resuming session: incompatible with configuration");
+        return None;
+    }
+    Some(found)
+}
+
+/// Picks the group for the initial key share: the one the server accepted
+/// last time, or the provider's first TLS 1.3-capable group.
+fn initial_key_share(
+    config: &ClientConfig,
+    server_name: &ServerName<'static>,
+    kx_state: &mut KxState,
+) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+    let group = config
+        .resumption
+        .store
+        .kx_hint(server_name)
+        .and_then(|hint| config.find_kx_group(hint, ProtocolVersion::TLSv1_3))
+        .or_else(|| {
+            config
+                .provider
+                .kx_groups
+                .iter()
+                .copied()
+                .find(|g| g.usable_for_version(ProtocolVersion::TLSv1_3))
+        })
+        .ok_or_else(|| Error::general("no key exchange group is usable for TLS 1.3"))?;
+    *kx_state = KxState::Started(group);
+    group.start()
+}
+
+/// Builds and sends the first ClientHello.
+pub(in crate::client) fn start_handshake(
+    server_name: ServerName<'static>,
+    alpn_protocols: Vec<Vec<u8>>,
+    config: Arc<ClientConfig>,
+    cx: &mut ClientContext<'_>,
+) -> NextStateOrError {
+    let mut transcript_buffer = HandshakeHashBuffer::new();
+    if config.client_auth_cert_resolver.has_certs() {
+        transcript_buffer.set_client_auth_enabled();
+    }
+
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
+    let mut resuming = find_session(&server_name, &config, cx);
+
+    let key_share = if supports_tls13 {
+        Some(initial_key_share(
+            &config,
+            &server_name,
+            &mut cx.common.kx_state,
+        )?)
+    } else {
+        None
+    };
+
+    let session_id = match &resuming {
+        #[cfg(feature = "tls12")]
+        Some(Retrieved {
+            value: ClientSessionValue::Tls12(inner),
+            ..
+        }) if !inner.session_id.is_empty() => inner.session_id,
+        // RFC 8446 §4.1.2: a non-empty legacy_session_id helps middleboxes;
+        // for TLS 1.2 ticket resumption a random ID lets us detect acceptance.
+        _ if supports_tls13 || resuming.is_some() => {
+            SessionId::random(config.provider.secure_random)?
+        }
+        _ => SessionId::empty(),
+    };
+
+    // For TLS 1.2 ticket resumption the stored session has no ID of its own:
+    // remember the random one we send, so the server echoing it back tells us
+    // the ticket was accepted (RFC 5077 §3.4).
+    #[cfg(feature = "tls12")]
+    if let Some(Retrieved {
+        value: ClientSessionValue::Tls12(inner),
+        ..
+    }) = &mut resuming
+        && inner.session_id.is_empty()
+    {
+        inner.session_id = session_id;
+    }
+
+    // RFC 9849 §6.1: an ECH offer needs TLS 1.3, and may not resume a
+    // TLS 1.2 session.
+    let ech = match &config.ech_mode {
+        Some(EchMode::Enable(ech_config)) => {
+            if !supports_tls13 {
+                return Err(Error::general(
+                    "Encrypted Client Hello requires TLS 1.3 to be enabled",
+                ));
+            }
+            #[cfg(feature = "tls12")]
+            if matches!(
+                &resuming,
+                Some(Retrieved {
+                    value: ClientSessionValue::Tls12(_),
+                    ..
+                })
+            ) {
+                resuming = None;
+            }
+            Some(ClientEch::offer(
+                ech_config,
+                config.provider.secure_random,
+                config.client_auth_cert_resolver.has_certs(),
+            )?)
+        }
+        Some(EchMode::Grease(grease)) => Some(ClientEch::GreasePending(grease.clone())),
+        None => None,
+    };
+    if let Some(ech) = &ech {
+        cx.data.ech_status = ech.initial_status();
+    }
+
+    let random = Random::new(config.provider.secure_random)?;
+    let grease = if config.enable_grease {
+        Some(GreaseValues::random(config.provider.secure_random)?)
+    } else {
+        None
+    };
+    let input = ClientHelloInput {
+        config,
+        resuming,
+        random,
+        sent_tls13_fake_ccs: false,
+        hello: ClientHelloDetails::new(),
+        session_id,
+        server_name,
+        alpn_protocols,
+        ech,
+        grease,
+    };
+    emit_client_hello_for_retry(
+        transcript_buffer,
+        None,
+        key_share.map(OfferedKeyShare::Full),
+        None,
+        input,
+        cx,
+    )
+}
+
+/// Builds and sends a ClientHello (the first, or the answer to a HelloRetryRequest).
+///
+/// `committed_suite` is the suite a HelloRetryRequest fixed, which the
+/// ServerHello must then repeat.
+pub(super) fn emit_client_hello_for_retry(
+    mut transcript_buffer: HandshakeHashBuffer,
+    retryreq: Option<&HelloRetryRequest>,
+    key_share: Option<OfferedKeyShare>,
+    committed_suite: Option<SupportedCipherSuite>,
+    mut input: ClientHelloInput,
+    cx: &mut ClientContext<'_>,
+) -> NextStateOrError {
+    let config = &input.config;
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    // RFC 9849 §6.1: with ECH, both ClientHellos offer TLS 1.3 only.
+    let ech_tls13_only = input
+        .ech
+        .as_ref()
+        .is_some_and(ClientEch::restricts_to_tls13);
+    let supports_tls12 = config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
+    let offers_version = |v: ProtocolVersion| {
+        config.supports_version(v) && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+    };
+
+    let supported_versions: Vec<ProtocolVersion> =
+        [ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]
+            .into_iter()
+            .filter(|v| offers_version(*v))
+            .collect();
+
+    let server_name = match (&input.server_name, config.enable_sni) {
+        (ServerName::DnsName(dns), true) => Some(ServerNamePayload::SingleDnsName(dns.to_owned())),
+        _ => None,
+    };
+
+    let offered_sigschemes = config.verifier().supported_verify_schemes();
+
+    // Only groups usable with an offered version: a TLS 1.2-only hello must
+    // not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3, RFC 7919
+    // §3) or ML-KEM. The list may not be empty (RFC 9846 §4.3.7), so a
+    // configuration without such a group fails here instead of sending one.
+    let mut named_groups: Vec<NamedGroup> = Vec::new();
+    for group in config
+        .provider
+        .kx_groups
+        .iter()
+        .filter(|g| supported_versions.iter().any(|v| g.usable_for_version(*v)))
+        .map(|g| g.name())
+    {
+        if !named_groups.contains(&group) {
+            named_groups.push(group);
+        }
+    }
+    if named_groups.is_empty() {
+        return Err(Error::General(
+            "no key exchange group is usable with the enabled protocol versions".into(),
+        ));
+    }
+
+    // RFC 7366 §2: ask for Encrypt-then-MAC whenever a block cipher suite
+    // is on offer; the server answers only if it selects one.
+    let offers_block_cipher = supports_tls12
+        && config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.is_tls12_block_cipher());
+
+    // RFC 9846 §4.3.8: key shares appear in the order of their groups in
+    // supported_groups.
+    let group_position = |group: NamedGroup| {
+        named_groups
+            .iter()
+            .position(|g| *g == group)
+            .unwrap_or(usize::MAX)
+    };
+    let key_shares = key_share.as_ref().map(|ks| {
+        let mut shares = vec![KeyShareEntry::new(ks.group(), ks.pub_key())];
+        // For the first ClientHello (or a HelloRetryRequest that names no
+        // group) a hybrid share's classical half is offered too, for
+        // free, when the provider also supports that group on its own.
+        let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+        if !hrr_named_group
+            && let Some((component_group, component_share)) = ks.hybrid_component()
+            && config
+                .find_kx_group(component_group, ProtocolVersion::TLSv1_3)
+                .is_some()
+        {
+            shares.push(KeyShareEntry::new(component_group, component_share));
+        }
+        shares.sort_by_key(|share| group_position(share.group));
+        shares
+    });
+
+    let mut exts = ClientExtensions {
+        server_name,
+        named_groups: Some(named_groups),
+        ec_point_formats: supports_tls12.then(|| vec![ECPointFormat::Uncompressed]),
+        signature_schemes: Some(offered_sigschemes.clone()),
+        protocols: (!input.alpn_protocols.is_empty()).then(|| {
+            input
+                .alpn_protocols
+                .iter()
+                .cloned()
+                .map(ProtocolName::from)
+                .collect()
+        }),
+        certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
+        extended_master_secret: supports_tls12.then_some(()),
+        encrypt_then_mac: offers_block_cipher.then_some(()),
+        supported_versions: Some(supported_versions),
+        psk_modes: supports_tls13.then(|| vec![PskKeyExchangeMode::PSK_DHE_KE]),
+        key_shares,
+        cookie: retryreq.and_then(|r| r.extensions.cookie.clone()),
+        // RFC 9846 §4.3.6: willing to authenticate after the handshake.
+        post_handshake_auth: (supports_tls13
+            && config.enable_post_handshake_auth
+            && config.client_auth_cert_resolver.has_certs())
+        .then_some(()),
+        // RFC 7250: raw public keys instead of certificates, in either direction.
+        client_certificate_types: config
+            .client_auth_cert_resolver
+            .only_raw_public_keys()
+            .then(|| vec![CertificateType::RawPublicKey]),
+        server_certificate_types: config
+            .verifier
+            .requires_raw_public_keys()
+            .then(|| vec![CertificateType::RawPublicKey]),
+        certificate_compression: supports_tls13
+            .then(|| {
+                crate::compress::offered_cert_compression(
+                    &config.cert_decompressors,
+                    config.cert_decompression_limit,
+                )
+            })
+            .flatten(),
+        ..Default::default()
+    };
+
+    // RFC 9345 §4.1.1: offer to accept a delegated credential (TLS 1.3 only).
+    if supports_tls13 && config.enable_delegated_credentials {
+        exts.delegated_credential = Some(tls13::delegated_credential_schemes(config));
+    }
+
+    #[cfg(feature = "tls12")]
+    if supports_tls12
+        && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets
+    {
+        exts.session_ticket = Some(match &input.resuming {
+            Some(Retrieved {
+                value: ClientSessionValue::Tls12(inner),
+                ..
+            }) if !inner.ticket().is_empty() => {
+                ClientSessionTicket::Offer(crate::msgs::base::Payload::new(inner.ticket().to_vec()))
+            }
+            _ => ClientSessionTicket::Request,
+        });
+    }
+
+    // RFC 9846 §4.2.4: after a HelloRetryRequest, a PSK whose hash differs
+    // from that of the cipher suite the server selected cannot be used (its
+    // binder would cover a transcript hashed differently), so it is dropped.
+    if let Some(committed) = committed_suite
+        && let Some(Retrieved {
+            value: ClientSessionValue::Tls13(inner),
+            ..
+        }) = &input.resuming
+        && inner.suite().common.hash_provider.algorithm() != committed.hash_provider().algorithm()
+    {
+        input.resuming = None;
+    }
+
+    // Our external PSKs, in configuration order (RFC 9846 §4.3.11): whether
+    // we offer any decides which ticket may go with them. Never in the
+    // clear after the server rejected ECH at the HelloRetryRequest (RFC
+    // 9849 §6.1.5): their identities belong to the inner hello.
+    let ech_rejected_at_retry = matches!(input.ech, Some(ClientEch::RejectedAtRetry { .. }));
+    let external_offers =
+        if supports_tls13 && !config.external_psks.is_empty() && !ech_rejected_at_retry {
+            crate::psk::client_external_offers(
+                &config.external_psks,
+                &config.provider.cipher_suites,
+                committed_suite.and_then(|s| s.tls13()),
+                &input.server_name,
+                &input.alpn_protocols,
+            )
+        } else {
+            Vec::new()
+        };
+    // RFC 8773: ask for certificate authentication on top of an external PSK.
+    let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
+    if cert_with_extern_psk {
+        exts.cert_with_extern_psk = Some(());
+    }
+
+    if let Some(Retrieved {
+        value: ClientSessionValue::Tls13(inner),
+        ..
+    }) = &input.resuming
+    {
+        // A session established with an external PSK is resumed only while
+        // that PSK is still configured and usable on this connection: the
+        // resumption carries its authentication forward. With
+        // `require_external_psk`, other sessions are not offered at all.
+        let ticket_usable = match inner.external_psk() {
+            Some(binding) => config.external_psks.iter().any(|psk| {
+                binding.matches(psk)
+                    && psk.usable_by_client(&input.server_name, &input.alpn_protocols)
+            }),
+            None => !config.require_external_psk,
+        };
+        // RFC 8773 asks for certificate authentication with an external PSK;
+        // a server that resumed the ticket instead would skip it. Rather
+        // than let the server choose, the ticket is not offered alongside
+        // (a conservative choice; RFC 8773 does not require it).
+        if !ticket_usable || cert_with_extern_psk {
+            input.resuming = None;
+        }
+    }
+
+    // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in below.
+    let tls13_session = match &input.resuming {
+        Some(retrieved) if supports_tls13 => retrieved.map(|v| match v {
+            ClientSessionValue::Tls13(inner) => Some(inner),
+            #[cfg(feature = "tls12")]
+            _ => None,
+        }),
+        _ => None,
+    };
+    // The ticket goes first, then the external PSKs; their binders are
+    // filled in below.
+    let mut offered_psks: Vec<OfferedPsk> = Vec::new();
+    if let Some(resuming) = &tls13_session {
+        offered_psks.push(OfferedPsk {
+            identity: resuming.ticket().to_vec(),
+            obfuscated_ticket_age: resuming.obfuscated_ticket_age(),
+            suite: resuming.suite(),
+            secret: PskSecret::new(resuming.secret()),
+            label: BinderLabel::Resumption,
+            external: None,
+        });
+    }
+    offered_psks.extend(external_offers);
+
+    // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
+    // configuration allow it, but never in the second ClientHello of a
+    // retry. An external PSK needs a provisioned suite, and is not used for
+    // 0-RTT when we ask for certificate authentication (RFC 8773).
+    if let Some(first) = offered_psks.first()
+        && config.enable_early_data
+        && retryreq.is_none()
+        && !ech_tls13_only
+    {
+        let max_early_data_size = match (&first.external, &tls13_session) {
+            (Some(psk), _) => {
+                if psk.cipher_suite() == Some(first.suite.common.suite) && !cert_with_extern_psk {
+                    psk.max_early_data_size()
+                } else {
+                    0
+                }
+            }
+            (None, Some(resuming)) => resuming.max_early_data_size(),
+            (None, None) => 0,
+        };
+        if max_early_data_size > 0 {
+            cx.data.early_data.enable(max_early_data_size as usize);
+            exts.early_data = Some(());
+        }
+    }
+
+    if !offered_psks.is_empty() {
+        exts.preshared_key = Some(PresharedKeyOffer {
+            identities: offered_psks
+                .iter()
+                .map(|o| PresharedKeyIdentity::new(o.identity.clone(), o.obfuscated_ticket_age))
+                .collect(),
+            binders: offered_psks
+                .iter()
+                .map(|o| {
+                    PresharedKeyBinder::new(vec![0u8; o.suite.common.hash_provider.output_len()])
+                })
+                .collect(),
+        });
+    }
+
+    // RFC 8449: the largest record we accept. The protocol maximum is that
+    // of the highest version offered; a TLS 1.2 server does not enforce a
+    // larger value (RFC 8449 §4) and we clamp what we enforce.
+    exts.record_size_limit = config
+        .record_size_limit
+        .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    // RFC 9149: a TLS 1.3 extension only.
+    exts.ticket_request = config
+        .tls13_ticket_request
+        .filter(|_| supports_tls13)
+        .map(|request| ClientTicketRequest {
+            new_session_count: request.new_session_count,
+            resumption_count: request.resumption_count,
+        });
+
+    let mut cipher_suites: Vec<CipherSuite> = config
+        .provider
+        .cipher_suites
+        .iter()
+        .filter(|cs| offers_version(cs.version().version))
+        .map(|cs| cs.suite())
+        .collect();
+    // RFC 5746 §3.3: signal secure renegotiation support (we never
+    // renegotiate); a TLS 1.3-only hello has nothing to signal.
+    if supports_tls12 || !ech_tls13_only {
+        cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    }
+
+    // What the server's choices are checked against: never a GREASE value.
+    cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
+    input.hello.offered_sigschemes = offered_sigschemes;
+    input.hello.sent_record_size_limit = exts.record_size_limit;
+
+    if let Some(grease) = &input.grease {
+        add_grease(grease, retryreq, &mut cipher_suites, &mut exts);
+    }
+
+    if let Some(ech) = &mut input.ech {
+        // Everything but the extensions: version, random, an empty
+        // session ID, the suites and the compression methods.
+        let other_len = 2 + 32 + 1 + 2 + 2 * cipher_suites.len() + 2;
+        ech.prepare(&mut exts, other_len, config.provider.secure_random)?;
+    }
+    // GREASE extensions are never part of `present_types`.
+    input.hello.sent_extensions = exts.present_types();
+
+    let mut chp = ClientHelloPayload {
+        client_version: ProtocolVersion::TLSv1_2,
+        random: input.random,
+        session_id: input.session_id,
+        cipher_suites,
+        compression_methods: vec![Compression::Null],
+        extensions: exts,
+    };
+    // RFC 7685: the length is final here, binders included (they are
+    // zero-filled placeholders of the right size until computed below).
+    // With a real ECH offer this is the inner hello, which RFC 9849 §6.1.3
+    // pads instead; the outer hello is padded when it is sealed.
+    if !matches!(input.ech, Some(ClientEch::Offer(_))) {
+        chp.extensions.padding = padding_len(
+            config.client_hello_padding,
+            HANDSHAKE_HEADER_LEN + chp.get_encoding().len(),
+        );
+    }
+    let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
+
+    tls13::fill_in_psk_binders(&offered_psks, &transcript_buffer, &mut hmp);
+
+    let ch = Message {
+        // RFC 8446 §5.1: the first ClientHello's record may use the lowest
+        // legacy version for compatibility; later records use TLS 1.2.
+        version: if retryreq.is_some() {
+            ProtocolVersion::TLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_0
+        },
+        payload: MessagePayload::handshake(hmp),
+    };
+
+    // RFC 9849 §6.1.1: with a real ECH offer, `ch` is the inner hello: it
+    // goes into our transcript, sealed into the outer hello that is sent.
+    let outer = match (&mut input.ech, &ch.payload) {
+        (
+            Some(ClientEch::Offer(offer)),
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::ClientHello(inner)),
+                ..
+            },
+        ) => {
+            let outer = offer.seal_outer(
+                inner,
+                retryreq.is_some(),
+                |len| padding_len(config.client_hello_padding, HANDSHAKE_HEADER_LEN + len),
+                config.provider.secure_random,
+            )?;
+            let outer = Message {
+                version: ch.version,
+                payload: MessagePayload::handshake(HandshakeMessagePayload(
+                    HandshakePayload::ClientHello(outer),
+                )),
+            };
+            offer.outer_transcript.add_message(&outer);
+            Some(outer)
+        }
+        _ => None,
+    };
+
+    trace!("Sending ClientHello {:#?}", ch);
+    transcript_buffer.add_message(&ch);
+    cx.common.send_msg(outer.unwrap_or(ch), false);
+
+    // With 0-RTT offered, the early traffic key derives from the ClientHello
+    // alone, so early data can go out right behind it.
+    if let Some(first) = offered_psks.first()
+        && cx.data.early_data.is_enabled()
+    {
+        let schedule = KeyScheduleEarly::new(first.suite, first.secret.as_ref());
+        tls13::derive_early_traffic_secret(
+            &*config.key_log,
+            cx,
+            first.suite.common.hash_provider,
+            &schedule,
+            &mut input.sent_tls13_fake_ccs,
+            &transcript_buffer,
+            &input.random.0,
+        );
+    }
+
+    let next = ExpectServerHello {
+        input,
+        transcript_buffer,
+        offered_psks,
+        offered_key_share: key_share,
+        suite: committed_suite,
+    };
+
+    Ok(if retryreq.is_some() {
+        Box::new(next)
+    } else {
+        Box::new(ExpectServerHelloOrHelloRetryRequest { next })
+    })
+}
+
+/// The four-byte handshake message header: type and 24-bit length.
+const HANDSHAKE_HEADER_LEN: usize = 4;
+
+/// Puts the GREASE values (RFC 8701 §3) into the ClientHello, each first in
+/// its list. After a HelloRetryRequest that names a group, the key share
+/// list must hold exactly one share for that group (RFC 9846 §4.1.2), so no
+/// GREASE share goes into that second ClientHello.
+fn add_grease(
+    grease: &GreaseValues,
+    retryreq: Option<&HelloRetryRequest>,
+    cipher_suites: &mut Vec<CipherSuite>,
+    exts: &mut ClientExtensions,
+) {
+    cipher_suites.insert(0, CipherSuite::Unknown(grease.cipher_suite));
+    if let Some(groups) = &mut exts.named_groups {
+        groups.insert(0, NamedGroup::Unknown(grease.group));
+    }
+    let hrr_named_group = retryreq.is_some_and(|rr| rr.extensions.key_share.is_some());
+    if let Some(shares) = &mut exts.key_shares
+        && !hrr_named_group
+    {
+        // RFC 8701 §3: a GREASE key share carries a single byte.
+        shares.insert(
+            0,
+            KeyShareEntry::new(NamedGroup::Unknown(grease.group), &[0]),
+        );
+    }
+    if let Some(schemes) = &mut exts.signature_schemes {
+        schemes.insert(0, SignatureScheme::Unknown(grease.signature_scheme));
+    }
+    if let Some(versions) = &mut exts.supported_versions {
+        versions.insert(0, ProtocolVersion::Unknown(grease.version));
+    }
+    if let Some(modes) = &mut exts.psk_modes {
+        modes.insert(0, PskKeyExchangeMode::Unknown(grease.psk_mode));
+    }
+    exts.grease_first = Some(grease.first_extension);
+    exts.grease_last = Some(grease.last_extension);
+}
+
+/// The length of the `padding` extension body (RFC 7685) for a ClientHello
+/// handshake message of `unpadded` bytes, or `None` for no extension.
+///
+/// Lengths of 256 to 511 bytes are padded to 512, the workaround RFC 7685
+/// §4 was written for; an `AtLeast` target is reached first. The extension
+/// itself takes four bytes of header.
+fn padding_len(policy: ClientHelloPadding, unpadded: usize) -> Option<usize> {
+    const PROBLEMATIC: core::ops::Range<usize> = 256..512;
+    let mut body = match policy {
+        ClientHelloPadding::Disabled => return None,
+        ClientHelloPadding::AtLeast(target) if unpadded < usize::from(target) => {
+            Some((usize::from(target) - unpadded).saturating_sub(4))
+        }
+        _ => None,
+    };
+    let padded = unpadded + body.map_or(0, |b| 4 + b);
+    if PROBLEMATIC.contains(&padded) {
+        let missing = PROBLEMATIC.end - padded;
+        body = Some(match body {
+            Some(b) => b + missing,
+            None => missing.saturating_sub(4),
+        });
+    }
+    body
+}

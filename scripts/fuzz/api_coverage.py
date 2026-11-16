@@ -7,7 +7,7 @@ functions) in the library crates' sources, outside inline modules gated on
 or under a `tests/` directory of `src/`.
 Each one is identified by its source file and its name qualified with the
 type of the enclosing `impl` block, for example
-`crates/browntls/src/conn.rs ConnectionCommon::read_tls`.
+`crates/browntls/src/conn/buffered.rs ConnectionCommon::read_tls`.
 
 `run` builds the fuzz project's library tests with LLVM source-based coverage
 on the pinned stable toolchain, runs them (they feed every harness its seeds,

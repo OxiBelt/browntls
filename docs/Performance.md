@@ -209,6 +209,62 @@ The portable P-256 path gained 1.6–2.0× and portable RSA signing 2.3–2.4×.
 Loading P-256's `p[3]` from an immediate instead of a static (so the crate
 links into shared objects) cost at most a few percent in A/B runs.
 
+## Load-aware backend routing
+
+`accel::load` (see [Architecture](Architecture.md#load-aware-backend-routing))
+moves work to another backend only when that backend measures faster than
+a congested primary. These measurements answer two questions on one
+machine: what does it cost to leave routing enabled, and what would a shift
+cost or gain. Reproduce with:
+
+```sh
+cargo run --release -p browntls-crypto --example load -- --cipher aes --threads 30 --fixed 0:50
+```
+
+The example seals 16 KiB records, one key per thread, with routing disabled
+and enabled, and once more with a share pinned on an alternate backend.
+
+- CPU: AMD EPYC 4585PX (virtual machine, 30 vCPUs, one thread per core),
+  with AVX-512 VAES, VPCLMULQDQ and IFMA, BMI2 and ADX
+- Medians of five runs of 2 s each; another job was using the machine at
+  times. Throughput is the total over all threads.
+
+| Cipher | Threads | Routing disabled | Enabled | 50% pinned on the first alternate |
+|---|---:|---:|---:|---:|
+| ChaCha20-Poly1305 | 1 | 4.6 GB/s | -0.3% | -28% (AVX2) |
+| ChaCha20-Poly1305 | 30 | 93.8 GB/s | -0.5% | -29% |
+| ChaCha20-Poly1305 | 90 | 93.5 GB/s | -0.6% | -29% |
+| AES-256-GCM | 1 | 26.4 GB/s | -3.0% | -47% (VAES on AVX2) |
+| AES-256-GCM | 30 | 346 GB/s | -4.0% | -32% |
+| AES-256-GCM | 90 | 338 GB/s | -3.4% | -34% |
+
+Observations:
+
+- **Cost of leaving it enabled**: about 20 ns per record of at least 4096
+  bytes (shorter records skip the routing decision). That is half a percent
+  of a ChaCha20-Poly1305 record and 3 to 4% of an AES-256-GCM record, which
+  takes 0.6 µs here. Single runs of the AES rows varied from -1.4% to -10%.
+  For key exchange and signatures the cost measured 0.1 to 0.2 µs per
+  operation: 1 to 4% of an ML-KEM operation and below the noise for the
+  curves and RSA.
+- **No shift happened**, with all cores busy (30 threads) or three threads
+  per core (90). The balancer noticed the slowdown under overload, probed
+  the alternates a few times, found none faster and stayed on the primary.
+- **A shift would have lost here**: pinning half of the work on the next
+  backend cost 28 to 47%, and for the other families every alternate
+  measured slower than its primary on the idle machine too (portable P-256
+  ECDH 1.5×, portable ML-KEM-768 2×, RSA-2048 signing 2.7× on BMI2/ADX and
+  3.8× on portable code). On this machine each core has its own vector and
+  AES units, the virtual CPUs do not share cores, and the widest backend
+  stays the fastest under load, so the premise of routing (the primary's
+  instructions being contended while another kind is free) does not arise.
+
+What these numbers do not show: a machine where it does arise, such as two
+hardware threads of one core competing for the same execution units, or
+wide-vector code slowed by frequency limits. No such measurement exists
+yet, so the benefit of routing is unverified; the cost above is what
+enabling it buys on a machine like this one.
+
 ## Improvement candidates
 
 - SHA-512 rounds in hand-scheduled x86-64 assembly with the schedule

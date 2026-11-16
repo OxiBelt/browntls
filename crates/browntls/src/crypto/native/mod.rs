@@ -69,6 +69,42 @@
 //! # Ok::<(), browntls::Error>(())
 //! ```
 //!
+//! ## Load-aware routing
+//!
+//! The policy picks one backend per family. With the `std` feature,
+//! [`accel::load`] can also move part of a family's work to another
+//! permitted backend while the selected one runs slower than it usually
+//! does, for example because other work is using the same instructions.
+//! It is off by default and process-wide. Enable it before creating
+//! connections: AES-GCM keys are only routed if they were created while it
+//! was enabled. Nothing a peer can observe changes, since every backend
+//! computes the same results.
+//!
+//! Routed: AES-GCM and ChaCha20-Poly1305 records of at least 4096 bytes,
+//! X25519, P-256, P-384, P-521 and ML-KEM key exchange (also inside the
+//! hybrid groups), ECDSA signatures and verifications on those curves, and
+//! RSA signatures with 2048-, 3072- and 4096-bit keys.
+//!
+//! ```
+//! use browntls::crypto::native::accel::load;
+//!
+//! # #[cfg(feature = "std")] {
+//! // Shift when a backend is 25% slower than usual (the default).
+//! load::enable(load::Config::DEFAULT).expect("built with `std`");
+//!
+//! // Later: what is each kind of work doing?
+//! for s in load::status_all() {
+//!     println!("{s}"); // e.g. "AES records (256-bit key): steady on AES-NI (...)"
+//! }
+//! # load::disable();
+//! # }
+//! ```
+//!
+//! Whether routing helps depends on the machine: work only moves to a
+//! backend that measures faster than the congested one at that moment.
+//! See [`accel::load`] for the mechanism, its security considerations and
+//! its limits, and `docs/Performance.md` for measurements.
+//!
 //! Keys select their backend when created, so set policies before building
 //! configurations and connections.
 

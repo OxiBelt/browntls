@@ -39,6 +39,12 @@
 //! choose its [`ServerConfig`](browntls::ServerConfig) by server name, ALPN
 //! or cipher suites before the handshake goes on.
 //!
+//! [`TlsConnector::early_data`] lets [`TlsConnector::connect`] return
+//! before the handshake on a resumed TLS 1.3 session, so the first writes go
+//! out as 0-RTT data; a server reads accepted early data through
+//! [`ServerConnection::early_data`](browntls::ServerConnection::early_data)
+//! (`stream.get_mut().1.early_data()`) once the handshake is done.
+//!
 //! # Flushing
 //!
 //! A write encrypts the plaintext into TLS records and writes as many of

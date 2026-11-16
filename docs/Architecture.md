@@ -529,6 +529,14 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `ServerConfig`). A refusal, from the acceptor or from
   `Accepted::into_connection`, writes and flushes the `AcceptedAlert` before
   the future fails; `take_io` returns the transport afterwards.
+- With `TlsConnector::early_data(true)` and a resumable session that
+  allows 0-RTT, `Connect` resolves before the handshake
+  (`IoSession::skip_handshake`). Writes go to `ClientConnection::early_data`
+  and are kept; the first read, flush or shutdown, or a write the allowance
+  cannot take, completes the handshake, flushes our last flight
+  (EndOfEarlyData, Finished), and resends the kept bytes as 1-RTT data if
+  the server declined them. Servers read accepted early data from the
+  connection after `Accept`; the streams never mix it into ordinary reads.
 - Reads return plaintext through `Reader::into_first_chunk`, which lends the
   first buffered chunk for the connection's lifetime so `poll_fill_buf` can
   return it. A read whose records queue an answer (an alert, a KeyUpdate

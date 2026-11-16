@@ -96,6 +96,20 @@ async fn accept(
 }
 ```
 
+## 0-RTT early data
+
+With `ClientConfig::enable_early_data` set and `TlsConnector::early_data(true)`,
+`connect` returns before the handshake when a resumed TLS 1.3 session allows
+early data. Writes then go out as early data with the ClientHello, up to the
+server's allowance; the first read, flush or shutdown (or a write beyond the
+allowance) completes the handshake, and early data the server declined is sent
+again as ordinary data. A server that set `max_early_data_size` (with stateful
+session storage) reads accepted early data through
+`stream.get_mut().1.early_data()` after `accept`.
+
+Early data can be replayed by an attacker: send only requests that are safe to
+repeat.
+
 ## Behaviour
 
 - **Flushing.** Records the transport does not take at once stay queued: call

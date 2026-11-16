@@ -43,6 +43,8 @@ pub struct LazyConfigAcceptor<IO> {
     io: Option<IO>,
     /// A refusal whose alert is being written.
     alert: Option<(browntls::Error, AcceptedAlert)>,
+    /// The future already failed (and keeps the transport for `take_io`).
+    failed: bool,
 }
 
 impl<IO> LazyConfigAcceptor<IO>
@@ -55,6 +57,7 @@ where
             acceptor,
             io: Some(io),
             alert: None,
+            failed: false,
         }
     }
 
@@ -84,11 +87,17 @@ where
                 )));
             };
 
+            if this.failed {
+                return Poll::Ready(Err(io::Error::other(
+                    "LazyConfigAcceptor polled after it failed",
+                )));
+            }
             if let Some((error, mut alert)) = this.alert.take() {
                 if poll_send_alert(io, &mut alert, cx).is_pending() {
                     this.alert = Some((error, alert));
                     return Poll::Pending;
                 }
+                this.failed = true;
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
             }
 

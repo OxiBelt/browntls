@@ -79,6 +79,9 @@ async fn a_plaintext_request_is_refused_with_an_alert_and_the_transport_kept() {
     assert_eq!(header[0], 0x15, "an alert record");
 
     // ...and the server can still answer in plain text.
+    // Polling again reports the failure, not a confusing acceptor error.
+    let again = (&mut lazy).await.unwrap_err();
+    assert!(again.to_string().contains("after it failed"), "{again}");
     let mut transport = lazy.take_io().expect("transport");
     transport
         .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
@@ -87,6 +90,7 @@ async fn a_plaintext_request_is_refused_with_an_alert_and_the_transport_kept() {
     assert!(lazy.take_io().is_none());
     let err = (&mut lazy).await.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::Other);
+    assert!(err.to_string().contains("take_io"), "{err}");
 }
 
 #[tokio::test]

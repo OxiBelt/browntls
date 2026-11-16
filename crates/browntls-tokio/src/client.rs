@@ -329,7 +329,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         if self.early.is_none() {
             return Poll::Ready(Ok(()));
         }
-        let poll = self.poll_finish_early(cx);
+        // The handshake writes too, and may take a parked writer's
+        // registration: register both tasks, as answering reads do.
+        let joint = common::joint_waker(cx.waker(), self.st.write_waker.as_ref());
+        let poll = self.poll_finish_early(&mut Context::from_waker(&joint));
         if poll.is_pending()
             && let Some(early) = &mut self.early
         {

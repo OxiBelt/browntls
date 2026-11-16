@@ -16,7 +16,10 @@ use crate::common::{Stream, StreamState};
 /// 9846 §4.2.10: early data is resent automatically only when the same ALPN
 /// protocol is selected). The operation that ended the early phase returns
 /// this as an `io::Error` of kind `Other`; the stream itself stays usable,
-/// and the application decides what to send.
+/// and the application decides what to send. With split halves that
+/// operation may be a read: check
+/// [`ClientConnection::is_early_data_accepted`] before relying on early data
+/// having arrived.
 ///
 /// Declined early data is resent automatically only when the connection
 /// offered no ALPN protocol and none was selected, or offered exactly one

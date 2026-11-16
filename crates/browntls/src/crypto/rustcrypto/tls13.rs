@@ -36,6 +36,7 @@ pub(crate) static TLS13_CHACHA20_POLY1305_SHA256_INTERNAL: &Tls13CipherSuite = &
     },
     hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA256),
     aead_alg: &CHACHA20_POLY1305,
+    quic: Some(super::quic::CHACHA20_POLY1305),
 };
 
 /// `TLS13_AES_256_GCM_SHA384`.
@@ -48,6 +49,7 @@ pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
         },
         hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA384),
         aead_alg: &AES_256_GCM,
+        quic: Some(super::quic::AES_256_GCM),
     });
 
 /// `TLS13_AES_128_GCM_SHA256`.
@@ -62,6 +64,7 @@ pub(crate) static TLS13_AES_128_GCM_SHA256_INTERNAL: &Tls13CipherSuite = &Tls13C
     },
     hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA256),
     aead_alg: &AES_128_GCM,
+    quic: Some(super::quic::AES_128_GCM),
 };
 
 /// Which [`ConnectionTrafficSecrets`] variant an algorithm's keys map to.

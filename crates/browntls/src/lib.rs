@@ -82,6 +82,7 @@ mod key_log_file;
 #[cfg(feature = "std")]
 mod limited_cache;
 pub mod psk;
+pub mod quic;
 mod rand;
 mod record_layer;
 #[cfg(feature = "std")]

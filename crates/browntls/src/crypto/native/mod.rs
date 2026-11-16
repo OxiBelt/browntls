@@ -127,6 +127,7 @@ pub mod hmac;
 pub mod hpke;
 #[cfg(feature = "tls12")]
 pub mod prf;
+pub mod quic;
 pub mod sign;
 pub mod ticketer;
 pub mod verify;

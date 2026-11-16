@@ -82,8 +82,12 @@ pub(super) fn emit_server_hello(
     common.send_msg(sh, false);
 }
 
-/// Sends the middlebox-compatibility ChangeCipherSpec (RFC 8446 appendix D.4).
+/// Sends the middlebox-compatibility ChangeCipherSpec (RFC 8446 appendix D.4);
+/// never on QUIC, which has no such record (RFC 9001 §8.4).
 pub(super) fn emit_fake_ccs(common: &mut CommonState) {
+    if common.is_quic() {
+        return;
+    }
     let m = Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::ChangeCipherSpec(ChangeCipherSpecPayload),
@@ -209,12 +213,20 @@ pub(super) fn emit_encrypted_extensions(
         early_data: early_data_accepted.then_some(()),
         client_certificate_type: cert_types.client,
         server_certificate_type: cert_types.server,
+        // RFC 9001 §8.2: our transport parameters, on QUIC connections only.
+        transport_parameters: cx
+            .common
+            .quic
+            .as_ref()
+            .map(|q| Payload::new(q.local_params.clone())),
         // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
+        // QUIC has no TLS records: never acknowledged there.
         record_size_limit: hs::record_size_limit_ack(
             config,
             client_hello,
             ProtocolVersion::TLSv1_3,
-        ),
+        )
+        .filter(|_| !cx.common.is_quic()),
         // RFC 9149 §3: `expected_count`.
         ticket_request: expected_tickets,
         ..Default::default()

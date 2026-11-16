@@ -389,6 +389,7 @@ fn suite_with_limit(limit: u64) -> browntls::SupportedCipherSuite {
             },
             hkdf_provider: orig.hkdf_provider,
             aead_alg: orig.aead_alg,
+            quic: orig.quic,
         }));
     browntls::SupportedCipherSuite::Tls13(suite)
 }

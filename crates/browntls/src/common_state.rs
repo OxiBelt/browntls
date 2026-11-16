@@ -14,7 +14,9 @@ use crate::msgs::base::Payload;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
 use crate::msgs::handshake::CertificateChain;
-use crate::msgs::message::{Message, OutboundChunks, OutboundPlainMessage, PlainMessage};
+use crate::msgs::message::{
+    Message, MessagePayload, OutboundChunks, OutboundPlainMessage, PlainMessage,
+};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -192,6 +194,9 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
+    /// Present on QUIC connections (RFC 9001): handshake messages and alerts
+    /// go to the QUIC implementation instead of the record layer.
+    pub(crate) quic: Option<alloc::boxed::Box<crate::quic::Quic>>,
     /// Driven by the unbuffered API: received application data stays in the
     /// caller's buffer instead of being copied into `received_plaintext`.
     pub(crate) unbuffered: bool,
@@ -240,6 +245,7 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
+            quic: None,
             unbuffered: false,
             app_data_in_place: false,
             external_psk: None,
@@ -409,8 +415,30 @@ impl CommonState {
         self.negotiated_version == Some(ProtocolVersion::TLSv1_3)
     }
 
+    /// Whether this is a QUIC connection (RFC 9001).
+    pub(crate) fn is_quic(&self) -> bool {
+        self.quic.is_some()
+    }
+
     /// Queues `m` for sending, encrypting it when `must_encrypt`.
+    ///
+    /// On a QUIC connection nothing goes to the record layer: handshake
+    /// messages are queued for CRYPTO frames at the current encryption level
+    /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
+    /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        if let Some(quic) = &mut self.quic {
+            match m.payload {
+                MessagePayload::Handshake { encoded, .. } => {
+                    quic.queue_handshake(encoded.bytes().to_vec());
+                }
+                MessagePayload::Alert(alert) if alert.level == AlertLevel::Fatal => {
+                    quic.record_alert(alert.description);
+                }
+                _ => {}
+            }
+            return;
+        }
         if !must_encrypt {
             let msg = PlainMessage::from(m);
             for fragment in self.message_fragmenter.fragment_message(&msg) {
@@ -637,9 +665,7 @@ impl CommonState {
     pub(crate) fn send_change_cipher_spec(&mut self) {
         let m = Message {
             version: ProtocolVersion::TLSv1_2,
-            payload: crate::msgs::message::MessagePayload::ChangeCipherSpec(
-                crate::msgs::ccs::ChangeCipherSpecPayload,
-            ),
+            payload: MessagePayload::ChangeCipherSpec(crate::msgs::ccs::ChangeCipherSpecPayload),
         };
         self.send_msg(m, false);
         self.record_layer.start_encrypting();

@@ -56,6 +56,7 @@ and re-encoding stability.
 | `tls_unbuffered` | tls-connection | The unbuffered API of both sides with fuzzed buffer sizes, damaged delivery, early data, key updates and exporters |
 | `tls_ech` | tls-extensions | ECH configuration lists, server keys, SVCB records and handshakes (accepted, rejected with retry configurations, GREASE) in shared and split mode (client-facing server fed in fuzz-chosen pieces, back-end server, trial decryption with random identifiers) |
 | `tls_psk` | tls-extensions | External PSKs, the RFC 9258 importer and RFC 8773, with handshakes using matching and differing PSKs |
+| `tls_quic` | tls-extensions | QUIC-TLS (RFC 9001): Initial keys, packet and header protection, key updates, Retry tags and CRYPTO_ERROR codes against their properties; in-process QUIC handshakes on both providers with fuzzed suites, groups, ALPN, transport parameters, resumption, 0-RTT, split and damaged CRYPTO data, and post-handshake bytes |
 | `tls_auth` | tls-extensions | Delegated credentials (decoding, issuing, validity windows, handshakes) and exported authenticators between connected peers |
 | `tls_codec` | tls-codec | The doc-hidden codec re-exports, record payload types, distinguished names and stored session values |
 

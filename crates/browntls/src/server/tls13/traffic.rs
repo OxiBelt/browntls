@@ -313,6 +313,17 @@ impl State<ServerConnectionData> for ExpectTraffic {
                 cx.common.received_key_update_requests = 0;
                 cx.common.take_received_plaintext(payload);
             }
+            // RFC 9001 §6: QUIC has its own key update; a TLS KeyUpdate is
+            // a connection error equivalent to unexpected_message.
+            MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(_)),
+                ..
+            } if cx.common.is_quic() => {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::UnexpectedMessage,
+                    PeerMisbehaved::KeyUpdateReceivedInQuicConnection,
+                ));
+            }
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::KeyUpdate(request)),
                 ..

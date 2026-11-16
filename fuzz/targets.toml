@@ -81,6 +81,19 @@ sources = ["crates/browntls/src/ech/**", "crates/browntls/src/crypto/hpke.rs", "
 topic = "tls-extensions"
 sources = ["crates/browntls/src/psk.rs", "crates/browntls/src/tls13/**", "crates/browntls/src/client/**", "crates/browntls/src/server/**"]
 
+[targets.tls_quic]
+topic = "tls-extensions"
+sources = [
+  "crates/browntls/src/quic.rs",
+  "crates/browntls/src/crypto/native/quic.rs",
+  "crates/browntls/src/crypto/rustcrypto/quic.rs",
+  "crates/browntls/src/tls13/**",
+  "crates/browntls/src/client/**",
+  "crates/browntls/src/server/**",
+  "crates/browntls/src/conn.rs",
+  "crates/browntls/src/common_state.rs",
+]
+
 [targets.tls_auth]
 topic = "tls-extensions"
 sources = [

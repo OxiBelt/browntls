@@ -79,6 +79,12 @@ impl SupportedCipherSuite {
         }
     }
 
+    /// Whether this suite can be used with QUIC (RFC 9001 §5.3): a TLS 1.3
+    /// suite with a QUIC algorithm.
+    pub fn usable_for_quic(&self) -> bool {
+        self.tls13().is_some_and(|suite| suite.quic.is_some())
+    }
+
     /// The protocol version this suite belongs to.
     pub fn version(&self) -> &'static SupportedProtocolVersion {
         match self {

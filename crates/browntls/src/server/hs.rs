@@ -348,6 +348,7 @@ impl ExpectClientHello {
             }
         }
 
+        crate::quic::tls::require_tls13(cx.common, version)?;
         cx.common.negotiated_version = Some(version);
 
         // RFC 8446 §4.1.2: compression must be null only.
@@ -472,6 +473,8 @@ impl ExpectClientHello {
                 None => {}
             }
         }
+        let offered = client_hello.alpn_protocols().is_some();
+        crate::quic::tls::require_alpn(cx.common, !self.config.alpn_protocols.is_empty(), offered)?;
 
         // Key exchange groups (RFC 8446 §4.2.7, RFC 8422 §5.1.1).
         // RFC 8422 §5.1: without the extension no ECC suite may be
@@ -571,6 +574,8 @@ impl ExpectClientHello {
                 suite.usable_for_kx_algorithm(kx_algo) || kx_algo != KeyExchangeAlgorithm::ECDHE
             })
             .filter(|suite| block_ciphers_usable || !suite.is_tls12_block_cipher())
+            // RFC 9001 §5.3: QUIC needs a header protection scheme.
+            .filter(|suite| !cx.common.is_quic() || suite.usable_for_quic())
             .collect();
 
         // External PSKs the client offered (RFC 9846 §4.3.11). The server
@@ -939,6 +944,8 @@ pub(super) fn process_client_hello<'a>(
             PeerMisbehaved::OfferedDuplicateCertificateCompressions,
         ));
     }
+
+    crate::quic::tls::read_client_hello(cx.common, client_hello)?;
 
     // RFC 8446 §4.1.2: the second ClientHello must repeat the server name.
     let sni = client_hello.sni().cloned();

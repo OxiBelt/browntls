@@ -50,10 +50,11 @@ where
         self.complete_prior_io()?;
         // Fetch records until plaintext is available or the peer closes.
         while self.conn.wants_read() {
-            let at_eof = self.conn.complete_io(self.sock)?.0 == 0;
-            if at_eof {
+            // A pass that only wrote, such as answering a KeyUpdate, read
+            // nothing but is not EOF: go round again and read.
+            let (rdlen, wrlen) = self.conn.complete_io(self.sock)?;
+            if rdlen == 0 && wrlen == 0 {
                 if let Ok(io_state) = self.conn.process_new_packets()
-                    && at_eof
                     && io_state.plaintext_bytes_to_read() == 0
                 {
                     return Err(std::io::Error::new(

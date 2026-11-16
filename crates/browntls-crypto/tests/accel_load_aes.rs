@@ -177,7 +177,7 @@ fn check<A: Gcm>(key: &[u8]) {
     assert_eq!(accel::policy(Algorithm::Ghash), Policy::PREFERRED);
     let selected = (aes::Backend::select(), GhashBackend::select());
 
-    // The records, without routing. A key made now has no alternates.
+    // The records, without routing. A key made now is never routed.
     let early = A::new(key).unwrap();
     assert_eq!(early.pair(), selected);
     let baseline = records(&early, ROUNDS);
@@ -187,20 +187,17 @@ fn check<A: Gcm>(key: &[u8]) {
     assert_eq!((s.name, s.unit), (A::STREAM, "byte"));
     assert_eq!(s.primary_cost, None, "nothing is timed while disabled");
 
-    // Enabled and steady: the same records. Long ones are timed, unless
-    // the selected backend has no alternate: a key without alternates does
-    // not reach the routing code.
+    // Enabled and steady: the same records, and the long ones are timed.
     load::enable(Config::DEFAULT).unwrap();
     let alternates = status().alternates;
     let routed = A::new(key).unwrap();
     assert_eq!(routed.pair(), selected);
-    let timed = |s: &StreamStatus| s.primary_cost.is_some() == (alternates > 0);
-    let s = run_until(&routed, &baseline, timed);
+    let s = run_until(&routed, &baseline, |s| s.primary_cost.is_some());
     println!("{s}");
     assert_eq!(s.phase, Phase::Steady);
     assert_eq!(s.primary, accel::status(Algorithm::Aes).backend);
     assert_eq!(s.alternates, alternates);
-    assert_eq!(s.baseline_cost.is_some(), alternates > 0, "{s}");
+    assert!(s.baseline_cost.is_some(), "{s}");
     assert_eq!(
         load::set_fixed(Algorithm::Aes, lane(), alternates, 50),
         Err(Error::Unsupported)
@@ -213,7 +210,7 @@ fn check<A: Gcm>(key: &[u8]) {
     for alternate in 0..alternates {
         runs_on_alternate(&routed, &baseline, alternate, "created while enabled");
         // A key created before routing was enabled, and one created for
-        // explicit backends, hold no other expanded key.
+        // explicit backends, are not routed.
         stays_on_primary(
             &early,
             &baseline,
@@ -239,32 +236,50 @@ fn check<A: Gcm>(key: &[u8]) {
     load::clear_fixed(Algorithm::Aes, lane());
     assert_eq!(status().phase, Phase::Steady);
 
-    // A key holds the alternates of the configuration it was created
-    // under: one made while the portable backend was excluded is not moved
-    // to it later.
+    // A key expands its alternates when a record is first routed to one,
+    // for the configuration of that moment: one whose first routed record
+    // came while the portable backend was excluded is not moved to it
+    // later.
     restart(Config {
         portable: false,
         ..Config::DEFAULT
     });
     let accelerated_only = A::new(key).unwrap();
     let without_portable = status().alternates;
-    restart(Config::DEFAULT);
     assert!(without_portable <= alternates);
-    if without_portable < alternates {
-        let what = "created without the portable alternate";
+    if without_portable > 0 {
+        load::set_fixed(Algorithm::Aes, lane(), 0, 100).unwrap();
+        run_until(&accelerated_only, &baseline, |s| s.alternate_cost.is_some());
+    }
+    restart(Config::DEFAULT);
+    if 0 < without_portable && without_portable < alternates {
+        let what = "first routed without the portable alternate";
         let last = alternates - 1;
-        stays_on_primary(
-            &accelerated_only,
-            &baseline,
-            last,
-            without_portable > 0,
-            what,
-        );
+        stays_on_primary(&accelerated_only, &baseline, last, true, what);
         assert_eq!(status().alternate, Some("portable"));
     }
     for alternate in 0..without_portable {
-        let what = "created without the portable alternate";
+        let what = "first routed without the portable alternate";
         runs_on_alternate(&accelerated_only, &baseline, alternate, what);
+    }
+
+    // A rejected record is not timed, on any route: a peer chooses how many
+    // of those it sends.
+    for percent in [0, 100] {
+        restart(Config::DEFAULT);
+        if alternates > 0 {
+            load::set_fixed(Algorithm::Aes, lane(), 0, percent).unwrap();
+        }
+        for _ in 0..256 {
+            let mut buf = data(16384);
+            assert_eq!(
+                routed.open_in_place(&[9; 12], AAD, &mut buf, &[0; 16]),
+                Err(Error::DecryptFailed)
+            );
+            assert!(buf.iter().all(|&b| b == 0));
+        }
+        let s = status();
+        assert_eq!((s.primary_cost, s.alternate_cost), (None, None), "{s}");
     }
 
     // Additional data beyond a record header is not counted in a record's

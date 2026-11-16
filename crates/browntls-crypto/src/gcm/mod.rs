@@ -27,32 +27,31 @@
 //! briefly hold unauthenticated plaintext, as with other fused
 //! implementations.
 //!
-//! Keys made by [`Aead::new`] take part in load-aware routing
-//! ([`crate::accel::load`]): while it is enabled and the selected AES backend
-//! runs slower than usual, a share of the records is sealed and opened with
-//! another AES backend. Records under 128-bit and under 256-bit keys are
-//! separate streams, since they cost differently per byte. An expanded key
-//! serves one backend only, so a key
-//! that is created while routing is enabled (and only then; this needs the
-//! `alloc` feature) is expanded for each alternate AES backend as well. An
-//! alternate runs with the GHASH backend of its own instruction class (VAES
-//! with VPCLMULQDQ of the same width, AES-NI with PCLMULQDQ, FEAT_AES with
-//! FEAT_PMULL, Zvkned with Zvkg, Zkne with Zbc/Zbkc, portable with
-//! portable), so that a moved record leaves the selected backends'
-//! instructions for both halves of the work; if the GHASH policy forbids
-//! that backend or the CPU lacks it, with the next one in GHASH preference
-//! order that is permitted and available, and an AES backend left without
-//! one is not an alternate. Like the selected backends, the alternates and
-//! their GHASH backends are those of the moment the key is created. On
-//! x86-64 an expanded key takes 1664 bytes: that is the size of
-//! [`Aes128Gcm`] and [`Aes256Gcm`] with or without routing, and each
-//! alternate adds as much on the heap (three of them, 4992 bytes per key,
-//! on a CPU with AVX-512 VAES under the default policy and configuration).
-//! All of it is zeroised on drop.
+//! Keys made by [`Aead::new`] while load-aware routing
+//! ([`crate::accel::load`]) is enabled take part in it: while the selected
+//! AES backend runs slower than usual, a share of the records is sealed and
+//! opened with another AES backend. Records under 128-bit and under 256-bit
+//! keys are separate streams, since they cost differently per byte.
 //!
-//! Messages are limited to `2^36 - 32` bytes and additional data to
-//! `2^61 - 1` bytes (SP 800-38D §5.2.1.1). Authentication failures zero the
-//! buffer and never release plaintext; tag comparison is constant time.
+//! An expanded key serves one backend only. A routable key therefore keeps
+//! a copy of the AES key (in a small allocation, wiped on drop) and expands
+//! it for the alternate AES backends when one of its records is first
+//! routed to an alternate; that record is not timed. Most keys never reach
+//! that point and cost nothing more than the copy. An alternate runs with
+//! the GHASH backend of its own instruction class (VAES with VPCLMULQDQ of
+//! the same width, AES-NI with PCLMULQDQ, FEAT_AES with FEAT_PMULL, Zvkned
+//! with Zvkg, Zkne with Zbc/Zbkc, portable with portable), so that a moved
+//! record leaves the selected backends' instructions for both halves of
+//! the work; if the GHASH policy forbids that backend or the CPU lacks it,
+//! with the next one in GHASH preference order that is permitted and
+//! available, and an AES backend left without one is not an alternate. The
+//! alternates and their GHASH backends are those of the moment of the
+//! expansion and stay with the key. On x86-64 an expanded key takes 1664
+//! bytes: that is the size of [`Aes128Gcm`] and [`Aes256Gcm`] with or
+//! without routing, and each alternate of an expanded key adds as much on
+//! the heap (three of them, 4992 bytes per key, on a CPU with AVX-512 VAES
+//! under the default policy and configuration). The whole of that memory
+//! is zeroised when the key is dropped.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -147,7 +146,7 @@ impl GhashBackend {
     }
 
     /// The GHASH backend of the same instruction class as an AES backend.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     fn class_of(aes: aes::Backend) -> Self {
         match aes {
             aes::Backend::VaesAvx512 => Self::VpclmulAvx512,
@@ -161,7 +160,7 @@ impl GhashBackend {
     }
 
     /// [`Self::companion`] with `usable` in place of the policy and the CPU.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     fn companion_where(aes: aes::Backend, usable: impl Fn(Self) -> bool) -> Option<Self> {
         use crate::accel::Backends as _;
         let class = Self::class_of(aes);
@@ -182,7 +181,7 @@ impl GhashBackend {
     /// available (never a more preferred one, which would be back in a class
     /// the record was meant to leave). `None` when there is none: `aes` is
     /// then not used as an alternate.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     fn companion(aes: aes::Backend) -> Option<Self> {
         use crate::accel::Backends as _;
         let policy = crate::accel::policy(crate::accel::Algorithm::Ghash);
@@ -385,6 +384,7 @@ impl Gcm {
         Ok(Self { aes, ghash: ghash? })
     }
 
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn instance(&self) -> Instance<'_> {
         Instance {
             aes: &self.aes,
@@ -582,6 +582,7 @@ mod tests {
     /// A routed record leaves the primary's instruction class for GHASH
     /// too, and a companion that cannot be used is replaced only by a less
     /// preferred backend.
+    #[cfg(feature = "std")]
     #[test]
     fn companions_follow_the_instruction_class() {
         use crate::aes::Backend as A;

@@ -950,19 +950,21 @@ Properties this design keeps:
 - A keyed object is routed only while the policy still selects the backend
   it was created for, and one created with explicit backends never is.
 - A keyed object whose key is expanded per backend (an AES-GCM key) is
-  routed only to backends it holds an expanded key for. It expands its key
-  for the alternates when it is created, if routing is enabled at that
-  moment and the crate has the `alloc` feature; a key created earlier stays
-  on its primary, at no cost on the record path. Each alternate AES backend
-  runs with the GHASH backend of its own instruction class (VAES with
-  VPCLMULQDQ of the same width, AES-NI with PCLMULQDQ, and so on), so a
-  moved record leaves the primary's instructions for both halves of the
-  work; where the GHASH policy forbids that backend or the CPU lacks it,
-  the next permitted one in GHASH preference order is used, and without one
-  that AES backend is not an alternate. On x86-64 an expanded AES-GCM key
-  takes 1664 bytes, which is the size of the key types with or without
-  routing; each alternate adds as much on the heap (4992 bytes per key for
-  the three alternates of AVX-512 VAES), zeroised on drop like the rest.
+  routable only if it was created while routing was enabled. It then keeps
+  a copy of the AES key in a small allocation and expands it for the
+  alternates when one of its records is first routed to one; until then it
+  costs nothing else, and a key created earlier or with explicit backends
+  never enters the routing code. Each alternate AES backend runs with the
+  GHASH backend of its own instruction class (VAES with VPCLMULQDQ of the
+  same width, AES-NI with PCLMULQDQ, and so on), so a moved record leaves
+  the primary's instructions for both halves of the work; where the GHASH
+  policy forbids that backend or the CPU lacks it, the next permitted one
+  in GHASH preference order is used, and without one that AES backend is
+  not an alternate. On x86-64 an expanded AES-GCM key takes 1664 bytes,
+  which is the size of the key types with or without routing; each
+  alternate of an expanded key adds as much on the heap (4992 bytes per key
+  for the three alternates of AVX-512 VAES). The key copy and the whole of
+  the alternates' storage are zeroised on drop.
 
 Limits:
 

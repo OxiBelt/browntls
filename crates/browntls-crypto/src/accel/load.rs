@@ -119,13 +119,17 @@
 //!   primary.
 //! * A keyed object (for example an AEAD key) is routed only while the
 //!   policy still selects the backend it was created for.
-//! * A keyed object whose key is expanded per backend (an AES-GCM key) can
-//!   only be routed to backends it holds an expanded key for. It expands its
-//!   key for the alternates when it is created, and only if routing is
-//!   enabled at that moment and the crate has the `alloc` feature: a key
-//!   created earlier stays on its primary, and one created under another
-//!   policy or [`Config::portable`] setting holds the alternates of that
-//!   moment. Each alternate costs memory per key (see [`crate::gcm`]).
+//! * A keyed object whose key is expanded per backend (an AES-GCM key) is
+//!   routable only if it was created while routing was enabled. It expands
+//!   its key for the alternates when one of its records is first routed to
+//!   one, under the policies and configuration of that moment, and keeps
+//!   those alternates; that record is not timed, so many short-lived keys
+//!   can keep a probe from completing. Each alternate costs memory per
+//!   expanded key (see [`crate::gcm`]).
+//! * A stream's statistics are per AES backend. Keys expanded under
+//!   different GHASH policies run the same AES backend with different GHASH
+//!   backends and are averaged together; set policies before enabling
+//!   routing.
 //!
 //! ```
 //! use browntls_crypto::accel::{Algorithm, load};
@@ -406,12 +410,12 @@ fn candidates<B: Backends>(stream: &Stream, cfg: u32) -> Option<Candidates> {
 ///
 /// Nothing while routing is disabled, or when `own` is not the backend the
 /// policy selects (such an object is never routed).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "std")]
 pub(crate) fn alternates<B: Backends>(stream: &Stream, own: B) -> impl Iterator<Item = B> {
     alternates_under(stream, own, CONFIG.load(Relaxed))
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "std")]
 fn alternates_under<B: Backends>(stream: &Stream, own: B, cfg: u32) -> impl Iterator<Item = B> {
     let mask = if cfg & ENABLED == 0 {
         0
@@ -481,6 +485,15 @@ impl<B: Backends> Route<B> {
             );
         }
     }
+}
+
+/// Whether a call of `units` units on `stream` needs no routing decision:
+/// routing is disabled, or the call is too short to be timed and no share
+/// is fixed. For callers that prepare something before they ask [`route`].
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn idle(stream: &Stream, units: usize) -> bool {
+    CONFIG.load(Relaxed) & ENABLED == 0 || stream.passes(units)
 }
 
 /// Routes one call of `units` units by an object created for backend `own`.
@@ -794,7 +807,7 @@ mod tests {
     /// preference order, and there are none while routing is disabled or
     /// for a backend the policy does not select. Read-only, like
     /// `candidates_match`.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     fn alternates_match<B: Backends + fmt::Debug>() {
         use std::vec::Vec;
         let Some(stream) = B::streams().first() else {
@@ -830,7 +843,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     #[test]
     fn alternates_are_the_candidates_of_the_primary() {
         alternates_match::<crate::chacha::Backend>();

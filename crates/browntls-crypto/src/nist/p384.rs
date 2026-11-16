@@ -12,16 +12,12 @@ type Fast = super::p384_x86::P384Adx;
 #[cfg(not(target_arch = "x86_64"))]
 type Fast = P384;
 
-#[inline]
-fn accelerated() -> bool {
-    super::P384Backend::accelerated()
-}
-
 super::api::curve_module! {
     name = "P-384",
     soft = P384,
     fast = Fast,
-    accel = accelerated(),
+    backend = P384Backend,
+    load = P384_LOAD,
     limbs = 6,
     field_len = 48,
     tls_hash = Sha384

@@ -21,10 +21,17 @@
 //! together) in the portable `u128` kernel and in the BMI2/ADX assembly when
 //! the length is a multiple of four limbs; other lengths use the per-limb
 //! two-pass BMI2/ADX step.
+//!
+//! The constants of a context do not depend on its kernel: every kernel
+//! computes the same fully reduced radix-2^64 product. [`Mont::under`]
+//! therefore runs an operation under another kernel than the context's own
+//! without copying the context ([`Under`]); RSA private-key operations use it
+//! for load-aware routing ([`crate::accel::load`]).
 
 use super::{MAX_LIMBS, soft};
 use crate::Error;
 use crate::ct;
+use crate::rsa::RsaBackend;
 use crate::zeroize::Zeroize;
 
 /// Montgomery multiplication kernel selection.
@@ -46,9 +53,9 @@ impl Kernel {
     pub(crate) fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
-            let backend = crate::accel::select::<crate::rsa::RsaBackend>();
+            let backend = crate::accel::select::<RsaBackend>();
             #[cfg(target_feature = "sse2")]
-            if backend == crate::rsa::RsaBackend::Ifma
+            if backend == RsaBackend::Ifma
                 && let (Some(adx), Some(ifma)) = (
                     super::x86_64::MulxAdx::detect(),
                     super::ifma::Ifma::detect(),
@@ -56,7 +63,7 @@ impl Kernel {
             {
                 return Self::Ifma(adx, ifma);
             }
-            if backend != crate::rsa::RsaBackend::Soft
+            if backend != RsaBackend::Soft
                 && let Some(token) = super::x86_64::MulxAdx::detect()
             {
                 return Self::MulxAdx(token);
@@ -79,6 +86,31 @@ impl Kernel {
             }
         }
         all
+    }
+
+    /// The backend of the RSA acceleration policy this kernel implements.
+    pub(crate) fn backend(self) -> RsaBackend {
+        match self {
+            Self::Soft => RsaBackend::Soft,
+            #[cfg(target_arch = "x86_64")]
+            Self::MulxAdx(_) => RsaBackend::MulxAdx,
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            Self::Ifma(..) => RsaBackend::Ifma,
+        }
+    }
+
+    /// The kernel of `backend` for an operation of a key whose kernel is
+    /// `self`, built from the proofs of CPU support `self` already holds:
+    /// the portable kernel always, the BMI2/ADX kernel with the token of a
+    /// BMI2/ADX or IFMA kernel, and otherwise only `self`'s own backend.
+    /// `None` when `self` holds no proof that the CPU can run `backend`.
+    pub(crate) fn lower(self, backend: RsaBackend) -> Option<Self> {
+        match backend {
+            RsaBackend::Soft => Some(Self::Soft),
+            #[cfg(target_arch = "x86_64")]
+            RsaBackend::MulxAdx => self.mulx_adx().map(Self::MulxAdx),
+            _ => (self.backend() == backend).then_some(self),
+        }
     }
 
     /// Short name for diagnostics.
@@ -216,7 +248,8 @@ impl<const CAP: usize> Mont<CAP> {
         let mut scratch = [0u64; MAX_LIMBS * 2 + 2];
         let mut tmp = [0u64; CAP];
         for i in (0..nbits - 1).rev() {
-            ctx.mul_into(&mut tmp[..len], &x[..len], &x[..len], &mut scratch);
+            ctx.own()
+                .mul_into(&mut tmp[..len], &x[..len], &x[..len], &mut scratch);
             x[..len].copy_from_slice(&tmp[..len]);
             if (target >> i) & 1 == 1 {
                 let hi = super::shl1(&mut x[..len]);
@@ -247,20 +280,89 @@ impl<const CAP: usize> Mont<CAP> {
         self.kernel
     }
 
+    /// This context for one operation that runs under `kernel` instead of
+    /// the context's own kernel.
+    pub(crate) fn under(&self, kernel: Kernel) -> Under<'_, CAP> {
+        Under { ctx: self, kernel }
+    }
+
+    /// This context under its own kernel.
+    fn own(&self) -> Under<'_, CAP> {
+        self.under(self.kernel)
+    }
+
+    /// [`Under::mul`] with the context's kernel.
+    pub(crate) fn mul(&self, out: &mut [u64], a: &[u64], b: &[u64]) {
+        self.own().mul(out, a, b);
+    }
+
+    /// [`Under::to_mont`] with the context's kernel.
+    pub(crate) fn to_mont(&self, out: &mut [u64], a: &[u64]) {
+        self.own().to_mont(out, a);
+    }
+
+    /// [`Under::demont`] with the context's kernel.
+    pub(crate) fn demont(&self, out: &mut [u64], a: &[u64]) {
+        self.own().demont(out, a);
+    }
+
+    /// [`Under::exp_ct`] with the context's kernel.
+    pub(crate) fn exp_ct(&self, out: &mut [u64], base: &[u64], exp: &[u64]) {
+        self.own().exp_ct(out, base, exp);
+    }
+
+    /// [`Under::exp_pub_vartime`] with the context's kernel.
+    pub(crate) fn exp_pub_vartime(&self, out: &mut [u64], base: &[u64], e: u64) {
+        self.own().exp_pub_vartime(out, base, e);
+    }
+}
+
+/// A [`Mont`] context together with the kernel that one operation runs
+/// under ([`Mont::under`]). The context is borrowed, not copied.
+#[derive(Clone, Copy)]
+pub(crate) struct Under<'a, const CAP: usize> {
+    ctx: &'a Mont<CAP>,
+    kernel: Kernel,
+}
+
+impl<'a, const CAP: usize> Under<'a, CAP> {
+    /// Number of limbs of the modulus.
+    pub(crate) fn len(self) -> usize {
+        self.ctx.len
+    }
+
+    /// The modulus.
+    pub(crate) fn modulus(self) -> &'a [u64] {
+        self.ctx.modulus()
+    }
+
+    /// `R mod m`: the Montgomery form of 1.
+    fn one(self) -> &'a [u64] {
+        self.ctx.one()
+    }
+
+    /// The kernel the operation runs under (the CRT exponentiation asks
+    /// whether it is the IFMA one, where that exists).
+    #[cfg(any(test, all(target_arch = "x86_64", target_feature = "sse2")))]
+    pub(crate) fn kernel(self) -> Kernel {
+        self.kernel
+    }
+
     /// `out = a b R^-1 mod m` for `a < R`, `b < m` (all `len` limbs). The
     /// product is accumulated in `scratch` and copied out at the end.
-    fn mul_into(&self, out: &mut [u64], a: &[u64], b: &[u64], scratch: &mut [u64]) {
-        let len = self.len;
+    fn mul_into(self, out: &mut [u64], a: &[u64], b: &[u64], scratch: &mut [u64]) {
+        let len = self.len();
+        let m0inv = self.ctx.m0inv;
         debug_assert!(out.len() == len && a.len() == len && b.len() == len);
         debug_assert!(scratch.len() >= 2 * len + 2);
-        let m = &self.m[..len];
+        let m = self.modulus();
         #[cfg(target_arch = "x86_64")]
         if let Some(token) = self.kernel.mulx_adx()
             && len.is_multiple_of(4)
         {
             let t = &mut scratch[..len + 2];
             t.fill(0);
-            token.mont_mul4(t, a, b, m, self.m0inv);
+            token.mont_mul4(t, a, b, m, m0inv);
             let hi = t[len + 1];
             out.copy_from_slice(&t[1..=len]);
             super::cond_sub_mod_with(out, hi, m, &mut t[..len]);
@@ -269,7 +371,7 @@ impl<const CAP: usize> Mont<CAP> {
         if self.kernel == Kernel::Soft {
             let t = &mut scratch[..len + 1];
             t.fill(0);
-            soft::mont_mul(t, a, b, m, self.m0inv);
+            soft::mont_mul(t, a, b, m, m0inv);
             let hi = t[len];
             out.copy_from_slice(&t[..len]);
             super::cond_sub_mod_with(out, hi, m, &mut scratch[len + 1..2 * len + 1]);
@@ -278,8 +380,7 @@ impl<const CAP: usize> Mont<CAP> {
         let t = &mut scratch[..2 * len + 2];
         t[..len + 2].fill(0);
         for i in 0..len {
-            self.kernel
-                .step(&mut t[i..i + len + 2], a, b[i], m, self.m0inv);
+            self.kernel.step(&mut t[i..i + len + 2], a, b[i], m, m0inv);
         }
         // The reduced value is t[len .. 2 len + 1]: len limbs plus a top limb
         // in {0, 1}; it is below 2 m, so one conditional subtraction remains.
@@ -294,22 +395,22 @@ impl<const CAP: usize> Mont<CAP> {
     /// and after the final subtraction (for example a CRT half or a
     /// Diffie-Hellman shared secret on conversion out of Montgomery form), so
     /// it is wiped before returning.
-    pub(crate) fn mul(&self, out: &mut [u64], a: &[u64], b: &[u64]) {
+    pub(crate) fn mul(self, out: &mut [u64], a: &[u64], b: &[u64]) {
         let mut scratch = [0u64; MAX_LIMBS * 2 + 2];
         self.mul_into(out, a, b, &mut scratch);
-        scratch[..2 * self.len + 2].zeroize();
+        scratch[..2 * self.len() + 2].zeroize();
     }
 
     /// Converts `a < R` to Montgomery form (`a R mod m`), reducing it.
-    pub(crate) fn to_mont(&self, out: &mut [u64], a: &[u64]) {
-        self.mul(out, a, &self.rr[..self.len]);
+    pub(crate) fn to_mont(self, out: &mut [u64], a: &[u64]) {
+        self.mul(out, a, &self.ctx.rr[..self.len()]);
     }
 
     /// Converts out of Montgomery form (`a R^-1 mod m`).
-    pub(crate) fn demont(&self, out: &mut [u64], a: &[u64]) {
+    pub(crate) fn demont(self, out: &mut [u64], a: &[u64]) {
         let mut one = [0u64; CAP];
         one[0] = 1;
-        self.mul(out, a, &one[..self.len]);
+        self.mul(out, a, &one[..self.len()]);
     }
 
     /// Constant-time exponentiation with a secret exponent.
@@ -321,10 +422,10 @@ impl<const CAP: usize> Mont<CAP> {
     /// [`super::HALF_LIMBS`] contexts of RSA CRT halves, 16 KiB for an 8192-bit
     /// ([`MAX_LIMBS`]) modulus.
     #[inline(never)]
-    pub(crate) fn exp_ct(&self, out: &mut [u64], base: &[u64], exp: &[u64]) {
+    pub(crate) fn exp_ct(self, out: &mut [u64], base: &[u64], exp: &[u64]) {
         // `3 * CAP >= 2 * len + 2` scratch limbs, as `mul_into` needs.
         const { assert!(2 <= CAP && CAP <= MAX_LIMBS) };
-        let len = self.len;
+        let len = self.len();
         debug_assert!(out.len() == len && base.len() == len);
         let mut scratch = [[0u64; CAP]; 3];
         let scratch = scratch.as_flattened_mut();
@@ -372,15 +473,18 @@ impl<const CAP: usize> Mont<CAP> {
     /// Exponentiation by a small *public* exponent `e >= 1` (variable time in
     /// `e` only; the base is handled in constant time).
     #[inline(never)]
-    pub(crate) fn exp_pub_vartime(&self, out: &mut [u64], base: &[u64], e: u64) {
+    pub(crate) fn exp_pub_vartime(self, out: &mut [u64], base: &[u64], e: u64) {
         debug_assert!(e >= 1);
+        // The IFMA code reads the context's constants and converts one with
+        // the context's own kernel, which is an IFMA kernel whenever this
+        // one is ([`Kernel::lower`]).
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         if let Some(ifma) = self.kernel.ifma()
-            && ifma.exp_pub_vartime(self, out, base, e)
+            && ifma.exp_pub_vartime(self.ctx, out, base, e)
         {
             return;
         }
-        let len = self.len;
+        let len = self.len();
         let mut scratch = [0u64; MAX_LIMBS * 2 + 2];
         let mut acc = [0u64; CAP];
         let mut tmp = [0u64; CAP];
@@ -395,6 +499,11 @@ impl<const CAP: usize> Mont<CAP> {
             }
         }
         out.copy_from_slice(&acc[..len]);
+        // The base may be secret (the blinding factor, the unreleased
+        // signature), and so are its powers.
+        acc.zeroize();
+        tmp.zeroize();
+        scratch.zeroize();
     }
 }
 
@@ -525,6 +634,65 @@ mod tests {
                 }
                 for r in &results {
                     assert_eq!(r, &results[0]);
+                }
+            }
+        }
+    }
+
+    /// Conversions, a product and both exponentiations under `ctx`'s kernel.
+    fn exercise(
+        ctx: Under<'_, HALF_LIMBS>,
+        a: &[u64],
+        b: &[u64],
+        e: &[u64],
+        small: u64,
+    ) -> [Vec<u64>; 6] {
+        let mut out = core::array::from_fn(|_| vec![0u64; ctx.len()]);
+        let [am, bm, product, back, power, public] = &mut out;
+        ctx.to_mont(am, a);
+        ctx.to_mont(bm, b);
+        ctx.mul(product, am, bm);
+        ctx.demont(back, am);
+        ctx.exp_ct(power, am, e);
+        ctx.exp_pub_vartime(public, am, small);
+        out
+    }
+
+    /// A context's constants do not depend on the kernel it was built with,
+    /// and under a kernel lowered from its own it computes what a context
+    /// built with that kernel computes. A kernel is only lowered to one it
+    /// holds the proof of CPU support for.
+    #[test]
+    fn a_context_runs_under_every_lower_kernel() {
+        let mut seed = 31u64;
+        let kernels: Vec<Kernel> = Kernel::available().into_iter().flatten().collect();
+        assert_eq!(Kernel::detect().backend(), crate::accel::select());
+        for &len in &[1usize, 2, 4, 16, 24, 32, 33, 64] {
+            let m = random_modulus(&mut seed, len);
+            let a = random_below(&mut seed, &m);
+            let b = random_below(&mut seed, &m);
+            let e: Vec<u64> = (0..2).map(|_| rng(&mut seed)).collect();
+            let small = (rng(&mut seed) >> 31) | 1;
+            for &own in &kernels {
+                let ctx = Mont::<HALF_LIMBS>::new(&m, own).unwrap();
+                assert_eq!(own.lower(own.backend()), Some(own));
+                assert_eq!(ctx.own().kernel(), own);
+                for (slot, &other) in kernels.iter().enumerate() {
+                    // `available` lists the kernels from the portable one up.
+                    let below = kernels.iter().position(|k| *k == own).unwrap() >= slot;
+                    let lowered = own.lower(other.backend());
+                    assert_eq!(lowered, below.then_some(other), "{own:?} to {other:?}");
+                    let Some(kernel) = lowered else { continue };
+                    let built = Mont::<HALF_LIMBS>::new(&m, other).unwrap();
+                    assert_eq!((ctx.m, ctx.rr, ctx.one), (built.m, built.rr, built.one));
+                    assert_eq!((ctx.len, ctx.m0inv), (built.len, built.m0inv));
+                    let under = ctx.under(kernel);
+                    assert_eq!((under.kernel(), under.len()), (other, len));
+                    assert_eq!(under.modulus(), &m[..]);
+                    let got = exercise(under, &a, &b, &e, small);
+                    let want = exercise(built.own(), &a, &b, &e, small);
+                    assert_eq!(got, want, "len {len}: {own:?} under {other:?}");
+                    assert_eq!(got[3], a, "demont undoes to_mont");
                 }
             }
         }

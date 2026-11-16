@@ -242,12 +242,14 @@ pub(crate) fn sign<C: Curve<N>, const N: usize>(
 }
 
 /// Verifies `(r, s)` over `digest` for the public point `q`. Variable time.
+/// For an accepted signature, tells whether the verification did typical
+/// work ([`scalar_mul::mul_double_vartime`]).
 pub(crate) fn verify<C: Curve<N>, const N: usize>(
     q: &Affine<N>,
     digest: &[u8],
     r: &[u64; N],
     s: &[u64; N],
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     if !in_scalar_range::<C, N>(r) || !in_scalar_range::<C, N>(s) {
         return Err(Error::InvalidSignature);
     }
@@ -256,18 +258,18 @@ pub(crate) fn verify<C: Curve<N>, const N: usize>(
     let w = C::scalar_invert(&s_mont);
     let u1 = mont::mont_mul(&e, &w, &C::ORDER, C::ORDER_INV);
     let u2 = mont::mont_mul(r, &w, &C::ORDER, C::ORDER_INV);
-    let point = scalar_mul::mul_double_vartime::<C, N>(&u1, &u2, q);
+    let (point, typical) = scalar_mul::mul_double_vartime::<C, N>(&u1, &u2, q);
     // x(point) mod n == r, i.e. x == r or (when r + n < p) x == r + n, checked
     // projectively as X == x Z^2 (no inversion). The identity never matches.
     if jacobian::x_equals::<C, N>(&point, &fe_from_canonical_rt::<C, N>(r)) {
-        return Ok(());
+        return Ok(typical);
     }
     let (rn, carry) = mont::add(r, &C::ORDER);
     if carry == 0
         && mont::lt(&rn, &C::P) != 0
         && jacobian::x_equals::<C, N>(&point, &fe_from_canonical_rt::<C, N>(&rn))
     {
-        return Ok(());
+        return Ok(typical);
     }
     Err(Error::InvalidSignature)
 }

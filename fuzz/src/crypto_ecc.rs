@@ -8,7 +8,8 @@
 //! backend, and with load-aware routing (`accel::load`) sending a fuzzed
 //! share of the calls to a fuzzed alternate backend; NIST public keys, ECDH,
 //! signing and verification also under the portable backend (acceleration
-//! policy `NONE`); agreement is symmetric; signatures round trip through
+//! policy `NONE`) and with load-aware routing in the same way; agreement is
+//! symmetric; signatures round trip through
 //! every encoding and verification path; a flipped bit is rejected by both
 //! sides; on fuzzed keys, points, DER documents and signatures browntls and
 //! the oracle reach the same verdict (browntls is allowed to be stricter
@@ -27,7 +28,7 @@
 //! | 3 | Ed25519 verification of fuzzed keys and signatures | message, mode, key and signature or seed and mask |
 //! | 4 | Ed25519 PKCS #8 parsing | raw or a valid v1/v2 encoding with an edit |
 //! | 5–9 | the same for X448 and Ed448 (with contexts) | as 0–4 |
-//! | 10–14 | P-256: keys, SEC 1 points, DER documents, signing, verification | see `crypto_ecc/nist.rs` |
+//! | 10–14 | P-256: keys, SEC 1 points, DER documents, signing, verification | see `crypto_ecc/nist.rs`; each ends with a routing alternate and share |
 //! | 15–19 | P-384 | as 10–14 |
 //! | 20–24 | P-521 | as 10–14 |
 //!
@@ -372,13 +373,15 @@ pub fn seeds() -> Vec<Vec<u8>> {
             Seed::op(op)
                 .bytes(&scalar(&d))
                 .bytes(&scalar(&d2))
-                .bytes(&[0xff]),
+                .bytes(&[0xff])
+                .bytes(&[0, 100]),
             Seed::op(op)
                 .bytes(&[1, 0, 0])
                 .short(&[0x55; 96])
                 .bytes(&[1])
                 .bytes(&scalar(&d2))
-                .bytes(&[7]),
+                .bytes(&[7])
+                .bytes(&[1, 50]),
             Seed::op(op)
                 .bytes(&[1, 0, 0])
                 .short(&[0x55; 96])
@@ -394,26 +397,31 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 .bytes(&[1])
                 .bytes(&NONE)
                 .bytes(&[0xff])
-                .bytes(&scalar(&d2)),
+                .bytes(&scalar(&d2))
+                .bytes(&[0, 100]),
             Seed::op(op + 1)
                 .bytes(&[1])
                 .bytes(&scalar(&d))
                 .bytes(&[0])
                 .bytes(&NONE)
                 .bytes(&[0xff])
-                .bytes(&[1, 0, 5]),
+                .bytes(&[1, 0, 5])
+                .bytes(&[0, 50]),
             Seed::op(op + 1).bytes(&[2, 2]).bytes(&d2),
             Seed::op(op + 1).bytes(&[2, 4]).bytes(&d).bytes(&d2),
             Seed::op(op + 1).bytes(&[0]).short(&[0]),
-            // DER: each document unedited, one edited, raw.
+            // DER: each document unedited (the private keys then loaded
+            // with routing), one edited, raw.
             Seed::op(op + 2)
                 .bytes(&[0, 0])
                 .bytes(&scalar(&d))
-                .bytes(&NONE),
+                .bytes(&NONE)
+                .bytes(&[0, 100]),
             Seed::op(op + 2)
                 .bytes(&[1, 0])
                 .bytes(&scalar(&d))
-                .bytes(&NONE),
+                .bytes(&NONE)
+                .bytes(&[0, 50]),
             Seed::op(op + 2)
                 .bytes(&[2, 0])
                 .bytes(&scalar(&d))
@@ -424,36 +432,42 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 .bytes(&[1, 0, 6, 0x01]),
             Seed::op(op + 2).bytes(&[2, 1]).field(&[0x30, 0x00]),
             // Signing with the curve's hash and another; hedged with enough
-            // and too little randomness; wrong digest lengths.
+            // and too little randomness; wrong digest lengths; then routed
+            // with every call, half of the calls and a few on the alternate.
             Seed::op(op + 3)
                 .bytes(&scalar(&d))
                 .bytes(&[curve + 1])
                 .field(msg)
                 .bytes(&[0, 3])
                 .short(&[0x5c; 32])
-                .bytes(&[4, 0, 0]),
+                .bytes(&[4, 0, 0, 0])
+                .bytes(&[0, 100]),
             Seed::op(op + 3)
                 .bytes(&scalar(&d))
                 .bytes(&[4])
                 .field(msg)
                 .bytes(&[1, 0])
                 .short(&[0x5c; 8])
-                .bytes(&[3, 0, 1, 0]),
+                .bytes(&[3, 0, 1, 0])
+                .bytes(&[0, 50]),
             Seed::op(op + 3)
                 .bytes(&scalar(&d2))
                 .bytes(&[0])
                 .field(b"")
                 .bytes(&[0, 0])
                 .short(&[0; 40])
-                .bytes(&NONE),
+                .bytes(&NONE)
+                .bytes(&[1, 1]),
             // Verification: each signature source; a zero mask keeps the
-            // signature valid.
+            // signature valid. Rejected and accepted signatures are then
+            // verified with routing.
             Seed::op(op + 4)
                 .bytes(&scalar(&d))
                 .bytes(&[curve + 1])
                 .field(msg)
                 .bytes(&[0])
-                .bytes(&vec![0x31; 2 * fl]),
+                .bytes(&vec![0x31; 2 * fl])
+                .bytes(&[0, 100]),
             Seed::op(op + 4)
                 .bytes(&scalar(&d))
                 .bytes(&[curve + 1])
@@ -466,7 +480,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 .field(msg)
                 .bytes(&[2])
                 .bytes(&NONE)
-                .bytes(&[0]),
+                .bytes(&[0])
+                .bytes(&[0, 100]),
             Seed::op(op + 4)
                 .bytes(&scalar(&d))
                 .bytes(&[5])
@@ -489,12 +504,14 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 .bytes(&scalar(&d))
                 .bytes(&[curve + 1])
                 .field(msg)
-                .bytes(&[4, 0]),
+                .bytes(&[4, 0])
+                .bytes(&[0, 50]),
             Seed::op(op + 4)
                 .bytes(&scalar(&d))
                 .bytes(&[curve + 1])
                 .field(msg)
-                .bytes(&[4, 1]),
+                .bytes(&[4, 1])
+                .bytes(&[0, 100]),
         ]);
     }
     seeds.into_iter().map(|s| s.0).collect()

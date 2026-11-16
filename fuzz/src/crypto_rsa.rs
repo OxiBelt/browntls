@@ -5,7 +5,9 @@
 //! Two RSA keys (2048 and 3072 bits) are generated once per process by the
 //! crate's own key generation from a fixed deterministic byte source, so
 //! inputs replay exactly; each is loaded again under every RSA backend the
-//! CPU offers (AVX-512 IFMA, BMI2/ADX, portable). Nothing secret is
+//! CPU offers (AVX-512 IFMA, BMI2/ADX, portable). Signatures are repeated
+//! with load-aware routing (`accel::load`) sending a fuzzed share of them to
+//! a fuzzed alternate backend, which never changes them. Nothing secret is
 //! committed. The reference (`crypto_rsa/oracle.rs`) is raw RSA with
 //! `num-bigint` and EMSA-PKCS1-v1_5 / EMSA-PSS written from RFC 8017 over
 //! the RustCrypto hashes.
@@ -19,8 +21,8 @@
 //! | 0 components | modulus source, exponent, minimum size, buffer size, hash, message, signature | acceptance exactly as documented; accessors; PKCS #1 and SPKI round trips; fuzzed signatures against an arbitrary odd modulus verified by every backend and by the reference |
 //! | 1 public DER | source, minimum size | the default bounds equal `*_with_min_bits(2048)`; an `rsaEncryption` SPKI reads the same with its algorithm; re-encoding is stable |
 //! | 2 algorithm | source, algorithm, buffer size | parse, encode, parse round trip; permissions; short buffers fail cleanly |
-//! | 3 sign PKCS #1 | key, hash, message, blinding entropy, buffer size, backend, bit | exact errors; one signature whatever the entropy and backend; the reference verifies it; a flipped bit fails everywhere |
-//! | 4 sign PSS | key, hash, message, salt and entropy, buffer size, backend, bit | exact errors; backends agree for fixed randomness; the reference recovers the salt; a flipped bit fails |
+//! | 3 sign PKCS #1 | key, hash, message, blinding entropy, buffer size, backend, bit, hash, routing alternate and share | exact errors; one signature whatever the entropy, the backend and the routing; the reference verifies it; a flipped bit fails everywhere |
+//! | 4 sign PSS | key, hash, message, salt and entropy, buffer size, backend, bit, routing alternate and share | exact errors; backends agree for fixed randomness, with and without routing; the reference recovers the salt; a flipped bit fails |
 //! | 5 verify | key, hash, message, signature source | browntls and the reference agree for both paddings |
 //! | 6 forge | key, hash, message, salt length or encoding edit | encodings signed by the reference: PSS accepts only `sLen = hLen`, PKCS #1 v1.5 only the canonical encoding |
 //! | 7 private DER | parser, source, hash, algorithm, buffer size | accepted keys sign correctly; unedited encodings load and re-encode byte for byte; failed writes leave the buffer zeroed |
@@ -50,6 +52,7 @@ use num_bigint::BigUint;
 use sha2::Digest as _;
 
 use self::oracle::HASHES;
+use crate::crypto_hash::with_fixed_share;
 use crate::input::{Input, put_field, put_short_field};
 
 /// Most operations per input.
@@ -352,6 +355,31 @@ fn out_len(k: usize, input: &mut Input<'_>) -> usize {
     }
 }
 
+/// Load-aware routing moves the signatures of a key loaded under the
+/// default policy to a lower backend and never changes them: with a fuzzed
+/// share of the signatures of every key size fixed on a fuzzed alternate,
+/// `sign` gives `sig` through that key (`key.loaded[0]`) and through
+/// `signer`, a key of a fuzzed backend, which is routed only if it is the
+/// same one.
+fn check_routed(
+    key: &FixedKey,
+    signer: &RsaPrivateKey,
+    sig: &[u8],
+    input: &mut Input<'_>,
+    sign: impl Fn(&RsaPrivateKey, &mut [u8]) -> Result<usize, Error>,
+) {
+    let (alternate, percent) = (input.byte(), input.byte());
+    let routed = with_fixed_share(Algorithm::Rsa, alternate, percent, || {
+        [&key.loaded[0], signer].map(|signer| {
+            let mut out = vec![0u8; sig.len()];
+            sign(signer, &mut out).map(|_| out)
+        })
+    });
+    for out in routed {
+        assert_eq!(out.as_deref(), Ok(sig), "RSA with load-aware routing");
+    }
+}
+
 /// The documented rule of `RsaPublicKey::from_components_with_min_bits`.
 fn expected_components(n_be: &[u8], e_be: &[u8], min_bits: usize) -> Result<(), Error> {
     if !(LEGACY_MIN_MODULUS_BITS..=MAX_MODULUS_BITS).contains(&min_bits) {
@@ -649,6 +677,9 @@ fn op_sign_pkcs1(fx: &Fixture, input: &mut Input<'_>) {
     if other != hash {
         assert!(verify_pkcs1v15(key.public(), other, msg, sig).is_err());
     }
+    check_routed(key, signer, sig, input, |signer, out| {
+        signer.sign_pkcs1v15(hash, msg, out)
+    });
 }
 
 /// Op 4: PSS signing.
@@ -690,6 +721,9 @@ fn op_sign_pss(fx: &Fixture, input: &mut Input<'_>) {
         check_verify(key.public(), public, hash, msg, &bad),
         (false, false)
     );
+    check_routed(key, signer, sig, input, |signer, out| {
+        signer.sign_pss(hash, msg, &FixedRng::new(rng_bytes), out)
+    });
 }
 
 /// Op 5: fuzzed signatures under the fixed keys.
@@ -1074,17 +1108,22 @@ pub fn seeds() -> Vec<Vec<u8>> {
     }
     // 3, 4: signing with each key and hash, then the error paths.
     // (The 3072-bit key once per operation: debug builds are slow.)
+    // Each ends with a routing alternate and its share of the signatures:
+    // all, half and a few of them, on each alternate in turn.
     for hash in 0..HASHES.len() as u8 {
         let key = u8::from(hash == 3);
+        let share = [100, 50, 1][usize::from(hash % 3)];
         let mut s = vec![3, key, hash];
         put_field(&mut s, msg);
         put_short_field(&mut s, &[0x11; 32]);
         s.extend_from_slice(&[hash % 2, hash, hash + 1, 0, 5 * hash, hash + 1]);
+        s.extend_from_slice(&[hash, share]);
         seeds.push(s);
         let mut s = vec![4, key, hash];
         put_field(&mut s, msg);
         put_short_field(&mut s, &[0x22; 96]);
         s.extend_from_slice(&[hash % 2, hash, hash + 2, 0, 9 * hash]);
+        s.extend_from_slice(&[hash + 1, share]);
         seeds.push(s);
     }
     for (op, entropy, out) in [(3u8, 31usize, 0u8), (3, 32, 2), (4, 96, 2), (4, 40, 0)] {

@@ -909,7 +909,7 @@ Work is grouped in *streams*, one per homogeneous kind of work of a family
 
 | Phase | What happens |
 |---|---|
-| Steady | Everything runs on the primary. Some calls are timed (about one record of at least 4096 bytes in sixteen; every key exchange), giving a short-term average cost and a baseline, the cost in normal operation. The baseline follows slow drift (weight 1/1024 upwards, 1/256 downwards) but not a run of slow calls |
+| Steady | Everything runs on the primary. Some calls are timed (about one record of at least 4096 bytes in sixteen; every key exchange, encapsulation and signature operation), giving a short-term average cost and a baseline, the cost in normal operation. The baseline follows slow drift (weight 1/1024 upwards, 1/256 downwards) but not a run of slow calls |
 | Probing | The short-term cost exceeded the baseline by `threshold_percent` (default 25, at least 20) and five of the last eight timed calls were each that slow. One call in eight goes to the next permitted backend in preference order, until at least four of them and sixteen calls of the primary were timed |
 | Shifting | The probed backend measured at least 5% cheaper than the congested primary. Every eight timed calls of the primary its share grows by 1/16 of the work while that holds (up to `max_shift_percent`, default 90), or shrinks by as much when the primary has recovered to within half the threshold of its baseline or the alternate is the slower one |
 
@@ -949,6 +949,14 @@ Properties this design keeps:
   alternate three times slower.
 - A keyed object is routed only while the policy still selects the backend
   it was created for, and one created with explicit backends never is.
+- An ML-KEM key and an RSA private key hold nothing that depends on the
+  backend their arithmetic runs on (the ML-KEM backends share one
+  representation of the key polynomials; an RSA key's Montgomery constants
+  are the same for every multiplication kernel), so a routed call uses the
+  key as it is: nothing is added to a key, and it does not matter when the
+  key was created. An RSA signature moves only to a backend below the
+  key's own; the AVX-512 IFMA backend's per-key constants are used by that
+  backend alone.
 - A keyed object whose key is expanded per backend (an AES-GCM key) is
   routable only if it was created while routing was enabled. It then keeps
   a copy of the AES key in a small allocation and expands it for the
@@ -985,6 +993,28 @@ Limits:
 - Records shorter than 4096 bytes are too short to time and always run on
   the primary, unless a share was fixed by hand. A record whose additional
   data exceeds 1/64 of its length is routed but not timed.
+- A key exchange or signature stream is meant to hold calls of one cost.
+  Calls that do not fit are left out of the measurements and still routed:
+  - a rejected signature and a ciphertext of the wrong length (a peer
+    chooses how many of those it sends);
+  - an ECDSA signature with another hash than the curve's TLS hash, whose
+    RFC 6979 nonce derivation costs differently (P-256 with SHA-512
+    measured 28% above P-256 with SHA-256 on one machine);
+  - an ECDSA verification that did less work than random inputs cause.
+    Verification runs in variable time on public values, and whoever
+    supplies both the key and the signature can make it cost a tenth
+    (measured on P-256), which would drag the stream's baseline down.
+    Verifications that pass this check vary by under a tenth.
+
+  When such calls land on a probe they yield no sample, so a stream of them
+  can keep a probe from completing. What remains varies within the
+  threshold but is partly in other hands: an ML-KEM public key chosen for
+  it raises the cost of encapsulating to it by up to 10%, and an RSA key's
+  public exponent changes its signing cost by 4% (3 against 65537) to 17%
+  (the largest accepted), through the two public-exponent exponentiations
+  of blinding and the fault check.
+- Only the polynomial arithmetic of an ML-KEM operation moves; its Keccak
+  permutations follow their own policies and are not routed.
 - The cost per byte depends somewhat on the record length (about 10%
   between 4096 and 16384 bytes for ChaCha20-Poly1305 on one machine), which
   is why the threshold cannot be set below 20%.
@@ -999,10 +1029,17 @@ Limits:
 
 Routed so far: ChaCha20-Poly1305 records (ChaCha20 backends), AES-GCM
 records (AES backends, each with its GHASH companion; one stream per key
-size, since 256-bit keys cost more per byte) and the X25519 ladder,
-including their uses by the native TLS provider once an application calls
-`load::enable`; for AES-GCM that means keys created after the call. AES-CCM,
-AES-CBC and the AES block types are not routed.
+size, since 256-bit keys cost more per byte), the X25519 ladder, P-256,
+P-384 and P-521 (four streams per curve: public key derivation, ECDH, ECDSA
+signing and accepted ECDSA verifications), ML-KEM (nine streams: key
+generation, encapsulation and decapsulation of each parameter set) and RSA
+signatures, that is the private-key operation with its blinding and fault
+check, of 2048-, 3072- and 4096-bit keys (one stream per size; keys of
+other sizes are not routed). That includes their uses by the native TLS
+provider once an application calls `load::enable`; for AES-GCM that means
+keys created after the call. AES-CCM, AES-CBC, the AES block types, RSA
+verification, FFDHE, X448, Ed25519, Ed448 and the hash functions are not
+routed.
 
 ### Operating-system interface
 

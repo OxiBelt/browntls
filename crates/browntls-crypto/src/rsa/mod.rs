@@ -79,7 +79,11 @@
 //! | x86-64 with BMI2 + ADX | `BMI2/ADX` (dedicated) | fused `mulx`/`adcx`/`adox` CIOS multiplication (moduli of a multiple of four limbs; other lengths use a per-limb step) |
 //! | all | `portable` | fused `u128` CIOS multiplication |
 //!
-//! Keys keep the backend selected when they were created or loaded.
+//! Keys keep the backend selected when they were created or loaded. While
+//! load-aware routing ([`crate::accel::load`]) is enabled, a share of the
+//! signatures of a 2048-, 3072- or 4096-bit key can run on a backend below
+//! the key's own in the table (see the `private` module); verification is not
+//! routed.
 //!
 //! Secret material is zeroised on drop.
 
@@ -152,6 +156,31 @@ impl crate::accel::Backends for RsaBackend {
             Self::MulxAdx => "BMI2/ADX",
             Self::Soft => "portable",
         }
+    }
+
+    fn streams() -> &'static [crate::accel::load::Stream] {
+        &LOAD
+    }
+}
+
+/// Load-aware routing state ([`crate::accel::load`]): the private-key
+/// operations (signatures) of keys of one size, whose cost depends on the
+/// size and only slightly on anything else (the public exponent).
+/// Public-key operations and FFDHE are not routed.
+static LOAD: [crate::accel::load::Stream; 3] = [
+    crate::accel::load::Stream::op("sign (2048-bit key)"),
+    crate::accel::load::Stream::op("sign (3072-bit key)"),
+    crate::accel::load::Stream::op("sign (4096-bit key)"),
+];
+
+/// The stream of the private-key operations of a key with a modulus of
+/// `bits` bits, if keys of that size are routed.
+fn load_stream(bits: usize) -> Option<&'static crate::accel::load::Stream> {
+    match bits {
+        2048 => Some(&LOAD[0]),
+        3072 => Some(&LOAD[1]),
+        4096 => Some(&LOAD[2]),
+        _ => None,
     }
 }
 mod key_alg;

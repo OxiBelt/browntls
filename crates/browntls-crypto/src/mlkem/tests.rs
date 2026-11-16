@@ -70,6 +70,68 @@ fn backends_detected() {
     }
 }
 
+/// Every parameter set and operation has its own stream.
+#[test]
+fn every_operation_has_its_stream() {
+    use super::backend::{Op, stream};
+    use super::{MlKem512, MlKem768, MlKem1024};
+    use crate::accel::Backends;
+    let ops = [Op::Keygen, Op::Encaps, Op::Decaps];
+    let names: std::vec::Vec<&str> = ops
+        .map(|op| stream::<MlKem512>(op).name())
+        .into_iter()
+        .chain(ops.map(|op| stream::<MlKem768>(op).name()))
+        .chain(ops.map(|op| stream::<MlKem1024>(op).name()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "keygen (512)",
+            "encaps (512)",
+            "decaps (512)",
+            "keygen (768)",
+            "encaps (768)",
+            "decaps (768)",
+            "keygen (1024)",
+            "encaps (1024)",
+            "decaps (1024)",
+        ]
+    );
+    let all: std::vec::Vec<&str> = Backend::streams().iter().map(|s| s.name()).collect();
+    assert_eq!(all, names);
+}
+
+/// A key is routed unless it was given an explicit backend.
+#[test]
+fn only_keys_with_the_default_backend_are_routed() {
+    use super::backend::Op;
+    use super::{DecapsulationKey, EncapsulationKey, MlKem768};
+    let seed = [7u8; 64];
+    let dk = DecapsulationKey::<MlKem768>::from_seed(&seed);
+    assert!(dk.ek.routed && dk.encapsulation_key().clone().routed);
+    assert_eq!(dk.backend(), Backend::detect());
+    // Routing is never enabled in this test binary: a routed key runs on
+    // its own engine, like one that is not routed.
+    for routed in [false, true] {
+        let (engine, route) = super::route::<MlKem768>(dk.ek.engine, routed, Op::Decaps);
+        assert_eq!((engine, route.backend()), (dk.ek.engine, dk.backend()));
+        route.done();
+    }
+    let ek = EncapsulationKey::<MlKem768>::from_bytes(dk.ek.as_bytes()).unwrap();
+    assert!(ek.routed);
+    let parsed = DecapsulationKey::<MlKem768>::from_bytes(dk.to_bytes().as_ref()).unwrap();
+    assert!(parsed.ek.routed);
+    for b in Backend::available() {
+        assert!(!ek.clone().with_backend(b).unwrap().routed, "{b:?}");
+        let pinned = DecapsulationKey::<MlKem768>::from_seed_with_backend(&seed, b).unwrap();
+        assert!(!pinned.ek.routed && pinned.backend() == b, "{b:?}");
+        let repinned = DecapsulationKey::<MlKem768>::from_seed(&seed)
+            .with_backend(b)
+            .unwrap();
+        assert!(!repinned.ek.routed && repinned.backend() == b, "{b:?}");
+    }
+}
+
 #[test]
 fn ntt_matches_portable() {
     for e in engines() {

@@ -23,13 +23,27 @@
 //!    mismatch (hardware fault, inconsistent key) returns an error.
 //!
 //! Every step has a running time that depends only on the key size.
+//!
+//! # Load-aware routing
+//!
+//! A signature by a key of 2048, 3072 or 4096 bits takes part in load-aware
+//! routing ([`crate::accel::load`]; one stream per size): while routing is
+//! enabled and the key's backend runs slower than usual, a share of the
+//! signatures runs all of the steps above under a lower backend's kernel.
+//! The key's Montgomery contexts do not depend on the kernel, so nothing is
+//! copied or added to the key for that; the radix-2^52 constants of the IFMA
+//! backend are used only under the IFMA kernel. A key is routed only while
+//! the RSA policy still selects the backend it was loaded with, and only
+//! signatures that passed the fault check are timed. The self-test of a key
+//! being loaded always runs under the key's own kernel.
 
 use super::bigint::crt::CrtExp;
-use super::bigint::mont::Mont;
+use super::bigint::mont::{Kernel, Mont, Under};
 use super::bigint::{self, HALF_LIMBS, MAX_LIMBS, inv};
 use super::key_alg::{self, MAX_ALGORITHM_IDENTIFIER_LEN, RsaKeyAlgorithm};
-use super::{MAX_MODULUS_BYTES, RsaPublicKey, pkcs1, pss};
+use super::{MAX_MODULUS_BYTES, RsaBackend, RsaPublicKey, pkcs1, pss};
 use crate::Error;
+use crate::accel::load::{self, Route};
 use crate::ct::{self, Choice};
 use crate::der::{self, Writer, tag};
 use crate::hash::{DynHash, HashAlgorithm, MAX_OUTPUT_LEN, Shake256};
@@ -173,7 +187,7 @@ fn coefficient_consistent(q: &[u64], qinv: &[u64], p: &[u64]) -> Choice {
 /// Reduces an `x` of up to `2 * ctx.len()` limbs into Montgomery form modulo
 /// the context's prime using multiplications only (constant time).
 #[inline(never)]
-fn reduce_to_mont(ctx: &Mont<HALF_LIMBS>, x: &[u64], out: &mut [u64]) {
+fn reduce_to_mont(ctx: Under<'_, HALF_LIMBS>, x: &[u64], out: &mut [u64]) {
     let h = ctx.len();
     debug_assert!(x.len() >= h && x.len() <= 2 * h && out.len() == h);
     let mut lo = [0u64; HALF_LIMBS];
@@ -196,7 +210,13 @@ fn reduce_to_mont(ctx: &Mont<HALF_LIMBS>, x: &[u64], out: &mut [u64]) {
 /// `r^-1 mod p` and `r^-1 mod q`, with `r` of up to `2 * p.len()` limbs. The
 /// two inversions run together ([`inv::mod_inverse_pair`]). Constant time.
 #[inline(never)]
-fn unblind(p: &Mont<HALF_LIMBS>, q: &Mont<HALF_LIMBS>, r: &[u64], sp: &mut [u64], sq: &mut [u64]) {
+fn unblind(
+    p: Under<'_, HALF_LIMBS>,
+    q: Under<'_, HALF_LIMBS>,
+    r: &[u64],
+    sp: &mut [u64],
+    sq: &mut [u64],
+) {
     let h = p.len();
     let mut rm = [[0u64; HALF_LIMBS]; 2];
     let mut rn = [[0u64; HALF_LIMBS]; 2];
@@ -435,7 +455,8 @@ impl RsaPrivateKey {
         let mut sig = [0u8; MAX_MODULUS_BYTES];
         pkcs1::encode(HashAlgorithm::Sha256, SELF_TEST_MESSAGE, &mut em[..k])
             .map_err(|_| Error::InvalidKey)?;
-        self.rsasp1(&em[..k], &[], &mut sig[..k])
+        // Under the key's own kernel, whatever load-aware routing does.
+        self.rsasp1_under(self.public.n.kernel(), &em[..k], &[], &mut sig[..k])
             .map_err(|_| Error::InvalidKey)
     }
 
@@ -599,17 +620,64 @@ impl RsaPrivateKey {
         r[0] |= 1;
     }
 
+    /// The kernel one private-key operation runs under, and its route: the
+    /// kernel the key was loaded with, or a lower one for a share of the
+    /// operations while load-aware routing has moved work. Keys of other
+    /// sizes than those with a stream are never routed.
+    ///
+    /// Not inlined, like [`Self::report`]: the signing path then carries
+    /// the route alone on its stack, not the routing decision's temporaries.
+    #[inline(never)]
+    fn route(&self) -> (Kernel, Route<RsaBackend>) {
+        let own = self.public.n.kernel();
+        let Some(stream) = super::load_stream(self.modulus_bits()) else {
+            return (own, Route::fixed(own.backend()));
+        };
+        let route = load::route(stream, own.backend(), 1, |b| own.lower(b).is_some());
+        // A route names the key's backend or one its kernel can be lowered
+        // to; anything else would run, untimed, under the key's own kernel.
+        match own.lower(route.backend()) {
+            Some(kernel) => (kernel, route),
+            None => (own, route.untimed()),
+        }
+    }
+
+    /// Reports a completed private-key operation to its route.
+    #[inline(never)]
+    fn report(route: Route<RsaBackend>) {
+        route.done();
+    }
+
     /// RSASP1 with CRT, blinding and fault check. `em` and `out` are `k`
     /// bytes; `em` must encode an integer below `n`.
-    #[inline(never)]
     pub(super) fn rsasp1(&self, em: &[u8], entropy: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        let (kernel, route) = self.route();
+        self.rsasp1_under(kernel, em, entropy, out)?;
+        // Only a signature that passed the fault check is reported.
+        Self::report(route);
+        Ok(())
+    }
+
+    /// [`Self::rsasp1`] with every Montgomery operation under `kernel`,
+    /// which is the key's own kernel or one lowered from it
+    /// ([`Kernel::lower`]).
+    #[inline(never)]
+    fn rsasp1_under(
+        &self,
+        kernel: Kernel,
+        em: &[u8],
+        entropy: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), Error> {
         let k = self.modulus_len_bytes();
         let l = self.public.limbs();
         let half = self.half;
         if em.len() != k || out.len() != k {
             return Err(Error::InvalidLength);
         }
-        let n = &self.public.n;
+        let n = self.public.n.under(kernel);
+        let p = self.p.under(kernel);
+        let q = self.q.under(kernel);
         let e = self.public.e();
 
         let mut m = [0u64; MAX_LIMBS];
@@ -636,11 +704,11 @@ impl RsaPrivateKey {
         let mut sq = [0u64; HALF_LIMBS];
         let mut base = [0u64; HALF_LIMBS];
         let mut base_q = [0u64; HALF_LIMBS];
-        reduce_to_mont(&self.p, &m_blind[..l], &mut base[..half]);
-        reduce_to_mont(&self.q, &m_blind[..l], &mut base_q[..half]);
+        reduce_to_mont(p, &m_blind[..l], &mut base[..half]);
+        reduce_to_mont(q, &m_blind[..l], &mut base_q[..half]);
         self.crt.exp(
-            &self.p,
-            &self.q,
+            p,
+            q,
             &mut sp[..half],
             &mut sq[..half],
             &base[..half],
@@ -653,26 +721,20 @@ impl RsaPrivateKey {
         // Unblind each half: multiply by r^-1 mod prime (constant-time
         // safegcd inversion of r mod prime).
         let mut tmp = [0u64; HALF_LIMBS];
-        unblind(&self.p, &self.q, &r[..l], &mut sp[..half], &mut sq[..half]);
+        unblind(p, q, &r[..l], &mut sp[..half], &mut sq[..half]);
 
         // Garner: s = s_q + q * ((s_p - s_q) qInv mod p).
         let mut sq_n = [0u64; HALF_LIMBS];
-        self.q.demont(&mut sq_n[..half], &sq[..half]); // s_q, normal form, < q
-        self.p.to_mont(&mut tmp[..half], &sq_n[..half]); // s_q mod p, Montgomery form
+        q.demont(&mut sq_n[..half], &sq[..half]); // s_q, normal form, < q
+        p.to_mont(&mut tmp[..half], &sq_n[..half]); // s_q mod p, Montgomery form
         let mut diff = [0u64; HALF_LIMBS];
-        bigint::mod_sub(
-            &mut diff[..half],
-            &sp[..half],
-            &tmp[..half],
-            self.p.modulus(),
-        );
-        self.p
-            .mul(&mut tmp[..half], &diff[..half], &self.qinv_mont[..half]);
+        bigint::mod_sub(&mut diff[..half], &sp[..half], &tmp[..half], p.modulus());
+        p.mul(&mut tmp[..half], &diff[..half], &self.qinv_mont[..half]);
         let mut h = [0u64; HALF_LIMBS];
-        self.p.demont(&mut h[..half], &tmp[..half]); // h < p
+        p.demont(&mut h[..half], &tmp[..half]); // h < p
         // Reuse the (dead) blinded-message buffer for the signature.
         let s = &mut m_blind;
-        bigint::mul(&mut s[..2 * half], self.q.modulus(), &h[..half]);
+        bigint::mul(&mut s[..2 * half], q.modulus(), &h[..half]);
         let carry = bigint::add_assign(&mut s[..half], &sq_n[..half]);
         bigint::add_word(&mut s[half..2 * half], carry);
         // s < n, so the limbs above `l` are zero.
@@ -806,5 +868,68 @@ impl RsaPrivateKey {
             out.zeroize();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accel::Backends;
+    use crate::rand::OsRng;
+
+    /// A signature is the same under the key's own kernel and under every
+    /// kernel it can be lowered to (the backends load-aware routing may
+    /// send it to), with and without blinding entropy; a representative
+    /// that is not below the modulus is refused under each.
+    #[test]
+    fn signatures_agree_under_every_lower_kernel() {
+        let key = RsaPrivateKey::generate(2048, &OsRng).unwrap();
+        let k = key.modulus_len_bytes();
+        let own = key.public.n.kernel();
+        assert_eq!(own.backend(), crate::accel::select());
+        let mut em = [0u8; MAX_MODULUS_BYTES];
+        pkcs1::encode(HashAlgorithm::Sha256, b"routed", &mut em[..k]).unwrap();
+        let mut reference = [0u8; MAX_MODULUS_BYTES];
+        key.rsasp1(&em[..k], &[], &mut reference[..k]).unwrap();
+        let mut ran = 0;
+        for backend in RsaBackend::PREFERENCE {
+            let Some(kernel) = own.lower(*backend) else {
+                assert!(*backend != own.backend() && *backend != RsaBackend::Soft);
+                continue;
+            };
+            assert_eq!(kernel.backend(), *backend);
+            for entropy in [&[][..], &[7u8; 32]] {
+                let mut sig = [0u8; MAX_MODULUS_BYTES];
+                key.rsasp1_under(kernel, &em[..k], entropy, &mut sig[..k])
+                    .unwrap();
+                assert_eq!(sig[..k], reference[..k], "{backend:?}");
+            }
+            let mut sig = [0xa5u8; MAX_MODULUS_BYTES];
+            assert_eq!(
+                key.rsasp1_under(kernel, &[0xff; 256], &[], &mut sig[..k]),
+                Err(Error::InvalidLength),
+                "{backend:?}"
+            );
+            ran += 1;
+        }
+        // At least the key's own backend and, unless that is it, the
+        // portable one.
+        assert!(ran > usize::from(own.backend() != RsaBackend::Soft));
+    }
+
+    #[test]
+    fn only_the_common_key_sizes_have_a_stream() {
+        for (bits, routed) in [
+            (1024, false),
+            (2047, false),
+            (2048, true),
+            (3072, true),
+            (4096, true),
+            (4097, false),
+            (8192, false),
+        ] {
+            assert_eq!(crate::rsa::load_stream(bits).is_some(), routed, "{bits}");
+        }
+        assert_eq!(RsaBackend::streams().len(), 3);
     }
 }

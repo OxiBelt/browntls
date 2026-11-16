@@ -114,11 +114,26 @@
 //!   10% between 4096 and 16384 bytes for ChaCha20-Poly1305 on one
 //!   machine), so a change of record sizes looks like a small change of
 //!   speed; the smallest threshold is 20% for that reason.
+//! * A key exchange or signature stream is meant to hold calls of one cost.
+//!   A rejected signature and a ciphertext of the wrong length are not
+//!   timed, since a peer chooses how many of those it sends. Neither is a
+//!   successful call whose cost is another one than its stream's: an ECDSA
+//!   signature with another hash than the curve's TLS hash, and an ECDSA
+//!   verification that did less work than random inputs cause (whoever
+//!   supplies both key and signature can make one cost a tenth). Such calls
+//!   are still routed, and when they land on a probe they yield no sample,
+//!   so a stream of them can keep a probe from completing.
+//! * What remains varies within the threshold but is partly in other
+//!   hands: an ML-KEM public key chosen for it raises the cost of
+//!   encapsulating to it by up to 10%, and an RSA key's public exponent
+//!   changes its signing cost by 4% (3 against 65537) to 17% (the largest
+//!   accepted).
 //! * A marginal alternate (one that is nearly as slow as the congested
 //!   primary) is given up when timings are noisy; work then stays on the
 //!   primary.
-//! * A keyed object (for example an AEAD key) is routed only while the
-//!   policy still selects the backend it was created for.
+//! * A keyed object (for example an AEAD key, an ML-KEM key or an RSA
+//!   private key) is routed only while the policy still selects the backend
+//!   it was created for.
 //! * A keyed object whose key is expanded per backend (an AES-GCM key) is
 //!   routable only if it was created while routing was enabled. It expands
 //!   its key for the alternates when one of its records is first routed to
@@ -801,6 +816,12 @@ mod tests {
     fn candidates_follow_the_policy() {
         candidates_match::<crate::chacha::Backend>();
         candidates_match::<crate::aes::Backend>();
+        candidates_match::<crate::curve25519::x25519::Backend>();
+        candidates_match::<crate::nist::P256Backend>();
+        candidates_match::<crate::nist::P384Backend>();
+        candidates_match::<crate::nist::P521Backend>();
+        candidates_match::<crate::mlkem::Backend>();
+        candidates_match::<crate::rsa::RsaBackend>();
     }
 
     /// A keyed object's alternates are the candidates of its backend, in

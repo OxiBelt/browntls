@@ -46,7 +46,8 @@ intent.
 | Unbuffered API (`browntls::unbuffered`, `UnbufferedClientConnection`, `UnbufferedServerConnection`; also without `std`): TLS 1.2 and 1.3, both sides, in-place decryption in the caller's buffer, encryption into the caller's buffer with exact size errors, resumption, 0-RTT, KeyUpdate including the confidentiality-limit refresh, `close_notify`; tested against buffered browntls peers, itself and rustls 0.23 on both providers, with whole and byte-by-byte input (`tests/cases/unbuffered.rs`) | done |
 | Encrypted Client Hello (RFC 9849) client and server in shared mode, GREASE, retry configurations, SVCB/HTTPS `ech` parameter parsing (RFC 9848); see [Architecture](Architecture.md#encrypted-client-hello-rfc-9849) | done |
 | QUIC | planned |
-| Fuzzing targets for codecs, PKI and handshake state | done: eight cargo-fuzz targets in `fuzz/` (handshake messages, deframer, certificate decompression, X.509 path validation, PEM, CRLs, client and server connections with a genuine in-process peer and identity TLS 1.3 record protection); built and run over generated seeds in CI on the stable toolchain. Fuzzing itself is manual: the only campaign so far ran each target for 60 seconds from the generated seeds when the targets were added (nightly 1.102, libFuzzer with AddressSanitizer, x86-64; between 3.5 thousand executions for the connection targets and 4.5 million for `pki_crl`) and found no crash, which is evidence of little beyond the harnesses working |
+| Fuzzing targets for codecs, PKI and handshake state | done: eight cargo-fuzz targets in `fuzz/` (handshake messages, deframer, certificate decompression, X.509 path validation, PEM, CRLs, client and server connections with a genuine in-process peer and identity TLS 1.3 record protection); built and run over generated seeds in CI on the stable toolchain. The first manual campaign ran each target for 60 seconds from the generated seeds when the targets were added (nightly 1.102, libFuzzer with AddressSanitizer, x86-64; between 3.5 thousand executions for the connection targets and 4.5 million for `pki_crl`) and found no crash, which is evidence of little beyond the harnesses working |
+| Fuzzing the public API | done: fifteen API-sequence targets grouped by topic (hashes, ciphers, ECC, RSA, KEMs, HPKE, crypto utilities, PKI, configuration, buffered and unbuffered connections, ECH, PSK, delegated credentials and exported authenticators, codec types), checked against RustCrypto oracles, models and every backend; CI requires them to reach every public function of the three library crates (four `PlainMessage` methods are not reachable from outside the crate and are exempt). The Fuzz workflow runs all twenty-three targets as a GitHub Actions matrix: on pull requests for the targets whose sources changed, daily on x86-64, aarch64 and (crypto targets) riscv64 with cached corpora |
 | Kernel integration design | planned |
 
 ## Governance gaps
@@ -54,12 +55,14 @@ intent.
 These requirements from [Maintenance](Maintenance.md) are not yet met:
 
 - `cargo vet` admission with real audits for every dependency.
-- Continuous fuzzing. The targets in `fuzz/` exist and are run by hand; no
-  service runs them, no corpus is kept between runs, and CI only smoke-tests
-  the harnesses. The connection targets do not reach states behind a
-  Finished or CertificateVerify they would have to forge, TLS 1.2 after
-  ChangeCipherSpec, or the RustCrypto provider; `browntls-crypto` primitives
-  have no fuzz target.
+- Continuous fuzzing beyond the daily CI runs. There is no dedicated fuzzing
+  service (such as OSS-Fuzz); each target gets twenty minutes a day per
+  architecture, findings from CI are reported only as a target name and an
+  input hash, and the riscv64 runners build without AddressSanitizer. The
+  connection targets do not reach states behind a Finished or
+  CertificateVerify they would have to forge, or TLS 1.2 after
+  ChangeCipherSpec, except through the genuine in-process peers of the API
+  targets.
 - `cargo vet` audits are also missing for the optional compression crates
   (`miniz_oxide`, `brotli`, `ruzstd` and their dependencies), which parse
   peer data when their features are enabled; `ruzstd` contains `unsafe`.

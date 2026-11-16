@@ -28,7 +28,7 @@ on:
       - 'crates/browntls-entropy/**'
       - 'rust-toolchain.toml'
   schedule:
-    - cron: '7 4 * * 3'
+    - cron: '0 3 * * 1'
   workflow_dispatch:
     inputs:
       samples:
@@ -37,10 +37,6 @@ on:
         default: ''
 
 permissions: {}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

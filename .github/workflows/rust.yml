@@ -4,15 +4,8 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '41 5 * * 1'
+    - cron: '0 5 * * 1'
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +17,8 @@ jobs:
     name: Format, Clippy and docs
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,6 +65,8 @@ jobs:
   test-x86_64:
     name: Test x86-64 (${{ matrix.name }})
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -116,6 +113,8 @@ jobs:
   test-aarch64:
     name: Test aarch64 (native, ${{ matrix.name }})
     runs-on: ubuntu-26.04-arm
+    permissions:
+      contents: read
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -148,6 +147,8 @@ jobs:
     name: Test riscv64 (native, RISE)
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -169,6 +170,8 @@ jobs:
     name: Test under QEMU (${{ matrix.profile }})
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -214,6 +217,8 @@ jobs:
     name: Build without std
     runs-on: ubuntu-26.04
     timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -247,6 +252,8 @@ jobs:
     name: Fuzz harnesses (stable build and seeds)
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -268,6 +275,8 @@ jobs:
   dependencies:
     name: Dependency policy (cargo-deny)
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     timeout-minutes: 15
     steps:
       - name: Check out source

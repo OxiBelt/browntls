@@ -21,7 +21,7 @@ name: Fuzz
 on:
   pull_request:
   schedule:
-    - cron: '7 2 * * *'
+    - cron: '0 3 * * 1'
   workflow_dispatch:
     inputs:
       granularity:
@@ -37,10 +37,6 @@ on:
         description: 'Fuzzing time per target, in seconds'
         type: number
         default: 600
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

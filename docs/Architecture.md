@@ -1068,7 +1068,7 @@ entropy from the optional `getrandom` crate feature.
 
 ## Toolchain and dependency policy
 
-- Rust 1.99.1 is pinned in `rust-toolchain.toml` and is the MSRV
+- Rust 1.100.0 is pinned in `rust-toolchain.toml` and is the MSRV
   (`rust-version`). Toolchain upgrades are explicit changes.
 - `Cargo.lock` is committed and CI builds with `--locked`.
 - Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`

@@ -17,7 +17,7 @@ See [Architecture](docs/Architecture.md) for the design and
 been independently reviewed or audited. There are no published releases or
 production-readiness claims; kernel integration remains to be designed.
 
-Rust 1.99.1 is required (pinned in `rust-toolchain.toml`).
+Rust 1.100.0 is required (pinned in `rust-toolchain.toml`).
 
 ## Contributing
 

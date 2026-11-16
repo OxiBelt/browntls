@@ -38,7 +38,7 @@ claim they are configured.
 
 ## Rust workspace requirements
 
-The workspace was introduced with the toolchain pin (Rust 1.99.1, also the
+The workspace was introduced with the toolchain pin (now Rust 1.100.0, also the
 MSRV), a committed `Cargo.lock` used with `--locked`, format/Clippy/test/doc
 CI, QEMU and native multi-architecture test jobs, `no_std` builds, and
 `cargo deny` (advisories, licenses, bans, sources) with a checksum-pinned

@@ -17,9 +17,6 @@
 1003 crates/browntls/tests/cases/tls13_features.rs
 1391 crates/browntls/tests/cases/tls13.rs
 1517 crates/browntls/tests/cases/unbuffered.rs
-1564 crates/browntls/tests/ech_native.rs
-1657 crates/browntls/tests/native_rsa_pss_keys.rs
-1496 crates/browntls/tests/openssl_interop.rs
 1616 fuzz/src/crypto_cipher.rs
 1127 fuzz/src/crypto_hpke.rs
 1094 fuzz/src/crypto_kem.rs

@@ -209,11 +209,20 @@ fn wnaf<const N: usize>(k: &[u64; N], w: u32, out: &mut [i8]) -> usize {
 
 /// Variable-time `u1 * G + u2 * Q` for signature verification, in Jacobian
 /// coordinates. All inputs are public; this function is **not** constant time.
+///
+/// Also tells whether the multiplication did the work it does for scalars
+/// drawn at random: nearly [`Curve::BITS`] doublings and at least three
+/// quarters of the additions expected of width-6 and width-5 digit strings
+/// of that length. The cost of this function follows its inputs, and
+/// someone who chooses the key and the signature chooses them: `u1 = u2 =
+/// 1` costs a tenth. A caller that measures the cost (load-aware routing)
+/// counts only typical multiplications, whose cost is within a tenth of the
+/// usual one whatever the inputs.
 pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
     u1: &[u64; N],
     u2: &[u64; N],
     q: &Affine<N>,
-) -> Jacobian<N> {
+) -> (Jacobian<N>, bool) {
     // Odd multiples of Q: table[i] = (2i + 1) Q.
     let qj = Jacobian::from_affine::<C>(q);
     let q2 = jacobian::double::<C, N>(&qj);
@@ -227,12 +236,14 @@ pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
     let l1 = wnaf(u1, 6, &mut n1[..64 * N + 1]);
     let l2 = wnaf(u2, 5, &mut n2[..64 * N + 1]);
     let len = l1.max(l2);
+    let mut additions = 0usize;
     let mut acc = Jacobian::identity::<C>();
     for i in (0..len).rev() {
         if !acc.is_identity() {
             acc = jacobian::double::<C, N>(&acc);
         }
         let d1 = n1[i];
+        additions += usize::from(d1 != 0) + usize::from(n2[i] != 0);
         if d1 != 0 {
             let mut t = C::G_ODD[usize::from(d1.unsigned_abs()) / 2];
             if d1 < 0 {
@@ -249,7 +260,10 @@ pub(crate) fn mul_double_vartime<C: Curve<N>, const N: usize>(
             acc = jacobian::add::<C, N>(&acc, &t);
         }
     }
-    acc
+    // A width-w digit string has one non-zero digit in w + 1 on average.
+    let expected = C::BITS / 7 + C::BITS / 6;
+    let typical = len + 16 >= C::BITS && 4 * additions >= 3 * expected;
+    (acc, typical)
 }
 
 #[cfg(test)]
@@ -364,8 +378,18 @@ mod tests {
                 to_affine::<C, N>(&double::<C, N>(&Projective::from_affine::<C>(&C::G))).unwrap();
             let u2 = random_scalar::<C, N>(&mut seed);
             let u1 = mont::sub_mod(k, &mont::add_mod(&u2, &u2, &C::ORDER), &C::ORDER);
-            let dbl = mul_double_vartime::<C, N>(&u1, &u2, &two_g);
+            let (dbl, typical) = mul_double_vartime::<C, N>(&u1, &u2, &two_g);
+            assert!(typical, "random scalars do typical work");
             assert!(jacobian::x_equals::<C, N>(&dbl, &var.x));
+            // Small scalars, as a crafted signature can have, do not.
+            let mut one = [0u64; N];
+            one[0] = 1;
+            let (three_g, typical) = mul_double_vartime::<C, N>(&one, &one, &two_g);
+            assert!(!typical && !three_g.is_identity());
+            // Nor do long scalars with few non-zero digits.
+            let mut sparse = [0u64; N];
+            sparse[(C::BITS - 2) / 64] = 1 << ((C::BITS - 2) % 64);
+            assert!(!mul_double_vartime::<C, N>(&sparse, &sparse, &two_g).1);
             // The y-coordinate: Y == y Z^3.
             let z3 = C::mul(&C::sqr(&dbl.z), &dbl.z);
             assert_eq!(C::mul(&var.y, &z3), dbl.y);

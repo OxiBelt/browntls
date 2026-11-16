@@ -53,7 +53,7 @@ stability.
 | `tls_config` | tls-config | Client and server configuration builders, providers and cipher suites, signers, verifiers and root stores, ticketers, certificate compression, key logs, session caches and certificate resolvers |
 | `tls_conn` | tls-connection | An in-process client and server driven by API calls: transfers with damaged bytes, reader and writer, early data, close_notify, key updates, exporters, `complete_io`, `Stream`, `Acceptor`, accessors, secret extraction |
 | `tls_unbuffered` | tls-connection | The unbuffered API of both sides with fuzzed buffer sizes, damaged delivery, early data, key updates and exporters |
-| `tls_ech` | tls-extensions | ECH configuration lists, server keys, SVCB records and handshakes (accepted, rejected with retry configurations, GREASE) |
+| `tls_ech` | tls-extensions | ECH configuration lists, server keys, SVCB records and handshakes (accepted, rejected with retry configurations, GREASE) in shared and split mode (client-facing server fed in fuzz-chosen pieces, back-end server, trial decryption with random identifiers) |
 | `tls_psk` | tls-extensions | External PSKs, the RFC 9258 importer and RFC 8773, with handshakes using matching and differing PSKs |
 | `tls_auth` | tls-extensions | Delegated credentials (decoding, issuing, validity windows, handshakes) and exported authenticators between connected peers |
 | `tls_codec` | tls-codec | The doc-hidden codec re-exports, record payload types, distinguished names and stored session values |

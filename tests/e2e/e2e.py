@@ -8,6 +8,11 @@ applies, and checks what the browntls side negotiated (protocol version,
 cipher suite, key exchange group, handshake kind) together with the
 application data exchanged.
 
+The Encrypted Client Hello scenarios (RFC 9849) use one server in shared
+mode, or two in split mode: a browntls client-facing server, which decrypts
+the ClientHello and relays the connection, and a browntls back-end server,
+which terminates it.
+
 Commands (run from the repository root; see tests/e2e/README.md):
 
     python3 tests/e2e/e2e.py matrix images|e2e     GitHub Actions matrix JSON
@@ -41,6 +46,11 @@ E2E_DIR = Path(__file__).resolve().parent
 
 LABEL = "org.oxibelt.browntls-e2e.run"
 SERVER_ALIAS = "tls-server"
+# Encrypted Client Hello: the back-end server of split mode, the public name
+# (with its own certificate, see peer/gen-pki.sh) and the per-run keys.
+BACKEND_ALIAS = "ech-backend"
+ECH_PUBLIC_NAME = "ech-public.test"
+ECH_KEYS = {"current": 1, "stale": 2}
 PORT = 4433
 MESSAGE = "browntls end-to-end check"
 # How long a client may retry connecting while the server starts up, and how
@@ -133,8 +143,12 @@ class Suite:
 
     name: str
     description: str
-    implementation: str  # "openssl", "gnutls" or "browntls"
+    implementation: str  # "openssl", "gnutls", "go" or "browntls"
     peer_image: str  # Dockerfile under tests/e2e/peer/ (also used for PKI)
+    # "mlkem": X25519MLKEM768; "etm-toggle": a peer without Encrypt-then-MAC;
+    # "ech": Encrypted Client Hello; "ech-only": nothing but ECH scenarios;
+    # "browntls-ech-client": the scenarios whose client must be browntls
+    # (GREASE and random configuration identifiers in split mode).
     features: frozenset[str]
 
 
@@ -167,7 +181,16 @@ SUITES: dict[str, Suite] = {
             "browntls client and server in separate containers",
             "browntls",
             "alpine",
-            frozenset({"mlkem"}),
+            frozenset({"mlkem", "ech", "browntls-ech-client"}),
+        ),
+        # Go implements ECH as a client and as a shared-mode server; its
+        # client also drives the browntls split-mode servers.
+        Suite(
+            "go",
+            "Go crypto/tls ECH client and shared-mode server",
+            "go",
+            "go",
+            frozenset({"ech", "ech-only"}),
         ),
     )
 }
@@ -235,6 +258,44 @@ ROLES = ("client", "server")
 
 
 @dataclasses.dataclass(frozen=True)
+class Ech:
+    """An Encrypted Client Hello (RFC 9849) setup.
+
+    `topology` is "shared" (one server decrypts and terminates) or "split"
+    (a browntls client-facing server decrypts and relays to a browntls
+    back-end server). The client offers the current configuration
+    ("enable"), one whose key no server holds ("stale"; with `retry` it
+    retries once with the retry configurations), or GREASE ("grease").
+    `random_config_id` has the client randomize the configuration identifier
+    and the servers use trial decryption and check the public name. `hrr`
+    restricts the terminating server to P-256, for a HelloRetryRequest.
+    """
+
+    topology: str
+    client: str = "enable"
+    retry: bool = False
+    random_config_id: bool = False
+    hrr: bool = False
+
+    @property
+    def connections(self) -> int:
+        return 2 if self.retry else 1
+
+    @property
+    def forwarded(self) -> int:
+        """Connections the client-facing server forwards in split mode."""
+        return 0 if self.client == "grease" else 1
+
+    @property
+    def server_name(self) -> str:
+        """The client's server name: the public name for GREASE in split
+        mode, which the client-facing server completes itself."""
+        if self.client == "grease" and self.topology == "split":
+            return ECH_PUBLIC_NAME
+        return SERVER_ALIAS
+
+
+@dataclasses.dataclass(frozen=True)
 class Scenario:
     """One handshake configuration.
 
@@ -265,6 +326,7 @@ class Scenario:
     expect_suite: str | None = None
     expect_group: str | None = None
     expect_handshake: str | None = "Full"
+    ech: Ech | None = None
 
     @property
     def refused(self) -> bool:
@@ -280,6 +342,10 @@ class Scenario:
         return ("EncryptThenMacExtensionRequired", "NoCipherSuitesInCommon")
 
     def applies_to(self, suite: Suite) -> bool:
+        if (self.ech is None and "ech-only" in suite.features) or (
+            self.ech is not None and "ech" not in suite.features
+        ):
+            return False
         return self.requires <= suite.features and not (self.excludes & suite.features)
 
     def roles_for(self, suite: Suite) -> tuple[str, ...]:
@@ -315,6 +381,21 @@ def _tls12(name: str, suite: str, groups: tuple[str, ...], key: str, **kw) -> Sc
         groups=groups,
         expect_version="TLSv1_2",
         expect_suite=suite,
+        **kw,
+    )
+
+
+def _ech(name: str, ech: Ech, **kw) -> Scenario:
+    # Split mode always has browntls servers: the peer can only be the client.
+    kw.setdefault("roles", ("server",) if ech.topology == "split" else ROLES)
+    return Scenario(
+        name,
+        "ecdsa-p256",
+        tls="1.3",
+        connections=ech.connections,
+        ech=ech,
+        expect_version="TLSv1_3",
+        expect_handshake="FullWithHelloRetryRequest" if ech.hrr else "Full",
         **kw,
     )
 
@@ -468,6 +549,25 @@ SCENARIOS: tuple[Scenario, ...] = (
         "rsa-2048",
         connections=2,
         roles=("client",),
+    ),
+    # Encrypted Client Hello (RFC 9849). Shared mode: the peer is client or
+    # server. Split mode: the servers are browntls, the client the peer.
+    _ech("ech-shared", Ech("shared")),
+    _ech("ech-shared-hello-retry-request", Ech("shared", hrr=True)),
+    _ech("ech-shared-retry-configs", Ech("shared", client="stale", retry=True)),
+    _ech("ech-shared-grease", Ech("shared", client="grease"), roles=("client",)),
+    _ech("ech-split", Ech("split")),
+    _ech("ech-split-hello-retry-request", Ech("split", hrr=True)),
+    _ech("ech-split-retry-configs", Ech("split", client="stale", retry=True)),
+    _ech(
+        "ech-split-grease",
+        Ech("split", client="grease"),
+        requires=frozenset({"browntls-ech-client"}),
+    ),
+    _ech(
+        "ech-split-random-config-id",
+        Ech("split", random_config_id=True),
+        requires=frozenset({"browntls-ech-client"}),
     ),
 )
 
@@ -736,6 +836,32 @@ class Run:
             timeout=600,
         )
 
+    def generate_ech_keys(self) -> None:
+        """ECH keys for the public name: the servers' current key and a
+        stale one no server holds (`browntls-e2e ech-keygen`)."""
+        for which, config_id in ECH_KEYS.items():
+            docker(
+                "run",
+                "--rm",
+                *self.label(),
+                "--user",
+                "0:0",
+                "-v",
+                f"{self.volume}:/pki",
+                "--platform",
+                self.arch.platform,
+                *qemu_env(self.arch),
+                self.image,
+                "ech-keygen",
+                "--out",
+                f"/pki/ech/{which}",
+                "--public-name",
+                ECH_PUBLIC_NAME,
+                "--config-id",
+                str(config_id),
+                timeout=300,
+            )
+
     def _common(self, name: str, browntls: bool) -> list[str]:
         args = ["--name", name, *self.label(), "--network", self.network]
         args += ["-v", f"{self.volume}:/pki:ro"]
@@ -747,11 +873,13 @@ class Run:
         self.counter += 1
         return f"{self.id}-{self.counter}-{what}"
 
-    def start_server(self, image: str, cmd: Sequence[str], env: dict[str, str]) -> Container:
+    def start_server(
+        self, image: str, cmd: Sequence[str], env: dict[str, str], alias: str = SERVER_ALIAS
+    ) -> Container:
         browntls = image == self.image
-        name = self.next_name("server")
+        name = self.next_name("server" if alias == SERVER_ALIAS else alias)
         args = ["run", "-d", *self._common(name, browntls)]
-        args += ["--network-alias", SERVER_ALIAS]
+        args += ["--network-alias", alias]
         for k, v in env.items():
             args += ["-e", f"{k}={v}"]
         if not browntls:
@@ -891,7 +1019,10 @@ def run_scenario(run: Run, sc: Scenario, role: str, artifacts: Path | None) -> R
     env = peer_env(sc, impl)
     problems: list[str] = []
 
-    if role == "client":
+    if sc.ech is not None:
+        problems, containers = run_ech_scenario(run, sc, role)
+        negotiated = summarize_ech(containers)
+    elif role == "client":
         if impl == "browntls":
             server = run.start_server(run.image, browntls_args(sc, "server"), {})
             server_impl = "browntls"
@@ -926,16 +1057,276 @@ def run_scenario(run: Run, sc: Scenario, role: str, artifacts: Path | None) -> R
             if client.exit_code != 0:
                 problems.append(f"{impl} client exit status {client.exit_code}")
         negotiated = summarize(server, "server")
+    if sc.ech is None:
+        containers = {"server": server, "client": client}
 
     seconds = time.monotonic() - start
     if artifacts is not None:
         d = artifacts / f"{sc.name}--browntls-{role}"
         d.mkdir(parents=True, exist_ok=True)
-        for who, c in (("server", server), ("client", client)):
+        for who, c in containers.items():
             (d / f"{who}.stdout").write_text(c.stdout)
             (d / f"{who}.stderr").write_text(c.stderr)
         (d / "problems.txt").write_text("\n".join(problems) + ("\n" if problems else ""))
     return Result(sc.name, role, not problems, seconds, negotiated, problems)
+
+
+
+# ------------------------------------------------------ encrypted client hello
+
+
+def ech_file(which: str, name: str) -> str:
+    return f"/pki/ech/{which}/{name}"
+
+
+def ech_terminating_server_args(sc: Scenario, accept: int, backend: bool) -> list[str]:
+    """A browntls server that terminates ECH connections: shared mode (with
+    the keys, and the public name's certificate for rejections) or the
+    back-end server of split mode."""
+    ech = sc.ech
+    assert ech is not None
+    args = ["server", "--listen", f"0.0.0.0:{PORT}", "--accept", str(accept), "--tls", "1.3"]
+    args += ["--cert", pki(sc.key, "server.pem"), "--key", pki(sc.key, "server.key")]
+    if backend:
+        args.append("--ech-backend")
+    else:
+        args += [
+            "--sni-cert",
+            f"{ECH_PUBLIC_NAME},{pki(sc.key, 'public.pem')},{pki(sc.key, 'public.key')}",
+            "--ech-config",
+            ech_file("current", "ech-config"),
+            "--ech-key",
+            ech_file("current", "ech-key"),
+        ]
+        if ech.random_config_id:
+            args += ["--ech-trial-decryption", "--ech-public-name-check"]
+    if ech.hrr:
+        args += ["--group", "secp256r1"]
+    return args
+
+
+def ech_client_facing_args(sc: Scenario) -> list[str]:
+    """The browntls client-facing server of split mode: the public name's
+    certificate for the connections it completes itself."""
+    ech = sc.ech
+    assert ech is not None
+    args = ["client-facing", "--listen", f"0.0.0.0:{PORT}", "--accept", str(ech.connections)]
+    args += ["--cert", pki(sc.key, "public.pem"), "--key", pki(sc.key, "public.key")]
+    args += ["--ech-config", ech_file("current", "ech-config")]
+    args += ["--ech-key", ech_file("current", "ech-key")]
+    args += ["--backend", f"{SERVER_ALIAS}={BACKEND_ALIAS}:{PORT}", "--tls", "1.3"]
+    args += ["--wait", str(CONNECT_WAIT)]
+    if ech.random_config_id:
+        args += ["--ech-trial-decryption", "--ech-public-name-check"]
+    return args
+
+
+def ech_client_list(ech: Ech) -> str:
+    return ech_file("stale" if ech.client == "stale" else "current", "ech-config-list")
+
+
+def ech_browntls_client_args(sc: Scenario) -> list[str]:
+    ech = sc.ech
+    assert ech is not None
+    args = ["client", "--connect", f"{SERVER_ALIAS}:{PORT}", "--server-name", ech.server_name]
+    args += ["--ca", pki(sc.key, "ca.pem"), "--message", MESSAGE, "--tls", "1.3"]
+    args += ["--wait", str(CONNECT_WAIT)]
+    if ech.client == "grease":
+        args.append("--ech-grease")
+    else:
+        args += ["--ech-config-list", ech_client_list(ech)]
+    if ech.retry:
+        args.append("--ech-retry")
+    if ech.random_config_id:
+        args.append("--ech-random-config-id")
+    return args
+
+
+def ech_go_server_command(sc: Scenario) -> list[str]:
+    ech = sc.ech
+    assert ech is not None
+    cmd = ["go-peer", "server", "-listen", f":{PORT}", "-accept", str(ech.connections)]
+    for who in ("server", "public"):
+        cmd += ["-cert", pki(sc.key, f"{who}.pem"), "-key", pki(sc.key, f"{who}.key")]
+    cmd += ["-ech-config", ech_file("current", "ech-config")]
+    cmd += ["-ech-key", ech_file("current", "ech-key")]
+    if ech.hrr:
+        cmd.append("-p256-only")
+    return cmd
+
+
+def ech_go_client_command(sc: Scenario) -> list[str]:
+    ech = sc.ech
+    assert ech is not None
+    cmd = ["go-peer", "client", "-connect", f"{SERVER_ALIAS}:{PORT}"]
+    cmd += ["-server-name", ech.server_name, "-ca", pki(sc.key, "ca.pem")]
+    cmd += ["-ech-config-list", ech_client_list(ech), "-message", MESSAGE]
+    cmd += ["-wait", str(CONNECT_WAIT)]
+    if ech.retry:
+        cmd.append("-retry")
+    return cmd
+
+
+def check_ech_client(sc: Scenario, impl: str, c: Container) -> list[str]:
+    """The client's view: the ECH outcome, the handshake kind, the reply,
+    and one rejection before a retry."""
+    ech = sc.ech
+    assert ech is not None
+    evs = events(c.stdout)
+    problems = [f"{impl} client error: {e.get('message')}" for e in evs if e.get("event") == "error"]
+    if c.exit_code != 0:
+        problems.append(f"{impl} client exit status {c.exit_code}")
+    rejected = [e for e in evs if e.get("event") == "ech-rejected"]
+    if len(rejected) != (1 if ech.retry else 0):
+        problems.append(f"{impl} client: {len(rejected)} ECH rejections")
+    if ech.retry and rejected and not rejected[0].get("retry_configs"):
+        problems.append(f"{impl} client: the rejection carried no retry configurations")
+    conns = [e for e in evs if e.get("event") == "connection" and e.get("role") == "client"]
+    if len(conns) != 1:
+        problems.append(f"{impl} client: {len(conns)} connections, expected 1")
+    for e in conns:
+        if impl == "go":
+            if e.get("ech_accepted") is not True:
+                problems.append("go client: ECH not accepted")
+        else:
+            want = "Grease" if ech.client == "grease" else "Accepted"
+            if e.get("ech") != want:
+                problems.append(f"browntls client: ech={e.get('ech')!r}, expected {want!r}")
+        for k, v in (("version", sc.expect_version), ("handshake", sc.expect_handshake)):
+            if v is not None and e.get(k) != v:
+                problems.append(f"{impl} client: {k}={e.get(k)!r}, expected {v!r}")
+        if e.get("received") != MESSAGE[::-1]:
+            problems.append(f"{impl} client received {e.get('received')!r}")
+    return problems
+
+
+def check_ech_server(
+    sc: Scenario, impl: str, what: str, c: Container, accepted: int, refused: int, rejected: int
+) -> list[str]:
+    """A terminating server's view: `accepted` connections with the inner
+    server name and ECH confirmed, `rejected` completed with the outer
+    hello (GREASE), and `refused` ended by the client's `ech_required`."""
+    evs = events(c.stdout)
+    problems = [f"{what} error: {e.get('message')}" for e in evs if e.get("event") == "error"]
+    if c.exit_code != 0:
+        problems.append(f"{what} exit status {c.exit_code}")
+    required = [e for e in evs if e.get("event") == "ech-required"]
+    if len(required) != refused:
+        problems.append(f"{what}: {len(required)} ech_required alerts, expected {refused}")
+    conns = [e for e in evs if e.get("event") == "connection" and e.get("role") == "server"]
+    if len(conns) != accepted + rejected:
+        problems.append(f"{what}: {len(conns)} connections, expected {accepted + rejected}")
+    for e in conns:
+        ok = e.get("ech_accepted") if impl == "go" else e.get("ech") == "Accepted"
+        if bool(ok) != (accepted > 0):
+            problems.append(f"{what}: ECH status {e.get('ech', e.get('ech_accepted'))!r}")
+        if e.get("received") != MESSAGE:
+            problems.append(f"{what} received {e.get('received')!r}")
+        if accepted and e.get("server_name") != SERVER_ALIAS:
+            problems.append(f"{what} saw server name {e.get('server_name')!r}")
+        if accepted and sc.expect_handshake and e.get("handshake") != sc.expect_handshake:
+            problems.append(f"{what}: handshake={e.get('handshake')!r}")
+    return problems
+
+
+def check_client_facing(sc: Scenario, c: Container) -> list[str]:
+    """The client-facing server's decisions: a rejected first attempt is
+    completed locally, an accepted offer forwarded for the inner name."""
+    ech = sc.ech
+    assert ech is not None
+    refused = 1 if ech.retry else 0
+    expected = []
+    if ech.retry or ech.client == "grease":
+        expected.append(("Local", "Rejected"))
+    if ech.client != "grease":
+        expected.append(("Forward", "Accepted"))
+    evs = events(c.stdout)
+    decisions = [(e.get("decision"), e.get("ech")) for e in evs if e.get("event") == "client-facing"]
+    # The connections it completes itself, if any; otherwise just errors.
+    if ech.client == "grease":
+        problems = check_ech_server(sc, "browntls", "client-facing server", c, 0, 0, 1)
+    else:
+        problems = check_ech_server(sc, "browntls", "client-facing server", c, 0, refused, 0)
+    if decisions != expected:
+        problems.append(f"client-facing decisions {decisions}, expected {expected}")
+    for e in evs:
+        if e.get("event") == "client-facing" and e.get("decision") == "Forward":
+            if e.get("server_name") != SERVER_ALIAS:
+                problems.append(f"client-facing forwarded {e.get('server_name')!r}")
+    return problems
+
+
+def run_ech_scenario(run: Run, sc: Scenario, role: str) -> tuple[list[str], dict[str, Container]]:
+    """Runs ECH scenario `sc`; `role` is the browntls side facing the peer
+    (against itself, browntls plays every part)."""
+    ech = sc.ech
+    assert ech is not None
+    impl = run.suite.implementation
+    problems: list[str] = []
+    containers: dict[str, Container] = {}
+    browntls_client = impl == "browntls" or role == "client"
+    refused = 1 if ech.retry else 0
+
+    if ech.topology == "split":
+        backend = None
+        if ech.forwarded:
+            backend = run.start_server(
+                run.image,
+                ech_terminating_server_args(sc, ech.forwarded, backend=True),
+                {},
+                alias=BACKEND_ALIAS,
+            )
+        front = run.start_server(run.image, ech_client_facing_args(sc), {})
+        servers = [("client-facing", front)] + ([("backend", backend)] if backend else [])
+    elif browntls_client and impl == "go":
+        servers = [("server", run.start_server(run.peer, ech_go_server_command(sc), {}))]
+    else:
+        args = ech_terminating_server_args(sc, ech.connections, backend=False)
+        servers = [("server", run.start_server(run.image, args, {}))]
+    for what, c in servers:
+        if not run.wait_for_log(c, '"event":"listening"', CONNECT_WAIT):
+            problems.append(f"{what} did not start listening")
+
+    if browntls_client:
+        client = run.run_client(run.image, ech_browntls_client_args(sc), {})
+        problems += check_ech_client(sc, "browntls", client)
+    else:
+        client = run.run_client(run.peer, ech_go_client_command(sc), {})
+        problems += check_ech_client(sc, impl, client)
+    containers["client"] = client
+
+    for what, c in servers:
+        c = run.finish_server(c, wait=20)
+        containers[what] = c
+        if what == "client-facing":
+            problems += check_client_facing(sc, c)
+        elif what == "backend":
+            problems += check_ech_server(sc, "browntls", "back-end server", c, ech.forwarded, 0, 0)
+        else:
+            server_impl = "go" if (browntls_client and impl == "go") else "browntls"
+            grease = ech.client == "grease"
+            problems += check_ech_server(
+                sc,
+                server_impl,
+                f"{server_impl} server",
+                c,
+                0 if grease else 1,
+                refused,
+                1 if grease else 0,
+            )
+    return problems, containers
+
+
+def summarize_ech(containers: dict[str, Container]) -> str:
+    client = containers.get("client")
+    if client is None:
+        return "-"
+    conns = [e for e in events(client.stdout) if e.get("event") == "connection"]
+    if not conns:
+        return "-"
+    e = conns[-1]
+    ech = e.get("ech", "Accepted" if e.get("ech_accepted") else "not accepted")
+    return f"{e.get('version')} {e.get('handshake')} ECH {ech}"
 
 
 # ----------------------------------------------------------------- commands
@@ -1090,7 +1481,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     peer_versions = ""
     if suite.implementation != "browntls":
-        probe = "openssl version" if suite.implementation == "openssl" else "gnutls-cli --version | head -n 1"
+        probe = {
+            "openssl": "openssl version",
+            "gnutls": "gnutls-cli --version | head -n 1",
+            "go": f"cat {SHARE}/go-version",
+        }[suite.implementation]
         peer_versions = docker(
             "run", "--rm", "--entrypoint", "sh", peer_image_tag(suite.peer_image), "-c", probe,
             check=False,
@@ -1103,6 +1498,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     with Run(arch, suite, image) as run:
         print(f"run {run.id}: generating certificates")
         run.generate_pki()
+        if any(sc.ech is not None for sc in chosen):
+            print(f"run {run.id}: generating ECH keys")
+            run.generate_ech_keys()
         for sc in chosen:
             for role in sc.roles_for(suite):
                 result = run_scenario(run, sc, role, artifacts)

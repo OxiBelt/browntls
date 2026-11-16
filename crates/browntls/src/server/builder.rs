@@ -114,6 +114,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             require_external_psk: false,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
             ech: None,
+            ech_backend: false,
         }
     }
 

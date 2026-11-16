@@ -29,6 +29,7 @@ Each CI job pairs one architecture with one peer suite.
 | `openssl-3.0` | OpenSSL 3.0 from Ubuntu 24.04 ([`peer/ubuntu.Dockerfile`](peer/ubuntu.Dockerfile)), without post-quantum groups |
 | `gnutls` | GnuTLS 3.8 from Alpine 3.24 |
 | `browntls` | browntls client and server in separate containers |
+| `go` | Go 1.27 `crypto/tls` ([`peer/go.Dockerfile`](peer/go.Dockerfile), the program in [`peer/go/`](peer/go/main.go)): Encrypted Client Hello scenarios only |
 
 Peer containers run natively on the runner; only the browntls containers use
 the target platform, so in the emulated job the peers are not slowed down.
@@ -63,13 +64,32 @@ allows it, with browntls as server against the peer's client:
   `record_size_limit` of 512 (RFC 8449) on the browntls side, which a peer
   implementing it (GnuTLS) must respect, and, as a browntls client, GREASE
   values (RFC 8701), `ticket_request` (RFC 9149) and a ClientHello padded to
-  1024 bytes (RFC 7685).
+  1024 bytes (RFC 7685);
+- Encrypted Client Hello (RFC 9849, suites `browntls` and `go`), with keys
+  made per run by `browntls-e2e ech-keygen` (X25519, public name
+  `ech-public.test`) in both server topologies. Shared mode (`ech-shared*`):
+  one server decrypts and terminates; the peer is client or server. Split
+  mode (`ech-split*`): a browntls client-facing server
+  (`browntls-e2e client-facing`, network alias `tls-server`) decrypts the
+  ClientHello and relays the connection to a browntls back-end server
+  (`server --ech-backend`, alias `ech-backend`), so these run with the
+  peer as client only (Go has no split-mode server). Each topology runs
+  accepted, after a HelloRetryRequest (the terminating server accepts only
+  P-256), and with a stale configuration the client retries with the
+  server's retry configurations; plus GREASE, and in split mode random
+  configuration identifiers with trial decryption and the public name check
+  (browntls client only). The harness checks the ECH status and handshake
+  kind on every side, the server name the terminating server saw (the inner
+  one), the client-facing server's decisions (`Forward` for an accepted
+  offer, `Local` for a rejection it completes itself as the public name),
+  the single rejection before a retry, and the application data.
 
 For every connection the harness checks the protocol version, cipher suite,
 key exchange group and handshake kind the browntls side reports, the
 certificates it received, and one line of application data in each direction.
 Certificates and keys are generated per run, inside a Docker volume, by
-[`peer/gen-pki.sh`](peer/gen-pki.sh).
+[`peer/gen-pki.sh`](peer/gen-pki.sh) (including the certificate for the ECH
+public name) and, for the ECH scenarios, `browntls-e2e ech-keygen`.
 
 ## Running locally
 
@@ -105,3 +125,10 @@ works with a remote Docker daemon.
   repositories at build time; the job summary records the versions used.
 - The scenarios cover the default and selected explicit configurations, not
   every suite and group combination; the in-process suites cover those.
+- Encrypted Client Hello in split mode has browntls on both server sides:
+  no other implementation in the matrix has a client-facing or back-end
+  server, so the independent check is the Go client, which verifies the
+  back-end server's acceptance confirmations through the browntls relay.
+  Go's server is shared mode only, and it neither sends GREASE ECH nor
+  randomizes configuration identifiers, so those scenarios have a browntls
+  client.

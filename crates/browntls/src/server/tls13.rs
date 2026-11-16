@@ -151,7 +151,9 @@ impl CompleteClientHelloHandling {
             let client_hello_hash = self.transcript.current_hash();
             self.transcript.rollup_for_hrr();
             let ech = match &cx.data.ech {
-                ServerEch::Accepted(_) => HrrEch::Confirm(client_hello.random.0),
+                ServerEch::Accepted(_) | ServerEch::Backend => {
+                    HrrEch::Confirm(client_hello.random.0)
+                }
                 ServerEch::Rejected => HrrEch::Random,
                 ServerEch::NotOffered => HrrEch::None,
             };

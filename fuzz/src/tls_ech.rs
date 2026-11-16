@@ -8,7 +8,11 @@
 //! client and a server in the same process: ECH accepted (optionally after a
 //! HelloRetryRequest), rejected with retry configurations and retried,
 //! rejected by a server without ECH, and GREASE, optionally with a byte of
-//! the client's first flight altered.
+//! the client's first flight altered; and the same through split mode
+//! (RFC 9849 §3.1): a [`ClientFacing`] server forwarding to a back-end
+//! server ([`ServerConfig::ech_backend`]) or completing the handshake
+//! locally, fed in fuzz-chosen pieces, optionally with trial decryption,
+//! random configuration identifiers and the public name check.
 //!
 //! Checked properties: the configuration parsers agree with an independent
 //! model of RFC 9849 §4 (version, mandatory extensions, public name rules of
@@ -18,7 +22,11 @@
 //! with each other and with a model of RFC 9460 §2.2; the handshakes end in
 //! the documented states (both sides `Accepted` with the inner server name,
 //! `RejectedEch` with the server's retry configurations, which then
-//! succeed, or none for a server without ECH; GREASE completes).
+//! succeed, or none for a server without ECH; GREASE completes); in split
+//! mode the client-facing server forwards exactly the accepted offers,
+//! names the inner server, relays application data unmodified, keeps every
+//! byte it received for a local server, and reports a fatal error with a
+//! plaintext alert.
 //!
 //! Input: up to 32 operations, each an operation byte followed by its
 //! arguments (see [`run`]); at most two handshake operations per input.
@@ -28,6 +36,7 @@ use std::sync::{Arc, OnceLock};
 
 use browntls::crypto::hpke::{Hpke, HpkeKem, HpkePrivateKey, HpkePublicKey};
 use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls::ech::split::{ClientFacing, ClientFacingDecision};
 use browntls::ech::svcb::{
     ECH_SVC_PARAM_KEY, ech_config_list_from_presentation, ech_config_list_from_svc_params,
     ech_config_list_from_svcb_rdata,
@@ -412,8 +421,11 @@ impl State {
 ///    or raw bytes;
 /// 5. presentation: 16-bit-prefixed text;
 /// 6. GREASE: suite and placeholder key, or a generated one;
-/// 7. handshake: scenario, HelloRetryRequest flag, stale configuration
-///    fields, and an optional edit of the client's first flight.
+/// 7. handshake: scenario (shared mode: accepted, stale, no server ECH,
+///    GREASE; split mode: accepted, stale or GREASE, and accepted with
+///    random identifiers), HelloRetryRequest flag, stale configuration
+///    fields, an optional edit of the client's first flight, and for split
+///    mode the variant and the size of the pieces.
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);
@@ -946,7 +958,7 @@ fn default_key(config_id: u8, maximum_name_length: u8) -> EchServerKey {
 /// default and stale keys, whether to serve the kept keys, the flight edit
 /// flag, offset (16 bits) and XOR byte.
 fn handshake(input: &mut Input, state: &mut State) {
-    let scenario = input.choose(4);
+    let scenario = input.choose(6);
     let hrr = input.bool();
     let config_id = input.byte();
     let maximum_name_length = input.byte();
@@ -965,7 +977,7 @@ fn handshake(input: &mut Input, state: &mut State) {
             PUBLIC.as_bytes().to_vec(),
         ),
     };
-    let current = Arc::new(EchServerConfig::new(vec![key]).expect("one key"));
+    let current = Arc::new(EchServerConfig::new(vec![key.clone()]).expect("one key"));
 
     match scenario {
         0 => {
@@ -1068,6 +1080,16 @@ fn handshake(input: &mut Input, state: &mut State) {
             }
             assert_eq!(client.ech_status(), EchStatus::Rejected);
         }
+        4 | 5 => split(
+            input,
+            state,
+            &key,
+            &current,
+            sound,
+            hrr,
+            scenario == 5,
+            edit,
+        ),
         _ => {
             // GREASE, against a server with or without ECH.
             let (config, valid) = match &state.grease {
@@ -1099,6 +1121,305 @@ fn handshake(input: &mut Input, state: &mut State) {
                 assert_eq!(server_conn.ech_status(), expected);
                 assert_eq!(server_conn.server_name(), Some(SECRET));
             }
+        }
+    }
+}
+
+// -------------------------------------------------------------- split mode
+
+/// The parties of a split-mode connection and their first errors.
+struct SplitRun {
+    client: ClientConnection,
+    front: Option<ClientFacing>,
+    backend: Option<ServerConnection>,
+    local: Option<ServerConnection>,
+    backend_config: Arc<ServerConfig>,
+    local_config: Arc<ServerConfig>,
+    /// The largest piece the client-facing server reads at once.
+    chunk: usize,
+    /// Whether the local server reads `into_received` rather than being
+    /// made by `into_server_connection`.
+    by_hand: bool,
+    client_err: Option<Error>,
+    front_err: Option<Error>,
+    server_err: Option<Error>,
+}
+
+fn drain<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec<u8> {
+    let mut out = Vec::new();
+    while conn.wants_write() {
+        if conn.write_tls(&mut out).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+fn feed<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>, mut data: &[u8]) {
+    while !data.is_empty() {
+        match conn.read_tls(&mut data) {
+            Ok(n) if n > 0 => {}
+            _ => {
+                if conn.process_new_packets().is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl SplitRun {
+    /// Feeds `data` to the client-facing server in pieces; a fatal error
+    /// must come with a plaintext alert for the client.
+    fn front_reads(&mut self, data: &[u8], from_client: bool) {
+        let Some(front) = &mut self.front else {
+            return;
+        };
+        for piece in data.chunks(self.chunk) {
+            let res = if from_client {
+                front.read_client(piece)
+            } else {
+                front.read_backend(piece)
+            };
+            if let Err(e) = res {
+                if self.front_err.is_none() && from_client {
+                    let alert = front.take_for_client();
+                    assert!(
+                        alert.len() == 7 && alert[..6] == [21, 3, 3, 0, 2, 2],
+                        "{alert:?}"
+                    );
+                    feed(&mut self.client, &alert);
+                }
+                self.front_err.get_or_insert(e);
+                return;
+            }
+        }
+    }
+
+    fn pump(&mut self, mut edit: Option<(usize, u8)>) {
+        for _ in 0..32 {
+            let mut moved = false;
+            let mut out = drain(&mut self.client);
+            if let Some((at, x)) = edit.take()
+                && !out.is_empty()
+            {
+                let at = at % out.len();
+                out[at] ^= x;
+            }
+            moved |= !out.is_empty();
+            match &mut self.local {
+                Some(local) => feed(local, &out),
+                None => self.front_reads(&out, true),
+            }
+
+            match self.front.as_ref().and_then(ClientFacing::decision) {
+                Some(ClientFacingDecision::Local) if self.local.is_none() => {
+                    let front = self.front.take().expect("front");
+                    let local = if self.by_hand {
+                        let received = front.into_received();
+                        let mut local =
+                            ServerConnection::new(self.local_config.clone()).expect("local");
+                        feed(&mut local, &received);
+                        local
+                    } else {
+                        front
+                            .into_server_connection(self.local_config.clone())
+                            .expect("local")
+                    };
+                    self.local = Some(local);
+                    moved = true;
+                }
+                Some(ClientFacingDecision::Forward) if self.backend.is_none() => {
+                    self.backend =
+                        Some(ServerConnection::new(self.backend_config.clone()).expect("backend"));
+                    moved = true;
+                }
+                _ => {}
+            }
+            if let Some(local) = &mut self.local
+                && self.server_err.is_none()
+                && let Err(e) = local.process_new_packets()
+            {
+                self.server_err = Some(e);
+            }
+
+            if let (Some(front), Some(backend)) = (&mut self.front, &mut self.backend) {
+                let forwarded = front.take_for_backend();
+                moved |= !forwarded.is_empty();
+                feed(backend, &forwarded);
+                if self.server_err.is_none()
+                    && let Err(e) = backend.process_new_packets()
+                {
+                    self.server_err = Some(e);
+                }
+                let answer = drain(backend);
+                moved |= !answer.is_empty();
+                self.front_reads(&answer, false);
+            }
+
+            let to_client = match (&mut self.front, &mut self.local) {
+                (_, Some(local)) => drain(local),
+                (Some(front), None) => front.take_for_client(),
+                (None, None) => Vec::new(),
+            };
+            moved |= !to_client.is_empty();
+            feed(&mut self.client, &to_client);
+            if self.client_err.is_none()
+                && let Err(e) = self.client.process_new_packets()
+            {
+                self.client_err = Some(e);
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    fn no_errors(&self) -> bool {
+        self.client_err.is_none() && self.front_err.is_none() && self.server_err.is_none()
+    }
+}
+
+/// Split mode (scenarios 4 and 5): variant (accepted, stale, GREASE) and
+/// piece size. Scenario 5 sends a random configuration identifier to a
+/// client-facing server with trial decryption and the public name check.
+#[allow(clippy::too_many_arguments)]
+fn split(
+    input: &mut Input,
+    state: &State,
+    key: &EchServerKey,
+    current: &Arc<EchServerConfig>,
+    sound: bool,
+    hrr: bool,
+    random_ids: bool,
+    edit: Option<(usize, u8)>,
+) {
+    let variant = if random_ids { 0 } else { input.choose(3) };
+    let chunk = 1 + usize::from(input.byte());
+    let edited = edit.is_some();
+    let ech = if random_ids {
+        // The fixture's X25519 key pair under another configuration first:
+        // trial decryption must move on to the next key.
+        let ech = EchServerConfig::new(vec![default_key(9, 0), key.clone()])
+            .expect("keys")
+            .with_trial_decryption()
+            .with_public_name_check();
+        assert!(ech.trial_decryption() && ech.public_name_check());
+        Arc::new(ech)
+    } else {
+        current.clone()
+    };
+    let mode = match variant {
+        0 => {
+            let Ok(config) = EchConfig::new(current.ech_config_list(), ALL_SUPPORTED_SUITES) else {
+                return;
+            };
+            let config = if random_ids {
+                config.with_random_config_id()
+            } else {
+                config
+            };
+            assert_eq!(config.random_config_id(), random_ids);
+            EchMode::Enable(config)
+        }
+        1 => {
+            let fixture = fixture();
+            let stale = Fields {
+                version: ECH_VERSION,
+                config_id: 1,
+                kem: KEMS[0].0,
+                public_key: fixture.stale.0.clone(),
+                suites: vec![(1, 1)],
+                maximum_name_length: 0,
+                public_name: PUBLIC.as_bytes().to_vec(),
+                extensions: Vec::new(),
+            };
+            let list = config_list([&stale.encode()[..]]);
+            EchMode::Enable(EchConfig::new(&list, ALL_SUPPORTED_SUITES).expect("stale config"))
+        }
+        _ => match &state.grease {
+            Some((g, true)) => EchMode::Grease(g.clone()),
+            _ => {
+                EchMode::Grease(EchGreaseConfig::generate(ALL_SUPPORTED_SUITES[0]).expect("GREASE"))
+            }
+        },
+    };
+    let mut backend = (*server_config(None, hrr)).clone();
+    backend.ech_backend = true;
+    let local_config = server_config(Some(ech.clone()), hrr);
+    let Some((client, _)) = connect(mode, &local_config, sound) else {
+        return;
+    };
+    let mut run = SplitRun {
+        client,
+        front: Some(ClientFacing::new(ech.clone())),
+        backend: None,
+        local: None,
+        backend_config: Arc::new(backend),
+        local_config,
+        chunk,
+        by_hand: chunk % 2 == 1,
+        client_err: None,
+        front_err: None,
+        server_err: None,
+    };
+    let _ = format!("{:?}", run.front);
+    run.pump(edit);
+    if edited || !sound {
+        return;
+    }
+    match variant {
+        0 => {
+            assert!(
+                run.no_errors(),
+                "{:?} {:?} {:?}",
+                run.client_err,
+                run.front_err,
+                run.server_err
+            );
+            let front = run.front.as_mut().expect("forwarding");
+            assert_eq!(front.decision(), Some(ClientFacingDecision::Forward));
+            assert_eq!(front.ech_status(), EchStatus::Accepted);
+            assert_eq!(front.server_name(), Some(SECRET));
+            assert!(front.is_relaying());
+            assert_eq!(run.client.ech_status(), EchStatus::Accepted);
+            let backend = run.backend.as_mut().expect("backend");
+            assert_eq!(backend.ech_status(), EchStatus::Accepted);
+            assert_eq!(backend.server_name(), Some(SECRET));
+            // Application data passes the relay unmodified.
+            run.client.writer().write_all(b"hidden").expect("write");
+            let out = drain(&mut run.client);
+            front.read_client(&out).expect("relay");
+            assert_eq!(front.take_for_backend(), out);
+            feed(backend, &out);
+            backend.process_new_packets().expect("backend reads");
+            let mut got = [0u8; 6];
+            backend.reader().read_exact(&mut got).expect("data");
+            assert_eq!(&got, b"hidden");
+        }
+        1 => {
+            assert!(run.backend.is_none());
+            let local = run.local.as_ref().expect("local");
+            assert_eq!(local.ech_status(), EchStatus::Rejected);
+            let Some(Error::RejectedEch(rejected)) = &run.client_err else {
+                panic!("expected a rejection: {:?}", run.client_err);
+            };
+            assert_eq!(rejected.retry_configs(), Some(ech.ech_config_list()));
+        }
+        _ => {
+            assert!(
+                run.no_errors(),
+                "{:?} {:?} {:?}",
+                run.client_err,
+                run.front_err,
+                run.server_err
+            );
+            assert!(run.backend.is_none());
+            assert_eq!(run.client.ech_status(), EchStatus::Grease);
+            assert_eq!(
+                run.local.as_ref().expect("local").ech_status(),
+                EchStatus::Rejected
+            );
         }
     }
 }
@@ -1396,6 +1717,29 @@ pub fn seeds() -> Vec<Vec<u8>> {
         seeds.push(handshake_seed(scenario, hrr, id, false, false));
     }
     seeds.push(handshake_seed(0, false, 7, false, true));
+    // split mode: accepted (whole, then byte by byte after a
+    // HelloRetryRequest), stale (both local hand-offs), GREASE, random
+    // identifiers with trial decryption, and an edited flight
+    for (hrr, id, variant, chunk) in [
+        (false, 7u8, 0u8, 255u8),
+        (true, 7, 0, 0),
+        (false, 7, 1, 3),
+        (true, 8, 1, 2),
+        (false, 7, 2, 9),
+        (true, 7, 2, 40),
+    ] {
+        let mut seed = handshake_seed(4, hrr, id, false, false);
+        seed.extend_from_slice(&[variant, chunk]);
+        seeds.push(seed);
+    }
+    for (hrr, chunk) in [(false, 100u8), (true, 6)] {
+        let mut seed = handshake_seed(5, hrr, 7, false, false);
+        seed.push(chunk);
+        seeds.push(seed);
+    }
+    let mut seed = handshake_seed(4, true, 7, false, true);
+    seed.extend_from_slice(&[0, 255]);
+    seeds.push(seed);
     // GREASE settings (generated, fixture placeholder, fuzzed placeholder),
     // then a handshake using them
     for grease in [&[6u8, 9, 1][..], &[6, 18, 0, 1], &[6, 27, 0, 0, 1, 7]] {

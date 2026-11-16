@@ -590,11 +590,16 @@ a random 32-byte context.
 
 ### Encrypted Client Hello (RFC 9849)
 
-`browntls::ech` implements ECH in shared mode on top of the HPKE traits in
-`crypto::hpke` (`Hpke`, `HpkeSealer`, `HpkeOpener`); the native provider
-implements them in `crypto::native::hpke` for every `browntls_crypto::hpke`
-suite. The RustCrypto provider has no HPKE, so ECH needs the native provider
-or another implementation of the traits.
+`browntls::ech` implements ECH on top of the HPKE traits in `crypto::hpke`
+(`Hpke`, `HpkeSealer`, `HpkeOpener`); the native provider implements them in
+`crypto::native::hpke` for every `browntls_crypto::hpke` suite. The
+RustCrypto provider has no HPKE, so the client and the servers that decrypt
+need the native provider or another implementation of the traits; the
+back-end server of split mode decrypts nothing and works with either
+provider. Both server topologies of RFC 9849 §3.1 are implemented: shared
+mode, where one server decrypts and terminates the connection, and split
+mode, where a client-facing server decrypts and relays the connection to a
+back-end server that terminates it.
 
 - Client (`ClientConfig::ech_mode`): `EchConfig::new` picks the first
   configuration in an `ECHConfigList` with RFC 9849's version, no unknown
@@ -619,8 +624,18 @@ or another implementation of the traits.
   followed by a ServerHello that does not is `illegal_parameter`. GREASE
   (`EchMode::Grease`) sends a random `config_id`, a real `enc` and a payload
   sized like a padded inner hello, and ignores the server's ECH answers.
-- Server (`ServerConfig::ech`, `EchServerConfig`): keys are matched by
-  `config_id` (several keys may share one) and trial-decrypted; the inner
+- Server in shared mode (`ServerConfig::ech`, `EchServerConfig`): keys are
+  matched by `config_id` (several keys may share one) and trial-decrypted;
+  with `EchServerConfig::with_trial_decryption` every key is tried whatever
+  the identifier (§7.1, the second method, for clients that randomize it;
+  §10.4 allows it only when configured, since each ClientHello that does
+  not decrypt then costs one decapsulation per key and suite). With
+  `EchServerConfig::with_public_name_check`, an extension that decrypts
+  under a configuration whose public name differs from the outer
+  `server_name` (ignoring ASCII case) is `illegal_parameter`; only the
+  configuration that decrypted is compared, so keys shared between
+  configurations with different public names cause no spurious failure. The
+  inner
   hello is rebuilt in linear time (one cursor into the outer extensions;
   missing, repeated, out-of-order or ECH references, and non-zero padding,
   are `illegal_parameter`), must carry an `inner` ECH extension and offer
@@ -636,13 +651,72 @@ or another implementation of the traits.
   HelloRetryRequest carries 8 random bytes in place of a confirmation. An
   `ech_outer_extensions` extension, or an ECH extension of type `inner` or of
   an unknown type, in a ClientHello as received is `illegal_parameter`.
+- Client-facing server of split mode (`ech::split::ClientFacing`, §7.1):
+  a sans-I/O object per connection, fed the client's and the back-end
+  server's bytes. It reassembles the first ClientHello (plaintext handshake
+  records, at most 64 KiB, nothing else in the records) and decrypts it with
+  the shared-mode code, then decides: `Forward` when ECH is accepted (the
+  inner ClientHello, re-framed in records of the client's record version, is
+  queued for the back-end server chosen by its `server_name`), `Local`
+  otherwise (no extension, GREASE, stale keys, or input that is not a
+  ClientHello or does not parse as one). A ClientHello whose framing is
+  wrong (an empty handshake record, more than 64 KiB, or more handshake data
+  after it in its record) is a fatal error instead, because a local server
+  would decrypt and answer it before noticing; refusing empty records also
+  bounds what is buffered before the decision. After `Local`, the bytes
+  received so far go to an ordinary shared-mode `ServerConnection` with the
+  same keys
+  (`into_server_connection` or `into_received`), which decrypts again,
+  reaches the same result, authenticates as the public name and sends the
+  retry configurations. After `Forward`, client records are forwarded whole
+  until the back-end server's first handshake message: a
+  HelloRetryRequest (recognised by its random) makes the client-facing
+  server decrypt the second ClientHelloOuter with the first one's HPKE
+  context (§7.1.1, the same checks and alerts as shared mode) and forward
+  its inner ClientHello; a ServerHello, an alert or anything else switches
+  both directions to unmodified relaying (`is_relaying`). An `inner` or
+  unknown ECH type, `ech_outer_extensions`, or a malformed inner
+  ClientHello is a fatal error with a plaintext alert for the client
+  (`take_for_client`). The client-facing server never holds traffic keys.
+  It buffers one partial record per direction, one ClientHello, a copy of
+  the client's bytes until the decision (for a local hand-off), and what it
+  queues for each side until the caller takes it. It issues no
+  HelloRetryRequest cookie (§7.1.1), so it keeps its state for the whole
+  handshake.
+- Back-end server of split mode (`ServerConfig::ech_backend`, §7.2): a
+  ClientHello with an `inner` ECH extension (as the client-facing server
+  forwards it) is confirmed in the ServerHello random and, after a
+  HelloRetryRequest, in its ECH extension, with the same code as shared
+  mode; the HelloRetryRequest stays stateful, as in shared mode. An `outer`
+  or unknown type is `illegal_parameter` (§7), as is an inner ClientHello
+  offering TLS 1.2 or below (stricter than §7.2, which only forbids
+  confirming when TLS 1.2 is negotiated; a conforming client-facing server
+  never forwards such a hello, §7.1); after a
+  HelloRetryRequest the second ClientHello must carry `inner` again
+  (`missing_extension` otherwise), and one that adds it is
+  `illegal_parameter`. A ClientHello without ECH is served as usual.
+  `ech_backend` and `ech` exclude each other (`ServerConnection::new` and
+  `Accepted::into_connection` fail).
+- Client with a random identifier (`EchConfig::with_random_config_id`,
+  §10.4): one random `config_id`, repeated after a HelloRetryRequest, for
+  servers known to use trial decryption.
 - `ech::svcb` reads the `ech` SvcParam (RFC 9848) from SVCB/HTTPS record
   data or its Base64 presentation form; the crate does no DNS lookups.
 
-Not implemented: split mode (a client-facing server forwarding to a back-end
-server), trial decryption with every key regardless of `config_id`, the
-optional check of the outer SNI against the public name, and ECH with DTLS or
-QUIC.
+Tests: shared and split mode in-process (`crates/browntls/tests/ech_native.rs`:
+acceptance with and without a HelloRetryRequest, input fed byte by byte, an
+inner ClientHello spanning records, resumption, rejection completed locally
+with retry configurations and the retry forwarded, GREASE and non-ECH
+connections kept local, every error path of the client-facing and back-end
+servers, trial decryption with random identifiers, a back-end server on the
+RustCrypto provider), the `tls_ech` fuzz target (split mode in fuzz-chosen
+pieces), and the Docker E2E matrix (`ech-*` scenarios: browntls in every
+role, and Go crypto/tls 1.27 as client and shared-mode server, also as the
+client of the browntls split-mode servers).
+
+Not implemented: ECH with DTLS or QUIC, and a client-facing server that
+inspects anything after the back-end server's ServerHello (by design: it
+relays the encrypted handshake unmodified).
 
 ### Cargo features (`browntls`)
 

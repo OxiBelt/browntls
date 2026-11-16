@@ -22,6 +22,24 @@
 //!
 //! ECH restricts a connection to TLS 1.3: a client offering it sends neither
 //! TLS 1.2 nor 0-RTT data, and resumes only TLS 1.3 sessions.
+//!
+//! # Server topologies (§3.1)
+//!
+//! - Shared mode: one server holds the keys, decrypts the inner ClientHello
+//!   and terminates the connection ([`ServerConfig::ech`]).
+//! - Split mode: a client-facing server holds the keys and decrypts
+//!   ([`split::ClientFacing`]), then forwards the inner ClientHello to a
+//!   back-end server, which terminates the connection
+//!   ([`ServerConfig::ech_backend`]); the client-facing server relays the
+//!   rest of the connection without seeing its plaintext.
+//!
+//! Servers match keys by configuration identifier unless configured for
+//! trial decryption ([`EchServerConfig::with_trial_decryption`]), for
+//! clients that randomize the identifier
+//! ([`EchConfig::with_random_config_id`], §10.4).
+//!
+//! [`ServerConfig::ech`]: crate::ServerConfig::ech
+//! [`ServerConfig::ech_backend`]: crate::ServerConfig::ech_backend
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -40,6 +58,7 @@ pub(crate) mod client;
 pub(crate) mod codec;
 pub(crate) mod config;
 pub(crate) mod server;
+pub mod split;
 pub mod svcb;
 #[cfg(test)]
 mod tests;
@@ -105,6 +124,7 @@ pub struct EchConfig {
     pub(crate) hpke: &'static dyn Hpke,
     pub(crate) cipher_suite: HpkeSymmetricCipherSuite,
     pub(crate) public_name: DnsName<'static>,
+    pub(crate) random_config_id: bool,
 }
 
 impl EchConfig {
@@ -142,6 +162,7 @@ impl EchConfig {
                 hpke,
                 cipher_suite,
                 public_name,
+                random_config_id: false,
             });
         }
         Err(Error::General(String::from(
@@ -160,6 +181,28 @@ impl EchConfig {
         self.contents.key_config.config_id
     }
 
+    /// Sends a random configuration identifier instead of
+    /// [`config_id`](Self::config_id), so that the identifier cannot be
+    /// used to track the client (RFC 9849 §4.1, §10.4). The same random
+    /// value is repeated after a HelloRetryRequest.
+    ///
+    /// Only for servers known to use trial decryption
+    /// ([`EchServerConfig::with_trial_decryption`]): RFC 9849 §10.4 forbids
+    /// this mode unless the application or its configuration calls for it,
+    /// and a server matching identifiers rejects ECH (or, by chance, tries
+    /// the wrong keys).
+    #[must_use]
+    pub fn with_random_config_id(mut self) -> Self {
+        self.random_config_id = true;
+        self
+    }
+
+    /// Whether [`with_random_config_id`](Self::with_random_config_id) is
+    /// set.
+    pub fn random_config_id(&self) -> bool {
+        self.random_config_id
+    }
+
     /// The HPKE suite that will seal the inner ClientHello.
     pub fn suite(&self) -> HpkeSuite {
         HpkeSuite {
@@ -175,6 +218,7 @@ impl fmt::Debug for EchConfig {
             .field("config_id", &self.config_id())
             .field("public_name", &self.public_name)
             .field("suite", &self.suite())
+            .field("random_config_id", &self.random_config_id)
             .finish_non_exhaustive()
     }
 }
@@ -280,6 +324,9 @@ impl RejectedEch {
 pub struct EchServerKey {
     pub(crate) encoded: Vec<u8>,
     pub(crate) key_config: HpkeKeyConfig,
+    /// The configuration's `public_name`, for the optional check of the
+    /// outer server name (§7.1).
+    pub(crate) public_name: Vec<u8>,
     pub(crate) private_key: HpkePrivateKey,
     /// The suites usable with this key, matching the configuration's
     /// `cipher_suites`.
@@ -313,7 +360,13 @@ impl EchServerKey {
                 "unsupported ECHConfig version",
             )));
         };
-        Self::from_parts(entry.encoded, contents.key_config, private_key, hpke_suites)
+        Self::from_parts(
+            entry.encoded,
+            contents.key_config,
+            contents.public_name,
+            private_key,
+            hpke_suites,
+        )
     }
 
     /// Generates a key pair for the KEM of `hpke_suites[0]` and an
@@ -364,12 +417,19 @@ impl EchServerKey {
             public_name: public_name.as_bytes().to_vec(),
             extensions: Vec::new(),
         });
-        Self::from_parts(entry.encoded, key_config, private_key, hpke_suites)
+        Self::from_parts(
+            entry.encoded,
+            key_config,
+            public_name.as_bytes().to_vec(),
+            private_key,
+            hpke_suites,
+        )
     }
 
     fn from_parts(
         encoded: Vec<u8>,
         key_config: HpkeKeyConfig,
+        public_name: Vec<u8>,
         private_key: HpkePrivateKey,
         hpke_suites: &[&'static dyn Hpke],
     ) -> Result<Self, Error> {
@@ -391,6 +451,7 @@ impl EchServerKey {
         Ok(Self {
             encoded,
             key_config,
+            public_name,
             private_key,
             suites,
         })
@@ -426,12 +487,15 @@ impl fmt::Debug for EchServerKey {
     }
 }
 
-/// A server's ECH keys (RFC 9849 §7), in shared mode: the server decrypts
-/// the inner ClientHello and completes the handshake with it itself.
+/// A server's ECH keys (RFC 9849 §7), for a server in shared mode
+/// ([`ServerConfig::ech`](crate::ServerConfig::ech)) or the client-facing
+/// server of split mode ([`split::ClientFacing`]).
 #[derive(Debug)]
 pub struct EchServerConfig {
     pub(crate) keys: Vec<EchServerKey>,
     list: Vec<u8>,
+    pub(crate) trial_decryption: bool,
+    pub(crate) check_public_name: bool,
 }
 
 impl EchServerConfig {
@@ -453,7 +517,52 @@ impl EchServerConfig {
             return Err(Error::General(String::from("ECHConfigList too long")));
         }
         let list = config::encode_config_list(keys.iter().map(|k| k.encoded.as_slice()));
-        Ok(Self { keys, list })
+        Ok(Self {
+            keys,
+            list,
+            trial_decryption: false,
+            check_public_name: false,
+        })
+    }
+
+    /// Tries every key on every ECH extension, whatever its configuration
+    /// identifier (RFC 9849 §7.1, the second method), for clients that
+    /// randomize the identifier ([`EchConfig::with_random_config_id`]).
+    ///
+    /// RFC 9849 §10.4: use this only where the application or its
+    /// configuration calls for it. Every ClientHello that does not decrypt
+    /// (GREASE included) then costs one HPKE decapsulation per key and
+    /// suite, which a peer can force at will; limit the rate of new
+    /// connections accordingly.
+    #[must_use]
+    pub fn with_trial_decryption(mut self) -> Self {
+        self.trial_decryption = true;
+        self
+    }
+
+    /// Whether [`with_trial_decryption`](Self::with_trial_decryption) is
+    /// set.
+    pub fn trial_decryption(&self) -> bool {
+        self.trial_decryption
+    }
+
+    /// Refuses, with `illegal_parameter`, an ECH extension that decrypts
+    /// but whose outer ClientHello names a server other than the public
+    /// name of the configuration that decrypted it (RFC 9849 §7.1, an
+    /// optional check). The comparison ignores ASCII case. Only the
+    /// configuration that decrypted is compared, so keys shared between
+    /// configurations with different public names do not cause spurious
+    /// failures.
+    #[must_use]
+    pub fn with_public_name_check(mut self) -> Self {
+        self.check_public_name = true;
+        self
+    }
+
+    /// Whether [`with_public_name_check`](Self::with_public_name_check) is
+    /// set.
+    pub fn public_name_check(&self) -> bool {
+        self.check_public_name
     }
 
     /// The `ECHConfigList` to publish (in DNS, RFC 9848) and to send as

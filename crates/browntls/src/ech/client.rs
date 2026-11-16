@@ -34,6 +34,9 @@ const PRE_SHARED_KEY: u16 = 41;
 /// A real ECH offer awaiting the server's answer.
 pub(crate) struct EchOffer {
     pub(crate) config: EchConfig,
+    /// The identifier sent: the configuration's, or a random one kept for
+    /// a second ClientHello (§10.4).
+    config_id: u8,
     sealer: Box<dyn HpkeSealer>,
     enc: Vec<u8>,
     /// The outer ClientHello's own random (§6.1: never the inner one's).
@@ -81,8 +84,16 @@ impl ClientEch {
         if client_auth_enabled {
             outer_transcript.set_client_auth_enabled();
         }
+        let config_id = if config.random_config_id {
+            let mut id = [0u8; 1];
+            rng.fill(&mut id)?;
+            id[0]
+        } else {
+            config.contents.key_config.config_id
+        };
         Ok(Self::Offer(Box::new(EchOffer {
             config: config.clone(),
+            config_id,
             sealer,
             enc: enc.0,
             outer_random: Random::new(rng)?,
@@ -182,7 +193,7 @@ impl EchOffer {
         let enc = if retry { Vec::new() } else { self.enc.clone() };
         let mut ech = EchOuter {
             cipher_suite: self.config.cipher_suite,
-            config_id: self.config.contents.key_config.config_id,
+            config_id: self.config_id,
             enc: PayloadU16::new(enc),
             payload: PayloadU16::new(vec![0; payload_len]),
         };

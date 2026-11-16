@@ -902,7 +902,7 @@ impl State<ServerConnectionData> for ExpectClientHello {
         // RFC 9849 §7.1: decide on ECH before anything else; an accepted
         // offer replaces the ClientHello with the inner one.
         let m = match crate::ech::server::process_client_hello(
-            self.config.ech.as_deref(),
+            self.config.ech_role(),
             &mut cx.data.ech,
             cx.common,
             &m,

@@ -327,6 +327,9 @@ class Scenario:
     expect_group: str | None = None
     expect_handshake: str | None = "Full"
     ech: Ech | None = None
+    # The browntls side runs its connections through browntls-tokio
+    # (`--async`), which its output must confirm (`"io":"async"`).
+    async_io: bool = False
 
     @property
     def refused(self) -> bool:
@@ -550,6 +553,32 @@ SCENARIOS: tuple[Scenario, ...] = (
         connections=2,
         roles=("client",),
     ),
+    # The asynchronous streams of browntls-tokio on a Tokio runtime: TLS 1.3
+    # with client authentication, TLS 1.2, and TLS 1.3 resumption.
+    _tls13(
+        "async-tls13-client-auth",
+        "TLS13_AES_128_GCM_SHA256",
+        "X25519",
+        "ecdsa-p256",
+        client_auth=True,
+        async_io=True,
+    ),
+    _tls12(
+        "async-tls12",
+        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        ("secp256r1",),
+        "ecdsa-p256",
+        async_io=True,
+    ),
+    _tls13(
+        "async-tls13-resumption",
+        "TLS13_CHACHA20_POLY1305_SHA256",
+        "X25519",
+        "ed25519",
+        connections=2,
+        roles=("client",),
+        async_io=True,
+    ),
     # Encrypted Client Hello (RFC 9849). Shared mode: the peer is client or
     # server. Split mode: the servers are browntls, the client the peer.
     _ech("ech-shared", Ech("shared")),
@@ -635,6 +664,8 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
         args += ["--record-size-limit", str(OPTIONAL_RECORD_SIZE_LIMIT)]
         if role == "client":
             args += ["--grease", "--ticket-request", "1,1", "--padding", "1024"]
+    if sc.async_io:
+        args.append("--async")
     return args
 
 
@@ -990,6 +1021,8 @@ def check_browntls(sc: Scenario, role: str, c: Container, reply: str | None) -> 
             problems.append(f"browntls client received {e.get('received')!r}, expected {reply!r}")
         if role == "server" and e.get("received") != MESSAGE:
             problems.append(f"browntls server received {e.get('received')!r}")
+        if sc.async_io and e.get("io") != "async":
+            problems.append(f"browntls {role} #{e.get('index')} did not use the asynchronous streams")
     return problems
 
 

@@ -133,6 +133,15 @@ class CommandTest(unittest.TestCase):
         self.assertIn("-Verify", e2e.peer_server_command(sc, "openssl"))
         self.assertIn("--require-client-cert", e2e.peer_server_command(sc, "gnutls"))
 
+    def test_async_scenarios_pass_the_flag_to_both_roles(self):
+        scenarios = [s for s in e2e.SCENARIOS if s.async_io]
+        self.assertEqual(len(scenarios), 3)
+        for sc in scenarios:
+            for role in sc.roles:
+                self.assertIn("--async", e2e.browntls_args(sc, role))
+        plain = self.scenario("tls13-aes128gcm-x25519")
+        self.assertNotIn("--async", e2e.browntls_args(plain, "client"))
+
     def test_peer_clients_connect_to_the_server_alias(self):
         sc = self.scenario("tls12-rsa-chacha20")
         for impl in ("openssl", "gnutls"):
@@ -182,6 +191,20 @@ class CheckTest(unittest.TestCase):
         out = '{"event":"error","message":"peer is incompatible"}'
         problems = e2e.check_browntls(sc, "server", e2e.Container("s", 1, out), None)
         self.assertEqual(len(problems), 3, problems)
+
+    def test_async_scenarios_require_async_output(self):
+        sc = self.scenario("async-tls12")
+        common = dict(
+            version="TLSv1_2",
+            suite="TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            group="secp256r1",
+            handshake="Full",
+        )
+        reply = e2e.MESSAGE[::-1]
+        ok = e2e.Container("c", 0, connection("client", io="async", **common))
+        self.assertEqual(e2e.check_browntls(sc, "client", ok, reply), [])
+        blocking = e2e.Container("c", 0, connection("client", **common))
+        self.assertEqual(len(e2e.check_browntls(sc, "client", blocking, reply)), 1)
 
     def test_resumed_connection_must_be_resumed(self):
         sc = self.scenario("tls12-resumption")

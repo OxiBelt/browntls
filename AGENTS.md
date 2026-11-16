@@ -40,11 +40,17 @@ Never present successful documentation CI as validation of a TLS implementation.
 
 Delegate only when useful tools are available and the task has a clear boundary.
 Parallelize independent investigation; give write tasks non-overlapping
-ownership. Require concise evidence and verification from workers. Prefer
-independent review of cryptography, unsafe/FFI, kernel boundaries, parsing,
-protocol state, concurrency, and resource limits. If independent review is
-unavailable, report that limit rather than inventing a reviewer. Do not bind
-this workflow to particular model names or subscription capabilities.
+ownership. Require concise evidence and verification from workers. Apply the
+mandatory [independent review gate](CONTRIBUTING.md#independent-review) to
+substantive behavior or safety changes in sensitive areas. If a suitable
+reviewer is unavailable, continue useful preparation and testing but leave
+those changes unlanded; report the gap rather than inventing a reviewer.
+
+Use the [subagent delegation skill](.agents/skills/subagent-delegation/SKILL.md)
+when delegation materially helps. It supports GPT and Claude workers in the
+same application and is also discoverable by Codex and Claude Code. Keep roles
+capability-based; resolve permitted model choices against the active runtime
+rather than assuming particular model names or subscription capabilities exist.
 
 Start security review from a trustworthy baseline and cover the change plus
 affected surrounding surfaces. Expand coverage when evidence warrants it;

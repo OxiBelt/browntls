@@ -121,9 +121,9 @@ verified; see the [release prerequisites](docs/Maintenance.md#release-prerequisi
 
 If any LLM agent participated in preparing or reviewing a contribution, disclose
 that assistance on each affected commit, issue, comment, pull request, review,
-or other account-authored contribution. Human review does not remove the notice
-requirement. Identify the actual agent; never attribute another tool's work to
-Codex.
+or other account-authored contribution. Review by a person does not remove the
+notice requirement. Identify the actual agent; never attribute another tool's
+work to Codex.
 
 For every Codex-assisted commit, append this trailer after a blank line:
 
@@ -163,6 +163,32 @@ Review direct and transitive dependencies, features, sources, build scripts,
 licenses, maintenance, and unsafe code. Security-critical additions and exceptions
 need a named owner and tracking issue. Exceptions must be exact, justified, and
 time-bounded. Never invent cargo-vet audits or use wildcard exemptions.
+
+## Independent review
+
+Before landing substantive behavior or safety changes to cryptography, PKI,
+parsing, protocol state, concurrency, resource limits, or unsafe/FFI/kernel
+boundaries, obtain review by a capable, named non-author person or separate
+agent. This applies to behavior-changing mechanical edits too; ordinary prose,
+comments, and formatting do not trigger this gate.
+
+The reviewer must inspect the actual diff and materially affected surrounding
+code against the intended contract and safety invariants. A separate agent
+using the same model is acceptable; changing providers alone establishes
+neither independence nor correctness. Record reviewer identity, the reviewed
+commit or reproducible diff, findings, verification, and remaining limits in the
+task report. Keep public contribution messages portable and sanitized.
+
+Resolve blocking findings and obtain review of material follow-up changes
+before landing. If an eligible reviewer is unavailable, continue useful local
+preparation and testing, report the gap, and leave affected changes unlanded.
+Self-review does not satisfy the gate. Boundary-specific evidence and exception
+requirements above still apply.
+
+For delegated work, use the
+[subagent delegation skill](.agents/skills/subagent-delegation/SKILL.md).
+It defines bounded ownership, evidence reports, model selection, and escalation;
+it does not waive contribution, review, signing, or disclosure requirements.
 
 ## Tests and temporary resources
 

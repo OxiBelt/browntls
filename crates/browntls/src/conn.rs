@@ -767,6 +767,19 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
 
+            // After close_notify the connection stops wanting to read, so
+            // the transport would never be read again: treat it like EOF.
+            // Likewise, a handshake that wants neither to read nor to write
+            // cannot make progress, and looping would only spin.
+            if self.has_received_close_notify
+                || (until_handshaked
+                    && self.is_handshaking()
+                    && !self.wants_read()
+                    && !self.wants_write())
+            {
+                eof = true;
+            }
+
             match (eof, until_handshaked, self.is_handshaking()) {
                 (_, true, false) => return Ok((rdlen, wrlen)),
                 (_, false, _) => return Ok((rdlen, wrlen)),

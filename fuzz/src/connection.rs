@@ -420,6 +420,7 @@ fn finish<S: SideData>(conn: &mut ConnectionCommon<S>, failed: bool) {
 /// server flights first), a byte giving the records to drop from the last
 /// such flight, then the bytes the client receives.
 pub fn client(data: &[u8]) {
+    crate::init();
     let (mode, script) = parse(data);
     let configs = configs();
     let name = ServerName::try_from("localhost").expect("name");
@@ -463,6 +464,7 @@ pub fn client(data: &[u8]) {
 /// Input: as for [`client`], with genuine client flights first and the
 /// bytes the server receives after them.
 pub fn server(data: &[u8]) {
+    crate::init();
     let (mode, script) = parse(data);
     let configs = configs();
     let Ok(mut server) = ServerConnection::new(configs.server[mode.index()].clone()) else {

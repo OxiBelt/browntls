@@ -36,6 +36,16 @@
 //!   reductions.
 //!
 //! Nonces follow RFC 6979, hedged with fresh randomness by default.
+//!
+//! Each curve's operations take part in load-aware routing
+//! ([`crate::accel::load`]) with one stream per kind of operation, as their
+//! costs differ: public key derivation, ECDH, ECDSA signing and ECDSA
+//! verification. While routing is enabled and the selected backend runs
+//! slower than usual, a share of an operation's calls uses the other
+//! backend; one call runs on one backend throughout. Only completed
+//! operations are timed: of the verifications those that accepted the
+//! signature, and of the signatures those with the curve's TLS hash (the
+//! others are routed without being timed).
 
 mod api;
 mod curve;
@@ -65,6 +75,8 @@ mod wide_x86;
 pub mod p256;
 pub mod p384;
 
+use crate::accel::load::Stream;
+
 /// Whether the CPU offers the accelerated P-256 field arithmetic.
 pub(crate) fn p256_hardware_available() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -77,10 +89,33 @@ pub(crate) fn p256_hardware_available() -> bool {
     }
 }
 
-/// Whether P-256 operations use the accelerated field arithmetic now.
-pub(crate) fn p256_accelerated() -> bool {
-    crate::accel::select::<P256Backend>() == P256Backend::BmiAdx
+/// The streams of one curve for load-aware routing ([`crate::accel::load`]):
+/// one per kind of operation, indexed by the constants below. The kinds
+/// differ in cost, and a stream holds calls of one cost.
+const fn curve_streams() -> [Stream; 4] {
+    [
+        Stream::op("public key"),
+        Stream::op("ECDH"),
+        Stream::op("ECDSA sign"),
+        Stream::op("ECDSA verify"),
+    ]
 }
+
+/// The stream of fixed-base multiplications that derive a public key.
+pub(crate) const LOAD_PUBLIC_KEY: usize = 0;
+/// The stream of ECDH variable-base multiplications.
+pub(crate) const LOAD_ECDH: usize = 1;
+/// The stream of ECDSA signatures (timed with the curve's TLS hash).
+pub(crate) const LOAD_SIGN: usize = 2;
+/// The stream of ECDSA verifications that accepted the signature.
+pub(crate) const LOAD_VERIFY: usize = 3;
+
+/// Load-aware routing state of P-256.
+pub(crate) static P256_LOAD: [Stream; 4] = curve_streams();
+/// Load-aware routing state of P-384.
+pub(crate) static P384_LOAD: [Stream; 4] = curve_streams();
+/// Load-aware routing state of P-521.
+pub(crate) static P521_LOAD: [Stream; 4] = curve_streams();
 
 /// P-256 field arithmetic backends (for the acceleration policy).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +150,10 @@ impl crate::accel::Backends for P256Backend {
             Self::Portable => "portable",
         }
     }
+
+    fn streams() -> &'static [Stream] {
+        &P256_LOAD
+    }
 }
 pub mod p521;
 
@@ -133,7 +172,7 @@ pub(crate) fn wide_hardware_available() -> bool {
 /// Declares the backend set of a curve whose only accelerated backend is the
 /// BMI2/ADX product kernel.
 macro_rules! wide_backend {
-    ($(#[$m:meta])* $name:ident, $alg:ident) => {
+    ($(#[$m:meta])* $name:ident, $alg:ident, $load:ident) => {
         $(#[$m])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) enum $name {
@@ -141,13 +180,6 @@ macro_rules! wide_backend {
             BmiAdx,
             /// Portable 64-bit arithmetic.
             Portable,
-        }
-
-        impl $name {
-            /// Whether the curve's operations use the BMI2/ADX kernels now.
-            pub(crate) fn accelerated() -> bool {
-                crate::accel::select::<Self>() == Self::BmiAdx
-            }
         }
 
         impl crate::accel::Backends for $name {
@@ -174,16 +206,20 @@ macro_rules! wide_backend {
                     Self::Portable => "portable",
                 }
             }
+
+            fn streams() -> &'static [Stream] {
+                &$load
+            }
         }
     };
 }
 
 wide_backend! {
     /// P-384 field arithmetic backends (for the acceleration policy).
-    P384Backend, P384
+    P384Backend, P384, P384_LOAD
 }
 
 wide_backend! {
     /// P-521 field arithmetic backends (for the acceleration policy).
-    P521Backend, P521
+    P521Backend, P521, P521_LOAD
 }

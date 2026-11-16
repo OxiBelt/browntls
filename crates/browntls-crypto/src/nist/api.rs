@@ -1,23 +1,40 @@
 //! The public per-curve API, instantiated by [`curve_module!`] in `p256`,
 //! `p384` and `p521`.
 //!
-//! Each module wraps the generic implementation for one parameter set. Point
-//! multiplications go through `$fast` when `$accel()` reports the required CPU
-//! features and through the portable `$soft` otherwise; both share constants.
+//! Each module wraps the generic implementation for one parameter set. The
+//! four kinds of operation that multiply points (public key derivation, ECDH,
+//! signing, verification) run the generic code for `$fast` or for the
+//! portable `$soft`, which share constants. The backend of a call comes from
+//! [`crate::accel::load::route_call`]: the one the curve's policy selects,
+//! or the other one for a share of the calls while load-aware routing has
+//! moved work. Either way it is a backend the CPU can run, and one call uses
+//! one backend throughout, since everything below these entry points is
+//! generic over it. Encodings and range checks always use `$soft`; they are
+//! independent of the multiplications and the same for both.
+//!
+//! A call is reported to the routing layer, which times it, only when it
+//! completed: a verification only when it accepted the signature, and a
+//! signature only when it used the curve's TLS hash (with another hash the
+//! RFC 6979 nonce derivation costs differently; such a signature is routed
+//! but not timed).
 
 macro_rules! curve_module {
     (
         name = $doc_name:literal,
         soft = $soft:ty,
         fast = $fast:ty,
-        accel = $accel:expr,
+        backend = $backend:ident,
+        load = $load:ident,
         limbs = $n:literal,
         field_len = $field_len:literal,
         tls_hash = $tls_hash:ident
     ) => {
         use crate::Error;
+        use crate::accel::load;
         use crate::hash::{DynHash, HashAlgorithm};
         use crate::nist::curve::{Affine, Curve};
+        use crate::nist::{$backend as Backend, $load as LOAD};
+        use crate::nist::{LOAD_ECDH, LOAD_PUBLIC_KEY, LOAD_SIGN, LOAD_VERIFY};
         use crate::nist::{ecdsa, keys};
         use crate::rand::SecureRandom;
         use crate::zeroize::Zeroizing;
@@ -40,11 +57,13 @@ macro_rules! curve_module {
         pub const TLS_HASH: HashAlgorithm = HashAlgorithm::$tls_hash;
 
         fn public_point(d: &keys::SecretScalar<$n>) -> Result<Affine<$n>, Error> {
-            if $accel {
-                keys::public_key::<$fast, $n>(d)
-            } else {
-                keys::public_key::<$soft, $n>(d)
-            }
+            let route = load::route_call::<Backend>(&LOAD[LOAD_PUBLIC_KEY], 1);
+            let point = match route.backend() {
+                Backend::BmiAdx => keys::public_key::<$fast, $n>(d),
+                Backend::Portable => keys::public_key::<$soft, $n>(d),
+            }?;
+            route.done();
+            Ok(point)
         }
 
         #[doc = concat!("A ", $doc_name, " private key: a scalar in `[1, n - 1]`, zeroised on drop.")]
@@ -145,11 +164,12 @@ macro_rules! curve_module {
             /// which cannot happen for a validated `peer`.
             pub fn diffie_hellman(&self, peer: &PublicKey) -> Result<[u8; FIELD_LEN], Error> {
                 let mut out = [0u8; FIELD_LEN];
-                if $accel {
-                    keys::ecdh::<$fast, $n>(&self.d, &peer.point, &mut out)?;
-                } else {
-                    keys::ecdh::<$soft, $n>(&self.d, &peer.point, &mut out)?;
-                }
+                let route = load::route_call::<Backend>(&LOAD[LOAD_ECDH], 1);
+                match route.backend() {
+                    Backend::BmiAdx => keys::ecdh::<$fast, $n>(&self.d, &peer.point, &mut out),
+                    Backend::Portable => keys::ecdh::<$soft, $n>(&self.d, &peer.point, &mut out),
+                }?;
+                route.done();
                 Ok(out)
             }
         }
@@ -294,11 +314,26 @@ macro_rules! curve_module {
                     }
                     None => None,
                 };
-                let (r, s) = if $accel {
-                    ecdsa::sign::<$fast, $n>(&self.secret.d, hash, digest, extra)?
+                // Routed after the random bytes were drawn: the time of the
+                // generator is not part of the signature's cost. The nonce
+                // derivation is, and it depends on the hash, so only
+                // signatures with the curve's TLS hash are timed: a stream
+                // holds calls of one cost.
+                let route = load::route_call::<Backend>(&LOAD[LOAD_SIGN], 1);
+                let route = if hash == TLS_HASH {
+                    route
                 } else {
-                    ecdsa::sign::<$soft, $n>(&self.secret.d, hash, digest, extra)?
+                    route.untimed()
                 };
+                let (r, s) = match route.backend() {
+                    Backend::BmiAdx => {
+                        ecdsa::sign::<$fast, $n>(&self.secret.d, hash, digest, extra)
+                    }
+                    Backend::Portable => {
+                        ecdsa::sign::<$soft, $n>(&self.secret.d, hash, digest, extra)
+                    }
+                }?;
+                route.done();
                 Signature::from_scalars(&r, &s)
             }
         }
@@ -376,11 +411,15 @@ macro_rules! curve_module {
             r: &[u64; $n],
             s: &[u64; $n],
         ) -> Result<(), Error> {
-            if $accel {
-                ecdsa::verify::<$fast, $n>(&public.point, digest, r, s)
-            } else {
-                ecdsa::verify::<$soft, $n>(&public.point, digest, r, s)
-            }
+            let route = load::route_call::<Backend>(&LOAD[LOAD_VERIFY], 1);
+            match route.backend() {
+                Backend::BmiAdx => ecdsa::verify::<$fast, $n>(&public.point, digest, r, s),
+                Backend::Portable => ecdsa::verify::<$soft, $n>(&public.point, digest, r, s),
+            }?;
+            // Only an accepted signature is reported: a rejection may have
+            // returned early, and a peer chooses how many of those it sends.
+            route.done();
+            Ok(())
         }
 
         /// Verifies a DER signature over `msg` hashed with `hash`. Any supported

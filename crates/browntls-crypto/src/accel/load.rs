@@ -114,11 +114,18 @@
 //!   10% between 4096 and 16384 bytes for ChaCha20-Poly1305 on one
 //!   machine), so a change of record sizes looks like a small change of
 //!   speed; the smallest threshold is 20% for that reason.
+//! * A key exchange or signature stream times every call that completes,
+//!   and holds calls of one cost. A failed operation (a rejected signature,
+//!   a malformed ciphertext) is not timed, since a peer chooses how many of
+//!   those it sends; neither is a successful one whose cost is another one
+//!   than its stream's (an ECDSA signature with another hash than the
+//!   curve's TLS hash), which is still routed.
 //! * A marginal alternate (one that is nearly as slow as the congested
 //!   primary) is given up when timings are noisy; work then stays on the
 //!   primary.
-//! * A keyed object (for example an AEAD key) is routed only while the
-//!   policy still selects the backend it was created for.
+//! * A keyed object (for example an AEAD key, an ML-KEM key or an RSA
+//!   private key) is routed only while the policy still selects the backend
+//!   it was created for.
 //! * A keyed object whose key is expanded per backend (an AES-GCM key) is
 //!   routable only if it was created while routing was enabled. It expands
 //!   its key for the alternates when one of its records is first routed to
@@ -801,6 +808,12 @@ mod tests {
     fn candidates_follow_the_policy() {
         candidates_match::<crate::chacha::Backend>();
         candidates_match::<crate::aes::Backend>();
+        candidates_match::<crate::curve25519::x25519::Backend>();
+        candidates_match::<crate::nist::P256Backend>();
+        candidates_match::<crate::nist::P384Backend>();
+        candidates_match::<crate::nist::P521Backend>();
+        candidates_match::<crate::mlkem::Backend>();
+        candidates_match::<crate::rsa::RsaBackend>();
     }
 
     /// A keyed object's alternates are the candidates of its backend, in

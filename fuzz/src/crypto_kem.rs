@@ -13,7 +13,12 @@
 //!   agrees with the oracle; encapsulation-key and expanded decapsulation-key
 //!   parsing accept exactly what the FIPS 203 checks (computed here
 //!   independently and by the oracle) accept; the acceleration policy picks
-//!   the backend it claims to.
+//!   the backend it claims to. Key generation, encapsulation and
+//!   decapsulation are repeated with load-aware routing (`accel::load`)
+//!   sending a fuzzed share of the calls to a fuzzed alternate backend (the
+//!   last two argument bytes of each operation) and must give what they gave
+//!   without routing, also through keys with an explicit backend, which are
+//!   never routed.
 //! - FFDHE: peer public values (fuzzed, and 0, 1, p - 1, p, too long, too
 //!   short) are validated exactly as `1 < Y < p - 1` with the right length;
 //!   `g^x` and `Y^x` agree with `num-bigint` and between the portable and the
@@ -34,6 +39,7 @@ use browntls_crypto::mlkem::{MlKem512, MlKem768, MlKem1024};
 use browntls_crypto::rand::{FixedRng, OsRng};
 use num_bigint::BigUint;
 
+use crate::crypto_hash::with_fixed_share;
 use crate::input::{Input, put_field};
 
 /// Operations per input.
@@ -123,6 +129,21 @@ pub fn run(data: &[u8]) {
     for alg in [Algorithm::MlKem, Algorithm::Rsa] {
         accel::set_policy(alg, Policy::PREFERRED).expect("PREFERRED is always satisfiable");
     }
+}
+
+/// Load-aware routing moves ML-KEM operations to another backend and never
+/// changes them: with a fuzzed share of the calls of every stream (key
+/// generation, encapsulation and decapsulation of each parameter set) fixed
+/// on a fuzzed alternate, `f` returns `want`, which was computed without
+/// routing.
+fn check_routed<T: PartialEq + core::fmt::Debug>(
+    input: &mut Input<'_>,
+    want: &T,
+    f: impl FnOnce() -> T,
+) {
+    let (alternate, percent) = (input.byte(), input.byte());
+    let routed = with_fixed_share(Algorithm::MlKem, alternate, percent, f);
+    assert_eq!(&routed, want, "ML-KEM with load-aware routing");
 }
 
 /// `len` bytes from the input, zero-padded.
@@ -316,6 +337,15 @@ macro_rules! mlkem {
                         assert_eq!(e, Error::RandomFailure);
                     }
                 }
+
+                // With routing: the same key, which still belongs to the
+                // backend the policy selects.
+                let want = (ek.clone(), dk_bytes.as_ref().to_vec(), Backend::detect());
+                check_routed(input, &want, || {
+                    let dk = Dk::from_seed(&seed);
+                    let bytes = dk.to_bytes().as_ref().to_vec();
+                    (dk.encapsulation_key().clone(), bytes, dk.backend())
+                });
             }
 
             /// Encapsulation with fuzzed randomness agrees with the oracle
@@ -354,6 +384,18 @@ macro_rules! mlkem {
                         assert_eq!(e, Error::RandomFailure);
                     }
                 }
+
+                // With routing, through the key and through one with an
+                // explicit backend (which is not routed).
+                let pinned = ek.clone().with_backend(ek.backend()).expect("own backend");
+                let want = ((ct, ss), (ct, ss), Ok(ss));
+                check_routed(input, &want, || {
+                    (
+                        ek.encapsulate_deterministic(&m),
+                        pinned.encapsulate_deterministic(&m),
+                        dk.decapsulate(ct.as_ref()),
+                    )
+                });
             }
 
             /// Decapsulation of fuzzed ciphertexts of any length.
@@ -366,6 +408,12 @@ macro_rules! mlkem {
                 };
                 let dk = Dk::from_seed(&seed);
                 let result = dk.decapsulate(&ct);
+                // With routing: the same secret or the same error, also
+                // from a key with an explicit backend (which is not routed).
+                let pinned = Dk::from_seed_with_backend(&seed, dk.backend()).expect("own backend");
+                check_routed(input, &(result, result), || {
+                    (dk.decapsulate(&ct), pinned.decapsulate(&ct))
+                });
                 if ct.len() != CT_LEN {
                     assert_eq!(result, Err(Error::InvalidLength));
                     return;
@@ -397,6 +445,8 @@ macro_rules! mlkem {
                 } else {
                     assert_ne!(k, ss, "{NAME}: tampered ciphertext accepted");
                 }
+                // Implicit rejection gives the same key with routing.
+                check_routed(input, &Ok(k), || dk.decapsulate(&bad));
             }
 
             /// Encapsulation-key validation (FIPS 203 §7.2).
@@ -466,6 +516,8 @@ macro_rules! mlkem {
                         }
                     }
                 }
+                // A parsed key is routed like a generated one.
+                check_routed(input, &(ct, ss), || ek.encapsulate_deterministic(&m));
             }
 
             /// Expanded decapsulation-key validation (FIPS 203 §7.3) and
@@ -538,6 +590,10 @@ macro_rules! mlkem {
                         }
                     }
                 }
+                // A parsed key is routed like a generated one.
+                check_routed(input, &(Ok(k), Ok(k2)), || {
+                    (dk.decapsulate(&ct), dk.decapsulate(ct2.as_ref()))
+                });
             }
 
             /// The ML-KEM acceleration policy selects the backend that
@@ -919,6 +975,48 @@ pub fn seeds() -> Vec<Vec<u8>> {
             .concat(),
         );
         seeds.push([&op(OP_MLKEM_DK)[..], &[0, 0, 3, 1, 2, 3]].concat());
+        // The same operations with load-aware routing: every call on the
+        // first alternate backend, half of the calls, a few of them. The
+        // routing bytes follow the operation's other arguments, so the
+        // ciphertexts are of full length here.
+        let ct_len = [768usize, 1088, 1568][usize::from(set)];
+        seeds.push([&op(OP_MLKEM_KEYGEN)[..], &seed, &[0], &[0, 100]].concat());
+        seeds.push([&op(OP_MLKEM_ENCAPS)[..], &seed, &m, &[0], &[0, 100]].concat());
+        seeds.push([&op(OP_MLKEM_ENCAPS)[..], &seed, &m, &[0], &[1, 50]].concat());
+        let mut routed = [&op(OP_MLKEM_DECAPS)[..], &seed, &[0]].concat();
+        put_field(&mut routed, &vec![0x5a; ct_len]);
+        routed.extend_from_slice(&[0, 100]);
+        seeds.push(routed);
+        let mut short = [&op(OP_MLKEM_DECAPS)[..], &seed, &[0]].concat();
+        put_field(&mut short, &m);
+        short.extend_from_slice(&[0, 100]);
+        seeds.push(short);
+        let flips = [1, 0, 7, 3, 1, 0, 9];
+        seeds.push([&op(OP_MLKEM_TAMPER)[..], &seed, &m, &flips, &[0, 100]].concat());
+        seeds.push([&op(OP_MLKEM_TAMPER)[..], &seed, &m, &flips, &[0, 3]].concat());
+        seeds.push(
+            [
+                &op(OP_MLKEM_EK)[..],
+                &[1],
+                &seed,
+                &[0, 1, 0xff],
+                &m,
+                &[0, 100],
+            ]
+            .concat(),
+        );
+        seeds.push(
+            [
+                &op(OP_MLKEM_DK)[..],
+                &[1],
+                &seed,
+                &[0],
+                &vec![0x3c; ct_len],
+                &m,
+                &[0, 100],
+            ]
+            .concat(),
+        );
         // policies and operating-system randomness
         // Required SIMD, portable only, the default
         let (simd, dedicated) = [(0, 1), (2, 2), (1, 1)][usize::from(set)];

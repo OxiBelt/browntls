@@ -7,10 +7,20 @@
 //! ECDH), DER (fuzzed SEC 1, PKCS #8 and SPKI documents), signing
 //! (deterministic, hedged, prehashed; encodings) and verification of fuzzed
 //! signatures.
+//!
+//! Every operation ends with two more argument bytes, a routing alternate
+//! and its share: the public key derivations, agreements, signatures and
+//! verifications of the operation are repeated with load-aware routing
+//! (`accel::load`) sending that share of the curve's calls to that
+//! alternate backend, and must give what they gave without routing
+//! ([`check_routed`]).
 
 use browntls_crypto::accel::{self, Algorithm, Policy};
 use browntls_crypto::hash::HashAlgorithm;
 use num_bigint::BigUint;
+
+use crate::crypto_hash::with_fixed_share;
+use crate::input::Input;
 
 /// Every hash ECDSA accepts.
 pub const HASHES: [HashAlgorithm; 7] = [
@@ -46,6 +56,21 @@ pub fn portable<T>(alg: Algorithm, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// Load-aware routing moves the operations of `alg` to the other backend and
+/// never changes them: with a fuzzed share of the calls of every stream of
+/// the curve (public keys, ECDH, signing, verification) fixed on a fuzzed
+/// alternate, `f` returns `want`, which was computed without routing.
+pub fn check_routed<T: PartialEq + core::fmt::Debug>(
+    alg: Algorithm,
+    input: &mut Input<'_>,
+    want: &T,
+    f: impl FnOnce() -> T,
+) {
+    let (alternate, percent) = (input.byte(), input.byte());
+    let routed = with_fixed_share(alg, alternate, percent, f);
+    assert_eq!(&routed, want, "{} with load-aware routing", alg.name());
+}
+
 /// `n - small` as `len` big-endian bytes, for scalars near the order.
 pub fn order_minus(order_hex: &str, small: u64, len: usize) -> Vec<u8> {
     let n = BigUint::parse_bytes(order_hex.as_bytes(), 16).expect("order");
@@ -67,7 +92,7 @@ macro_rules! nist_ops {
             use browntls_crypto::nist::$ours as ours;
             use browntls_crypto::rand::FixedRng;
 
-            use super::{HASHES, digest, order_minus, portable};
+            use super::{HASHES, check_routed, digest, order_minus, portable};
             use crate::crypto_ecc::{edit, flip_bit, message};
             use crate::input::Input;
 
@@ -168,9 +193,11 @@ macro_rules! nist_ops {
                 assert_eq!(signer.secret_key().to_bytes()[..], bytes[..]);
                 assert_eq!(signer.verifying_key(), public);
                 // Agreement with a second key is symmetric.
+                let mut agreed = None;
                 if let Some(peer) = secret(input) {
                     let ab = check_ecdh(&key, &peer.public_key());
                     assert_eq!(peer.diffie_hellman(&public), Ok(ab), "ECDH symmetry");
+                    agreed = Some((peer.public_key(), ab));
                 }
                 // SEC 1: ours and the oracle's are identical and load both
                 // ways; a fuzzed buffer size.
@@ -189,6 +216,14 @@ macro_rules! nist_ops {
                 let pkcs8 = theirs.to_pkcs8_der().expect("oracle PKCS #8");
                 let back = ours::SecretKey::from_pkcs8_der(pkcs8.as_bytes()).expect("PKCS #8");
                 assert_eq!(back.to_bytes()[..], bytes[..]);
+                // The public key and the agreement with routing.
+                let want = (Ok(public), agreed.map(|(_, ab)| Ok(ab)));
+                check_routed(ALG, input, &want, || {
+                    (
+                        ours::SecretKey::from_bytes(&bytes[..]).map(|k| k.public_key()),
+                        agreed.map(|(peer, _)| key.diffie_hellman(&peer)),
+                    )
+                });
             }
 
             /// A SEC 1 point: raw bytes, a valid point (either form) with an
@@ -258,7 +293,8 @@ macro_rules! nist_ops {
                     Err(e) => assert_eq!(e, Error::InvalidLength),
                 }
                 if let Some(key) = secret(input) {
-                    check_ecdh(&key, &public);
+                    let shared = check_ecdh(&key, &public);
+                    check_routed(ALG, input, &Ok(shared), || key.diffie_hellman(&public));
                 }
             }
 
@@ -316,6 +352,10 @@ macro_rules! nist_ops {
                         let back = ours::SecretKey::from_sec1_der(&buf[..n]).expect("own SEC 1");
                         assert_eq!(back.to_bytes()[..], key.to_bytes()[..]);
                         assert_eq!(back.public_key(), key.public_key());
+                        // Loading derives the public key, also with routing.
+                        check_routed(ALG, input, &Ok(key.public_key()), || {
+                            ours::SecretKey::from_sec1_der(&buf[..n]).map(|k| k.public_key())
+                        });
                     }
                     _ => {
                         let public = match ours::PublicKey::from_spki_der(&bytes) {
@@ -404,6 +444,17 @@ macro_rules! nist_ops {
                         Err(Error::InvalidLength)
                     );
                 }
+                // Signing (deterministic and hedged) and verification
+                // (accepting and rejecting) with routing.
+                let want = (Ok(sig), Ok(()), Err(Error::InvalidSignature), hedged);
+                check_routed(ALG, input, &want, || {
+                    (
+                        signer.sign_deterministic(hash, msg),
+                        ours::verify(&public, hash, msg, sig.as_der()),
+                        ours::verify_fixed(&public, hash, msg, &bad),
+                        signer.sign(hash, msg, &FixedRng::new(rng)),
+                    )
+                });
             }
 
             /// Op: fuzzed signatures in fixed and DER form, against the
@@ -483,6 +534,14 @@ macro_rules! nist_ops {
                 };
                 assert!(matches!(ours_ok, Ok(()) | Err(Error::InvalidSignature)));
                 assert_eq!(ours_ok.is_ok(), theirs_ok, "ECDSA verdict");
+                // The same verdict with routing.
+                check_routed(ALG, input, &ours_ok, || {
+                    if der {
+                        ours::verify(&public, hash, msg, &bytes)
+                    } else {
+                        ours::verify_fixed(&public, hash, msg, &bytes)
+                    }
+                });
             }
         }
     };

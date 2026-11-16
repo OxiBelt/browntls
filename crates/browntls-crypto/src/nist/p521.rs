@@ -12,16 +12,12 @@ type Fast = super::p521_x86::P521Adx;
 #[cfg(not(target_arch = "x86_64"))]
 type Fast = P521;
 
-#[inline]
-fn accelerated() -> bool {
-    super::P521Backend::accelerated()
-}
-
 super::api::curve_module! {
     name = "P-521",
     soft = P521,
     fast = Fast,
-    accel = accelerated(),
+    backend = P521Backend,
+    load = P521_LOAD,
     limbs = 9,
     field_len = 66,
     tls_hash = Sha512

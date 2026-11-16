@@ -27,6 +27,16 @@
 //!   sampling are shared, branch-free scalar code (compression uses a
 //!   multiply-shift, never a division).
 //! * Secret polynomials and seeds are zeroised after use and on drop.
+//! * Key generation, encapsulation and decapsulation take part in load-aware
+//!   routing ([`crate::accel::load`]), with one stream per operation and
+//!   parameter set: while routing is enabled and the selected backend runs
+//!   slower than usual, a share of the calls does its polynomial arithmetic
+//!   on another available backend. A key holds no data that depends on the
+//!   backend, so nothing is added to it. A key given an explicit backend
+//!   ([`DecapsulationKey::with_backend`] and the like) is never routed, and
+//!   another key only while the ML-KEM policy still selects the backend it
+//!   was created with. The Keccak permutations of an operation follow their
+//!   own policies and are not routed.
 
 mod backend;
 mod kpke;
@@ -46,12 +56,13 @@ mod tests;
 use core::marker::PhantomData;
 
 pub use backend::Backend;
-use backend::Engine;
+use backend::{Engine, Op};
 use params::params;
 pub use params::{ByteArray, MlKem512, MlKem768, MlKem1024, ParameterSet};
 use poly::{Poly, PolyVec};
 
 use crate::Error;
+use crate::accel::load::{self, Route};
 use crate::hash::{HashFunction, Sha3_256, Sha3_512, Shake256};
 use crate::rand::SecureRandom;
 use crate::zeroize::{Zeroize, Zeroizing};
@@ -61,6 +72,28 @@ pub const SHARED_SECRET_LEN: usize = 32;
 /// Decapsulation key seed (`d || z`) length in bytes.
 pub const SEED_LEN: usize = 64;
 
+/// The engine that runs one `op` of parameter set `P` by a key whose own
+/// engine is `own`, and the route to report the call with when it is done:
+/// `own`, or for a `routed` key another backend for a share of the calls
+/// while load-aware routing has moved work. Every backend computes the same
+/// values from the same key data, so any one the CPU can run will do; the
+/// route's backend is checked like any other ([`Engine::new`]).
+fn route<P: ParameterSet>(own: Engine, routed: bool, op: Op) -> (Engine, Route<Backend>) {
+    if !routed {
+        return (own, Route::fixed(own.backend()));
+    }
+    let route = load::route(backend::stream::<P>(op), own.backend(), 1, |_| true);
+    if route.backend() == own.backend() {
+        return (own, route);
+    }
+    match Engine::new(route.backend()) {
+        Ok(engine) => (engine, route),
+        // Not reached: a route names backends the CPU can run. Such a call
+        // would run, untimed, on the key's own engine.
+        Err(_) => (own, route.untimed()),
+    }
+}
+
 /// An ML-KEM encapsulation (public) key.
 #[derive(Clone)]
 pub struct EncapsulationKey<P: ParameterSet> {
@@ -69,7 +102,11 @@ pub struct EncapsulationKey<P: ParameterSet> {
     t_hat: PolyVec,
     /// `H(ek)`.
     h: [u8; 32],
+    /// The backend the key was created with.
     engine: Engine,
+    /// Whether load-aware routing may run a call on another backend: not
+    /// for a key that was given an explicit one.
+    routed: bool,
     _p: PhantomData<P>,
 }
 
@@ -118,12 +155,13 @@ impl<P: ParameterSet> EncapsulationKey<P> {
             t_hat,
             h: Sha3_256::digest(bytes),
             engine: Engine::detect(),
+            routed: true,
             _p: PhantomData,
         })
     }
 
     /// Builds the key from a freshly generated `t̂` and `rho`.
-    fn from_parts(t_hat: PolyVec, rho: &[u8; 32], engine: Engine) -> Self {
+    fn from_parts(t_hat: PolyVec, rho: &[u8; 32], engine: Engine, routed: bool) -> Self {
         let k = P::K;
         let mut bytes = P::EncapsulationKeyBytes::zeroed();
         {
@@ -138,25 +176,34 @@ impl<P: ParameterSet> EncapsulationKey<P> {
             bytes,
             t_hat,
             engine,
+            routed,
             _p: PhantomData,
         }
     }
 
     /// Returns a copy that uses `backend` for its arithmetic (for testing and
-    /// benchmarking).
+    /// benchmarking). Load-aware routing ([`crate::accel::load`]) never
+    /// moves the calls of such a key.
     ///
     /// # Errors
     ///
     /// [`Error::Unsupported`] if the backend is not available on this CPU.
     pub fn with_backend(mut self, backend: Backend) -> Result<Self, Error> {
         self.engine = Engine::new(backend)?;
+        self.routed = false;
         Ok(self)
     }
 
-    /// The arithmetic backend this key uses.
+    /// The arithmetic backend this key uses (while load-aware routing has
+    /// moved work, a share of its calls runs on another one).
     #[must_use]
     pub fn backend(&self) -> Backend {
         self.engine.backend()
+    }
+
+    /// The engine that runs one `op` with this key, and its route.
+    fn route(&self, op: Op) -> (Engine, Route<Backend>) {
+        route::<P>(self.engine, self.routed, op)
     }
 
     /// The encoded key.
@@ -202,6 +249,7 @@ impl<P: ParameterSet> EncapsulationKey<P> {
         &self,
         m: &[u8; 32],
     ) -> (P::Ciphertext, [u8; SHARED_SECRET_LEN]) {
+        let (engine, route) = self.route(Op::Encaps);
         let mut g = Sha3_512::new();
         g.update(m);
         g.update(&self.h);
@@ -213,7 +261,7 @@ impl<P: ParameterSet> EncapsulationKey<P> {
         kr.zeroize();
         let mut ct = P::Ciphertext::zeroed();
         kpke::encrypt(
-            self.engine,
+            engine,
             params::<P>(),
             &self.t_hat,
             &self.rho(),
@@ -222,6 +270,7 @@ impl<P: ParameterSet> EncapsulationKey<P> {
             ct.as_mut(),
         );
         r.zeroize();
+        route.done();
         (ct, key)
     }
 }
@@ -283,20 +332,30 @@ impl<P: ParameterSet> DecapsulationKey<P> {
     /// Expands the 64-byte seed `d || z` into a key pair.
     #[must_use]
     pub fn from_seed(seed: &[u8; SEED_LEN]) -> Self {
-        Self::keygen(Engine::detect(), seed)
+        // The key belongs to the backend the policy selects, whichever
+        // backend load-aware routing has compute it.
+        let own = Engine::detect();
+        let (engine, route) = route::<P>(own, true, Op::Keygen);
+        let key = Self::keygen(engine, own, true, seed);
+        route.done();
+        key
     }
 
     /// Like [`Self::from_seed`] with an explicit backend (for testing and
-    /// benchmarking).
+    /// benchmarking). Load-aware routing ([`crate::accel::load`]) never
+    /// moves the calls of such a key.
     ///
     /// # Errors
     ///
     /// [`Error::Unsupported`] if the backend is not available on this CPU.
     pub fn from_seed_with_backend(seed: &[u8; SEED_LEN], backend: Backend) -> Result<Self, Error> {
-        Ok(Self::keygen(Engine::new(backend)?, seed))
+        let engine = Engine::new(backend)?;
+        Ok(Self::keygen(engine, engine, false, seed))
     }
 
-    fn keygen(engine: Engine, seed: &[u8; SEED_LEN]) -> Self {
+    /// Generates the key with `engine`; the key keeps `own` as its backend
+    /// and is `routed` or not.
+    fn keygen(engine: Engine, own: Engine, routed: bool, seed: &[u8; SEED_LEN]) -> Self {
         let mut d = [0u8; 32];
         let mut z = [0u8; 32];
         d.copy_from_slice(&seed[..32]);
@@ -308,7 +367,7 @@ impl<P: ParameterSet> DecapsulationKey<P> {
         d.zeroize();
         Self {
             s_hat,
-            ek: EncapsulationKey::from_parts(t_hat, &rho, engine),
+            ek: EncapsulationKey::from_parts(t_hat, &rho, own, routed),
             z,
             seed: *seed,
             has_seed: true,
@@ -352,17 +411,20 @@ impl<P: ParameterSet> DecapsulationKey<P> {
     }
 
     /// Returns a copy of this key that uses `backend` for its arithmetic (for
-    /// testing and benchmarking).
+    /// testing and benchmarking). Load-aware routing
+    /// ([`crate::accel::load`]) never moves the calls of such a key.
     ///
     /// # Errors
     ///
     /// [`Error::Unsupported`] if the backend is not available on this CPU.
     pub fn with_backend(mut self, backend: Backend) -> Result<Self, Error> {
         self.ek.engine = Engine::new(backend)?;
+        self.ek.routed = false;
         Ok(self)
     }
 
-    /// The arithmetic backend this key uses.
+    /// The arithmetic backend this key uses (while load-aware routing has
+    /// moved work, a share of its calls runs on another one).
     #[must_use]
     pub fn backend(&self) -> Backend {
         self.ek.engine.backend()
@@ -410,7 +472,9 @@ impl<P: ParameterSet> DecapsulationKey<P> {
             return Err(Error::InvalidLength);
         }
         let p = params::<P>();
-        let engine = self.ek.engine;
+        // Implicit rejection makes every decapsulation of a ciphertext of
+        // the right length the same work, so each one is timed.
+        let (engine, route) = self.ek.route(Op::Decaps);
         let mut m = [0u8; 32];
         kpke::decrypt(engine, p, &self.s_hat, ct, &mut m);
 
@@ -447,6 +511,7 @@ impl<P: ParameterSet> DecapsulationKey<P> {
         r.zeroize();
         key.zeroize();
         ct2.zeroize();
+        route.done();
         Ok(reject)
     }
 }

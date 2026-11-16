@@ -10,16 +10,12 @@ type Fast = super::p256_x86::P256Adx;
 #[cfg(not(target_arch = "x86_64"))]
 type Fast = P256;
 
-#[inline]
-fn accelerated() -> bool {
-    super::p256_accelerated()
-}
-
 super::api::curve_module! {
     name = "P-256",
     soft = P256,
     fast = Fast,
-    accel = accelerated(),
+    backend = P256Backend,
+    load = P256_LOAD,
     limbs = 4,
     field_len = 32,
     tls_hash = Sha256

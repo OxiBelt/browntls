@@ -993,19 +993,26 @@ Limits:
 - Records shorter than 4096 bytes are too short to time and always run on
   the primary, unless a share was fixed by hand. A record whose additional
   data exceeds 1/64 of its length is routed but not timed.
-- Key exchange and signature streams time every call that completes, and a
-  stream is meant to hold calls of one cost. Calls that do not fit are left
-  out of the measurements: a failed operation (a rejected signature, a
-  ciphertext of the wrong length; a peer chooses how many of those it
-  sends), and an ECDSA signature with another hash than the curve's TLS
-  hash, whose RFC 6979 nonce derivation costs differently (P-256 with
-  SHA-512 measured 28% above P-256 with SHA-256 on one machine); such a
-  signature is still routed. An RSA signature's cost depends on the key
-  size and, through the two public-exponent exponentiations of its
-  blinding and fault check, slightly on the public exponent. ECDSA
-  verification runs in variable time on public values, so the cost of an
-  accepted signature varies with the key and the signature its sender
-  chose.
+- A key exchange or signature stream is meant to hold calls of one cost.
+  Calls that do not fit are left out of the measurements and still routed:
+  - a rejected signature and a ciphertext of the wrong length (a peer
+    chooses how many of those it sends);
+  - an ECDSA signature with another hash than the curve's TLS hash, whose
+    RFC 6979 nonce derivation costs differently (P-256 with SHA-512
+    measured 28% above P-256 with SHA-256 on one machine);
+  - an ECDSA verification that did less work than random inputs cause.
+    Verification runs in variable time on public values, and whoever
+    supplies both the key and the signature can make it cost a tenth
+    (measured on P-256), which would drag the stream's baseline down.
+    Verifications that pass this check vary by under a tenth.
+
+  When such calls land on a probe they yield no sample, so a stream of them
+  can keep a probe from completing. What remains varies within the
+  threshold but is partly in other hands: an ML-KEM public key chosen for
+  it raises the cost of encapsulating to it by up to 10%, and an RSA key's
+  public exponent changes its signing cost by 4% (3 against 65537) to 17%
+  (the largest accepted), through the two public-exponent exponentiations
+  of blinding and the fault check.
 - Only the polynomial arithmetic of an ML-KEM operation moves; its Keccak
   permutations follow their own policies and are not routed.
 - The cost per byte depends somewhat on the record length (about 10%

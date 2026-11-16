@@ -114,12 +114,20 @@
 //!   10% between 4096 and 16384 bytes for ChaCha20-Poly1305 on one
 //!   machine), so a change of record sizes looks like a small change of
 //!   speed; the smallest threshold is 20% for that reason.
-//! * A key exchange or signature stream times every call that completes,
-//!   and holds calls of one cost. A failed operation (a rejected signature,
-//!   a malformed ciphertext) is not timed, since a peer chooses how many of
-//!   those it sends; neither is a successful one whose cost is another one
-//!   than its stream's (an ECDSA signature with another hash than the
-//!   curve's TLS hash), which is still routed.
+//! * A key exchange or signature stream is meant to hold calls of one cost.
+//!   A rejected signature and a ciphertext of the wrong length are not
+//!   timed, since a peer chooses how many of those it sends. Neither is a
+//!   successful call whose cost is another one than its stream's: an ECDSA
+//!   signature with another hash than the curve's TLS hash, and an ECDSA
+//!   verification that did less work than random inputs cause (whoever
+//!   supplies both key and signature can make one cost a tenth). Such calls
+//!   are still routed, and when they land on a probe they yield no sample,
+//!   so a stream of them can keep a probe from completing.
+//! * What remains varies within the threshold but is partly in other
+//!   hands: an ML-KEM public key chosen for it raises the cost of
+//!   encapsulating to it by up to 10%, and an RSA key's public exponent
+//!   changes its signing cost by 4% (3 against 65537) to 17% (the largest
+//!   accepted).
 //! * A marginal alternate (one that is nearly as slow as the congested
 //!   primary) is given up when timings are noisy; work then stays on the
 //!   primary.

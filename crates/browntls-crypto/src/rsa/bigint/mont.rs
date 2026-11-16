@@ -499,6 +499,11 @@ impl<'a, const CAP: usize> Under<'a, CAP> {
             }
         }
         out.copy_from_slice(&acc[..len]);
+        // The base may be secret (the blinding factor, the unreleased
+        // signature), and so are its powers.
+        acc.zeroize();
+        tmp.zeroize();
+        scratch.zeroize();
     }
 }
 

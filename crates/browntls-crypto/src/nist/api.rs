@@ -412,13 +412,17 @@ macro_rules! curve_module {
             s: &[u64; $n],
         ) -> Result<(), Error> {
             let route = load::route_call::<Backend>(&LOAD[LOAD_VERIFY], 1);
-            match route.backend() {
+            let typical = match route.backend() {
                 Backend::BmiAdx => ecdsa::verify::<$fast, $n>(&public.point, digest, r, s),
                 Backend::Portable => ecdsa::verify::<$soft, $n>(&public.point, digest, r, s),
             }?;
-            // Only an accepted signature is reported: a rejection may have
-            // returned early, and a peer chooses how many of those it sends.
-            route.done();
+            // Only an accepted signature whose verification did the usual
+            // work is reported: a rejection may have returned early, and the
+            // cost follows the public inputs, which whoever supplies both
+            // key and signature can choose to be cheap.
+            if typical {
+                route.done();
+            }
             Ok(())
         }
 

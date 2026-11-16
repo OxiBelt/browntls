@@ -389,11 +389,12 @@ fn check<A: Gcm>(key: &[u8]) {
             .map(|alternate| fix(alternate, 100).alternate.unwrap())
             .collect();
         let without_simd = |name: &str| matches!(name, "AES-NI" | "FEAT_AES" | "Zkne" | "portable");
-        let kept = names.iter().any(|name| !without_simd(name));
         for (alternate, name) in names.iter().enumerate() {
             let what = format!("SIMD GHASH, {name}");
             if without_simd(name) {
-                stays_on_primary(&simd_ghash, &baseline, alternate, kept, &what);
+                // A routable key is timed on its primary even when no
+                // alternate is left for it.
+                stays_on_primary(&simd_ghash, &baseline, alternate, true, &what);
             } else {
                 runs_on_alternate(&simd_ghash, &baseline, alternate, &what);
             }

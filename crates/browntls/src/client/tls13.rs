@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use browntls_pki::ServerName;
+use browntls_pki::{ServerName, UnixTime};
 
 use super::client_conn::ClientConnectionData;
 use super::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
@@ -496,6 +496,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     key_schedule: self.key_schedule,
                     client_auth: None,
                     client_cert_compression: Vec::new(),
+                    delegated_credential_expiry: resuming.delegated_credential_expiry(),
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
@@ -512,6 +513,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     key_schedule: self.key_schedule,
                     client_auth: None,
                     client_cert_compression: Vec::new(),
+                    delegated_credential_expiry: None,
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
@@ -860,12 +862,14 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
 
         let message = construct_server_verify_message(&handshake_hash);
-        let sig_verified = match &self.delegated_credential {
-            None => self
-                .config
-                .verifier()
-                .verify_tls13_signature(&message, end_entity, cert_verify)
-                .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+        let (sig_verified, delegated_credential_expiry) = match &self.delegated_credential {
+            None => (
+                self.config
+                    .verifier()
+                    .verify_tls13_signature(&message, end_entity, cert_verify)
+                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+                None,
+            ),
             Some(dc) => {
                 // RFC 9345 §4.1.3: an invalid credential is illegal_parameter.
                 let offered_dc_schemes = delegated_credential_schemes(&self.config);
@@ -886,15 +890,20 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                     cx.common
                         .send_fatal_alert(AlertDescription::IllegalParameter, err)
                 })?;
+                let expiry = dc.expiry(end_entity).map_err(|err| {
+                    cx.common
+                        .send_fatal_alert(AlertDescription::IllegalParameter, err)
+                })?;
                 // Then the credential's key verifies CertificateVerify.
-                self.config
-                    .verifier()
-                    .verify_tls13_signature_with_delegated_key(
+                (
+                    self.config.verifier().verify_tls13_signature_with_delegated_key(
                         &message,
                         &dc.credential.public_key,
                         cert_verify,
                     )
-                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?
+                    .map_err(|err| send_cert_verify_error_alert(cx.common, err))?,
+                    Some(expiry),
+                )
             }
         };
         cx.data.delegated_credential = self.delegated_credential;
@@ -911,6 +920,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             key_schedule: self.key_schedule,
             client_auth: self.client_auth,
             client_cert_compression: self.client_cert_compression,
+            delegated_credential_expiry,
             cert_verified,
             sig_verified,
         }))
@@ -1084,6 +1094,8 @@ struct ExpectFinished {
     /// The compression algorithms the server's CertificateRequest accepts
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
+    /// The authentication deadline inherited from a delegated credential.
+    delegated_credential_expiry: Option<UnixTime>,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
 }
@@ -1200,6 +1212,7 @@ impl State<ClientConnectionData> for ExpectFinished {
             post_handshake_transcript,
             post_handshake_requests_since_data: 0,
             key_schedule,
+            delegated_credential_expiry: st.delegated_credential_expiry,
             _cert_verified: st.cert_verified,
             _sig_verified: st.sig_verified,
             _fin_verified: fin,
@@ -1219,6 +1232,8 @@ struct ExpectTraffic {
     /// application data; see [`MAX_POST_HANDSHAKE_AUTH_REQUESTS`].
     post_handshake_requests_since_data: u8,
     key_schedule: KeyScheduleTraffic,
+    /// The authentication deadline inherited from a delegated credential.
+    delegated_credential_expiry: Option<UnixTime>,
     _cert_verified: ServerCertVerified,
     _sig_verified: HandshakeSignatureValid,
     _fin_verified: FinishedMessageVerified,
@@ -1269,7 +1284,8 @@ impl ExpectTraffic {
             nst.age_add,
             nst.exts.max_early_data_size.unwrap_or(0),
         )
-        .with_external_psk(cx.common.external_psk_binding());
+        .with_external_psk(cx.common.external_psk_binding())
+        .with_delegated_credential_expiry(self.delegated_credential_expiry);
         self.config
             .resumption
             .store

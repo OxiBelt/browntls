@@ -77,6 +77,9 @@ pub struct Tls13ClientSessionValue {
     pub(crate) common: ClientSessionCommon,
     /// The external PSK the session was established with, if any.
     external_psk: Option<ExternalPskBinding>,
+    /// The absolute authentication deadline inherited from a delegated
+    /// credential, if the session was established through one.
+    delegated_credential_expiry: Option<UnixTime>,
 }
 
 impl Tls13ClientSessionValue {
@@ -103,6 +106,7 @@ impl Tls13ClientSessionValue {
                 server_cert_chain,
             ),
             external_psk: None,
+            delegated_credential_expiry: None,
         }
     }
 
@@ -114,6 +118,20 @@ impl Tls13ClientSessionValue {
 
     pub(crate) fn external_psk(&self) -> Option<&ExternalPskBinding> {
         self.external_psk.as_ref()
+    }
+
+    /// Carries a delegated credential's authentication deadline into this
+    /// ticket and any session resumed from it.
+    pub(crate) fn with_delegated_credential_expiry(
+        mut self,
+        expiry: Option<UnixTime>,
+    ) -> Self {
+        self.delegated_credential_expiry = expiry;
+        self
+    }
+
+    pub(crate) fn delegated_credential_expiry(&self) -> Option<UnixTime> {
+        self.delegated_credential_expiry
     }
 
     /// The identity of the external PSK (RFC 9846 §4.3.11) the session was
@@ -155,6 +173,10 @@ impl fmt::Debug for Tls13ClientSessionValue {
             .field("max_early_data_size", &self.max_early_data_size)
             .field("common", &self.common)
             .field("external_psk", &self.external_psk.is_some())
+            .field(
+                "delegated_credential_expiry",
+                &self.delegated_credential_expiry,
+            )
             .finish_non_exhaustive()
     }
 }

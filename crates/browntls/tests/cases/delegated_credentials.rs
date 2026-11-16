@@ -5,6 +5,7 @@
 // project tests against supports RFC 9345).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use browntls::delegated_credential::{
@@ -14,8 +15,8 @@ use browntls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInf
 use browntls::sign::{CertifiedKey, SigningKey, SingleCertAndKey};
 use browntls::time_provider::TimeProvider;
 use browntls::{
-    AlertDescription, ClientConfig, ClientConnection, Error, PeerMisbehaved, ProtocolVersion,
-    ServerConfig, ServerConnection, Side, SignatureScheme,
+    AlertDescription, ClientConfig, ClientConnection, Error, HandshakeKind, PeerMisbehaved,
+    ProtocolVersion, ServerConfig, ServerConnection, Side, SignatureScheme,
 };
 use common::*;
 
@@ -26,6 +27,28 @@ struct FixedTime(UnixTime);
 impl TimeProvider for FixedTime {
     fn current_time(&self) -> Option<UnixTime> {
         Some(self.0)
+    }
+}
+
+/// A clock shared by successive connections in resumption tests.
+#[derive(Debug)]
+struct AdjustableTime(AtomicU64);
+
+impl AdjustableTime {
+    fn new(now: UnixTime) -> Self {
+        Self(AtomicU64::new(now.as_secs()))
+    }
+
+    fn set(&self, now: UnixTime) {
+        self.0.store(now.as_secs(), Ordering::Relaxed);
+    }
+}
+
+impl TimeProvider for AdjustableTime {
+    fn current_time(&self) -> Option<UnixTime> {
+        Some(UnixTime::since_unix_epoch(Duration::from_secs(
+            self.0.load(Ordering::Relaxed),
+        )))
     }
 }
 
@@ -203,6 +226,58 @@ fn not_used_unless_both_sides_opt_in() {
         ));
     let (mut client, mut server) = connect(client_config, server_with(ck));
     do_handshake(&mut client, &mut server).unwrap();
+    assert!(client.delegated_credential().is_none());
+}
+
+#[test]
+fn delegated_credential_expiry_limits_resumption() {
+    let chain = delegation_server_chain(KeyType::EcdsaP256);
+    let start = now();
+    let expiry = UnixTime::since_unix_epoch(Duration::from_secs(start.as_secs() + 60));
+    let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
+    let certified_key = certified_key(&chain)
+        .with_delegated_credential(dc.clone(), key)
+        .unwrap();
+    let clock = Arc::new(AdjustableTime::new(start));
+
+    let mut client_config = dc_client(&chain);
+    client_config.time_provider = clock.clone();
+    let client_config = Arc::new(client_config);
+    let mut server_config = server_with(certified_key);
+    server_config.time_provider = clock.clone();
+    let server_config = Arc::new(server_config);
+
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(client.delegated_credential(), Some(&dc));
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert!(client.tls13_tickets_received() > 0);
+
+    // Resumption before the authentication deadline remains available, and
+    // the replacement ticket must inherit that same absolute deadline.
+    clock.set(UnixTime::since_unix_epoch(Duration::from_secs(
+        start.as_secs() + 1,
+    )));
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Resumed));
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert!(client.tls13_tickets_received() > 0);
+
+    // At expiry the renewed ticket is not offered. The ordinary certificate
+    // path still succeeds after the server stops selecting the credential.
+    clock.set(expiry);
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
     assert!(client.delegated_credential().is_none());
 }
 

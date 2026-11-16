@@ -150,6 +150,17 @@ fn find_session(
         return None;
     }
 
+    if matches!(
+        &found.value,
+        ClientSessionValue::Tls13(inner)
+            if inner
+                .delegated_credential_expiry()
+                .is_some_and(|expiry| now.as_secs() >= expiry.as_secs())
+    ) {
+        debug!("Not resuming session authenticated by expired delegated credential");
+        return None;
+    }
+
     let usable = match &found.value {
         ClientSessionValue::Tls13(inner) => {
             config.supports_version(ProtocolVersion::TLSv1_3)

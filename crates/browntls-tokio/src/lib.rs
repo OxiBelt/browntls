@@ -35,6 +35,10 @@
 //! # }
 //! ```
 //!
+//! [`LazyConfigAcceptor`] reads the ClientHello first, so a server can
+//! choose its [`ServerConfig`](browntls::ServerConfig) by server name, ALPN
+//! or cipher suites before the handshake goes on.
+//!
 //! # Flushing
 //!
 //! A write encrypts the plaintext into TLS records and writes as many of
@@ -116,7 +120,7 @@ mod common;
 pub mod server;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};
-pub use server::{Accept, FallibleAccept, TlsAcceptor};
+pub use server::{Accept, FallibleAccept, LazyConfigAcceptor, StartHandshake, TlsAcceptor};
 
 /// A client or a server stream, for code that handles both.
 #[derive(Debug)]

@@ -7,10 +7,11 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use browntls::server::AcceptedAlert;
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Stream, StreamState};
+use super::{Stream, StreamState, poll_send_alert};
 
 /// A stream whose handshake [`MidHandshake`] can drive.
 pub(crate) trait IoSession {
@@ -26,6 +27,13 @@ pub(crate) trait IoSession {
 /// A handshake in progress, or how it ended.
 pub(crate) enum MidHandshake<IS: IoSession> {
     Handshaking(IS),
+    /// Continuing a handshake failed before any I/O, with an alert to send
+    /// before reporting `error`.
+    SendAlert {
+        io: IS::Io,
+        alert: AcceptedAlert,
+        error: io::Error,
+    },
     /// Setting up the connection failed before any I/O.
     Error {
         io: IS::Io,
@@ -49,6 +57,17 @@ where
 
         let mut stream = match mem::replace(this, Self::End) {
             Self::Handshaking(stream) => stream,
+            Self::SendAlert {
+                mut io,
+                mut alert,
+                error,
+            } => {
+                if poll_send_alert(&mut io, &mut alert, cx).is_pending() {
+                    *this = Self::SendAlert { io, alert, error };
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Err((error, io)));
+            }
             Self::Error { io, error } => return Poll::Ready(Err((error, io))),
             // Like any future, this one must not be polled after it returned
             // `Ready`; by then the transport has been handed back.

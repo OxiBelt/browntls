@@ -65,7 +65,9 @@
 //! This is test tooling: it loads keys from files given on the command line
 //! and has no hardening beyond the library defaults it configures.
 
-use std::fmt::Write as _;
+mod client_facing;
+mod output;
+
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::ops::{Deref, DerefMut};
@@ -75,17 +77,19 @@ use std::time::{Duration, Instant};
 use browntls::client::{ClientHelloPadding, TicketRequest};
 use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
-use browntls::ech::split::{ClientFacing, ClientFacingDecision};
 use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
 use browntls::pki_types::pem::PemObject;
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use browntls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use browntls::sign::CertifiedKey;
 use browntls::{
-    AlertDescription, ClientConfig, ClientConnection, CommonState, ConnectionCommon, Error,
-    RootCertStore, ServerConfig, ServerConnection, SideData, StreamOwned, SupportedCipherSuite,
-    SupportedProtocolVersion, version,
+    ClientConfig, ClientConnection, ConnectionCommon, Error, RootCertStore, ServerConfig,
+    ServerConnection, SideData, StreamOwned, SupportedCipherSuite, SupportedProtocolVersion,
+    version,
 };
+
+use client_facing::client_facing;
+use output::{Value, emit, info, is_ech_required, negotiated, tls_error};
 
 /// Time allowed for a single read or write on an established connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -418,135 +422,6 @@ impl ResolvesServerCert for SniResolver {
     }
 }
 
-// ------------------------------------------------------------------- output
-
-/// A JSON value for [`emit`].
-#[derive(Debug)]
-enum Value {
-    Str(String),
-    Num(usize),
-    Bool(bool),
-}
-
-impl From<&str> for Value {
-    fn from(s: &str) -> Self {
-        Self::Str(s.to_owned())
-    }
-}
-
-impl From<String> for Value {
-    fn from(s: String) -> Self {
-        Self::Str(s)
-    }
-}
-
-/// Writes one JSON object on its own line to standard output.
-fn emit(fields: &[(&str, Value)]) {
-    let mut line = String::from("{");
-    for (i, (key, value)) in fields.iter().enumerate() {
-        if i > 0 {
-            line.push(',');
-        }
-        push_json_str(&mut line, key);
-        line.push(':');
-        match value {
-            Value::Str(s) => push_json_str(&mut line, s),
-            Value::Num(n) => {
-                let _ = write!(line, "{n}");
-            }
-            Value::Bool(b) => {
-                let _ = write!(line, "{b}");
-            }
-        }
-    }
-    line.push('}');
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
-}
-
-fn push_json_str(out: &mut String, s: &str) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-/// The negotiated parameters of an established connection.
-fn negotiated(common: &CommonState) -> Vec<(&'static str, Value)> {
-    let show = |v: Option<String>| Value::Str(v.unwrap_or_else(|| "none".into()));
-    vec![
-        (
-            "version",
-            show(common.protocol_version().map(|v| format!("{v:?}"))),
-        ),
-        (
-            "suite",
-            show(
-                common
-                    .negotiated_cipher_suite()
-                    .map(|s| format!("{:?}", s.suite())),
-            ),
-        ),
-        (
-            "group",
-            show(
-                common
-                    .negotiated_key_exchange_group()
-                    .map(|g| format!("{:?}", g.name())),
-            ),
-        ),
-        (
-            "handshake",
-            show(common.handshake_kind().map(|k| format!("{k:?}"))),
-        ),
-        (
-            "peer_certificates",
-            Value::Num(common.peer_certificates().map_or(0, <[_]>::len)),
-        ),
-    ]
-}
-
-/// Whether `err` (from a server's handshake) is the client refusing an ECH
-/// rejection (RFC 9849 §6.1.6), which precedes the client's retry.
-fn is_ech_required(err: &Error) -> bool {
-    *err == Error::AlertReceived(AlertDescription::EncryptedClientHelloRequired)
-}
-
-/// The connection's error after an I/O failure: the TLS error the
-/// connection recorded, if any.
-fn tls_error<S: SideData>(conn: &mut ConnectionCommon<S>) -> Option<Error> {
-    conn.process_new_packets().err()
-}
-
-/// Prints the acceleration backend selected for each algorithm family.
-fn info() {
-    emit(&[
-        ("event", "info".into()),
-        ("arch", std::env::consts::ARCH.into()),
-        ("package_version", env!("CARGO_PKG_VERSION").into()),
-    ]);
-    for status in native::accel::status_all() {
-        emit(&[
-            ("event", "accel".into()),
-            ("algorithm", status.algorithm.to_string().into()),
-            ("backend", status.backend.to_string().into()),
-            ("accelerated", Value::Bool(status.accelerated())),
-        ]);
-    }
-}
-
 // ---------------------------------------------------------------- transport
 
 fn set_timeouts(sock: &TcpStream) -> Result<()> {
@@ -714,169 +589,6 @@ fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Res
     emit(&fields);
     close(&mut tls);
     Ok(())
-}
-
-// ------------------------------------------------------------ client-facing
-
-/// The client-facing server of ECH split mode: decides each connection,
-/// then relays it to a back-end server or completes it locally.
-fn client_facing(o: &Options) -> Result<()> {
-    let ech = o
-        .ech_server()?
-        .ok_or("--ech-config and --ech-key are required")?;
-    if o.backends.is_empty() {
-        return Err("--backend is required".into());
-    }
-    // The local server: the public name's certificate, the same keys (for
-    // the retry configurations).
-    let local = server_config(o, Some(ech.clone()))?;
-    let listener = listen(o)?;
-    let mut failed = None;
-    for index in 0..o.accept {
-        let (sock, peer) = listener.accept().map_err(|e| format!("accept: {e}"))?;
-        if let Err(e) = set_timeouts(&sock).and_then(|()| front(o, &ech, &local, sock, index)) {
-            emit(&[
-                ("event", "error".into()),
-                ("index", Value::Num(index)),
-                ("peer", peer.to_string().into()),
-                ("message", e.clone().into()),
-            ]);
-            failed = Some(e);
-        }
-    }
-    failed.map_or(Ok(()), |e| {
-        Err(format!("at least one connection failed: {e}"))
-    })
-}
-
-fn front(
-    o: &Options,
-    ech: &Arc<EchServerConfig>,
-    local: &Arc<ServerConfig>,
-    mut client: TcpStream,
-    index: usize,
-) -> Result<()> {
-    let mut front = ClientFacing::new(ech.clone());
-    let mut buf = vec![0u8; 16 * 1024];
-    while front.decision().is_none() {
-        let n = client.read(&mut buf).map_err(|e| format!("read: {e}"))?;
-        if n == 0 {
-            return Err("client closed before its ClientHello".into());
-        }
-        if let Err(e) = front.read_client(&buf[..n]) {
-            let _ = client.write_all(&front.take_for_client());
-            return Err(format!("client-facing: {e}"));
-        }
-    }
-    let decision = front.decision();
-    emit(&[
-        ("event", "client-facing".into()),
-        ("index", Value::Num(index)),
-        (
-            "decision",
-            decision
-                .map_or_else(|| "none".to_owned(), |d| format!("{d:?}"))
-                .into(),
-        ),
-        ("ech", format!("{:?}", front.ech_status()).into()),
-        (
-            "server_name",
-            front.server_name().unwrap_or("none").to_owned().into(),
-        ),
-    ]);
-    if decision == Some(ClientFacingDecision::Local) {
-        let conn = front
-            .into_server_connection(local.clone())
-            .map_err(|e| e.to_string())?;
-        return serve(StreamOwned::new(conn, client), index);
-    }
-
-    let name = front.server_name().unwrap_or_default().to_owned();
-    let addr = o
-        .backends
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, addr)| addr.as_str())
-        .ok_or_else(|| format!("no back-end server for {name:?}"))?;
-    let mut backend = connect_with_retry(addr, o.wait)?;
-    set_timeouts(&backend)?;
-    backend
-        .write_all(&front.take_for_backend())
-        .map_err(|e| format!("write to {addr}: {e}"))?;
-    relay(front, client, backend)
-}
-
-/// Relays a forwarded connection: the client-facing server inspects the
-/// handshake until it relays both directions unmodified, then the bytes
-/// are copied directly. Returns when both directions have ended.
-fn relay(front: ClientFacing, client: TcpStream, backend: TcpStream) -> Result<()> {
-    let front = Arc::new(std::sync::Mutex::new(front));
-    let clone = |s: &TcpStream| s.try_clone().map_err(|e| format!("socket: {e}"));
-    let (client_r, backend_w) = (clone(&client)?, clone(&backend)?);
-    let to_backend = {
-        let front = front.clone();
-        std::thread::spawn(move || pump(&front, client_r, backend_w, true))
-    };
-    let from_backend = pump(&front, backend, client, false);
-    let to_backend = to_backend
-        .join()
-        .unwrap_or_else(|_| Err("relay thread panicked".into()));
-    from_backend.and(to_backend)
-}
-
-/// Copies `from` to `to` through the client-facing server (`from_client`
-/// says which direction this is). Each read may also release bytes for the
-/// other direction (a fatal alert for the client), which are written too.
-fn pump(
-    front: &std::sync::Mutex<ClientFacing>,
-    mut from: TcpStream,
-    mut to: TcpStream,
-    from_client: bool,
-) -> Result<()> {
-    let mut buf = vec![0u8; 16 * 1024];
-    let mut other = clone_peer(&from)?;
-    loop {
-        let n = match from.read(&mut buf) {
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => 0,
-            Err(e) => return Err(format!("relay read: {e}")),
-        };
-        if n == 0 {
-            let _ = to.shutdown(Shutdown::Write);
-            return Ok(());
-        }
-        let (forward, back, result) = {
-            let mut front = front.lock().map_err(|_| "relay lock poisoned")?;
-            let result = if from_client {
-                front.read_client(&buf[..n])
-            } else {
-                front.read_backend(&buf[..n])
-            };
-            let (forward, back) = if from_client {
-                (front.take_for_backend(), front.take_for_client())
-            } else {
-                (front.take_for_client(), front.take_for_backend())
-            };
-            (forward, back, result)
-        };
-        to.write_all(&forward)
-            .map_err(|e| format!("relay write: {e}"))?;
-        if !back.is_empty() {
-            other
-                .write_all(&back)
-                .map_err(|e| format!("relay write: {e}"))?;
-        }
-        if let Err(e) = result {
-            let _ = from.shutdown(Shutdown::Both);
-            let _ = to.shutdown(Shutdown::Both);
-            return Err(format!("client-facing: {e}"));
-        }
-    }
-}
-
-/// A second handle on the socket `s` reads from, to write back on it.
-fn clone_peer(s: &TcpStream) -> Result<TcpStream> {
-    s.try_clone().map_err(|e| format!("socket: {e}"))
 }
 
 // ------------------------------------------------------------------ ech-keygen

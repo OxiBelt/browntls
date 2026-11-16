@@ -65,9 +65,13 @@ pub(crate) mod generate {
         out
     }
 
+    /// Points per generated source line. Two keep the largest table (P-256)
+    /// within the repository's limit of 1000 lines per file.
+    const POINTS_PER_LINE: usize = 2;
+
     fn fmt_point<const N: usize>(p: &Affine<N>, out: &mut std::string::String) {
         use std::fmt::Write;
-        out.push_str("    Affine { x: [");
+        out.push_str("Affine { x: [");
         for (i, l) in p.x.iter().enumerate() {
             let _ = write!(out, "{}{l:#018x}", if i == 0 { "" } else { ", " });
         }
@@ -75,7 +79,19 @@ pub(crate) mod generate {
         for (i, l) in p.y.iter().enumerate() {
             let _ = write!(out, "{}{l:#018x}", if i == 0 { "" } else { ", " });
         }
-        out.push_str("] },\n");
+        out.push_str("] },");
+    }
+
+    /// Appends `points` in order, [`POINTS_PER_LINE`] to a line.
+    fn fmt_points<const N: usize>(points: &[Affine<N>], out: &mut std::string::String) {
+        for line in points.chunks(POINTS_PER_LINE) {
+            out.push_str("   ");
+            for p in line {
+                out.push(' ');
+                fmt_point(p, out);
+            }
+            out.push('\n');
+        }
     }
 
     /// Renders the generated source file for one curve.
@@ -102,16 +118,12 @@ pub(crate) mod generate {
         );
         for row in base.chunks(row_len) {
             s.push_str("  [\n");
-            for p in row {
-                fmt_point(p, &mut s);
-            }
+            fmt_points(row, &mut s);
             s.push_str("  ],\n");
         }
         s.push_str("];\n\n/// `[i] = (2 i + 1) * G`.\n#[rustfmt::skip]\n");
         let _ = writeln!(s, "pub(in super::super) static ODD: [Affine<{N}>; 16] = [");
-        for p in &odd {
-            fmt_point(p, &mut s);
-        }
+        fmt_points(&odd, &mut s);
         s.push_str("];\n");
         s
     }

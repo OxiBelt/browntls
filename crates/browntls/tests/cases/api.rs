@@ -728,3 +728,118 @@ fn custom_server_session_store_sees_puts_and_takes() {
     assert_eq!(*store.takes.lock().unwrap(), 1);
     assert_eq!(*store.puts.lock().unwrap(), 6);
 }
+
+// ---------------------------------------------------------------- blocking I/O
+
+/// A transport that hands out one queued chunk per read, then reports
+/// `WouldBlock`, and records what is written to it.
+#[derive(Default)]
+struct ChunkedIo {
+    chunks: std::collections::VecDeque<Vec<u8>>,
+    written: Vec<u8>,
+}
+
+impl Read for ChunkedIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(chunk) = self.chunks.front_mut() else {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        };
+        let n = chunk.len().min(buf.len());
+        buf[..n].copy_from_slice(&chunk[..n]);
+        chunk.drain(..n);
+        if chunk.is_empty() {
+            self.chunks.pop_front();
+        }
+        Ok(n)
+    }
+}
+
+impl Write for ChunkedIo {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The TLS bytes `conn` has queued.
+fn queued_tls<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec<u8> {
+    let mut out = Vec::new();
+    while conn.wants_write() {
+        conn.write_tls(&mut out).unwrap();
+    }
+    out
+}
+
+#[test]
+fn stream_read_answers_a_key_update_and_keeps_reading() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.protocol_version(), Some(version::TLS13.version));
+
+    // The peer's KeyUpdate(update_requested) and its next record arrive in
+    // separate reads, so answering the KeyUpdate is a pass that reads nothing.
+    server.refresh_traffic_keys().unwrap();
+    let key_update = queued_tls(&mut server);
+    server.writer().write_all(b"hello").unwrap();
+    let data = queued_tls(&mut server);
+    let mut io = ChunkedIo {
+        chunks: [key_update, data].into(),
+        written: Vec::new(),
+    };
+
+    let mut buf = [0u8; 16];
+    let n = Stream::new(&mut client, &mut io).read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+
+    // The client answered with its own KeyUpdate, which the server accepts.
+    assert!(!io.written.is_empty());
+    server.read_tls(&mut io.written.as_slice()).unwrap();
+    server.process_new_packets().unwrap();
+}
+
+/// A transport whose writes accept nothing.
+struct ZeroWriteIo;
+
+impl Read for ZeroWriteIo {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
+}
+
+impl Write for ZeroWriteIo {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn complete_io_fails_when_the_transport_accepts_no_bytes() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client: Connection =
+        ClientConnection::new(Arc::new(client_config(&chain)), server_name())
+            .unwrap()
+            .into();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ignored = tx.send(client.complete_io(&mut ZeroWriteIo));
+    });
+    let err = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("complete_io did not return")
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+}

@@ -726,6 +726,9 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Drives the connection over `io` until the handshake completes, or,
     /// once it has, until some plaintext was read or all queued TLS bytes
     /// were written. Returns `(bytes read, bytes written)`.
+    ///
+    /// Fails with `WriteZero` if `io` accepts no bytes while TLS bytes are
+    /// queued.
     pub fn complete_io<T>(&mut self, io: &mut T) -> Result<(usize, usize), std::io::Error>
     where
         T: std::io::Read + std::io::Write,
@@ -737,7 +740,17 @@ impl<Data: SideData> ConnectionCommon<Data> {
 
         loop {
             while self.wants_write() {
-                wrlen += self.write_tls(io)?;
+                match self.write_tls(io)? {
+                    // A transport that accepts nothing would leave the loop
+                    // spinning; report it like `Write::write_all` does.
+                    0 => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "transport accepted no TLS bytes",
+                        ));
+                    }
+                    n => wrlen += n,
+                }
             }
             io.flush()?;
 

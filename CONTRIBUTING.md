@@ -39,6 +39,7 @@ Run from the repository root with Python 3.10 or newer, Git, and
 ```sh
 python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
 python3 -B tests/scripts/check_markdown_links.py --repo-root .
+python3 -B tests/scripts/check_rust_line_count.py --repo-root .
 actionlint -shellcheck= -pyflakes=
 git diff --check
 git diff --cached --check
@@ -52,6 +53,13 @@ it is not a complete CommonMark parser. External HTTP(S) and mail links are not
 fetched. CI uses the same checks and pins the downloaded actionlint archive by
 SHA-256. Optional shellcheck and pyflakes integrations are disabled so the
 documented actionlint result does not depend on host-installed analyzers.
+
+The line count check fails when a Git-tracked `.rs` file has more than 1000
+lines. It counts every line, including comments, blank lines, tests and
+generated tables. Files that were larger when the limit was introduced are
+listed with their size in `tests/scripts/rust_line_count_baseline.txt`; a listed
+file may not grow, and its entry must be removed once the file is split. Do not
+add entries to that list.
 
 These checks validate repository maintenance files, not TLS correctness.
 
@@ -149,9 +157,10 @@ Never weaken a security default without explicit review, tests, and documentatio
 
 Do not add externally reachable panics or silently ignore security-sensitive
 errors. Split Rust modules by responsibility, keep protocol policy separate from
-OS effects, and review files above 750 lines as an advisory signal rather than
-a hard size gate. Do not introduce allocation, dispatch, or synchronization solely
-to split a hot path.
+OS effects, and review files above 750 lines as an advisory signal. No `.rs`
+file may exceed 1000 lines; the [local checks](#local-checks) enforce that hard
+limit. Do not introduce allocation, dispatch, or synchronization solely to split
+a hot path.
 
 First-party Rust must deny unsafe code by default when introduced. Any unsafe,
 FFI, or kernel boundary needs a documented narrow exception, safety invariants,

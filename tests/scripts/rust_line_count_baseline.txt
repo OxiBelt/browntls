@@ -1,0 +1,33 @@
+# Rust files that exceeded the 1000-line limit when it was introduced.
+#
+# Format: `<lines> <path>`. `check_rust_line_count.py` fails when a listed file
+# grows, when its recorded size is stale, and when an entry is no longer
+# needed. Do not add entries: split the file instead.
+
+1344 crates/browntls-crypto/src/accel/load/control.rs
+1495 crates/browntls-crypto/src/nist/tables/p256.rs
+1007 crates/browntls-e2e/src/main.rs
+1421 crates/browntls/src/client/hs.rs
+1489 crates/browntls/src/client/tls13.rs
+1121 crates/browntls/src/conn.rs
+1046 crates/browntls/src/crypto/native/kx.rs
+1062 crates/browntls/src/msgs/handshake/hello.rs
+1125 crates/browntls/src/server/server_conn.rs
+1903 crates/browntls/src/server/tls13.rs
+1040 crates/browntls/tests/cases/delegated_credentials.rs
+1453 crates/browntls/tests/cases/external_psk.rs
+1429 crates/browntls/tests/cases/interop.rs
+1003 crates/browntls/tests/cases/tls13_features.rs
+1391 crates/browntls/tests/cases/tls13.rs
+1517 crates/browntls/tests/cases/unbuffered.rs
+1564 crates/browntls/tests/ech_native.rs
+1657 crates/browntls/tests/native_rsa_pss_keys.rs
+1496 crates/browntls/tests/openssl_interop.rs
+1616 fuzz/src/crypto_cipher.rs
+1127 fuzz/src/crypto_hpke.rs
+1094 fuzz/src/crypto_kem.rs
+1187 fuzz/src/crypto_rsa.rs
+1346 fuzz/src/crypto_util.rs
+1443 fuzz/src/tls_auth.rs
+1397 fuzz/src/tls_conn.rs
+1767 fuzz/src/tls_ech.rs

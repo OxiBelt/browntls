@@ -23,11 +23,14 @@ jobs:
           # changes of the HEAD commit instead of the whole tree.
           fetch-depth: 2
 
-      - name: Test Markdown checker
+      - name: Test repository check scripts
         run: python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
 
       - name: Check Markdown links and anchors
         run: python3 -B tests/scripts/check_markdown_links.py --repo-root .
+
+      - name: Check Rust file line counts
+        run: python3 -B tests/scripts/check_rust_line_count.py --repo-root .
 
       - name: Check whitespace
         run: git show --format= --check HEAD

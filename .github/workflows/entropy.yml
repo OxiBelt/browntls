@@ -5,7 +5,8 @@ name: Entropy
 # low entropy: duplicates, biased or stuck bits, per-byte min-entropy and
 # Shannon entropy, collision entropy of bit windows, repeated blocks and
 # serial correlation (crates/browntls-entropy/README.md). Each topic is a
-# separate job, on every architecture whose OS-entropy path differs.
+# separate job on one x86-64 runner; the other architectures' OS-entropy
+# paths run at smoke size in the native test jobs of rust.yml.
 
 on:
   push:
@@ -48,17 +49,14 @@ env:
 
 jobs:
   entropy:
-    name: Entropy ${{ matrix.topic }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    name: Entropy ${{ matrix.topic }} (x86-64)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - x86-64
-          - aarch64
         topic:
           - os_rng
           - curve25519
@@ -71,41 +69,6 @@ jobs:
           - tls_kx
           - tls_ticketer
           - tls_handshake
-        include:
-          # 2^22 samples per generator; costly generators divide this
-          # (see each test's `sample_count` call).
-          - arch: x86-64
-            runner: ubuntu-26.04
-            samples: '4194304'
-            timeout: 120
-          # Native Arm: the aarch64 getrandom(2) system call path.
-          - arch: aarch64
-            runner: ubuntu-26.04-arm
-            samples: '4194304'
-            timeout: 120
-          # Native RISC-V (RISE, RV64GC): the riscv64 getrandom(2) system
-          # call path and the scalar backends. The runner is far slower,
-          # so the cheap topics run with 2^20 samples.
-          - arch: riscv64
-            topic: os_rng
-            runner: ubuntu-24.04-riscv
-            samples: '1048576'
-            timeout: 180
-          - arch: riscv64
-            topic: curve25519
-            runner: ubuntu-24.04-riscv
-            samples: '1048576'
-            timeout: 180
-          - arch: riscv64
-            topic: mlkem
-            runner: ubuntu-24.04-riscv
-            samples: '1048576'
-            timeout: 180
-          - arch: riscv64
-            topic: tls_ticketer
-            runner: ubuntu-24.04-riscv
-            samples: '1048576'
-            timeout: 180
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -126,7 +89,9 @@ jobs:
 
       - name: Check ${{ matrix.topic }}
         env:
-          BROWNTLS_ENTROPY_SAMPLES: ${{ inputs.samples || matrix.samples }}
+          # 2^22 samples per generator; costly generators divide this
+          # (see each test's `sample_count` call).
+          BROWNTLS_ENTROPY_SAMPLES: ${{ inputs.samples || '4194304' }}
           TOPIC: ${{ matrix.topic }}
         # One test at a time: each test already uses every core.
         run: cargo test -p browntls-entropy --locked --test "${TOPIC}" -- --nocapture --test-threads=1

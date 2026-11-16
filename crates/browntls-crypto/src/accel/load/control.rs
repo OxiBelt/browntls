@@ -59,6 +59,10 @@ const BASE_COOLDOWN: u32 = 256;
 const MAX_BACKOFF: u32 = 8;
 /// Uneventful primary samples after which one doubling is forgotten.
 const QUIET: u32 = 4096;
+/// The pause and the quiet stretch are counted in steps of this many primary
+/// samples, so that the control word, which every routed call reads, is
+/// written for one sample in so many and not for each.
+const BATCH: u32 = 16;
 /// Accepting a slow level raises the baseline by at most this factor at a
 /// time.
 const MAX_REBASE: u64 = 2;
@@ -214,7 +218,9 @@ impl Ctl {
 }
 
 // The largest cool-down and the quiet count fit their fields.
-const _: () = assert!(BASE_COOLDOWN << MAX_BACKOFF <= 0x1_ffff && QUIET <= 0x1fff);
+const _: () = assert!(BASE_COOLDOWN << MAX_BACKOFF <= 0x1_ffff && QUIET + BATCH <= 0x1fff);
+// A pause is a whole number of counting steps.
+const _: () = assert!((BASE_COOLDOWN / 4).is_multiple_of(BATCH) && QUIET.is_multiple_of(BATCH));
 
 /// A change to the statistics that goes with a controller step. It is
 /// applied only by the thread whose step was stored.
@@ -315,8 +321,16 @@ pub(crate) struct Snapshot {
     pub(crate) channels: [(u64, u64, u32); SLOTS],
 }
 
+/// The statistics of a stream, on cache lines of their own: timed calls
+/// write them, and every routed call of every thread reads the rest of the
+/// stream, which would otherwise be invalidated with each of those writes.
+#[repr(align(64))]
+struct Channels([Channel; SLOTS]);
+
 /// One homogeneous kind of work of an algorithm family (for example its
 /// record encryptions), whose calls are routed between the family's backends.
+///
+/// The other fields are read by every routed call and seldom written.
 pub(crate) struct Stream {
     name: &'static str,
     unit: &'static str,
@@ -325,11 +339,11 @@ pub(crate) struct Stream {
     sample_mask: u64,
     /// Calls with fewer units are never timed (clock noise would dominate).
     min_units: usize,
-    channels: [Channel; SLOTS],
     ctl: AtomicU64,
     /// The primary slot and candidate mask derived from the policy (see
     /// `super::candidates`).
     pub(super) cache: AtomicU32,
+    channels: Channels,
 }
 
 impl Stream {
@@ -339,9 +353,9 @@ impl Stream {
             unit,
             sample_mask,
             min_units: min,
-            channels: [const { Channel::new() }; SLOTS],
             ctl: AtomicU64::new(0),
             cache: AtomicU32::new(0),
+            channels: Channels([const { Channel::new() }; SLOTS]),
         }
     }
 
@@ -444,7 +458,7 @@ impl Stream {
         let mut cost = u64::try_from(cost).unwrap_or(MAX_COST).clamp(1, MAX_COST);
 
         let ctl = Ctl::unpack(self.ctl.load(Relaxed));
-        let ch = &self.channels[slot];
+        let ch = &self.channels.0[slot];
         let mut seen = ch.samples.load(Relaxed);
         let mut slow = ch.slow.load(Relaxed);
         if seen == 1 && cost.saturating_mul(OUTLIER) < slow {
@@ -457,6 +471,7 @@ impl Stream {
             cost = cost.min(slow.saturating_mul(OUTLIER));
         }
         let slow_sample = exceeds(cost, slow, params.threshold);
+        let tick = seen % BATCH == BATCH - 1;
         average(&ch.fast, seen, cost, FAST_WEIGHT);
         let own = slot == primary && ctl.primary == primary;
         let run = own
@@ -480,7 +495,7 @@ impl Stream {
         }
         ch.samples.store(seen.saturating_add(1), Relaxed);
 
-        let (next, effect) = self.step(ctl, slot, slow_sample, primary, mask, params);
+        let (next, effect) = self.step(ctl, slot, slow_sample, tick, primary, mask, params);
         // Losing the race to another thread's step is fine: that step was
         // computed from the same statistics, and this one changes nothing.
         if next != ctl
@@ -491,8 +506,8 @@ impl Stream {
         {
             match effect {
                 Effect::None => {}
-                Effect::Restart(alt) => self.channels[alt].reset(),
-                Effect::Rebase(cost) => self.channels[primary].slow.store(cost, Relaxed),
+                Effect::Restart(alt) => self.channels.0[alt].reset(),
+                Effect::Rebase(cost) => self.channels.0[primary].slow.store(cost, Relaxed),
             }
         }
     }
@@ -500,11 +515,14 @@ impl Stream {
     /// The controller: the control word that follows `ctl` after a sample on
     /// `slot`, which was `slow_sample` if it exceeded that channel's baseline
     /// by the threshold, and the change to the statistics that goes with it.
+    /// `tick` is set for one sample of the slot in [`BATCH`].
+    #[allow(clippy::too_many_arguments)]
     fn step(
         &self,
         ctl: Ctl,
         slot: usize,
         slow_sample: bool,
+        tick: bool,
         primary: usize,
         mask: u8,
         params: Params,
@@ -517,11 +535,11 @@ impl Stream {
             // longer allowed: start over.
             return (Ctl::steady(primary), Effect::None);
         }
-        let p = &self.channels[primary];
+        let p = &self.channels.0[primary];
         let (fast_p, slow_p) = (p.fast.load(Relaxed), p.slow.load(Relaxed));
         let congested = exceeds(fast_p, slow_p, params.threshold);
         let recovered = !exceeds(fast_p, slow_p, params.threshold / 2);
-        let a = &self.channels[ctl.alt];
+        let a = &self.channels.0[ctl.alt];
 
         match ctl.phase {
             Phase::Steady => {
@@ -531,7 +549,7 @@ impl Stream {
                 let recent = history(ctl.patience, slow_sample);
                 if ctl.cooldown > 0 {
                     let next = Ctl {
-                        cooldown: ctl.cooldown - 1,
+                        cooldown: ctl.cooldown.saturating_sub(if tick { BATCH } else { 0 }),
                         patience: recent,
                         ..ctl
                     };
@@ -547,8 +565,9 @@ impl Stream {
                     };
                 }
                 // A long uneventful stretch forgets one doubling of the pause.
-                let (backoff, quiet) = match (ctl.backoff, ctl.quiet + 1) {
+                let (backoff, quiet) = match (ctl.backoff, ctl.quiet + BATCH) {
                     (0, _) => (0, 0),
+                    (b, _) if !tick => (b, ctl.quiet),
                     (b, q) if q >= QUIET => (b - 1, 0),
                     (b, q) => (b, q),
                 };
@@ -707,7 +726,7 @@ impl Stream {
     /// Forgets every statistic and returns to [`Phase::Steady`].
     pub(crate) fn reset(&self) {
         self.ctl.store(0, Relaxed);
-        for ch in &self.channels {
+        for ch in &self.channels.0 {
             ch.reset();
         }
     }
@@ -716,7 +735,7 @@ impl Stream {
         Snapshot {
             ctl: Ctl::unpack(self.ctl.load(Relaxed)),
             channels: core::array::from_fn(|i| {
-                let ch = &self.channels[i];
+                let ch = &self.channels.0[i];
                 (
                     ch.fast.load(Relaxed),
                     ch.slow.load(Relaxed),
@@ -935,7 +954,9 @@ mod tests {
         .paused(BASE_COOLDOWN);
         s.ctl.store(paused.pack(), Relaxed);
         cost[0] = 1600;
-        let n = u64::from(paused.cooldown);
+        // (The pause is counted in steps, so its last few calls may already
+        // be past it.)
+        let n = u64::from(paused.cooldown - 2 * BATCH);
         assert_eq!(drive(&s, &mut calls, n, cost)[0], n);
         assert!(baseline_is(&s, 1000), "{}", baseline(&s));
         // Once the pause is over the congestion is still seen and acted on.

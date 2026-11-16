@@ -4,8 +4,6 @@
 # grows, when its recorded size is stale, and when an entry is no longer
 # needed. Do not add entries: split the file instead.
 
-1344 crates/browntls-crypto/src/accel/load/control.rs
-1495 crates/browntls-crypto/src/nist/tables/p256.rs
 1007 crates/browntls-e2e/src/main.rs
 1421 crates/browntls/src/client/hs.rs
 1489 crates/browntls/src/client/tls13.rs

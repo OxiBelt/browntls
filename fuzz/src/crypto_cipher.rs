@@ -17,9 +17,12 @@
 //! - seal/open round trips; a flipped ciphertext, tag or AAD bit, and any
 //!   fuzzed ciphertext the oracle rejects, fails to open and wipes the
 //!   buffer; fuzzed ciphertexts the oracle accepts open to its plaintext;
-//! - ChaCha20-Poly1305 keys pass the same checks with load-aware routing
-//!   (`accel::load`) enabled and a fuzzed share of their records fixed on a
-//!   fuzzed alternate ChaCha20 backend: routing never changes a record;
+//! - ChaCha20-Poly1305 and AES-GCM keys pass the same checks with
+//!   load-aware routing (`accel::load`) enabled and a fuzzed share of their
+//!   records fixed on a fuzzed alternate ChaCha20 or AES backend (for
+//!   AES-GCM with a key created under that share, which holds the key
+//!   expanded for the alternates, and with one created before it, which
+//!   does not): routing never changes a record;
 //! - TLS 1.2 CBC records (MAC-then-encrypt and encrypt-then-MAC, every MAC):
 //!   sealed records equal an independent construction, records with extra
 //!   padding open, and tampered bits, sequence numbers, padding or MACs are
@@ -80,7 +83,7 @@ const OP_TLS_CBC: u8 = 8;
 ///   counter-word override, CTR data (message);
 /// - 1 AES-GCM: width, key (32), nonce (12), AAD (8-bit field), plaintext
 ///   (message), tamper (u16), wrong key length, fuzzed ciphertext (field)
-///   and tag (16);
+///   and tag (16), routing alternate and share (one byte each);
 /// - 2 AES-CCM: key length, key (32), nonce length, nonce (13), tag length,
 ///   AAD, plaintext, tamper, fuzzed ciphertext and tag (8-bit field);
 /// - 3 AES-128-CCM / CCM_8: variant, key (16), nonce (12), AAD, plaintext,
@@ -393,7 +396,7 @@ fn check_typed<A: Aead>(
 
 macro_rules! gcm_op {
     ($ty:ty, $len:literal, $key:expr, $nonce:expr, $aad:expr, $pt:expr, $tamper:expr,
-     $bad:expr, $fct:expr, $ftag:expr) => {{
+     $bad:expr, $fct:expr, $ftag:expr, $alternate:expr, $percent:expr) => {{
         let key: &[u8; $len] = $key[..$len].try_into().expect("fixed length");
         let mut want_ct = $pt.to_vec();
         let want_tag = gcm_ref_seal(key, $nonce, $aad, &mut want_ct);
@@ -407,6 +410,45 @@ macro_rules! gcm_op {
         check_typed(
             "AES-GCM",
             &default,
+            $nonce,
+            $aad,
+            $pt,
+            &want_ct,
+            &want_tag,
+            $tamper,
+            fuzzed(),
+        );
+        // Load-aware routing moves records to another AES backend, with the
+        // GHASH backend that goes with it, and never changes them. A key
+        // holds its key expanded for the alternates only if it was created
+        // while routing was enabled: with a share fixed on an alternate, a
+        // key made now and the one made above give the records made above
+        // without routing (`want_ct`, `want_tag`), open them and reject
+        // what was rejected; so does the new key once routing is off again.
+        let routed = with_fixed_share(Algorithm::Aes, $alternate, $percent, || {
+            let routed = <$ty as Aead>::new(key).expect("valid key length");
+            assert_eq!(routed.backends(), default.backends());
+            for (what, aead) in [
+                ("AES-GCM routed", &routed),
+                ("AES-GCM routed, earlier key", &default),
+            ] {
+                check_typed(
+                    what,
+                    aead,
+                    $nonce,
+                    $aad,
+                    $pt,
+                    &want_ct,
+                    &want_tag,
+                    $tamper,
+                    fuzzed(),
+                );
+            }
+            routed
+        });
+        check_typed(
+            "AES-GCM, routing off again",
+            &routed,
             $nonce,
             $aad,
             $pt,
@@ -458,14 +500,15 @@ fn op_gcm(input: &mut Input<'_>) {
     let bad = input.byte();
     let fct = input.field();
     let ftag: [u8; TAG_LEN] = input.array();
+    let (alternate, percent) = (input.byte(), input.byte());
     assert!(GhashBackend::select().is_available());
     if wide {
         gcm_op!(
-            Aes256Gcm, 32, key, &nonce, aad, &pt, tamper, bad, fct, &ftag
+            Aes256Gcm, 32, key, &nonce, aad, &pt, tamper, bad, fct, &ftag, alternate, percent
         );
     } else {
         gcm_op!(
-            Aes128Gcm, 16, key, &nonce, aad, &pt, tamper, bad, fct, &ftag
+            Aes128Gcm, 16, key, &nonce, aad, &pt, tamper, bad, fct, &ftag, alternate, percent
         );
     }
 }
@@ -1419,17 +1462,29 @@ pub fn seeds() -> Vec<Vec<u8>> {
         s.push(1);
         seeds.push(s);
 
-        // AES-GCM, with a fuzzed record.
-        let mut s = vec![OP_GCM, wide];
-        s.extend_from_slice(key);
-        s.extend_from_slice(&bytes[50..62]);
-        put_short_field(&mut s, &bytes[..13]);
-        put_field(&mut s, &bytes[..40]);
-        s.push(0);
-        s.extend_from_slice(&[1, 7, 24]);
-        put_field(&mut s, &bytes[..5]);
-        s.extend_from_slice(&bytes[..16]);
-        seeds.push(s);
+        // AES-GCM, with a fuzzed record: routing shares of none, all and
+        // some of the records on each alternate AES backend; the last
+        // plaintext is long enough for its records to be timed.
+        for (alternate, percent, ext) in [
+            (0u8, 0u8, 0u8),
+            (0, 100, 0),
+            (1, 100, 0),
+            (2, 100, 0),
+            (1, 50, 0),
+            (0, 100, 255),
+        ] {
+            let mut s = vec![OP_GCM, wide];
+            s.extend_from_slice(key);
+            s.extend_from_slice(&bytes[50..62]);
+            put_short_field(&mut s, &bytes[..13]);
+            put_field(&mut s, &bytes[..40]);
+            s.push(ext);
+            s.extend_from_slice(&[1, 7, 24]);
+            put_field(&mut s, &bytes[..5]);
+            s.extend_from_slice(&bytes[..16]);
+            s.extend_from_slice(&[alternate, percent]);
+            seeds.push(s);
+        }
     }
     // AES-CCM: valid sets, an invalid tag length, an invalid key length.
     for (key_sel, nonce_len, tag_len) in [

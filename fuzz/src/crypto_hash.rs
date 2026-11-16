@@ -156,11 +156,11 @@ pub(crate) fn across_policies<R: PartialEq + Debug>(alg: Algorithm, f: impl Fn()
     first.expect("at least one policy")
 }
 
-/// Computes `f` with load-aware routing (`accel::load`) enabled and, when
-/// `alg` has an alternate backend on this CPU, `percent` (modulo 101) of the
-/// calls of its first stream fixed on alternate number `alternate` (modulo
-/// their number). Turns routing off again and returns the result, which the
-/// caller compares with the one computed without routing.
+/// Computes `f` with load-aware routing (`accel::load`) enabled and, for
+/// every stream of `alg` that has an alternate backend on this CPU,
+/// `percent` (modulo 101) of its calls fixed on alternate number `alternate`
+/// (modulo their number). Turns routing off again and returns the result,
+/// which the caller compares with the one computed without routing.
 pub(crate) fn with_fixed_share<R>(
     alg: Algorithm,
     alternate: u8,
@@ -168,10 +168,17 @@ pub(crate) fn with_fixed_share<R>(
     f: impl FnOnce() -> R,
 ) -> R {
     load::enable(load::Config::DEFAULT).expect("built with `std`, which provides the clock");
-    let alternates = load::status(alg, 0).map_or(0, |s| s.alternates);
-    if alternates > 0 {
-        load::set_fixed(alg, 0, usize::from(alternate) % alternates, percent % 101)
+    for lane in 0..load::lanes(alg) {
+        let alternates = load::status(alg, lane).map_or(0, |s| s.alternates);
+        if alternates > 0 {
+            load::set_fixed(
+                alg,
+                lane,
+                usize::from(alternate) % alternates,
+                percent % 101,
+            )
             .expect("an existing alternate and a share of at most 100%");
+        }
     }
     let r = f();
     load::disable();

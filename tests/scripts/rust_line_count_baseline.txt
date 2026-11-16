@@ -11,11 +11,6 @@
 1062 crates/browntls/src/msgs/handshake/hello.rs
 1125 crates/browntls/src/server/server_conn.rs
 1903 crates/browntls/src/server/tls13.rs
-1616 fuzz/src/crypto_cipher.rs
-1127 fuzz/src/crypto_hpke.rs
-1094 fuzz/src/crypto_kem.rs
-1187 fuzz/src/crypto_rsa.rs
-1346 fuzz/src/crypto_util.rs
 1443 fuzz/src/tls_auth.rs
 1397 fuzz/src/tls_conn.rs
 1767 fuzz/src/tls_ech.rs

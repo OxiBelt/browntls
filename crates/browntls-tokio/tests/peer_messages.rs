@@ -14,13 +14,18 @@ use browntls::server::PostHandshakeAuthStatus;
 use browntls::{HandshakeKind, NamedGroup};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex};
 use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(30);
 
-#[tokio::test]
-async fn a_client_that_only_reads_answers_post_handshake_authentication() {
+/// A client that sends a request and then only reads, over `client_io`,
+/// against a server that asks for a certificate after the handshake and
+/// answers only once it has one.
+async fn post_handshake_authentication_with_a_reading_client<IO>(client_io: IO, s: DuplexStream)
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     let pki = Pki::new();
     let version = &browntls::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
@@ -28,9 +33,8 @@ async fn a_client_that_only_reads_answers_post_handshake_authentication() {
     let mut server_config = pki.server_config_with_client_auth(version);
     server_config.request_client_auth_after_handshake = true;
 
-    let (c, s) = duplex(64 * 1024);
     let (client, server) = tokio::join!(
-        TlsConnector::from(Arc::new(client_config)).connect(localhost(), c),
+        TlsConnector::from(Arc::new(client_config)).connect(localhost(), client_io),
         TlsAcceptor::from(Arc::new(server_config)).accept(s),
     );
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
@@ -64,6 +68,20 @@ async fn a_client_that_only_reads_answers_post_handshake_authentication() {
     timeout(LIMIT, async { tokio::join!(client_side, server_side) })
         .await
         .expect("the client never answered the CertificateRequest");
+}
+
+#[tokio::test]
+async fn a_client_that_only_reads_answers_post_handshake_authentication() {
+    let (c, s) = duplex(64 * 1024);
+    post_handshake_authentication_with_a_reading_client(c, s).await;
+}
+
+#[tokio::test]
+async fn a_reading_client_finishes_an_answer_the_transport_took_in_part() {
+    // The answer (a certificate chain) leaves seven bytes per write, with a
+    // `Pending` between writes: later reads must write the rest.
+    let (c, s) = duplex(64 * 1024);
+    post_handshake_authentication_with_a_reading_client(Choppy::new(c, 7), s).await;
 }
 
 #[tokio::test]

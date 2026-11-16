@@ -532,8 +532,10 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   (a server awaiting client authentication before it responds); records
   that writes queued are left to them. The write side's waker is woken
   afterwards, because the read may have replaced its write-readiness
-  registration (the problem that made tokio-rustls keep reads from
-  writing).
+  registration (tokio-rustls's crate documentation gives wakeup problems
+  of this kind as its reason for not writing during reads). An answer the
+  transport took only in part stays the reads' to finish. A read that
+  fails writes and flushes the alert, and wakes the writer too.
 - A write encrypts what the send buffer takes and writes queued records
   until the transport blocks; a write that took nothing returns `Pending`
   only while records wait for the transport, so a retry cannot spin.

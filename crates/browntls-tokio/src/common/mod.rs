@@ -70,6 +70,9 @@ pub(crate) struct StreamState {
     /// may take over the transport's write-readiness registration, so it
     /// wakes this waker afterwards to let the writer register again.
     pub(crate) write_waker: Option<Waker>,
+    /// A read queued TLS bytes the peer may be waiting for, and they are
+    /// not all written yet: later reads keep writing them.
+    pub(crate) answering: bool,
 }
 
 impl StreamState {
@@ -79,6 +82,7 @@ impl StreamState {
             need_flush: false,
             deferred_error: None,
             write_waker: None,
+            answering: false,
         }
     }
 
@@ -260,12 +264,13 @@ where
     /// post-handshake authentication response) are written at once, as far
     /// as the transport takes them without waiting: a peer may wait for
     /// them before it sends what this read waits for. Records already
-    /// queued by writes are left to the writer. Touching the write side
-    /// wakes `write_waker`, whose registration it may have replaced.
+    /// queued by writes are left to the writer, unless a read failed (the
+    /// alert must go out). Touching the write side wakes the parked
+    /// writer, whose registration it may have replaced.
     pub(crate) fn poll_fill_buf(
         mut self,
         cx: &mut Context<'_>,
-        write_waker: &mut Option<Waker>,
+        st: &mut StreamState,
     ) -> Poll<io::Result<&'a [u8]>>
     where
         SD: 'a,
@@ -289,11 +294,18 @@ where
             }
         }
 
-        if !had_queued_tls && self.session.wants_write() {
+        // An answer partly written by an earlier read is still ours to
+        // finish, even though bytes were queued when this read began.
+        let answer = self.session.wants_write() && (st.answering || !had_queued_tls);
+        if answer || error.is_some() {
+            st.answering = answer;
             self.answer_peer(cx);
-            if let Some(waker) = write_waker.take() {
+            if let Some(waker) = st.write_waker.take() {
                 waker.wake();
             }
+        }
+        if !self.session.wants_write() {
+            st.answering = false;
         }
         if let Some(err) = error {
             return Poll::Ready(Err(err));
@@ -481,7 +493,7 @@ where
     if !st.state.readable() {
         return Poll::Ready(Ok(&[]));
     }
-    match Stream::new(io, session).poll_fill_buf(cx, &mut st.write_waker) {
+    match Stream::new(io, session).poll_fill_buf(cx, st) {
         Poll::Ready(Ok(chunk)) => {
             if chunk.is_empty() {
                 st.state.shutdown_read();

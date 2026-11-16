@@ -42,7 +42,7 @@ jobs:
           cargo fmt --all --check
           # Shared test cases are pulled in with `include!`, which cargo fmt
           # does not follow.
-          rustfmt --edition 2024 --check crates/browntls/tests/cases/*.rs
+          rustfmt --edition 2024 --check crates/browntls/tests/cases/*.rs crates/browntls/tests/cases/*/*.rs
 
       - name: Clippy (x86-64)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

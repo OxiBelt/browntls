@@ -79,6 +79,7 @@ pub const TARGETS: &[Target] = &[
     ),
     ("tls_ech", crate::tls_ech::run, crate::tls_ech::seeds),
     ("tls_psk", crate::tls_psk::run, crate::tls_psk::seeds),
+    ("tls_quic", crate::tls_quic::run, crate::tls_quic::seeds),
     ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),
     ("tls_codec", crate::tls_codec::run, crate::tls_codec::seeds),
 ];

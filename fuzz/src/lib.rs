@@ -37,6 +37,7 @@ pub mod tls_config;
 pub mod tls_conn;
 pub mod tls_ech;
 pub mod tls_psk;
+pub mod tls_quic;
 pub mod tls_unbuffered;
 
 pub use codec::{cert_decompress, deframer, handshake_message};

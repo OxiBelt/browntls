@@ -210,6 +210,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_quic"
+path = "fuzz_targets/tls_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tls_auth"
 path = "fuzz_targets/tls_auth.rs"
 test = false

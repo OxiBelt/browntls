@@ -1,9 +1,10 @@
 name: Docker E2E
 
-# Interoperability of the browntls client and server with OpenSSL, GnuTLS and
-# browntls itself, each in its own container on a Docker network, for every
-# target architecture. tests/e2e/e2e.py defines the matrix, the scenarios and
-# the checks; tests/e2e/README.md explains how to run them locally.
+# Interoperability of the browntls client and server with OpenSSL, GnuTLS,
+# Go crypto/tls (Encrypted Client Hello) and browntls itself, each in its own
+# container on a Docker network, for every target architecture.
+# tests/e2e/e2e.py defines the matrix, the scenarios and the checks;
+# tests/e2e/README.md explains how to run them locally.
 
 on:
   push:

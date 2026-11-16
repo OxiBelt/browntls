@@ -233,6 +233,18 @@ pub struct ServerConfig {
     /// ignores ECH. The certificate resolver must also hold a certificate
     /// for each key's public name, so clients can authenticate a rejection.
     pub ech: Option<Arc<crate::ech::EchServerConfig>>,
+    /// Act as the back-end server of an ECH split-mode deployment
+    /// (RFC 9849 §7.2): a client-facing server
+    /// ([`ech::split::ClientFacing`](crate::ech::split::ClientFacing))
+    /// decrypts the ClientHello and forwards the inner one, which carries
+    /// an `inner` ECH extension; this server then confirms acceptance in
+    /// its ServerHello (and HelloRetryRequest). An `outer` ECH extension is
+    /// refused with `illegal_parameter` (§7), as is an inner ClientHello
+    /// that offers TLS 1.2 or below. A ClientHello without ECH is served as
+    /// usual. Defaults to `false`; cannot be combined with
+    /// [`ech`](Self::ech), which makes the server decrypt itself (shared
+    /// mode).
+    pub ech_backend: bool,
     /// The largest `uncompressed_length` accepted in a peer's
     /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
     /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
@@ -361,6 +373,25 @@ impl ServerConfig {
     /// Refuses a configuration whose HelloRetryRequest cookie sealer is
     /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
     /// leaves the cookie format to the server; the key split is ours).
+    /// The part this configuration plays in ECH (RFC 9849 §7).
+    pub(crate) fn ech_role(&self) -> crate::ech::server::Role<'_> {
+        use crate::ech::server::Role;
+        match (&self.ech, self.ech_backend) {
+            (Some(ech), _) => Role::Shared(ech),
+            (None, true) => Role::Backend,
+            (None, false) => Role::Off,
+        }
+    }
+
+    pub(super) fn check_ech_role(&self) -> Result<(), Error> {
+        if self.ech.is_some() && self.ech_backend {
+            return Err(Error::General(
+                "ech (shared mode) and ech_backend (split mode) exclude each other".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn check_cookie_sealer(&self) -> Result<(), Error> {
         match &self.hello_retry_cookies {
             Some(sealer) if Arc::ptr_eq(sealer, &self.ticketer) => Err(Error::General(
@@ -548,6 +579,7 @@ impl SideData for ServerConnectionData {
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
         config.check_cookie_sealer()?;
+        config.check_ech_role()?;
         let mut common = CommonState::new(Side::Server);
         common.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
@@ -982,6 +1014,7 @@ impl Accepted {
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
         if let Err(err) = config
             .check_cookie_sealer()
+            .and_then(|()| config.check_ech_role())
             .and_then(|()| {
                 self.connection
                     .set_max_fragment_size(config.max_fragment_size)
@@ -1002,7 +1035,7 @@ impl Accepted {
         // RFC 9849 §7.1: with ECH keys in `config`, an encrypted ClientHello
         // replaces the one the acceptor saw.
         let inner = match crate::ech::server::process_client_hello(
-            config.ech.as_deref(),
+            config.ech_role(),
             &mut cx.data.ech,
             cx.common,
             &self.message,

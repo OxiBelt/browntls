@@ -220,5 +220,121 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(problems, ["browntls server saw no client certificate"])
 
 
+class EchTest(unittest.TestCase):
+    def scenario(self, name):
+        return next(s for s in e2e.SCENARIOS if s.name == name)
+
+    def names(self, suite):
+        return {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+
+    def test_suites_and_roles(self):
+        go = e2e.SUITES["go"]
+        self.assertTrue(all(s.ech is not None for s in e2e.scenarios_for(go)))
+        for suite in ("openssl", "openssl-3.0", "gnutls"):
+            self.assertFalse(any(n.startswith("ech-") for n in self.names(suite)), suite)
+        browntls = self.names("browntls")
+        for sc in e2e.SCENARIOS:
+            if sc.ech is not None:
+                self.assertIn(sc.name, browntls)
+        # Go has no split-mode server, nor GREASE or random identifiers.
+        self.assertEqual(self.scenario("ech-split").roles_for(go), ("server",))
+        self.assertEqual(self.scenario("ech-shared").roles_for(go), ("client", "server"))
+        self.assertNotIn("ech-split-grease", self.names("go"))
+        self.assertNotIn("ech-split-random-config-id", self.names("go"))
+
+    def test_split_mode_commands(self):
+        sc = self.scenario("ech-split-hello-retry-request")
+        front = e2e.ech_client_facing_args(sc)
+        self.assertEqual(front[0], "client-facing")
+        self.assertIn(f"{e2e.SERVER_ALIAS}={e2e.BACKEND_ALIAS}:{e2e.PORT}", front)
+        self.assertIn(e2e.pki(sc.key, "public.pem"), front)
+        self.assertNotIn("--group", front)
+        backend = e2e.ech_terminating_server_args(sc, 1, backend=True)
+        self.assertIn("--ech-backend", backend)
+        self.assertNotIn("--ech-config", backend)
+        self.assertEqual(backend[backend.index("--group") + 1], "secp256r1")
+        client = e2e.ech_browntls_client_args(sc)
+        self.assertEqual(client[client.index("--server-name") + 1], e2e.SERVER_ALIAS)
+        self.assertIn(e2e.ech_file("current", "ech-config-list"), client)
+
+    def test_client_variants(self):
+        stale = self.scenario("ech-split-retry-configs")
+        client = e2e.ech_browntls_client_args(stale)
+        self.assertIn(e2e.ech_file("stale", "ech-config-list"), client)
+        self.assertIn("--ech-retry", client)
+        self.assertIn("-retry", e2e.ech_go_client_command(stale))
+        front = e2e.ech_client_facing_args(stale)
+        self.assertEqual(front[front.index("--accept") + 1], "2")
+        grease = self.scenario("ech-split-grease")
+        client = e2e.ech_browntls_client_args(grease)
+        self.assertIn("--ech-grease", client)
+        self.assertNotIn("--ech-config-list", client)
+        self.assertEqual(client[client.index("--server-name") + 1], e2e.ECH_PUBLIC_NAME)
+        random = self.scenario("ech-split-random-config-id")
+        self.assertIn("--ech-random-config-id", e2e.ech_browntls_client_args(random))
+        front = e2e.ech_client_facing_args(random)
+        self.assertIn("--ech-trial-decryption", front)
+        self.assertIn("--ech-public-name-check", front)
+
+    def test_shared_mode_commands(self):
+        sc = self.scenario("ech-shared-hello-retry-request")
+        server = e2e.ech_terminating_server_args(sc, 1, backend=False)
+        self.assertIn("--ech-config", server)
+        self.assertNotIn("--ech-backend", server)
+        self.assertTrue(any(a.startswith(e2e.ECH_PUBLIC_NAME + ",") for a in server))
+        go = e2e.ech_go_server_command(sc)
+        self.assertIn("-p256-only", go)
+        self.assertEqual(go.count("-cert"), 2)
+
+    def test_checks(self):
+        sc = self.scenario("ech-split-retry-configs")
+        reply = e2e.MESSAGE[::-1]
+        rejected = '{"event":"ech-rejected","index":0,"retry_configs":true}'
+        accepted = connection(
+            "client", version="TLSv1_3", handshake="Full", ech="Accepted", received=reply
+        )
+        good = e2e.Container("c", 0, rejected + "\n" + accepted)
+        self.assertEqual(e2e.check_ech_client(sc, "browntls", good), [])
+        # The retry must follow exactly one rejection.
+        self.assertEqual(
+            len(e2e.check_ech_client(sc, "browntls", e2e.Container("c", 0, accepted))), 1
+        )
+        go = json.dumps(
+            {
+                "event": "connection",
+                "role": "client",
+                "version": "TLSv1_3",
+                "handshake": "Full",
+                "ech_accepted": False,
+                "received": reply,
+            }
+        )
+        problems = e2e.check_ech_client(sc, "go", e2e.Container("c", 0, rejected + "\n" + go))
+        self.assertEqual(problems, ["go client: ECH not accepted"])
+
+        decisions = "\n".join(
+            [
+                '{"event":"client-facing","decision":"Local","ech":"Rejected"}',
+                '{"event":"ech-required","role":"server","index":0}',
+                '{"event":"client-facing","decision":"Forward","ech":"Accepted",'
+                f'"server_name":"{e2e.SERVER_ALIAS}"}}',
+            ]
+        )
+        self.assertEqual(e2e.check_client_facing(sc, e2e.Container("f", 0, decisions)), [])
+        wrong = decisions.replace('"Forward"', '"Local"')
+        self.assertEqual(len(e2e.check_client_facing(sc, e2e.Container("f", 0, wrong))), 1)
+
+        backend = connection(
+            "server", version="TLSv1_3", handshake="Full", ech="Accepted", server_name="tls-server"
+        )
+        self.assertEqual(
+            e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, backend), 1, 0, 0), []
+        )
+        outer = backend.replace("tls-server", e2e.ECH_PUBLIC_NAME)
+        self.assertEqual(
+            len(e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, outer), 1, 0, 0)), 1
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

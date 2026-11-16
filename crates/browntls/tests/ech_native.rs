@@ -675,3 +675,890 @@ fn accepted_with_grease_padding_and_an_external_psk() {
         Some(&b"inner psk identity"[..])
     );
 }
+
+// ------------------------------------------------------------- split mode
+
+use browntls::InvalidMessage;
+use browntls::ech::split::{ClientFacing, ClientFacingDecision};
+
+/// A back-end server of split mode (RFC 9849 §7.2): no keys, the hidden
+/// name's certificate.
+fn backend_config(
+    certs: &Certs,
+    groups: Option<&[&'static dyn browntls::crypto::SupportedKxGroup]>,
+) -> ServerConfig {
+    let mut config = server_config(certs, None, groups);
+    config.ech_backend = true;
+    config
+}
+
+/// The first error of each party of a split-mode connection.
+#[derive(Debug, Default)]
+struct SplitErrors {
+    client: Option<Error>,
+    front: Option<Error>,
+    server: Option<Error>,
+}
+
+/// An edit of bytes in flight.
+type Edit = Box<dyn FnMut(&mut Vec<u8>)>;
+
+/// A client, a client-facing server, and the server that completes the
+/// handshake: the back-end server after `Forward`, a local server after
+/// `Local`.
+struct Split {
+    client: ClientConnection,
+    front: Option<ClientFacing>,
+    backend: Option<ServerConnection>,
+    local: Option<ServerConnection>,
+    backend_config: Arc<ServerConfig>,
+    local_config: Arc<ServerConfig>,
+    /// The largest piece of input the client-facing server gets at once.
+    chunk: usize,
+    /// Applied to each batch the client-facing server forwards to the
+    /// back-end server.
+    edit_forwarded: Option<Edit>,
+    errors: SplitErrors,
+}
+
+fn drain<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec<u8> {
+    let mut out = Vec::new();
+    while conn.wants_write() {
+        if conn.write_tls(&mut out).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+/// Gives `data` to `conn`, processing when its buffer fills up (an error
+/// then stays with the connection, for its next `process_new_packets`).
+fn feed<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>, mut data: &[u8]) {
+    while !data.is_empty() {
+        match conn.read_tls(&mut data) {
+            Ok(n) if n > 0 => {}
+            _ => {
+                if conn.process_new_packets().is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Split {
+    fn new(
+        certs: &Certs,
+        client: ClientConfig,
+        ech: &Arc<EchServerConfig>,
+        backend: ServerConfig,
+    ) -> Self {
+        let local_config = Arc::new(server_config(certs, Some(ech), None));
+        Self {
+            client: ClientConnection::new(Arc::new(client), ServerName::try_from(SECRET).unwrap())
+                .unwrap(),
+            front: Some(ClientFacing::new(ech.clone())),
+            backend: None,
+            local: None,
+            backend_config: Arc::new(backend),
+            local_config,
+            chunk: usize::MAX,
+            edit_forwarded: None,
+            errors: SplitErrors::default(),
+        }
+    }
+
+    fn front(&self) -> &ClientFacing {
+        self.front.as_ref().expect("still client-facing")
+    }
+
+    /// The server completing the handshake.
+    fn server(&mut self) -> &mut ServerConnection {
+        self.backend
+            .as_mut()
+            .or(self.local.as_mut())
+            .expect("a server")
+    }
+
+    /// Moves bytes until nothing changes.
+    fn pump(&mut self) {
+        for _ in 0..64 {
+            let mut moved = false;
+
+            // Client to the client-facing server or the local server.
+            let out = drain(&mut self.client);
+            moved |= !out.is_empty();
+            if let Some(local) = &mut self.local {
+                feed(local, &out);
+            } else if let Some(front) = &mut self.front {
+                for piece in out.chunks(self.chunk.max(1)) {
+                    if let Err(e) = front.read_client(piece) {
+                        self.errors.front.get_or_insert(e);
+                        break;
+                    }
+                }
+            }
+
+            // The decision.
+            match self.front.as_ref().and_then(ClientFacing::decision) {
+                Some(ClientFacingDecision::Local) if self.local.is_none() => {
+                    let front = self.front.take().unwrap();
+                    self.local = Some(
+                        front
+                            .into_server_connection(self.local_config.clone())
+                            .unwrap(),
+                    );
+                    moved = true;
+                }
+                Some(ClientFacingDecision::Forward) if self.backend.is_none() => {
+                    self.backend =
+                        Some(ServerConnection::new(self.backend_config.clone()).unwrap());
+                    moved = true;
+                }
+                _ => {}
+            }
+            if let Some(local) = &mut self.local
+                && self.errors.server.is_none()
+                && let Err(e) = local.process_new_packets()
+            {
+                self.errors.server = Some(e);
+            }
+
+            // Client-facing server and back-end server.
+            if let (Some(front), Some(backend)) = (&mut self.front, &mut self.backend) {
+                let mut forwarded = front.take_for_backend();
+                if let Some(edit) = &mut self.edit_forwarded
+                    && !forwarded.is_empty()
+                {
+                    edit(&mut forwarded);
+                }
+                moved |= !forwarded.is_empty();
+                feed(backend, &forwarded);
+                if self.errors.server.is_none()
+                    && let Err(e) = backend.process_new_packets()
+                {
+                    self.errors.server = Some(e);
+                }
+                let answer = drain(backend);
+                moved |= !answer.is_empty();
+                for piece in answer.chunks(self.chunk.max(1)) {
+                    if let Err(e) = front.read_backend(piece) {
+                        self.errors.front.get_or_insert(e);
+                        break;
+                    }
+                }
+            }
+
+            // To the client.
+            let to_client = match (&mut self.front, &mut self.local) {
+                (_, Some(local)) => drain(local),
+                (Some(front), None) => front.take_for_client(),
+                (None, None) => Vec::new(),
+            };
+            moved |= !to_client.is_empty();
+            feed(&mut self.client, &to_client);
+            if self.errors.client.is_none()
+                && let Err(e) = self.client.process_new_packets()
+            {
+                self.errors.client = Some(e);
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// Application data both ways, through the relay.
+    fn exchange(&mut self) {
+        self.client.writer().write_all(b"hidden hello").unwrap();
+        self.pump();
+        let mut got = [0u8; 12];
+        self.server().reader().read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hidden hello");
+        self.server().writer().write_all(b"reply").unwrap();
+        let out = drain(self.server());
+        match (&mut self.front, &mut self.local) {
+            (_, Some(_)) => feed(&mut self.client, &out),
+            (Some(front), None) => {
+                front.read_backend(&out).unwrap();
+                let out = front.take_for_client();
+                feed(&mut self.client, &out);
+            }
+            (None, None) => unreachable!(),
+        }
+        self.client.process_new_packets().unwrap();
+        let mut got = [0u8; 5];
+        self.client.reader().read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"reply");
+    }
+
+    fn assert_forwarded(&mut self) {
+        assert!(
+            self.errors.client.is_none()
+                && self.errors.front.is_none()
+                && self.errors.server.is_none(),
+            "{:?}",
+            self.errors
+        );
+        assert!(!self.client.is_handshaking());
+        let front = self.front();
+        assert_eq!(front.decision(), Some(ClientFacingDecision::Forward));
+        assert_eq!(front.ech_status(), EchStatus::Accepted);
+        assert_eq!(front.server_name(), Some(SECRET));
+        assert!(front.is_relaying());
+        assert_eq!(self.client.ech_status(), EchStatus::Accepted);
+        let backend = self.backend.as_ref().unwrap();
+        assert_eq!(backend.ech_status(), EchStatus::Accepted);
+        assert_eq!(backend.server_name(), Some(SECRET));
+        assert_eq!(self.client.alpn_protocol(), Some(&b"h2"[..]));
+        self.exchange();
+    }
+}
+
+use std::io::{Read as _, Write as _};
+
+#[test]
+fn split_mode_accepted() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut split = Split::new(
+        &certs,
+        client_config(&certs, enable(ech.ech_config_list())),
+        &ech,
+        backend_config(&certs, None),
+    );
+    split.pump();
+    split.assert_forwarded();
+    assert_eq!(split.client.handshake_kind(), Some(HandshakeKind::Full));
+}
+
+#[test]
+fn split_mode_accepted_after_hello_retry_request() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut split = Split::new(
+        &certs,
+        client_config(&certs, enable(ech.ech_config_list())),
+        &ech,
+        backend_config(&certs, Some(&[prov::kx_group::SECP256R1])),
+    );
+    split.pump();
+    split.assert_forwarded();
+    assert_eq!(
+        split.client.handshake_kind(),
+        Some(HandshakeKind::FullWithHelloRetryRequest)
+    );
+}
+
+#[test]
+fn split_mode_byte_by_byte() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    for groups in [None, Some(&[prov::kx_group::SECP256R1][..])] {
+        for chunk in [1, 3, 200] {
+            let mut split = Split::new(
+                &certs,
+                client_config(&certs, enable(ech.ech_config_list())),
+                &ech,
+                backend_config(&certs, groups),
+            );
+            split.chunk = chunk;
+            split.pump();
+            split.assert_forwarded();
+        }
+    }
+}
+
+#[test]
+fn split_mode_with_large_inner_hello() {
+    init_logging();
+    let certs = Certs::new();
+    // A long maximum name length and many ALPN values push the inner
+    // ClientHello past one record.
+    let key = EchServerKey::generate(3, PUBLIC, 255, ALL_SUPPORTED_SUITES).unwrap();
+    let ech = Arc::new(EchServerConfig::new(vec![key]).unwrap());
+    let mut client = client_config(&certs, enable(ech.ech_config_list()));
+    client.alpn_protocols = (0..1500u32)
+        .map(|i| format!("proto-{i:06}").into_bytes())
+        .chain([b"h2".to_vec()])
+        .collect();
+    let mut split = Split::new(&certs, client, &ech, backend_config(&certs, None));
+    split.pump();
+    split.assert_forwarded();
+}
+
+#[test]
+fn split_mode_resumption() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(9)]).unwrap());
+    let mut client = client_config(&certs, enable(ech.ech_config_list()));
+    client.resumption = Resumption::in_memory_sessions(8);
+    let client = Arc::new(client);
+    let backend = backend_config(&certs, None);
+    let mut split = Split::new(&certs, (*client).clone(), &ech, backend.clone());
+    split.client =
+        ClientConnection::new(client.clone(), ServerName::try_from(SECRET).unwrap()).unwrap();
+    split.pump();
+    split.assert_forwarded();
+    assert!(split.client.tls13_tickets_received() > 0);
+
+    let backend_arc = split.backend_config.clone();
+    let mut again = Split::new(&certs, (*client).clone(), &ech, backend);
+    again.backend_config = backend_arc;
+    again.client = ClientConnection::new(client, ServerName::try_from(SECRET).unwrap()).unwrap();
+    again.pump();
+    again.assert_forwarded();
+    assert_eq!(again.client.handshake_kind(), Some(HandshakeKind::Resumed));
+}
+
+#[test]
+fn split_mode_rejected_locally_with_retry_configs() {
+    init_logging();
+    let certs = Certs::new();
+    let stale = EchServerConfig::new(vec![server_key(1)]).unwrap();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(2)]).unwrap());
+    for groups in [None, Some(&[prov::kx_group::SECP256R1][..])] {
+        let mut split = Split::new(
+            &certs,
+            client_config(&certs, enable(stale.ech_config_list())),
+            &ech,
+            backend_config(&certs, groups),
+        );
+        if groups.is_some() {
+            split.local_config = Arc::new(server_config(&certs, Some(&ech), groups));
+        }
+        split.pump();
+        assert!(split.backend.is_none());
+        let local = split.local.as_ref().unwrap();
+        assert_eq!(local.ech_status(), EchStatus::Rejected);
+        assert_eq!(local.server_name(), Some(PUBLIC));
+        let Some(Error::RejectedEch(rejected)) = split.errors.client.clone() else {
+            panic!("{:?}", split.errors);
+        };
+        assert_eq!(rejected.retry_configs(), Some(ech.ech_config_list()));
+
+        // The retry reaches the back-end server.
+        let mut split = Split::new(
+            &certs,
+            client_config(&certs, enable(rejected.retry_configs().unwrap())),
+            &ech,
+            backend_config(&certs, groups),
+        );
+        split.pump();
+        split.assert_forwarded();
+    }
+}
+
+#[test]
+fn split_mode_grease_and_no_ech_stay_local() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(5)]).unwrap());
+    let grease = EchGreaseConfig::generate(DH_KEM_X25519_HKDF_SHA256_AES_128).unwrap();
+    for (mode, status) in [
+        (Some(EchMode::Grease(grease)), EchStatus::Rejected),
+        (None, EchStatus::NotOffered),
+    ] {
+        let mut split = Split::new(
+            &certs,
+            client_config(&certs, mode.clone()),
+            &ech,
+            backend_config(&certs, None),
+        );
+        // Before the decision, nothing is forwarded.
+        let first = drain(&mut split.client);
+        let (head, tail) = first.split_at(first.len() / 2);
+        let front = split.front.as_mut().unwrap();
+        front.read_client(head).unwrap();
+        assert_eq!(front.decision(), None);
+        assert!(front.read_backend(b"x").is_err());
+        front.read_client(tail).unwrap();
+        assert_eq!(front.decision(), Some(ClientFacingDecision::Local));
+        assert_eq!(front.ech_status(), status);
+        assert_eq!(front.server_name(), Some(SECRET));
+        assert!(front.take_for_backend().is_empty());
+        let received = split.front.take().unwrap().into_received();
+        assert_eq!(received, first);
+
+        // The local server completes the handshake.
+        let mut local = ServerConnection::new(split.local_config.clone()).unwrap();
+        feed(&mut local, &received);
+        local.process_new_packets().unwrap();
+        do_handshake(&mut split.client, &mut local).unwrap();
+        assert_eq!(local.ech_status(), status);
+        assert_eq!(send_and_receive(&mut split.client, &mut local, b"x"), b"x");
+    }
+}
+
+#[test]
+fn split_mode_local_for_unreadable_input() {
+    init_logging();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(5)]).unwrap());
+    for input in [
+        &b"GET / HTTP/1.1\r\n\r\n"[..],
+        // A handshake record that is not a ClientHello.
+        &[22, 3, 1, 0, 4, 2, 0, 0, 0],
+        // A ClientHello that does not parse.
+        &[22, 3, 1, 0, 6, 1, 0, 0, 2, 3, 3],
+    ] {
+        let mut front = ClientFacing::new(ech.clone());
+        front.read_client(input).unwrap();
+        assert_eq!(
+            front.decision(),
+            Some(ClientFacingDecision::Local),
+            "{input:?}"
+        );
+        assert_eq!(front.ech_status(), EchStatus::NotOffered);
+        // Later bytes are kept for the local server too.
+        front.read_client(b"more").unwrap();
+        let mut expected = input.to_vec();
+        expected.extend_from_slice(b"more");
+        assert_eq!(front.into_received(), expected);
+    }
+    // Not decided yet: no local connection.
+    let front = ClientFacing::new(ech);
+    assert!(
+        front
+            .into_server_connection(Arc::new(server_config(&Certs::new(), None, None)))
+            .is_err()
+    );
+}
+
+#[test]
+fn split_mode_refuses_malformed_client_hello_framing() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(5)]).unwrap());
+    let refused = |input: &[u8], expected: InvalidMessage| {
+        let mut front = ClientFacing::new(ech.clone());
+        assert_eq!(
+            front.read_client(input).unwrap_err(),
+            Error::InvalidMessage(expected),
+            "{input:?}"
+        );
+        assert_eq!(front.decision(), None);
+        let alert = front.take_for_client();
+        assert_eq!(&alert[..5], &[21, 3, 3, 0, 2], "{input:?}");
+        // The error stays.
+        assert!(front.read_client(&[22]).is_err());
+    };
+    // A ClientHello followed by more handshake data in its record.
+    refused(
+        &[22, 3, 1, 0, 5, 1, 0, 0, 0, 9],
+        InvalidMessage::TrailingData("ClientHello"),
+    );
+    // A ClientHello over the handshake message limit.
+    refused(
+        &[22, 3, 1, 0, 4, 1, 1, 0, 1],
+        InvalidMessage::MessageTooLarge,
+    );
+    // Empty handshake records (RFC 8446 §5.1), which would otherwise be
+    // buffered without end, also between fragments of a ClientHello.
+    refused(&[22, 3, 1, 0, 0], InvalidMessage::InvalidEmptyPayload);
+    refused(
+        &[22, 3, 1, 0, 2, 1, 0, 22, 3, 1, 0, 0],
+        InvalidMessage::InvalidEmptyPayload,
+    );
+
+    // A real ClientHelloOuter with a byte after it in the same record is
+    // refused, rather than handed to a local server that would decrypt it
+    // and answer for the inner name before noticing.
+    let mut client = ClientConnection::new(
+        Arc::new(client_config(&certs, enable(ech.ech_config_list()))),
+        ServerName::try_from(SECRET).unwrap(),
+    )
+    .unwrap();
+    let mut flight = drain(&mut client);
+    let len = usize::from(u16::from_be_bytes([flight[3], flight[4]]));
+    assert_eq!(flight.len(), 5 + len, "one record");
+    flight.push(0);
+    flight[3..5].copy_from_slice(&u16::try_from(len + 1).unwrap().to_be_bytes());
+    refused(&flight, InvalidMessage::TrailingData("ClientHello"));
+}
+
+#[test]
+fn split_mode_refuses_inner_extension_from_the_client() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut client = ClientConnection::new(
+        Arc::new(client_config(&certs, enable(ech.ech_config_list()))),
+        ServerName::try_from(SECRET).unwrap(),
+    )
+    .unwrap();
+    let mut flight = drain(&mut client);
+    // An inner ClientHello as forwarded to a back-end server, sent by a
+    // client.
+    let mut forwarded = ClientFacing::new(ech.clone());
+    forwarded.read_client(&flight).unwrap();
+    let inner = forwarded.take_for_backend();
+    let mut front = ClientFacing::new(ech.clone());
+    assert_eq!(
+        front.read_client(&inner).unwrap_err(),
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::IllegalEchClientHelloType)
+    );
+    // An unknown type.
+    let at = ech_extension_offset(&flight);
+    flight[at] = 5;
+    let mut front = ClientFacing::new(ech);
+    let err = front.read_client(&flight).unwrap_err();
+    assert_eq!(
+        err,
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::IllegalEchClientHelloType)
+    );
+    // A plaintext illegal_parameter alert for the client.
+    assert_eq!(front.take_for_client(), vec![21, 3, 3, 0, 2, 2, 47]);
+    assert_eq!(front.read_client(b"x").unwrap_err(), err);
+    assert_eq!(front.decision(), None);
+}
+
+/// Runs a split-mode handshake with a HelloRetryRequest, editing the
+/// client's second flight before the client-facing server reads it.
+fn split_second_hello_edited(edit: impl FnOnce(&mut Vec<u8>)) -> (Error, Vec<u8>) {
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut client = ClientConnection::new(
+        Arc::new(client_config(&certs, enable(ech.ech_config_list()))),
+        ServerName::try_from(SECRET).unwrap(),
+    )
+    .unwrap();
+    let mut backend = ServerConnection::new(Arc::new(backend_config(
+        &certs,
+        Some(&[prov::kx_group::SECP256R1]),
+    )))
+    .unwrap();
+    let mut front = ClientFacing::new(ech);
+    front.read_client(&drain(&mut client)).unwrap();
+    feed(&mut backend, &front.take_for_backend());
+    backend.process_new_packets().unwrap();
+    front.read_backend(&drain(&mut backend)).unwrap();
+    assert!(!front.is_relaying());
+    feed(&mut client, &front.take_for_client());
+    client.process_new_packets().unwrap();
+    let mut second = drain(&mut client);
+    edit(&mut second);
+    let err = front.read_client(&second).unwrap_err();
+    (err, front.take_for_client())
+}
+
+#[test]
+fn split_mode_checks_the_second_client_hello() {
+    init_logging();
+    // config_id changed.
+    let (err, alert) = split_second_hello_edited(|buf| {
+        let at = ech_extension_offset(buf);
+        buf[at + 5] ^= 1;
+    });
+    assert_eq!(
+        err,
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::EchChangedOnRetry)
+    );
+    assert_eq!(alert, vec![21, 3, 3, 0, 2, 2, 47]);
+    // The payload's last byte altered: decrypt_error.
+    let (err, alert) = split_second_hello_edited(|buf| {
+        let at = ech_extension_offset(buf);
+        let payload_len = usize::from(u16::from_be_bytes([buf[at + 8], buf[at + 9]]));
+        buf[at + 9 + payload_len] ^= 1;
+    });
+    assert_eq!(
+        err,
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::EchDecryptionFailedOnRetry)
+    );
+    assert_eq!(alert, vec![21, 3, 3, 0, 2, 2, 51]);
+    // No ECH extension: its type renamed.
+    let (err, alert) = split_second_hello_edited(|buf| {
+        let at = ech_extension_offset(buf);
+        buf[at - 3] ^= 0x01;
+    });
+    assert_eq!(
+        err,
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::MissingEchExtensionInSecondClientHello)
+    );
+    assert_eq!(alert, vec![21, 3, 3, 0, 2, 2, 109]);
+    // An extension of an unknown type in its place.
+    let (err, _) = split_second_hello_edited(|buf| {
+        let at = ech_extension_offset(buf);
+        buf[at] = 5;
+    });
+    assert_eq!(
+        err,
+        Error::PeerMisbehaved(browntls::PeerMisbehaved::IllegalEchClientHelloType)
+    );
+}
+
+/// The offset of the body of the first `inner` ECH extension (type,
+/// length 1, value 1) in `buf`.
+fn inner_extension_offset(buf: &[u8]) -> usize {
+    buf.windows(5)
+        .position(|w| w == [0xfe, 0x0d, 0, 1, 1])
+        .expect("an inner ECH extension")
+}
+
+#[test]
+fn backend_checks_the_forwarded_hellos() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    // The second inner ClientHello loses its `inner` extension, or gets
+    // one of another type.
+    for (value, expected) in [
+        (
+            None,
+            browntls::PeerMisbehaved::MissingEchExtensionInSecondClientHello,
+        ),
+        (
+            Some(5u8),
+            browntls::PeerMisbehaved::IllegalEchClientHelloType,
+        ),
+    ] {
+        let mut split = Split::new(
+            &certs,
+            client_config(&certs, enable(ech.ech_config_list())),
+            &ech,
+            backend_config(&certs, Some(&[prov::kx_group::SECP256R1])),
+        );
+        let mut batches = 0;
+        split.edit_forwarded = Some(Box::new(move |buf: &mut Vec<u8>| {
+            batches += 1;
+            if batches == 2 {
+                let at = inner_extension_offset(buf);
+                match value {
+                    None => buf[at + 1] = 0x0e,
+                    Some(v) => buf[at + 4] = v,
+                }
+            }
+        }));
+        split.pump();
+        assert_eq!(
+            split.errors.server,
+            Some(Error::PeerMisbehaved(expected.clone())),
+            "{:?}",
+            split.errors
+        );
+        assert!(split.errors.client.is_some());
+    }
+
+    // An inner ClientHello offering TLS 1.2 (supported_versions rewritten
+    // in place: TLS 1.3 becomes TLS 1.2).
+    let mut split = Split::new(
+        &certs,
+        client_config(&certs, enable(ech.ech_config_list())),
+        &ech,
+        backend_config(&certs, None),
+    );
+    split.edit_forwarded = Some(Box::new(|buf: &mut Vec<u8>| {
+        if let Some(at) = buf.windows(7).position(|w| w == [0, 43, 0, 3, 2, 3, 4]) {
+            buf[at + 6] = 3;
+        }
+    }));
+    split.pump();
+    assert_eq!(
+        split.errors.server,
+        Some(Error::PeerMisbehaved(
+            browntls::PeerMisbehaved::IllegalEchInnerClientHello
+        ))
+    );
+}
+
+#[test]
+fn backend_refuses_outer_extensions() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let grease = EchGreaseConfig::generate(DH_KEM_X25519_HKDF_SHA256_AES_128).unwrap();
+    // A client reaching the back-end server directly with ECH or GREASE.
+    for mode in [enable(ech.ech_config_list()), Some(EchMode::Grease(grease))] {
+        let (mut client, mut server) =
+            connect(client_config(&certs, mode), backend_config(&certs, None));
+        let (_, server_res) = do_handshake_until_error(&mut client, &mut server);
+        assert_eq!(
+            server_res,
+            Err(Error::PeerMisbehaved(
+                browntls::PeerMisbehaved::IllegalEchClientHelloType
+            ))
+        );
+    }
+    // Without ECH, the back-end server is an ordinary server.
+    let (mut client, mut server) =
+        connect(client_config(&certs, None), backend_config(&certs, None));
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(server.ech_status(), EchStatus::NotOffered);
+    assert_eq!(client.ech_status(), EchStatus::NotOffered);
+}
+
+#[test]
+fn backend_and_shared_mode_exclude_each_other() {
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut config = server_config(&certs, Some(&ech), None);
+    config.ech_backend = true;
+    let config = Arc::new(config);
+    assert!(ServerConnection::new(config.clone()).is_err());
+    // Also through the acceptor.
+    let client = ClientConnection::new(
+        Arc::new(client_config(&certs, enable(ech.ech_config_list()))),
+        ServerName::try_from(SECRET).unwrap(),
+    );
+    let mut client = client.unwrap();
+    let mut acceptor = browntls::server::Acceptor::default();
+    let flight = drain(&mut client);
+    acceptor.read_tls(&mut &flight[..]).unwrap();
+    let accepted = acceptor.accept().unwrap().unwrap();
+    assert!(accepted.into_connection(config).is_err());
+}
+
+#[test]
+fn backend_through_the_acceptor() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut client = ClientConnection::new(
+        Arc::new(client_config(&certs, enable(ech.ech_config_list()))),
+        ServerName::try_from(SECRET).unwrap(),
+    )
+    .unwrap();
+    let mut front = ClientFacing::new(ech);
+    front.read_client(&drain(&mut client)).unwrap();
+    let mut acceptor = browntls::server::Acceptor::default();
+    acceptor
+        .read_tls(&mut &front.take_for_backend()[..])
+        .unwrap();
+    let accepted = acceptor.accept().unwrap().unwrap();
+    assert_eq!(accepted.client_hello().server_name(), Some(SECRET));
+    let mut backend = accepted
+        .into_connection(Arc::new(backend_config(&certs, None)))
+        .unwrap();
+    assert_eq!(backend.ech_status(), EchStatus::Accepted);
+    front.read_backend(&drain(&mut backend)).unwrap();
+    assert!(front.is_relaying());
+    feed(&mut client, &front.take_for_client());
+    client.process_new_packets().unwrap();
+    assert_eq!(client.ech_status(), EchStatus::Accepted);
+    do_handshake(&mut client, &mut backend).unwrap();
+    assert_eq!(send_and_receive(&mut client, &mut backend, b"y"), b"y");
+}
+
+#[test]
+fn backend_alert_reaches_the_client() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    // A back-end server without the hidden name's certificate.
+    let mut backend = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(ResolvesServerCertUsingSni::new()));
+    backend.ech_backend = true;
+    let mut split = Split::new(
+        &certs,
+        client_config(&certs, enable(ech.ech_config_list())),
+        &ech,
+        backend,
+    );
+    split.pump();
+    assert!(split.errors.server.is_some());
+    assert!(
+        matches!(split.errors.client, Some(Error::AlertReceived(_))),
+        "{:?}",
+        split.errors
+    );
+    assert!(split.front().is_relaying());
+}
+
+#[test]
+fn trial_decryption_with_random_config_ids() {
+    init_logging();
+    let certs = Certs::new();
+    let key = server_key(7);
+    let ech = Arc::new(
+        EchServerConfig::new(vec![server_key(1), key.clone()])
+            .unwrap()
+            .with_trial_decryption()
+            .with_public_name_check(),
+    );
+    assert!(ech.trial_decryption() && ech.public_name_check());
+    let one = EchServerConfig::new(vec![key]).unwrap();
+    let config = EchConfig::new(one.ech_config_list(), ALL_SUPPORTED_SUITES)
+        .unwrap()
+        .with_random_config_id();
+    assert!(config.random_config_id());
+    let mut ids = Vec::new();
+    for groups in [None, Some(&[prov::kx_group::SECP256R1][..])] {
+        for _ in 0..4 {
+            // Shared mode.
+            let (mut client, mut server) = connect(
+                client_config(&certs, Some(EchMode::Enable(config.clone()))),
+                server_config(&certs, Some(&ech), groups),
+            );
+            let flight = drain(&mut client);
+            ids.push(flight[ech_extension_offset(&flight) + 5]);
+            feed(&mut server, &flight);
+            server.process_new_packets().unwrap();
+            assert_accepted(&mut client, &mut server);
+
+            // Split mode.
+            let mut split = Split::new(
+                &certs,
+                client_config(&certs, Some(EchMode::Enable(config.clone()))),
+                &ech,
+                backend_config(&certs, groups),
+            );
+            split.pump();
+            split.assert_forwarded();
+        }
+    }
+    // The identifiers sent are random (eight equal to 7 by chance:
+    // probability 2^-64).
+    assert!(ids.iter().any(|id| *id != 7), "{ids:?}");
+}
+
+#[cfg(feature = "rustcrypto")]
+#[test]
+fn backend_on_the_rustcrypto_provider() {
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    // The back-end server needs no HPKE: only HKDF for the confirmations.
+    let provider = Arc::new(browntls::crypto::rustcrypto::default_provider());
+    let resolver = {
+        let mut resolver = ResolvesServerCertUsingSni::new();
+        resolver
+            .add(
+                SECRET,
+                CertifiedKey::from_der(
+                    certs.secret.cert_chain(),
+                    certs.secret.private_key(),
+                    &provider,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        Arc::new(resolver)
+    };
+    for groups in [false, true] {
+        let mut prov = (*provider).clone();
+        if groups {
+            prov.kx_groups = vec![browntls::crypto::rustcrypto::kx_group::SECP256R1];
+        }
+        let mut backend = ServerConfig::builder_with_provider(Arc::new(prov))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver.clone());
+        backend.alpn_protocols = vec![b"h2".to_vec()];
+        backend.ech_backend = true;
+        let mut split = Split::new(
+            &certs,
+            client_config(&certs, enable(ech.ech_config_list())),
+            &ech,
+            backend,
+        );
+        split.pump();
+        split.assert_forwarded();
+    }
+}

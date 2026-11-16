@@ -7,7 +7,6 @@ use alloc::vec::Vec;
 use super::client::encode_inner;
 use super::codec::{EchClientHello, raw_extensions};
 use super::server::decode_inner;
-use crate::common_state::{CommonState, Side};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::{Error, PeerMisbehaved};
 use crate::msgs::codec::{Codec, encode_vec_u8, encode_vec_u16};
@@ -89,19 +88,13 @@ fn ext(typ: u16, body: &[u8]) -> Vec<u8> {
 }
 
 fn decode(outer: &[u8], encoded: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut common = CommonState::new(Side::Server);
     let session_id = SessionId::from_slice(&[9; 32]).unwrap();
-    decode_inner(
-        &mut common,
-        ProtocolVersion::TLSv1_0,
-        outer,
-        &session_id,
-        encoded,
-    )
-    .map(|m| match m.payload {
-        MessagePayload::Handshake { encoded, .. } => encoded.bytes().to_vec(),
-        _ => Vec::new(),
-    })
+    decode_inner(ProtocolVersion::TLSv1_0, outer, &session_id, encoded)
+        .map(|m| match m.payload {
+            MessagePayload::Handshake { encoded, .. } => encoded.bytes().to_vec(),
+            _ => Vec::new(),
+        })
+        .map_err(|fatal| fatal.1)
 }
 
 #[test]
@@ -206,4 +199,103 @@ fn inner_decoding_errors() {
     }
     // Truncated.
     assert!(decode(&outer, &encoded_with(&good, &[])[..40]).is_err());
+}
+
+/// The server's optional checks (RFC 9849 §7.1): candidates by
+/// configuration identifier or by trial decryption, and the outer server
+/// name against the public name.
+#[cfg(feature = "native")]
+#[test]
+fn candidate_selection_and_public_name_check() {
+    use super::codec::EchOuter;
+    use super::server::{Opened, open_first};
+    use super::{EchConfig, EchServerConfig, EchServerKey, hpke_info};
+    use crate::crypto::hpke::HpkePublicKey;
+    use crate::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+    use crate::enums::AlertDescription;
+    use crate::msgs::base::PayloadU16;
+
+    let key = EchServerKey::generate(7, "public.example", 0, ALL_SUPPORTED_SUITES).unwrap();
+    let other = EchServerKey::generate(8, "public.example", 0, ALL_SUPPORTED_SUITES).unwrap();
+    let list = EchServerConfig::new(vec![key.clone()])
+        .unwrap()
+        .ech_config_list()
+        .to_vec();
+    let client = EchConfig::new(&list, ALL_SUPPORTED_SUITES).unwrap();
+
+    // An outer ClientHello naming `outer_name`, sealed to `key` but sent
+    // with `config_id`.
+    let seal = |outer_name: &str, config_id: u8| -> ClientHelloPayload {
+        let inner = inner_hello();
+        let mut exts = outer_extensions(&inner);
+        exts.server_name = Some(name(outer_name));
+        let encoded = encode_inner(&inner, &exts, 0);
+        let public_key = HpkePublicKey(client.contents.key_config.public_key.0.clone());
+        let (enc, mut sealer) = client
+            .hpke
+            .setup_sealer(&hpke_info(&client.encoded), &public_key)
+            .unwrap();
+        let tag_len = client.cipher_suite.aead_id.tag_len().unwrap();
+        let mut ech = EchOuter {
+            cipher_suite: client.cipher_suite,
+            config_id,
+            enc: PayloadU16::new(enc.0),
+            payload: PayloadU16::new(vec![0; encoded.len() + tag_len]),
+        };
+        let mut outer = ClientHelloPayload {
+            client_version: ProtocolVersion::TLSv1_2,
+            random: Random::from([4; 32]),
+            session_id: SessionId::from_slice(&[9; 32]).unwrap(),
+            cipher_suites: vec![CipherSuite::TLS13_AES_128_GCM_SHA256],
+            compression_methods: vec![Compression::Null],
+            extensions: exts,
+        };
+        outer.extensions.encrypted_client_hello = Some(EchClientHello::Outer(ech.clone()));
+        let aad = outer.get_encoding();
+        ech.payload = PayloadU16::new(sealer.seal(&aad, &encoded).unwrap());
+        outer.extensions.encrypted_client_hello = Some(EchClientHello::Outer(ech));
+        outer
+    };
+    let open = |config: &EchServerConfig, outer: &ClientHelloPayload| {
+        open_first(
+            config,
+            outer,
+            &outer.get_encoding(),
+            ProtocolVersion::TLSv1_0,
+        )
+    };
+    let accepted = |r: &Result<Opened, _>| matches!(r, Ok(Opened::Accepted(..)));
+    let rejected = |r: &Result<Opened, _>| matches!(r, Ok(Opened::Rejected));
+
+    let by_id = EchServerConfig::new(vec![other.clone(), key.clone()]).unwrap();
+    let trial = EchServerConfig::new(vec![other.clone(), key.clone()])
+        .unwrap()
+        .with_trial_decryption();
+    let checked = EchServerConfig::new(vec![key.clone()])
+        .unwrap()
+        .with_public_name_check();
+
+    // The configuration's identifier.
+    let good = seal("public.example", 7);
+    assert!(accepted(&open(&by_id, &good)));
+    assert!(accepted(&open(&trial, &good)));
+    assert!(accepted(&open(&checked, &good)));
+    // Another identifier: only trial decryption finds the key.
+    for id in [8, 9] {
+        let moved = seal("public.example", id);
+        assert!(rejected(&open(&by_id, &moved)), "{id}");
+        assert!(accepted(&open(&trial, &moved)), "{id}");
+    }
+    // The outer name differs from the public name: refused only when
+    // checked, ignoring ASCII case.
+    let renamed = seal("other.example", 7);
+    assert!(accepted(&open(&by_id, &renamed)));
+    assert!(matches!(
+        open(&checked, &renamed),
+        Err(super::server::Fatal(
+            AlertDescription::IllegalParameter,
+            Error::PeerMisbehaved(PeerMisbehaved::EchPublicNameMismatch)
+        ))
+    ));
+    assert!(accepted(&open(&checked, &seal("Public.EXAMPLE", 7))));
 }

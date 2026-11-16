@@ -257,6 +257,10 @@ pub enum PeerMisbehaved {
     /// The HelloRetryRequest confirmed ECH but the ServerHello did not
     /// (RFC 9849 §6.1.5).
     EchAcceptanceVariedAfterRetry,
+    /// The outer ClientHello's server name is not the public name of the
+    /// ECH configuration that decrypted it, and the server checks it
+    /// (RFC 9849 §7.1).
+    EchPublicNameMismatch,
     EarlyDataAttemptedInSecondClientHello,
     EarlyDataExtensionWithoutResumption,
     EarlyDataOfferedWithVariedCipherSuite,

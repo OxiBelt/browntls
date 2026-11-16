@@ -526,9 +526,14 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   of the `complete_io` fix.
 - Reads return plaintext through `Reader::into_first_chunk`, which lends the
   first buffered chunk for the connection's lifetime so `poll_fill_buf` can
-  return it. Reads never write: a KeyUpdate answer goes out with the next
-  write or flush (RFC 9846 §4.7.3 only requires it before our next
-  application data).
+  return it. A read whose records queue an answer (an alert, a KeyUpdate
+  answer, a post-handshake authentication response) writes and flushes it
+  as far as the transport takes it at once, since the peer may wait for it
+  (a server awaiting client authentication before it responds); records
+  that writes queued are left to them. The write side's waker is woken
+  afterwards, because the read may have replaced its write-readiness
+  registration (the problem that made tokio-rustls keep reads from
+  writing).
 - A write encrypts what the send buffer takes and writes queued records
   until the transport blocks; a write that took nothing returns `Pending`
   only while records wait for the transport, so a retry cannot spin.

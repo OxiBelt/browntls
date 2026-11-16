@@ -72,8 +72,8 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 
 ## Behaviour
 
-- **Flushing.** A stream behaves like a `BufWriter`: call `flush` when a batch
-  of writes is done.
+- **Flushing.** Records the transport does not take at once stay queued: call
+  `flush` when a batch of writes is done.
 - **Closing.** `shutdown` sends `close_notify`, then shuts the transport's
   write side; later writes fail with `BrokenPipe` (RFC 9846 §6.1). The peer's
   `close_notify` reads as end of file; a transport that ends without one fails
@@ -81,8 +81,10 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 - **Splitting.** `tokio::io::split` gives read and write halves for two tasks.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
   `browntls::Error` (`err.get_ref()` then `downcast_ref`).
-- **Key updates.** A TLS 1.3 `KeyUpdate` asking for ours is answered with the
-  next write or flush; reads never write.
+- **Answers.** A read that receives a message calling for an answer (a TLS
+  1.3 `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`)
+  writes the answer at once if the transport has room, so a task that only
+  reads does not leave the peer waiting for it.
 
 ## Features
 

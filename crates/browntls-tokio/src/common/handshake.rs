@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Stream, TlsState};
+use super::{Stream, StreamState};
 
 /// A stream whose handshake [`MidHandshake`] can drive.
 pub(crate) trait IoSession {
@@ -19,7 +19,7 @@ pub(crate) trait IoSession {
 
     /// Whether the stream may be returned before its handshake completes.
     fn skip_handshake(&self) -> bool;
-    fn parts(&mut self) -> (&mut TlsState, &mut Self::Io, &mut Self::Session, &mut bool);
+    fn parts(&mut self) -> (&mut StreamState, &mut Self::Io, &mut Self::Session);
     fn into_io(self) -> Self::Io;
 }
 
@@ -57,10 +57,10 @@ where
         };
 
         if !stream.skip_handshake() {
-            let (state, io, session, need_flush) = stream.parts();
+            let (st, io, session) = stream.parts();
             let mut tls_stream = Stream::new(io, session)
-                .set_eof(!state.readable())
-                .set_need_flush(*need_flush);
+                .set_eof(!st.state.readable())
+                .set_need_flush(st.need_flush);
 
             macro_rules! try_poll {
                 ($e:expr) => {
@@ -70,7 +70,7 @@ where
                             return Poll::Ready(Err((err, stream.into_io())));
                         }
                         Poll::Pending => {
-                            *need_flush = tls_stream.need_flush;
+                            st.need_flush = tls_stream.need_flush;
                             *this = MidHandshake::Handshaking(stream);
                             return Poll::Pending;
                         }

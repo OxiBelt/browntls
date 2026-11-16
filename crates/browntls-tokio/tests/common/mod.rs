@@ -47,6 +47,8 @@ pub struct Pki {
     pub ca_pem: String,
     pub server_chain: Vec<CertificateDer<'static>>,
     pub server_key: Vec<u8>,
+    pub client_chain: Vec<CertificateDer<'static>>,
+    pub client_key: Vec<u8>,
 }
 
 impl Pki {
@@ -71,8 +73,20 @@ impl Pki {
             .push(DnType::CommonName, "localhost");
         let ee_cert = ee_params.signed_by(&ee_key, &issuer).unwrap();
 
+        let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+        client_params.is_ca = IsCa::NoCa;
+        client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        client_params
+            .distinguished_name
+            .push(DnType::CommonName, "client.example");
+        let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
+
         let ca = CertificateDer::from(ca_cert.der().to_vec());
         Self {
+            client_chain: vec![CertificateDer::from(client_cert.der().to_vec()), ca.clone()],
+            client_key: client_key.serialize_der(),
             ca_pem: ca_cert.pem(),
             server_chain: vec![CertificateDer::from(ee_cert.der().to_vec()), ca.clone()],
             ca,
@@ -82,6 +96,42 @@ impl Pki {
 
     pub fn server_key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()))
+    }
+
+    pub fn client_key(&self) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.client_key.clone()))
+    }
+
+    /// A server configuration that verifies client certificates from the CA.
+    pub fn server_config_with_client_auth(
+        &self,
+        version: &'static SupportedProtocolVersion,
+    ) -> ServerConfig {
+        let verifier = browntls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(self.roots()),
+            provider(),
+        )
+        .build()
+        .unwrap();
+        ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[version])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(self.server_chain.clone(), self.server_key())
+            .unwrap()
+    }
+
+    /// A client configuration that presents the client certificate.
+    pub fn client_config_with_cert(
+        &self,
+        version: &'static SupportedProtocolVersion,
+    ) -> ClientConfig {
+        ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[version])
+            .unwrap()
+            .with_root_certificates(self.roots())
+            .with_client_auth_cert(self.client_chain.clone(), self.client_key())
+            .unwrap()
     }
 
     pub fn roots(&self) -> RootCertStore {

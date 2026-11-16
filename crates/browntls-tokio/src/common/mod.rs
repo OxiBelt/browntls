@@ -1,11 +1,17 @@
 //! The polling core shared by the client and server streams: moving TLS
 //! records between a `browntls` connection and an `AsyncRead + AsyncWrite`
 //! transport without blocking.
+//!
+//! Adapted from tokio-rustls (`src/common/mod.rs`, Copyright (c) 2017
+//! quininer kel, MIT OR Apache-2.0), used here under Apache-2.0. Changes:
+//! browntls types, writes that cannot spin on a connection that takes no
+//! plaintext, a handshake exit when no progress is possible, and reads that
+//! send the answers the peer waits for.
 
 use std::io::{self, BufRead as _, IoSlice, Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -47,6 +53,49 @@ impl TlsState {
 
     pub(crate) fn writeable(self) -> bool {
         !matches!(self, Self::WriteShutdown | Self::FullyShutdown)
+    }
+}
+
+/// The per-stream state the polling functions share.
+#[derive(Debug)]
+pub(crate) struct StreamState {
+    pub(crate) state: TlsState,
+    /// TLS bytes reached the transport during the handshake and were not
+    /// flushed yet.
+    pub(crate) need_flush: bool,
+    /// A read error met after a read already returned bytes.
+    pub(crate) deferred_error: Option<io::Error>,
+    /// The waker of the last write, flush or shutdown that returned
+    /// `Pending`. A read that writes to the transport (to answer the peer)
+    /// may take over the transport's write-readiness registration, so it
+    /// wakes this waker afterwards to let the writer register again.
+    pub(crate) write_waker: Option<Waker>,
+}
+
+impl StreamState {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: TlsState::Stream,
+            need_flush: false,
+            deferred_error: None,
+            write_waker: None,
+        }
+    }
+
+    /// Records the waker of a write-side poll about to return `Pending`.
+    fn park_writer(&mut self, cx: &Context<'_>) {
+        match &mut self.write_waker {
+            Some(waker) if waker.will_wake(cx.waker()) => {}
+            slot => *slot = Some(cx.waker().clone()),
+        }
+    }
+
+    /// Records `cx` when `poll` is `Pending`, and passes it on.
+    fn track<T>(&mut self, cx: &Context<'_>, poll: Poll<T>) -> Poll<T> {
+        if poll.is_pending() {
+            self.park_writer(cx);
+        }
+        poll
     }
 }
 
@@ -206,11 +255,24 @@ where
 
     /// Reads records until plaintext is available or the peer closed, and
     /// returns the first buffered chunk (empty after `close_notify`).
-    pub(crate) fn poll_fill_buf(mut self, cx: &mut Context<'_>) -> Poll<io::Result<&'a [u8]>>
+    ///
+    /// Messages the records call for (an alert, a KeyUpdate answer, a
+    /// post-handshake authentication response) are written at once, as far
+    /// as the transport takes them without waiting: a peer may wait for
+    /// them before it sends what this read waits for. Records already
+    /// queued by writes are left to the writer. Touching the write side
+    /// wakes `write_waker`, whose registration it may have replaced.
+    pub(crate) fn poll_fill_buf(
+        mut self,
+        cx: &mut Context<'_>,
+        write_waker: &mut Option<Waker>,
+    ) -> Poll<io::Result<&'a [u8]>>
     where
         SD: 'a,
     {
+        let had_queued_tls = self.session.wants_write();
         let mut io_pending = false;
+        let mut error = None;
 
         while !self.eof && self.session.wants_read() {
             match self.read_io(cx) {
@@ -220,8 +282,21 @@ where
                     io_pending = true;
                     break;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    error = Some(err);
+                    break;
+                }
             }
+        }
+
+        if !had_queued_tls && self.session.wants_write() {
+            self.answer_peer(cx);
+            if let Some(waker) = write_waker.take() {
+                waker.wake();
+            }
+        }
+        if let Some(err) = error {
+            return Poll::Ready(Err(err));
         }
 
         match self.session.reader().into_first_chunk() {
@@ -238,6 +313,18 @@ where
             }
             Err(err) => Poll::Ready(Err(err)),
         }
+    }
+
+    /// Writes and flushes queued TLS bytes as far as the transport takes them
+    /// now. Errors are left for the next write to report.
+    fn answer_peer(&mut self, cx: &mut Context<'_>) {
+        while self.session.wants_write() {
+            match self.write_io(cx) {
+                Poll::Ready(Ok(n)) if n > 0 => {}
+                _ => break,
+            }
+        }
+        let _ = Pin::new(&mut *self.io).poll_flush(cx);
     }
 }
 
@@ -379,11 +466,11 @@ fn no_progress(pos: usize) -> io::Result<usize> {
     }
 }
 
-/// `AsyncBufRead::poll_fill_buf` for a stream in `state`.
+/// `AsyncBufRead::poll_fill_buf` for a stream in `st`.
 pub(crate) fn poll_fill_buf<'a, IO, C, SD>(
     io: &'a mut IO,
     session: &'a mut C,
-    state: &mut TlsState,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<&'a [u8]>>
 where
@@ -391,13 +478,13 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData + 'a,
 {
-    if !state.readable() {
+    if !st.state.readable() {
         return Poll::Ready(Ok(&[]));
     }
-    match Stream::new(io, session).poll_fill_buf(cx) {
+    match Stream::new(io, session).poll_fill_buf(cx, &mut st.write_waker) {
         Poll::Ready(Ok(chunk)) => {
             if chunk.is_empty() {
-                state.shutdown_read();
+                st.state.shutdown_read();
             }
             Poll::Ready(Ok(chunk))
         }
@@ -407,12 +494,11 @@ where
 
 /// `AsyncRead::poll_read`: copies plaintext into `buf`, then keeps filling
 /// while more is ready without waiting. An error met after some bytes were
-/// copied is kept in `deferred` and returned by the next read.
+/// copied is kept and returned by the next read.
 pub(crate) fn poll_read<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
-    state: &mut TlsState,
-    deferred: &mut Option<io::Error>,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
 ) -> Poll<io::Result<()>>
@@ -421,12 +507,12 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    if let Some(err) = deferred.take() {
+    if let Some(err) = st.deferred_error.take() {
         return Poll::Ready(Err(err));
     }
     let mut copied = false;
     while buf.remaining() > 0 {
-        match poll_fill_buf(io, session, state, cx) {
+        match poll_fill_buf(io, session, st, cx) {
             Poll::Ready(Ok(chunk)) => {
                 if chunk.is_empty() {
                     break;
@@ -437,7 +523,7 @@ where
                 copied = true;
             }
             Poll::Ready(Err(err)) if copied => {
-                *deferred = Some(err);
+                st.deferred_error = Some(err);
                 break;
             }
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -448,11 +534,11 @@ where
     Poll::Ready(Ok(()))
 }
 
-/// `AsyncWrite::poll_write` for a stream in `state`.
+/// `AsyncWrite::poll_write` for a stream in `st`.
 pub(crate) fn poll_write<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
-    state: TlsState,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
     buf: &[u8],
 ) -> Poll<io::Result<usize>>
@@ -461,17 +547,18 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    if !state.writeable() {
+    if !st.state.writeable() {
         return Poll::Ready(Err(write_after_shutdown()));
     }
-    Stream::new(io, session).as_mut_pin().poll_write(cx, buf)
+    let poll = Stream::new(io, session).as_mut_pin().poll_write(cx, buf);
+    st.track(cx, poll)
 }
 
-/// `AsyncWrite::poll_write_vectored` for a stream in `state`.
+/// `AsyncWrite::poll_write_vectored` for a stream in `st`.
 pub(crate) fn poll_write_vectored<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
-    state: TlsState,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
     bufs: &[IoSlice<'_>],
 ) -> Poll<io::Result<usize>>
@@ -480,12 +567,13 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    if !state.writeable() {
+    if !st.state.writeable() {
         return Poll::Ready(Err(write_after_shutdown()));
     }
-    Stream::new(io, session)
+    let poll = Stream::new(io, session)
         .as_mut_pin()
-        .poll_write_vectored(cx, bufs)
+        .poll_write_vectored(cx, bufs);
+    st.track(cx, poll)
 }
 
 /// `AsyncWrite::poll_flush`: writes every queued TLS byte and flushes the
@@ -493,6 +581,7 @@ where
 pub(crate) fn poll_flush<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>>
 where
@@ -500,7 +589,8 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    Stream::new(io, session).as_mut_pin().poll_flush(cx)
+    let poll = Stream::new(io, session).as_mut_pin().poll_flush(cx);
+    st.track(cx, poll)
 }
 
 /// `AsyncWrite::poll_shutdown`: queues `close_notify` (once), writes it and
@@ -508,7 +598,7 @@ where
 pub(crate) fn poll_shutdown<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
-    state: &mut TlsState,
+    st: &mut StreamState,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>>
 where
@@ -516,11 +606,12 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    if state.writeable() {
+    if st.state.writeable() {
         session.send_close_notify();
-        state.shutdown_write();
+        st.state.shutdown_write();
     }
-    Stream::new(io, session).as_mut_pin().poll_shutdown(cx)
+    let poll = Stream::new(io, session).as_mut_pin().poll_shutdown(cx);
+    st.track(cx, poll)
 }
 
 /// Gives `browntls`'s blocking `read_tls` an [`AsyncRead`], turning

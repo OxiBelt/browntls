@@ -37,15 +37,17 @@
 //!
 //! # Flushing
 //!
-//! A stream behaves like a `BufWriter`: a write encrypts the plaintext into
-//! TLS records and writes as many of them to the transport as it takes
-//! without waiting. Call [`flush`] when a batch of writes is done; it waits
-//! until every queued record reached the transport.
+//! A write encrypts the plaintext into TLS records and writes as many of
+//! them to the transport as it takes without waiting; the rest stay queued
+//! when the transport is not ready. Call [`flush`] when a batch of writes is
+//! done: it waits until every queued record reached the transport, and
+//! flushes the transport.
 //!
-//! Reads never write. Post-handshake messages that need an answer (a TLS
-//! 1.3 `KeyUpdate` asking for ours, say) are answered with the next write or
-//! flush, which RFC 9846 §4.7.3 allows: the answer must precede our next
-//! application data, not follow at once.
+//! A read that receives a message calling for an answer (a TLS 1.3
+//! `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`, a
+//! failure alert) writes the answer at once, as far as the transport takes
+//! it without waiting: the peer may wait for it before sending what the
+//! read is waiting for. What is left goes out with the next write or flush.
 //!
 //! # Closing
 //!

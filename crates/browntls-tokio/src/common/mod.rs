@@ -11,7 +11,8 @@
 use std::io::{self, BufRead as _, IoSlice, Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -100,6 +101,36 @@ impl StreamState {
             self.park_writer(cx);
         }
         poll
+    }
+}
+
+/// Wakes two tasks: a read that writes to the transport, and the writer
+/// whose registration that write may replace.
+struct JointWaker {
+    reader: Waker,
+    writer: Waker,
+}
+
+impl Wake for JointWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.reader.wake_by_ref();
+        self.writer.wake_by_ref();
+    }
+}
+
+/// `reader`, or a waker for both `reader` and `writer` when a writer is
+/// parked.
+pub(crate) fn joint_waker(reader: &Waker, writer: Option<&Waker>) -> Waker {
+    match writer {
+        Some(writer) if !writer.will_wake(reader) => Waker::from(Arc::new(JointWaker {
+            reader: reader.clone(),
+            writer: writer.clone(),
+        })),
+        _ => reader.clone(),
     }
 }
 
@@ -299,13 +330,15 @@ where
         let answer = self.session.wants_write() && (st.answering || !had_queued_tls);
         if answer || error.is_some() {
             st.answering = answer;
-            // Only a write that moved bytes calls for the writer: then the
-            // queue it waits on changed. A write that met `Pending` left
-            // this task registered for writability, and it wakes the
-            // writer once that write goes through; waking it at every
-            // `Pending` would spin a task that polls both directions. A
-            // failed read is final: the writer must see the error.
-            let wrote = self.answer_peer(cx);
+            // The read's write may take over the transport's write-readiness
+            // registration from a parked writer, so it registers a waker for
+            // both tasks: writability then wakes the writer too, and the
+            // reader need not poll again for that. Waking the writer at
+            // every `Pending` instead would spin a task that polls both
+            // directions. A write that moved bytes changed the writer's
+            // queue, and a failed read is final: both wake it at once.
+            let joint = joint_waker(cx.waker(), st.write_waker.as_ref());
+            let wrote = self.answer_peer(&mut Context::from_waker(&joint));
             if (wrote || error.is_some())
                 && let Some(waker) = st.write_waker.take()
             {

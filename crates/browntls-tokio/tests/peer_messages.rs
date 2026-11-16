@@ -233,3 +233,61 @@ async fn a_task_polling_both_directions_does_not_spin_while_answering() {
     assert!(polls < 100, "the task spun: {polls} polls in 300 ms");
     drop(server);
 }
+
+#[tokio::test]
+async fn a_parked_writer_is_woken_after_a_read_took_its_registration() {
+    let pki = Pki::new();
+    let version = &browntls::version::TLS13;
+    let mut client_config = pki.client_config_with_cert(version);
+    client_config.enable_post_handshake_auth = true;
+    let mut server_config = pki.server_config_with_client_auth(version);
+    server_config.request_client_auth_after_handshake = true;
+    let (c, s) = duplex(300);
+    let (client, server) = tokio::join!(
+        TlsConnector::from(Arc::new(client_config)).connect(localhost(), c),
+        TlsAcceptor::from(Arc::new(server_config)).accept(s),
+    );
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    // Leave the client's certificate answer partly written.
+    server.get_mut().1.request_client_auth().unwrap();
+    let mut buf = [0u8; 16];
+    let (flushed, _) = tokio::join!(
+        server.flush(),
+        timeout(Duration::from_millis(100), client.read(&mut buf))
+    );
+    flushed.unwrap();
+    assert!(client.get_ref().1.wants_write());
+
+    // A writer task parks on the full transport.
+    let (mut rd, mut wr) = tokio::io::split(client);
+    let total = 256 * 1024;
+    let writer = tokio::spawn(async move {
+        wr.write_all(&vec![7u8; total]).await.unwrap();
+        wr.flush().await.unwrap();
+        wr
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // One read gets data; its answer write meets `Pending` and takes the
+    // writer's registration. The reader then stops reading.
+    server.write_all(b"data").await.unwrap();
+    server.flush().await.unwrap();
+    let n = timeout(LIMIT, rd.read(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(&buf[..n], b"data");
+
+    let server_reads = tokio::spawn(async move {
+        let mut got = 0;
+        let mut chunk = vec![0u8; 16 * 1024];
+        while got < total {
+            let n = server.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            got += n;
+        }
+        got
+    });
+    timeout(LIMIT, writer)
+        .await
+        .expect("the writer was never woken")
+        .unwrap();
+    assert_eq!(timeout(LIMIT, server_reads).await.unwrap().unwrap(), total);
+    drop(rd);
+}

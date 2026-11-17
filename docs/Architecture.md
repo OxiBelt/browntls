@@ -38,6 +38,53 @@ parameter encodings (RFC 4055) are first mapped to one canonical constant
 (`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
 path validation and by handshake signature verification alike).
 
+### Certificate inspection
+
+`browntls-pki` parses a certificate once, eagerly: every field and extension
+it interprets is decoded and validated before any check runs. That parsed
+view is public as `Cert` (the rustls-webpki name), so applications inspect
+exactly what path validation sees rather than reparsing the DER with another
+library. `Cert::try_from` applies the strict policy used for end entities and
+intermediates (strict DER, version 3, no duplicate decoded extension, no
+unknown critical extension) to any certificate, CA or not; `EndEntityCert`
+dereferences to it and adds the verification methods. Parsing checks no
+signature, validity period or trust.
+
+- Extensions: every extension as an undecoded `Extension`, and typed views of
+  the ones the parser decodes (basic constraints, key usage, extended key
+  usage, subject and authority key identifiers, subject alternative names,
+  name constraints, CRL distribution points). Values validated at parse time
+  iterate without errors. Two parts that path validation reads leniently are
+  parsed strictly on access instead: each CRL distribution point, and the
+  issuer names of an authority key identifier. Both report
+  `ExtensionValueInvalid`, and both reject empty `GeneralNames`. Changing the
+  parser to reject them up front would have changed which certificates path
+  validation accepts.
+- Names: `GeneralName` covers every RFC 5280 choice; the ones the crate does
+  not decode keep their tag and contents. `Name` parses an X.501 name (issuer,
+  subject, trust anchor subject, `directoryName`, TLS `DistinguishedName`)
+  into RDNs and attributes. It checks the structure with DER's minimal
+  lengths and rejects empty RDNs, `SET OF` elements out of order (X.690
+  §11.6), an attribute repeated within an RDN, value tags of a universal type
+  in the wrong form, and names over 64 KiB. Each attribute value is checked
+  only as one element (tag, form and minimal outer length): its contents are
+  not parsed, so an `INTEGER` or `BOOLEAN` value need not be valid DER of its
+  type. A string accessor checks the contents of the UTF-8-compatible string
+  types.
+  `valid_dns_names` returns the `dNSName`s that server name verification can
+  match, which is not a substitute for `verify_is_valid_for_subject_name`.
+- Signatures: `SignedData` reads the `SEQUENCE { tbs, AlgorithmIdentifier,
+  BIT STRING }` of a certificate, CRL or certification request, or takes a raw
+  (message, algorithm, signature) triple, and verifies it against a
+  `SubjectPublicKeyInfo` through `verify_signed_data`, the function path
+  validation uses, including the RSASSA-PSS canonical forms. Like path
+  validation, it takes the key as a complete `SubjectPublicKeyInfo` or as its
+  contents (a trust anchor's form); the two cannot be confused.
+
+Everything returned borrows from the input, and work is linear in input
+lengths that the parser already bounds (64 KiB per certificate element, 4 GiB
+for a signed structure's `tbs`).
+
 ## Crypto provider mount point
 
 `browntls::crypto` defines the provider interface, modelled on rustls 0.23 so
@@ -251,8 +298,10 @@ record (§5.1) gives the application nothing and does not.
 A server learns the offer from the ClientHello (`ServerConnection::
 post_handshake_auth_offered`). `ServerConnection::request_client_auth`
 needs a completed TLS 1.3 handshake, the offer, a verifier that offers
-client authentication and no request still unanswered (one at a time,
-which bounds the state kept per connection). The request's
+client authentication, no request still unanswered (one at a time,
+which bounds the state kept per connection), and no `close_notify` in
+either direction (after the client's, nothing it sends is processed, so a
+request would stay unanswered). The request's
 `certificate_request_context` is an 8-byte request counter followed by 24
 random bytes: unique on the connection and unpredictable (§4.4.2). The
 answer may come after any amount of application data or KeyUpdates, but
@@ -266,6 +315,15 @@ after the Finished does `peer_certificates` change and
 is `Declined` (and `certificate_required` when the verifier makes client
 authentication mandatory). A resumed handshake may be followed by
 post-handshake authentication, as §4.4.2 allows.
+
+The unbuffered connections have the same methods
+(`UnbufferedServerConnection::{post_handshake_auth_offered,
+request_client_auth, post_handshake_auth_status}`,
+`UnbufferedClientConnection::post_handshake_auth_responses`) over the same
+state and checks (`ConnectionCore::request_client_auth`). The request is
+queued like any handshake message, so the next `process_tls_records`
+offers it through `EncodeTlsData` before anything else, and a client's
+answer leaves through `EncodeTlsData` as soon as the request is processed.
 
 With `ServerConfig::request_client_auth_after_handshake` set, a server
 leaves client authentication out of a TLS 1.3 handshake whose client
@@ -297,8 +355,8 @@ When it is set, a HelloRetryRequest carries a cookie that seals
 The connection that sent the HelloRetryRequest keeps its state and requires
 the second ClientHello to echo the cookie byte for byte
 (`missing_extension` if absent, `illegal_parameter` if different). A fresh
-`ServerConnection` or `Acceptor` whose first ClientHello carries a cookie
-opens it instead: it must authenticate under the sealer's current or
+server connection, or an acceptor (`Acceptor`, `UnbufferedAcceptor`), whose
+first ClientHello carries a cookie opens it instead: it must authenticate under the sealer's current or
 previous key, carry the label, parse exactly and be at most 60 seconds old
 (in either direction, for servers sharing a key); the suite and group must
 still be configured, the hash length must match the suite's, and the
@@ -339,7 +397,8 @@ export_early_keying_material` is the separate early exporter that §7.5
 recommends, from `early_exporter_master_secret` (logged as
 `EARLY_EXPORTER_SECRET`; checked against RFC 8448 §4). A client has it from
 the moment it offers 0-RTT and loses it if the server rejects 0-RTT; a
-server has it once it accepts 0-RTT. Like 0-RTT data it is not forward
+server has it once it accepts 0-RTT. After a fatal error neither side
+exports anything. Like 0-RTT data it is not forward
 secret and replays with the ClientHello.
 
 `tls_exporter_channel_binding` is the RFC 9266 `tls-exporter` channel
@@ -348,6 +407,12 @@ context. RFC 9266 §2 defines it for TLS 1.3 and for earlier versions only
 with the extended master secret, which the TLS 1.2 exporter requires
 anyway; since browntls never renegotiates, the RFC 9266 §4.2 renegotiation
 exclusion does not arise.
+
+`UnbufferedConnectionCommon` has the same three, through the same code
+(`ConnectionCore::export_keying_material` and
+`ConnectionCore::export_early_keying_material`). An unbuffered client builds
+its ClientHello in `new`, so its early exporter is there as soon as the
+connection exists when that ClientHello offers 0-RTT.
 
 ### TLS 1.3 external PSKs
 
@@ -553,7 +618,42 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   by application data. After a fatal error the alert is offered through
   `EncodeTlsData` first, then the error is returned on every call. A client
   writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
-  after its ClientHello.
+  after its ClientHello. The connection-specific accessors of the buffered
+  types are there too: `ech_status` on both sides, the server's
+  post-handshake authentication methods, and the client's
+  `delegated_credential` and `post_handshake_auth_responses`.
+- Acceptors read the first ClientHello before a `ServerConfig` is chosen:
+  `Acceptor` (buffered, `std`) and `UnbufferedAcceptor` (no `std`; the
+  caller's buffer and `discard`, as `process_tls_records`). Both drive one
+  `ConnectionCore` parked in a state that handles nothing
+  (`server/server_conn/accept.rs`): `first_handshake_message` reads
+  plaintext records (only `change_cipher_spec` may come first, for a
+  stateless retry), then the ClientHello checks that need no configuration
+  run (`hs::process_client_hello`). `into_connection(config)` applies the
+  checks and settings of a connection created with `config`
+  (`ServerConfig::apply_to`), lets `config`'s ECH keys replace the
+  ClientHello with the inner one, and hands it to
+  `ExpectClientHello::with_certified_key`, then checks that a ClientHello
+  that changed the read key ended its record (RFC 8446 §5.1, the check
+  `ConnectionCore::process_one` makes for every handshake message). The same
+  core (deframer, joiner, common state) goes on, so the connection behaves as
+  one created with `config` that read the same bytes; an unbuffered one
+  reports 0-RTT data in place, from the bytes the acceptor did not discard.
+  Three differences remain. An alert record ahead of the ClientHello is
+  refused by an acceptor (`InappropriateMessage`, `unexpected_message`, as in
+  rustls), while a new connection ignores a warning alert there and reports
+  a fatal one. With no cookie sealer, a `change_cipher_spec` ahead of the
+  ClientHello is `IllegalMiddleboxChangeCipherSpec` through an acceptor and
+  `InappropriateMessage` on a new connection (both `unexpected_message`).
+  With ECH, the acceptor checks the outer ClientHello before decryption, so a
+  defect only there (duplicate key shares or certificate compression
+  algorithms, no `signature_algorithms`) is refused, where a new connection
+  checks only the inner ClientHello. Every refusal fails the
+  core (`ConnectionCore::fail`, which forgets a TLS 1.2 session it resumed)
+  and queues a fatal alert, `internal_error` for a refused configuration;
+  `AcceptedAlert::write` or `UnbufferedAcceptedAlert::encode` (the
+  `EncodeTlsData` size contract) copies it out. A call after completion
+  fails with an empty alert.
 
 ### Asynchronous streams (`browntls-tokio`)
 
@@ -688,7 +788,15 @@ be built with a struct literal; `CertifiedKey::new` remains.
 
 `browntls::exported_authenticator` adds `request_authenticator`,
 `authenticator` and `validate_authenticator` to `ClientConnection` and
-`ServerConnection`. The messages are carried by the application protocol,
+`ServerConnection` (with `std`) and to `UnbufferedClientConnection` and
+`UnbufferedServerConnection` (also without `std`); QUIC connections do not
+have them. One macro per side defines the methods, with the same signatures
+and documentation, on the buffered and the unbuffered type, and their
+bodies call the same code on the `ConnectionCore` both APIs drive (the
+exporter, the context lists, the request digests, the verifier calls and
+the clock). Without `std` the default time provider has no clock, so
+validation fails with `FailedToGetCurrentTime` unless the configuration
+has one. The messages are carried by the application protocol,
 not the record layer. A client request is a `ClientCertificateRequest`
 (type 17), a server request a TLS 1.3 `CertificateRequest`; the answer is
 TLS 1.3 `Certificate`, `CertificateVerify` and `Finished` messages, or a lone
@@ -783,8 +891,8 @@ back-end server that terminates it.
   missing, repeated, out-of-order or ECH references, and non-zero padding,
   are `illegal_parameter`), must carry an `inner` ECH extension and offer
   nothing below TLS 1.3, and replaces the outer ClientHello for the rest of
-  the handshake (also through `Acceptor`, using the configuration passed to
-  `Accepted::into_connection`). The ServerHello random and, after a
+  the handshake (also through either acceptor, using the configuration
+  passed to `into_connection`). The ServerHello random and, after a
   HelloRetryRequest, its ECH extension carry the acceptance confirmations.
   The second ClientHello must repeat the `config_id` and cipher suite with an
   empty `enc` and decrypt with the same HPKE context (`missing_extension`,
@@ -838,8 +946,8 @@ back-end server that terminates it.
   HelloRetryRequest the second ClientHello must carry `inner` again
   (`missing_extension` otherwise), and one that adds it is
   `illegal_parameter`. A ClientHello without ECH is served as usual.
-  `ech_backend` and `ech` exclude each other (`ServerConnection::new` and
-  `Accepted::into_connection` fail).
+  `ech_backend` and `ech` exclude each other (connection creation and the
+  acceptors' `into_connection` fail).
 - Client with a random identifier (`EchConfig::with_random_config_id`,
   §10.4): one random `config_id`, repeated after a HelloRetryRequest, for
   servers known to use trial decryption.
@@ -1056,6 +1164,33 @@ NIST public keys must be uncompressed points on the curve, X25519/X448
 all-zero shared secrets are rejected, and a failed `open` leaves the sequence
 number unchanged. The PSK and authenticated modes are not implemented.
 
+`browntls_crypto::nist::{p256, p384, p521}` expose, besides keys, ECDH and
+ECDSA, the curves' arithmetic for other protocols, named after the RustCrypto
+`primeorder` / `elliptic-curve` 0.14 types without implementing their
+traits: `FieldElement` (integers modulo `p`), `Scalar` (integers modulo the
+group order `n`), `AffinePoint` (with the identity as a flag and SEC 1
+encoding to and from `Sec1Point`, the identity as `00`) and
+`ProjectivePoint`, which convert to and from `PublicKey`. Values stay in the
+Montgomery form of the curve code, always fully reduced; decoders reject
+values at or above the modulus and points off the curve
+(`Scalar::from_bytes_reduced` reduces up to twice the scalar length on
+request). Arithmetic, inversion (safegcd), square roots (`p = 3 mod 4`),
+comparisons, the group law (the complete RCB formulas, total on every
+input), scalar multiplication (`mul`: signed fixed windows over a table
+built by complete additions, so any point including the identity;
+`mul_by_generator`: the comb table) and normalisation are constant time; an
+`Option` or `Result` reveals only whether a value was zero, a root exists or
+an encoding was canonical. SEC 1 decoding is variable time, for public
+encodings, and `ProjectivePoint::mul_by_generator_and_mul_add_vartime` is
+the verification's variable-time double multiplication, for public inputs.
+Field and point operations run on the backend the curve's policy selects at
+each call (BMI2/ADX or portable) and are not routed by `accel::load`;
+scalar arithmetic is the portable Montgomery code on every backend.
+`Scalar` is zeroised on drop; field elements, points and `Sec1Point`
+encodings (which may encode a secret point) are `Copy` and implement
+`Zeroize` for callers that hold secret ones; `Debug` prints none of their
+values, encodings included (`Sec1Point::as_bytes` gives the bytes).
+
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
 
@@ -1264,8 +1399,9 @@ check, of 2048-, 3072- and 4096-bit keys (one stream per size; keys of
 other sizes are not routed). That includes their uses by the native TLS
 provider once an application calls `load::enable`; for AES-GCM that means
 keys created after the call. AES-CCM, AES-CBC, the AES block types, RSA
-verification, FFDHE, X448, Ed25519, Ed448 and the hash functions are not
-routed.
+verification, FFDHE, X448, Ed25519, Ed448, the hash functions and the
+public NIST arithmetic types (`FieldElement`, `Scalar`, `AffinePoint`,
+`ProjectivePoint`) are not routed.
 
 ### Operating-system interface
 

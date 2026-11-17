@@ -32,17 +32,40 @@
 //!   `RawPublicKeyEntity` and the key's certificate alike, with the
 //!   scheme's algorithms, never with another key type's, never tampered;
 //! * the fixture CRLs read the same borrowed and owned, verify with their
-//!   issuer's key only, and never verify once corrupted.
+//!   issuer's key only, and never verify once corrupted;
+//! * `Cert` over the fixture certificates and generated ones carrying every
+//!   extension and name form the crate decodes, possibly corrupted, parses
+//!   exactly when `EndEntityCert` does, lists the extensions an independent
+//!   reading of the DER finds, and decodes each typed extension as that
+//!   reading does; `valid_dns_names` predicts what
+//!   `verify_is_valid_for_subject_name` accepts, and IP names match the
+//!   `iPAddress` entries;
+//! * `Name` accepts a name generated from the input exactly when a model of
+//!   its rules does (DER structure and minimal lengths, value tags in their
+//!   X.690 form, sets strictly ascending so no attribute repeats; value
+//!   contents are not parsed), and every accepted name (generated, or a
+//!   mutated issuer or subject) re-encodes to its input;
+//! * `SignedData` verifies a fixture certificate or CRL exactly when the
+//!   algorithm model says the key and algorithms cover it (the key given
+//!   as a complete `SubjectPublicKeyInfo` or as a trust anchor's contents
+//!   alike), never once
+//!   corrupted or with another key, and path validation never accepts an
+//!   end entity whose signature check fails; raw triples give the verdicts
+//!   of `RawPublicKeyEntity`.
 //!
 //! Keys, certificates and CRLs come from the `tls_config` fixtures,
-//! generated once per process.
+//! generated once per process, and from certificates `inspect` generates
+//! once per process.
 
 use crate::input::Input;
 use crate::input::{put_field, put_short_field};
 
 mod chains;
+mod inspect;
 mod names;
+mod signed;
 mod values;
+mod x500;
 
 /// An operation: its harness and its cost against the per-input budget, in
 /// units of about 100 µs of release-build time (the slowest seed).
@@ -59,6 +82,10 @@ const OPS: &[Op] = &[
     (chains::path_op, 7),
     (chains::signature_op, 25),
     (chains::crl_op, 12),
+    (inspect::cert_inspect_op, 2),
+    (x500::dn_op, 1),
+    (signed::structure_op, 12),
+    (signed::parts_op, 3),
 ];
 
 /// Operation numbers, in [`OPS`] order.
@@ -73,6 +100,10 @@ mod op {
     pub const PATH: u8 = 7;
     pub const SIGNATURE: u8 = 8;
     pub const CRL: u8 = 9;
+    pub const INSPECT: u8 = 10;
+    pub const DN: u8 = 11;
+    pub const SIGNED: u8 = 12;
+    pub const SIGNED_PARTS: u8 = 13;
 }
 
 /// The `pki_api` fuzz target.
@@ -337,6 +368,91 @@ pub fn seeds() -> Vec<Vec<u8>> {
     add(op::CRL, &[&[1, 0], &short(&[0x7b, 4, 5, 6]), &[1]]);
     add(op::CRL, &[&[1, 1, 0, 30, 1], &short(&[]), &[0]]);
     add(op::CRL, &[&[2, 1, 0, 200, 4], &short(&[]), &[1]]);
+
+    // Inspection: each certificate (fixtures, then generated) with a
+    // server name, an extension to look up and fuzzed name constraints;
+    // then corrupted.
+    let constraints = [0xa0, 0x05, 0x30, 0x03, 0x82, 0x01, b'a'];
+    for c in 0..inspect::CERT_COUNT as u8 {
+        add(op::INSPECT, &[&[c, 0, c, c % 3], &short(&constraints)]);
+    }
+    add(
+        op::INSPECT,
+        &[
+            &[7, 0, 9],
+            &short(b"Mixed.example."),
+            &[3],
+            &short(&[0x55, 0x1d, 0x25]),
+            &short(&[]),
+        ],
+    );
+    add(
+        op::INSPECT,
+        &[
+            &[8, 0, 9],
+            &short(b"y.wild.example"),
+            &[0],
+            &short(&[0xa1, 0x00]),
+        ],
+    );
+    add(op::INSPECT, &[&[6, 1, 0, 0x30, 0x40, 0], &short(&[])]);
+
+    // Names generated from the input (RDN count, then per RDN an attribute
+    // count, reversal, and type, tag and value choices), then mutated
+    // issuers and subjects.
+    add(op::DN, &[&[0, 1, 1, 0, 0, 0, 0]]);
+    add(op::DN, &[&[0, 2, 3, 0, 0, 0, 1, 2, 2, 2, 4, 3, 3, 1, 0, 2]]);
+    add(op::DN, &[&[0, 1, 2, 1, 0, 0, 1, 1, 2, 2]]);
+    add(op::DN, &[&[0, 3, 1, 0, 3, 3, 6, 2, 1, 7, 2, 1, 0, 1, 6, 0]]);
+    add(
+        op::DN,
+        &[
+            &[0, 1, 1, 0, 6],
+            &short(&[0x2a, 0x03]),
+            &[14, 0x31, 6],
+            &short(b"v"),
+        ],
+    );
+    add(op::DN, &[&[0, 1, 1, 0, 0, 10, 0]]);
+    add(op::DN, &[&[0, 1, 1, 0, 0, 13, 0]]);
+    add(op::DN, &[&[0, 1, 0]]);
+    // The same attribute twice in one RDN.
+    add(op::DN, &[&[0, 1, 2, 0, 0, 0, 0, 0, 0, 0]]);
+    for c in 0..inspect::CERT_COUNT as u8 {
+        add(op::DN, &[&[1, c, c & 1, 3]]);
+    }
+    add(op::DN, &[&[1, 6, 0, 0, 0, 9, 0x10]]);
+    add(op::DN, &[&[1, 7, 1, 1, 0, 40]]);
+    add(op::DN, &[&[1, 8, 0, 2, 0, 3, 0x31]]);
+
+    // Signed data: each structure with its issuer's key and a provider's
+    // algorithms; another key; a fuzzed key; a subset of the algorithms;
+    // corrupted.
+    for s in 0..signed::STRUCTURES as u8 {
+        add(op::SIGNED, &[&[s, 0, 0, s & 1]]);
+    }
+    add(op::SIGNED, &[&[0, 0, 1, 0]]);
+    add(op::SIGNED, &[&[6, 0, 1, 1]]);
+    add(
+        op::SIGNED,
+        &[&[2, 0, 2], &field(&[0x30, 0x03, 0x30, 0x01, 0x00]), &[0]],
+    );
+    add(op::SIGNED, &[&[1, 0, 0, 2, 0, 0, 0x0f, 0xff]]);
+    add(op::SIGNED, &[&[3, 0, 0, 2, 0xff, 0xff, 0xff, 0xff]]);
+    add(op::SIGNED, &[&[0, 1, 0, 0x60, 0x40, 0, 0]]);
+    add(op::SIGNED, &[&[7, 1, 0, 0x01, 0x00, 0x08, 0, 1]]);
+
+    // Raw triples: each signature with a provider, untouched, then
+    // tampered, with an algorithm and a fuzzed identifier.
+    for s in 0..chains::signature_count() as u8 {
+        add(op::SIGNED_PARTS, &[&[s, s & 1, 0, s], &short(&[])]);
+    }
+    for tamper in 1..4u8 {
+        add(
+            op::SIGNED_PARTS,
+            &[&[tamper, 0, tamper, 0, 9, 3], &short(&[0x06, 0x01, 0x2a])],
+        );
+    }
 
     seeds
 }

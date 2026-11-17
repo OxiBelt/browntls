@@ -541,3 +541,33 @@ fn application_data_renews_the_key_update_budget() {
         take_tls(&mut client);
     }
 }
+
+#[test]
+fn post_handshake_auth_refused_after_close_notify() {
+    init_logging();
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = client_chain(KeyType::EcdsaP256);
+
+    // After the server's own close_notify.
+    let (mut client, mut server) = connect(
+        pha_client(&server_chain, &client_chain),
+        pha_server(&server_chain, &client_chain, true, true),
+    );
+    handshake(&mut client, &mut server);
+    server.send_close_notify();
+    assert!(server.request_client_auth().is_err());
+    assert_eq!(server.post_handshake_auth_status(), None);
+
+    // After the client's: it would never answer (RFC 9846 §6.1).
+    let (mut client, mut server) = connect(
+        pha_client(&server_chain, &client_chain),
+        pha_server(&server_chain, &client_chain, true, true),
+    );
+    handshake(&mut client, &mut server);
+    client.send_close_notify();
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    assert!(server.request_client_auth().is_err());
+    assert_eq!(server.post_handshake_auth_status(), None);
+    assert!(!server.wants_write(), "nothing was queued");
+}

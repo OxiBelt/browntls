@@ -1,10 +1,9 @@
 //! The buffered I/O API around the connection core.
 
-use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::ops::{Deref, DerefMut};
 
-use super::{ConnectionCore, SideData, State};
+use super::{ConnectionCore, SideData};
 use crate::common_state::{CommonState, IoState};
 use crate::error::Error;
 use crate::msgs::deframer::DeframerVecBuffer;
@@ -95,10 +94,6 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Rotates the traffic keys (TLS 1.3 only), asking the peer to do the same.
     pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
         self.core.refresh_traffic_keys()
-    }
-
-    pub(crate) fn replace_state(&mut self, new: Box<dyn State<Data>>) {
-        self.core.state = Ok(new);
     }
 }
 

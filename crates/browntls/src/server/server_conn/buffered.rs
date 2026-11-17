@@ -2,18 +2,14 @@
 //! reader, and the acceptor that reads a ClientHello before a configuration
 //! is chosen.
 
-use alloc::vec::Vec;
 use core::fmt;
 
+use super::accept::{self, AcceptedHello};
 use super::{
     ClientHello, EarlyDataState, PostHandshakeAuthStatus, ServerConfig, ServerConnectionData,
 };
-use crate::common_state::{CommonState, Side};
 use crate::conn::ConnectionCore;
-use crate::enums::{ProtocolVersion, SignatureScheme};
 use crate::error::Error;
-use crate::msgs::handshake::ClientHelloPayload;
-use crate::server::hs;
 use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
 
@@ -195,14 +191,7 @@ pub struct Acceptor {
 impl Default for Acceptor {
     fn default() -> Self {
         Self {
-            inner: Some(
-                ConnectionCore::new(
-                    alloc::boxed::Box::new(Accepting),
-                    ServerConnectionData::default(),
-                    CommonState::new(Side::Server),
-                )
-                .into(),
-            ),
+            inner: Some(accept::accepting_core().into()),
         }
     }
 }
@@ -221,7 +210,17 @@ impl Acceptor {
 
     /// Returns the ClientHello once it has been read in full.
     ///
-    /// On error, the alert to send to the client is returned too.
+    /// Before it, only `change_cipher_spec` records are allowed (a stateless
+    /// HelloRetryRequest, RFC 9846 §4.3.2). Anything else, a malformed
+    /// record, or a ClientHello that fails the checks that do not depend on
+    /// the configuration, is refused; so is a call after the acceptor
+    /// returned a ClientHello or an error. A refusal comes with the alert to
+    /// send to the client (empty for a call after completion).
+    ///
+    /// These checks see the ClientHello as sent. With Encrypted Client
+    /// Hello that is the outer one, so a defect only there is refused here,
+    /// although a connection created with the ECH keys, which checks only the
+    /// inner ClientHello it decrypts, would go on.
     pub fn accept(&mut self) -> Result<Option<Accepted>, (Error, AcceptedAlert)> {
         let Some(mut connection) = self.inner.take() else {
             return Err((
@@ -229,46 +228,14 @@ impl Acceptor {
                 AcceptedAlert::empty(),
             ));
         };
-
-        let message = match connection
-            .core
-            .first_handshake_message(&mut connection.deframer_buffer)
-        {
-            Ok(Some(msg)) => msg,
+        match accept::read_client_hello(&mut connection.core, &mut connection.deframer_buffer) {
+            Ok(Some(hello)) => Ok(Some(Accepted { connection, hello })),
             Ok(None) => {
                 self.inner = Some(connection);
-                return Ok(None);
+                Ok(None)
             }
-            Err(err) => {
-                // Every refusal comes with an alert the caller can send.
-                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
-                    &mut connection.core.common_state,
-                    err,
-                );
-                return Err((err, AcceptedAlert::from(connection)));
-            }
-        };
-
-        let mut cx = crate::conn::Context {
-            common: &mut connection.core.common_state,
-            data: &mut connection.core.data,
-        };
-        let sig_schemes = match hs::process_client_hello(&message, false, &mut cx) {
-            Ok((_, sig_schemes)) => sig_schemes,
-            Err(err) => {
-                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
-                    &mut connection.core.common_state,
-                    err,
-                );
-                return Err((err, AcceptedAlert::from(connection)));
-            }
-        };
-
-        Ok(Some(Accepted {
-            connection,
-            message,
-            sig_schemes,
-        }))
+            Err(err) => Err((err, AcceptedAlert::from(connection))),
+        }
     }
 }
 
@@ -319,131 +286,49 @@ impl fmt::Debug for AcceptedAlert {
 #[cfg(feature = "std")]
 pub struct Accepted {
     connection: crate::conn::ConnectionCommon<ServerConnectionData>,
-    message: crate::msgs::message::Message<'static>,
-    sig_schemes: Vec<SignatureScheme>,
+    hello: AcceptedHello,
 }
 
 #[cfg(feature = "std")]
 impl Accepted {
     /// The ClientHello.
+    ///
+    /// With Encrypted Client Hello this is the outer ClientHello: the inner
+    /// one is only decrypted by [`Self::into_connection`], with the keys of
+    /// the configuration chosen.
     pub fn client_hello(&self) -> ClientHello<'_> {
-        ClientHello::new(
-            self.connection.core.data.sni.as_ref(),
-            &self.sig_schemes,
-            Self::client_hello_payload(&self.message),
-        )
+        self.hello.client_hello(&self.connection.core.data)
     }
 
     /// Continues the handshake with `config`.
+    ///
+    /// The connection then behaves as a [`ServerConnection::new`] with
+    /// `config` that read the same bytes. One refusal differs in its error,
+    /// not its alert: a `change_cipher_spec` record ahead of the ClientHello,
+    /// with no cookie sealer in `config`, is
+    /// [`PeerMisbehaved::IllegalMiddleboxChangeCipherSpec`](crate::PeerMisbehaved::IllegalMiddleboxChangeCipherSpec)
+    /// here and [`Error::InappropriateMessage`] there (`unexpected_message`
+    /// both). `config` is checked as there
+    /// (cookie sealer, ECH role, `max_fragment_size`, `record_size_limit`);
+    /// ECH is processed with its keys; the ClientHello is then handled with
+    /// it. On error the alert to send is returned too: the handshake's own,
+    /// or `internal_error` when `config` itself is refused.
     pub fn into_connection(
         mut self,
         config: Arc<ServerConfig>,
     ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = config
-            .check_cookie_sealer()
-            .and_then(|()| config.check_ech_role())
-            .and_then(|()| {
-                self.connection
-                    .set_max_fragment_size(config.max_fragment_size)
-            })
-            .and_then(|()| {
-                crate::common_state::check_record_size_limit_config(config.record_size_limit)
-            })
-        {
-            return Err((err, AcceptedAlert::from(self.connection)));
-        }
-        self.connection.enable_secret_extraction = config.enable_secret_extraction;
-        self.connection.fips = config.fips();
-
-        let mut cx = crate::conn::Context {
-            common: &mut self.connection.core.common_state,
-            data: &mut self.connection.core.data,
-        };
-        // RFC 9849 §7.1: with ECH keys in `config`, an encrypted ClientHello
-        // replaces the one the acceptor saw.
-        let inner = match crate::ech::server::process_client_hello(
-            config.ech_role(),
-            &mut cx.data.ech,
-            cx.common,
-            &self.message,
-            false,
-        ) {
-            Ok(inner) => inner,
-            Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
-        };
-        let (message, sig_schemes) = match inner {
-            Some(inner) => match hs::process_client_hello(&inner, false, &mut cx) {
-                Ok((_, sig_schemes)) => (inner, sig_schemes),
-                Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
-            },
-            None => (self.message, self.sig_schemes),
-        };
-        let state = hs::ExpectClientHello::new(config);
-        let payload = Self::client_hello_payload(&message);
-        let new = match state.with_certified_key(sig_schemes, payload, &message, &mut cx) {
-            Ok(new) => new,
-            Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
-        };
-        self.connection.replace_state(new);
-        Ok(ServerConnection {
-            inner: self.connection,
-        })
-    }
-
-    fn client_hello_payload<'a>(
-        message: &'a crate::msgs::message::Message<'_>,
-    ) -> &'a ClientHelloPayload {
-        match &message.payload {
-            crate::msgs::message::MessagePayload::Handshake {
-                parsed:
-                    crate::msgs::handshake::HandshakeMessagePayload(
-                        crate::msgs::handshake::HandshakePayload::ClientHello(ch),
-                    ),
-                ..
-            } => ch,
-            // `Acceptor::accept` only constructs `Accepted` from a ClientHello.
-            _ => unreachable_client_hello(),
+        match accept::configure(&mut self.connection.core, self.hello, config) {
+            Ok(()) => Ok(ServerConnection {
+                inner: self.connection,
+            }),
+            Err(err) => Err((err, AcceptedAlert::from(self.connection))),
         }
     }
-}
-
-#[cfg(feature = "std")]
-#[cold]
-fn unreachable_client_hello() -> &'static ClientHelloPayload {
-    // `Accepted` is only built after `process_client_hello` accepted the
-    // message as a ClientHello, so this cannot be reached. Returning a leaked
-    // minimal payload keeps the function free of panics.
-    static EMPTY: std::sync::OnceLock<ClientHelloPayload> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
-        random: crate::msgs::handshake::Random::from([0u8; 32]),
-        session_id: crate::msgs::handshake::SessionId::empty(),
-        cipher_suites: Vec::new(),
-        compression_methods: Vec::new(),
-        extensions: Default::default(),
-    })
 }
 
 #[cfg(feature = "std")]
 impl fmt::Debug for Accepted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Accepted").finish_non_exhaustive()
-    }
-}
-
-/// The state an [`Acceptor`] parks in: it never handles messages itself.
-#[cfg(feature = "std")]
-struct Accepting;
-
-#[cfg(feature = "std")]
-impl crate::conn::State<ServerConnectionData> for Accepting {
-    fn handle(
-        self: alloc::boxed::Box<Self>,
-        _cx: &mut crate::conn::Context<'_, ServerConnectionData>,
-        _message: crate::msgs::message::Message<'_>,
-    ) -> Result<alloc::boxed::Box<dyn crate::conn::State<ServerConnectionData>>, Error> {
-        Err(Error::general(
-            "Acceptor connections cannot process messages",
-        ))
     }
 }

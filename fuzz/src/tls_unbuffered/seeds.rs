@@ -2,20 +2,20 @@
 
 use super::{Op, RETRY, StepArgs};
 
-struct Seed(Vec<u8>);
+pub(super) struct Seed(pub(super) Vec<u8>);
 
 impl Seed {
-    fn new(knobs: [u8; 5], connect: &[u8]) -> Self {
+    pub(super) fn new(knobs: [u8; 5], connect: &[u8]) -> Self {
         Self([&knobs[..], connect].concat())
     }
 
-    fn op(mut self, op: Op, args: &[u8]) -> Self {
+    pub(super) fn op(mut self, op: Op, args: &[u8]) -> Self {
         self.0.push(op as u8);
         self.0.extend_from_slice(args);
         self
     }
 
-    fn step(mut self, op: Op, side: u8, flags: u8, cap: u16, data: &[u8]) -> Self {
+    pub(super) fn step(mut self, op: Op, side: u8, flags: u8, cap: u16, data: &[u8]) -> Self {
         self.0.extend_from_slice(&[op as u8, side]);
         StepArgs { flags, cap, data }.write(&mut self.0);
         self
@@ -23,7 +23,7 @@ impl Seed {
 
     /// Drives the handshake to completion, then exchanges data, rotates
     /// keys, exports and checks.
-    fn conversation(self) -> Self {
+    pub(super) fn conversation(self) -> Self {
         self.op(Op::Pump, &[])
             .op(Op::Accessors, &[])
             .step(Op::Drive, 0, RETRY | 0x10, 0, b"ping")
@@ -154,5 +154,6 @@ pub fn seeds() -> Vec<Vec<u8>> {
         .op(Op::PostHandshakeAuth, &[])
         .op(Op::Accessors, &[]);
     seeds.push(seed.0);
+    seeds.extend(super::acceptor::seeds());
     seeds
 }

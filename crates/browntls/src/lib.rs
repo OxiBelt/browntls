@@ -192,7 +192,8 @@ pub mod server {
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
         ClientHello, PostHandshakeAuthStatus, ProducesTickets, ResolvesServerCert, ServerConfig,
-        ServerConnectionData, StoresServerSessions, UnbufferedServerConnection,
+        ServerConnectionData, StoresServerSessions, UnbufferedAcceptStatus, UnbufferedAccepted,
+        UnbufferedAcceptedAlert, UnbufferedAcceptor, UnbufferedServerConnection,
     };
 
     pub use crate::verify::NoClientAuth;

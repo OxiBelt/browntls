@@ -1,7 +1,9 @@
 //! Server configuration and connections.
 
+mod accept;
 #[cfg(feature = "std")]
 mod buffered;
+mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -11,6 +13,9 @@ use browntls_pki::{DnsName, UnixTime};
 
 #[cfg(feature = "std")]
 pub use buffered::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
+pub use unbuffered_acceptor::{
+    UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
+};
 
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
@@ -404,6 +409,19 @@ impl ServerConfig {
         Ok(())
     }
 
+    /// Checks this configuration and applies its per-connection settings to
+    /// `common`: every server connection goes through here, whether created
+    /// with the configuration or given it by an acceptor.
+    pub(super) fn apply_to(&self, common: &mut CommonState) -> Result<(), Error> {
+        self.check_cookie_sealer()?;
+        self.check_ech_role()?;
+        common.set_max_fragment_size(self.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
+        common.enable_secret_extraction = self.enable_secret_extraction;
+        common.fips = self.fips();
+        Ok(())
+    }
+
     pub(super) fn check_cookie_sealer(&self) -> Result<(), Error> {
         match &self.hello_retry_cookies {
             Some(sealer) if Arc::ptr_eq(sealer, &self.ticketer) => Err(Error::General(
@@ -691,14 +709,9 @@ impl ConnectionCore<ServerConnectionData> {
         config: Arc<ServerConfig>,
         quic: Option<crate::quic::Quic>,
     ) -> Result<Self, Error> {
-        config.check_cookie_sealer()?;
-        config.check_ech_role()?;
         let mut common = CommonState::new(Side::Server);
         common.quic = quic.map(alloc::boxed::Box::new);
-        common.set_max_fragment_size(config.max_fragment_size)?;
-        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
-        common.enable_secret_extraction = config.enable_secret_extraction;
-        common.fips = config.fips();
+        config.apply_to(&mut common)?;
         Ok(Self::new(
             alloc::boxed::Box::new(hs::ExpectClientHello::new(config)),
             ServerConnectionData::default(),
@@ -721,11 +734,7 @@ pub struct UnbufferedServerConnection {
 impl UnbufferedServerConnection {
     /// Prepares to accept a connection with `config`.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        let mut core = ConnectionCore::for_server(config)?;
-        core.data.early_data.set_in_place();
-        Ok(Self {
-            inner: crate::unbuffered::UnbufferedConnectionCommon::new(core),
-        })
+        Ok(Self::from_core(ConnectionCore::for_server(config)?))
     }
 
     /// The server name the client indicated, once its ClientHello was processed.

@@ -169,6 +169,7 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.name }}-x86_64-
 
       - name: Fuzz
+        id: fuzz
         env:
           FUZZ_FINDINGS: ${{ runner.temp }}/fuzz-findings
           # Only runs that save their corpus minimize it.
@@ -185,8 +186,15 @@ jobs:
       # the kind of finding, libFuzzer's seed, its statistics and the input's
       # SHA-256; the input is discarded with the runner, so a finding is a
       # signal to fuzz that target locally (fuzz/README.md).
+      #
+      # Pull requests, forks included, restore these caches, so the corpus is
+      # saved only when every target of the job ran clean: the failing input
+      # can be a corpus entry, and a saved corpus holding it would publish the
+      # input that the public hash identifies. run-targets.sh also moves a
+      # failing target's corpus out of fuzz/corpus. A failed, cancelled or
+      # timed-out job keeps the corpus it restored.
       - name: Save corpus
-        if: always() && github.event_name != 'pull_request'
+        if: success() && steps.fuzz.outcome == 'success' && github.event_name != 'pull_request'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus

@@ -5,6 +5,7 @@
 //! * the plaintext the handoff sets aside continues what that side read
 //!   before (the harness's prefix check), on success, on failure and when
 //!   the future is given up;
+//! * the 0-RTT data counted lies within the plaintext set aside;
 //! * a stream reported ready has no handoff blocker, and its connection's
 //!   `dangerous_into_kernel_connection` succeeds;
 //! * whatever comes back (a ready stream turned back, a refused one, an
@@ -65,8 +66,10 @@ impl World {
                 match outcome {
                     None => {
                         let _ = format!("{future:?}");
+                        let early = future.early_data_len();
                         let (stream, received) =
                             future.into_stream().expect("the future did not return");
+                        assert!(early <= received.len(), "0-RTT data beyond the data taken");
                         (Some(stream), received)
                     }
                     Some(Ok(handoff)) => {
@@ -77,6 +80,10 @@ impl World {
                             "a ready stream has a handoff blocker"
                         );
                         let received = handoff.received().to_vec();
+                        assert!(
+                            handoff.early_data_len() <= received.len(),
+                            "0-RTT data beyond the data taken"
+                        );
                         if flags & BACK_TO_USERSPACE != 0 {
                             let (stream, taken) = handoff.into_stream();
                             assert_eq!(taken, received);
@@ -93,6 +100,10 @@ impl World {
                     }
                     Some(Err(err)) => {
                         let _ = format!("{err} {err:?}");
+                        assert!(
+                            err.early_data_len <= err.received.len(),
+                            "0-RTT data beyond the data taken"
+                        );
                         if flags & DROP_REFUSED != 0 {
                             let received = err.received.clone();
                             let _ = err.into_io_error();

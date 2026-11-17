@@ -145,6 +145,12 @@ async fn offload(tls: TlsStream<TcpStream>) -> std::io::Result<()> {
 }
 ```
 
+The transport must not read ahead of what it is asked for (no buffered
+reader below the stream): the bytes after the record boundary are the
+kernel's. 0-RTT data a server accepted and has not read comes first in the
+plaintext set aside; it can be replayed, and `early_data_len` tells where it
+ends.
+
 Taking a stream apart with `into_inner` instead drops what only the stream
 holds (an unfinished 0-RTT phase, a read error kept for the next read), and
 the connection then refuses the handover while anything is in flight.

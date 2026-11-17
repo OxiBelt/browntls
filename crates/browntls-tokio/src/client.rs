@@ -286,7 +286,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// completes the handshake of a stream returned early for 0-RTT data
     /// (sending declined early data again where that is allowed), writes
     /// and flushes every queued record, reads exactly up to the next record
-    /// boundary, and sets the received plaintext aside.
+    /// boundary, and sets the received plaintext aside. The transport must
+    /// not read ahead (see [`crate::kernel`]).
     ///
     /// The configuration must have `enable_secret_extraction` set. On
     /// failure the stream comes back in the

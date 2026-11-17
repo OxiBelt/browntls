@@ -18,6 +18,15 @@
 //! (for `dangerous_into_kernel_connection`) and that plaintext, which the
 //! application reads before anything the kernel delivers.
 //!
+//! The transport must not read ahead of what it is asked for (a buffered
+//! reader would): the bytes after the record boundary are the kernel's, and
+//! what a transport holds back never reaches it. Bytes it buffers for
+//! writing are flushed.
+//!
+//! 0-RTT data a server accepted and has not read (it can be replayed, and
+//! reads of the stream never return it) comes first in that plaintext;
+//! [`KernelHandoff::early_data_len`] tells where it ends.
+//!
 //! The module needs no operating system support and works over any
 //! transport; `browntls-ktls` builds its Tokio stream on it.
 //!
@@ -32,7 +41,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use browntls::kernel::KernelHandoffBlocker;
-use browntls::{ClientConnection, ConnectionCommon, ServerConnection, SideData};
+use browntls::{ClientConnection, ConnectionCommon, IoState, ServerConnection, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::common::{self, Stream, StreamState, SyncReadAdapter};
@@ -50,6 +59,7 @@ use crate::{client, server};
 pub struct KernelHandoff<S> {
     stream: S,
     received: Vec<u8>,
+    early_data_len: usize,
 }
 
 impl<S> KernelHandoff<S> {
@@ -58,6 +68,14 @@ impl<S> KernelHandoff<S> {
     /// afterwards.
     pub fn received(&self) -> &[u8] {
         &self.received
+    }
+
+    /// How many bytes at the start of [`received`](Self::received) are
+    /// 0-RTT data a server accepted and had not read (`early_data()` of
+    /// the connection). An attacker can replay that data, so a server must
+    /// not act on it as on the rest. Zero for a client.
+    pub fn early_data_len(&self) -> usize {
+        self.early_data_len
     }
 
     /// Goes on in userspace: the stream, and the data to read before
@@ -101,6 +119,7 @@ impl<S> fmt::Debug for KernelHandoff<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KernelHandoff")
             .field("received", &self.received.len())
+            .field("early_data_len", &self.early_data_len)
             .finish_non_exhaustive()
     }
 }
@@ -109,17 +128,22 @@ impl<S> fmt::Debug for KernelHandoff<S> {
 ///
 /// Nothing is lost: the stream comes back with the application data the
 /// attempt had already taken out of it.
+#[non_exhaustive]
 pub struct KernelHandoffError<S> {
     /// The stream. It is still usable when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded:
     /// a [`KernelHandoffBlocker`] that driving the stream does not clear)
     /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent);
     /// after any other error it has failed like a stream whose read or
-    /// write returned that error.
+    /// write returned that error (a connection that had failed before
+    /// reports its error again).
     pub stream: S,
     /// Application data taken from the stream before the error, to be read
     /// before anything the stream yields.
     pub received: Vec<u8>,
+    /// How many bytes at the start of `received` are 0-RTT data a server
+    /// accepted and had not read; see [`KernelHandoff::early_data_len`].
+    pub early_data_len: usize,
     /// What stood in the way.
     pub error: io::Error,
 }
@@ -163,29 +187,35 @@ impl<S> std::error::Error for KernelHandoffError<S> {
 pub struct IntoKernelHandoff<S> {
     /// `None` once the future returned.
     stream: Option<S>,
-    received: Vec<u8>,
+    taken: sealed::Taken,
 }
 
 impl<S> IntoKernelHandoff<S> {
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream: Some(stream),
-            received: Vec::new(),
+            taken: sealed::Taken::default(),
         }
+    }
+
+    /// How many bytes at the start of the data taken so far are 0-RTT data
+    /// a server accepted; see [`KernelHandoff::early_data_len`].
+    pub fn early_data_len(&self) -> usize {
+        self.taken.early_len
     }
 
     /// Gives up: the stream and the application data already taken out of
     /// it, to be read before anything the stream yields. `None` once the
     /// future returned.
     pub fn into_stream(self) -> Option<(S, Vec<u8>)> {
-        Some((self.stream?, self.received))
+        Some((self.stream?, self.taken.data))
     }
 }
 
 impl<S> fmt::Debug for IntoKernelHandoff<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoKernelHandoff")
-            .field("received", &self.received.len())
+            .field("received", &self.taken.data.len())
             .finish_non_exhaustive()
     }
 }
@@ -193,15 +223,30 @@ impl<S> fmt::Debug for IntoKernelHandoff<S> {
 mod sealed {
     use super::*;
 
+    /// The plaintext taken out of a connection: accepted 0-RTT data (the
+    /// first `early_len` bytes), then the rest.
+    #[derive(Default)]
+    pub struct Taken {
+        pub(super) data: Vec<u8>,
+        pub(super) early_len: usize,
+    }
+
+    /// Lengths only: the data is application plaintext.
+    impl fmt::Debug for Taken {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Taken")
+                .field("data", &self.data.len())
+                .field("early_len", &self.early_len)
+                .finish()
+        }
+    }
+
     /// A stream [`IntoKernelHandoff`] can drive.
     pub trait Prepare {
         /// Moves the stream towards a state with nothing in flight, putting
-        /// the plaintext it takes out of the connection into `received`.
-        fn poll_prepare(
-            &mut self,
-            cx: &mut Context<'_>,
-            received: &mut Vec<u8>,
-        ) -> Poll<io::Result<()>>;
+        /// the plaintext it takes out of the connection into `taken`.
+        fn poll_prepare(&mut self, cx: &mut Context<'_>, taken: &mut Taken)
+        -> Poll<io::Result<()>>;
     }
 }
 
@@ -209,7 +254,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for client::TlsStream<I
     fn poll_prepare(
         &mut self,
         cx: &mut Context<'_>,
-        received: &mut Vec<u8>,
+        taken: &mut sealed::Taken,
     ) -> Poll<io::Result<()>> {
         // The 0-RTT phase first: only the stream knows what to send again
         // when the server declined the early data.
@@ -219,7 +264,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for client::TlsStream<I
             &mut self.session,
             &mut self.st,
             cx,
-            received,
+            taken,
             |_, _| Ok(()),
         )
     }
@@ -229,16 +274,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for server::TlsStream<I
     fn poll_prepare(
         &mut self,
         cx: &mut Context<'_>,
-        received: &mut Vec<u8>,
+        taken: &mut sealed::Taken,
     ) -> Poll<io::Result<()>> {
         poll_prepare(
             &mut self.io,
             &mut self.session,
             &mut self.st,
             cx,
-            received,
-            |session, received| match session.early_data() {
-                Some(mut early) => early.read_to_end(received).map(|_| ()),
+            taken,
+            |session, early_data| match session.early_data() {
+                Some(mut early) => early.read_to_end(early_data).map(|_| ()),
                 None => Ok(()),
             },
         )
@@ -256,19 +301,27 @@ impl<S: sealed::Prepare + Unpin> Future for IntoKernelHandoff<S> {
         let Some(mut stream) = this.stream.take() else {
             panic!("kernel handoff future polled after completion")
         };
-        let result = match stream.poll_prepare(cx, &mut this.received) {
+        let result = match stream.poll_prepare(cx, &mut this.taken) {
             Poll::Ready(result) => result,
             Poll::Pending => {
                 this.stream = Some(stream);
                 return Poll::Pending;
             }
         };
-        let received = std::mem::take(&mut this.received);
+        let sealed::Taken {
+            data: received,
+            early_len: early_data_len,
+        } = std::mem::take(&mut this.taken);
         Poll::Ready(match result {
-            Ok(()) => Ok(KernelHandoff { stream, received }),
+            Ok(()) => Ok(KernelHandoff {
+                stream,
+                received,
+                early_data_len,
+            }),
             Err(error) => Err(KernelHandoffError {
                 stream,
                 received,
+                early_data_len,
                 error,
             }),
         })
@@ -286,7 +339,7 @@ fn poll_prepare<IO, C, SD>(
     session: &mut C,
     st: &mut StreamState,
     cx: &mut Context<'_>,
-    received: &mut Vec<u8>,
+    taken: &mut sealed::Taken,
     take_early_data: fn(&mut C, &mut Vec<u8>) -> io::Result<()>,
 ) -> Poll<io::Result<()>>
 where
@@ -309,7 +362,7 @@ where
             KernelHandoffBlocker::HandshakeIncomplete if session.is_handshaking() => {
                 // A stream returned before its handshake completed. Plaintext
                 // left unread (a server's 0-RTT data) would stall it.
-                take_plaintext(session, received, take_early_data)?;
+                take_plaintext(session, taken, take_early_data)?;
                 let mut stream = Stream::new(io, session)
                     .set_eof(!st.state.readable())
                     .set_need_flush(st.need_flush);
@@ -318,7 +371,7 @@ where
                 ready!(poll)?;
             }
             KernelHandoffBlocker::UnreadPlaintext => {
-                take_plaintext(session, received, take_early_data)?;
+                take_plaintext(session, taken, take_early_data)?;
             }
             KernelHandoffBlocker::UnsentRecords => {
                 ready!(common::poll_flush(io, session, st, cx))?;
@@ -328,28 +381,41 @@ where
             }
             KernelHandoffBlocker::KeyUpdatePending => {
                 // Processing (nothing new) sends the KeyUpdate that is due.
-                process(io, session, cx)?;
+                let _ = process(io, session, cx)?;
                 if session.kernel_handoff_blocker() == Some(blocker) {
                     return Poll::Ready(Err(unsupported(blocker)));
                 }
             }
-            other => return Poll::Ready(Err(unsupported(other))),
+            other => {
+                // A connection that has failed says so (it reports an
+                // incomplete handshake); anything else stays as it is.
+                let _ = process(io, session, cx)?;
+                return Poll::Ready(Err(unsupported(other)));
+            }
         }
     }
 }
 
 /// Moves the plaintext the connection holds for the application into
-/// `received`: accepted 0-RTT data first, as it was sent first.
+/// `taken`: accepted 0-RTT data in front, as it was sent first.
 fn take_plaintext<C, SD>(
     session: &mut C,
-    received: &mut Vec<u8>,
+    taken: &mut sealed::Taken,
     take_early_data: fn(&mut C, &mut Vec<u8>) -> io::Result<()>,
 ) -> io::Result<()>
 where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    take_early_data(session, received)?;
+    let mut early = Vec::new();
+    let result = take_early_data(session, &mut early);
+    // Kept even when taking it failed part of the way, and kept together
+    // in front whatever was taken before.
+    let at = taken.early_len;
+    taken.early_len += early.len();
+    taken.data.splice(at..at, early);
+    result?;
+    let received = &mut taken.data;
     let mut reader = session.reader();
     // An error here (`WouldBlock`, a truncated transport) says only that
     // nothing more is buffered; whoever reads next meets it again.
@@ -364,9 +430,9 @@ where
     Ok(())
 }
 
-/// Completes the record the connection holds a part of, reading no byte
-/// beyond it (what follows is the kernel's), and processes the buffered
-/// records.
+/// Processes the buffered records and, while a record is still incomplete,
+/// reads towards its end and no byte beyond it (what follows is the
+/// kernel's).
 fn poll_to_record_boundary<IO, C, SD>(
     io: &mut IO,
     session: &mut C,
@@ -377,45 +443,46 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    let missing = session.bytes_to_record_boundary();
-    if missing > 0 {
-        let mut limited = SyncReadAdapter { io, cx }.take(missing as u64);
-        match session.read_tls(&mut limited) {
-            Ok(0) => {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "peer closed the connection inside a record",
-                )));
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
-            Err(err) => return Poll::Ready(Err(err)),
-        }
+    let state = process(io, session, cx)?;
+    if session.kernel_handoff_blocker() != Some(KernelHandoffBlocker::UnprocessedInput) {
+        return Poll::Ready(Ok(()));
     }
-    process(io, session, cx)?;
-    if session.bytes_to_record_boundary() == 0
-        && session.kernel_handoff_blocker() == Some(KernelHandoffBlocker::UnprocessedInput)
-    {
-        // Whole records the connection will not process: it stops at the
-        // peer's close_notify, and what follows that would stay for good.
+    if state.peer_has_closed() {
+        // The connection stops at the peer's close_notify: what follows
+        // it, whole or in part, would stay unprocessed for good.
         return Poll::Ready(Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "data follows the peer's close_notify",
         )));
     }
-    Poll::Ready(Ok(()))
+    let missing = session.bytes_to_record_boundary();
+    if missing == 0 {
+        // Whole records that processing left in place.
+        return Poll::Ready(Err(unsupported(KernelHandoffBlocker::UnprocessedInput)));
+    }
+    let mut limited = SyncReadAdapter { io, cx }.take(missing as u64);
+    match session.read_tls(&mut limited) {
+        Ok(0) => Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "peer closed the connection inside a record",
+        ))),
+        // The next round processes what was read.
+        Ok(_) => Poll::Ready(Ok(())),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+        Err(err) => Poll::Ready(Err(err)),
+    }
 }
 
 /// Processes the buffered records. On failure the alert goes out if the
 /// transport takes it now, as after a failed read.
-fn process<IO, C, SD>(io: &mut IO, session: &mut C, cx: &mut Context<'_>) -> io::Result<()>
+fn process<IO, C, SD>(io: &mut IO, session: &mut C, cx: &mut Context<'_>) -> io::Result<IoState>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
     match session.process_new_packets() {
-        Ok(_) => Ok(()),
+        Ok(state) => Ok(state),
         Err(err) => {
             let _ = Stream::new(io, session).write_io(cx);
             Err(io::Error::new(io::ErrorKind::InvalidData, err))

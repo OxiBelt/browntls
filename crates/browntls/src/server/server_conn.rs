@@ -177,8 +177,8 @@ pub struct ServerConfig {
     /// It also bounds the rejected 0-RTT records skipped during the
     /// handshake: their plaintext, and their number, since each costs at
     /// least one byte. With zero, early data that is offered anyway is
-    /// skipped up to 16384 bytes. An external PSK's own limit, if larger,
-    /// applies to its connections.
+    /// skipped up to 16384 bytes. When the server decrypts with an external
+    /// PSK's handshake key, that PSK's own limit applies if larger.
     pub max_early_data_size: u32,
 
     /// Whether to send application data before the client's Finished.

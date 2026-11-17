@@ -81,6 +81,46 @@ fn acceptor_rejects_garbage_with_an_alert() {
     assert_eq!(out[5], 2);
 }
 
+#[test]
+fn records_read_past_the_client_hello_wait_for_the_connection_and_its_alert_can_be_sent() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+
+    let mut acceptor = Acceptor::default();
+    let mut bytes = Vec::new();
+    client.write_tls(&mut bytes).unwrap();
+    // After the ClientHello, in the same read: a well-formed record of an
+    // unknown content type.
+    bytes.extend_from_slice(&[0x63, 3, 3, 0, 1, 0]);
+    acceptor.read_tls(&mut &bytes[..]).unwrap();
+    let accepted = acceptor.accept().unwrap().expect("ClientHello complete");
+
+    // The connection has not looked at that record yet.
+    let mut server = accepted
+        .into_connection(Arc::new(server_config(&chain)))
+        .map_err(|(e, _)| e)
+        .unwrap();
+    assert!(server.wants_write(), "the server's flight");
+    server.process_new_packets().unwrap_err();
+
+    // What it queued goes out through `AcceptedAlert`: its flight, which
+    // the client reads up to the alert that follows it.
+    let mut alert = browntls::server::AcceptedAlert::from(server);
+    let mut out = Vec::new();
+    alert.write_all(&mut out).unwrap();
+    assert_eq!(alert.write(&mut Vec::new()).unwrap(), 0);
+    let mut out = &out[..];
+    let err = loop {
+        assert!(!out.is_empty(), "no alert after the flight");
+        client.read_tls(&mut out).unwrap();
+        if let Err(err) = client.process_new_packets() {
+            break err;
+        }
+    };
+    assert!(matches!(err, Error::AlertReceived(_)), "{err:?}");
+}
+
 // ------------------------------------------------------------------ Stream
 
 #[test]

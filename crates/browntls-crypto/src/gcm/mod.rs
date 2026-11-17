@@ -2,22 +2,26 @@
 //!
 //! [`Aes128Gcm`] and [`Aes256Gcm`] implement [`Aead`] with 96-bit nonces and
 //! 128-bit tags, as used by TLS 1.2 (RFC 5288) and TLS 1.3 (RFC 8446).
+//! [`Ghash`] is GHASH on its own, keyed by the hash subkey `H`, for
+//! constructions other than AES-GCM; it runs on the same backends and is not
+//! a MAC by itself (see its security notes).
+//!
 //! Encryption is CTR mode over the [`crate::aes`] backends; GHASH dispatches
 //! independently to one of:
 //!
 //! | Backend | Where | Notes |
 //! |---|---|---|
-//! | [`GhashBackend::Soft`] | everywhere | masked integer multiplications, constant time |
-//! | [`GhashBackend::Clmul`] | x86-64 with PCLMULQDQ | 8 blocks per reduction, Karatsuba |
-//! | [`GhashBackend::Vpclmul`] | x86-64 with VPCLMULQDQ + AVX2 | 8 blocks per reduction on YMM registers |
-//! | [`GhashBackend::VpclmulAvx512`] | x86-64 with VPCLMULQDQ + AVX-512 | 32 blocks per reduction on ZMM registers |
-//! | [`GhashBackend::Pmull`] | aarch64 with FEAT_PMULL | 8 blocks per reduction, Karatsuba |
-//! | [`GhashBackend::RvZvkg`] | riscv64 with RVV 1.0 + Zvkg | `vghsh.vv` |
-//! | [`GhashBackend::RvZvbc`] | riscv64 with RVV 1.0 + Zvbc | `vclmul`/`vclmulh` |
-//! | [`GhashBackend::RvClmul`] | riscv64 with Zbc or Zbkc | scalar `clmul`/`clmulh` |
+//! | `GhashBackend::Soft` | everywhere | masked integer multiplications, constant time |
+//! | `GhashBackend::Clmul` | x86-64 with PCLMULQDQ | 8 blocks per reduction, Karatsuba |
+//! | `GhashBackend::Vpclmul` | x86-64 with VPCLMULQDQ + AVX2 | 8 blocks per reduction on YMM registers |
+//! | `GhashBackend::VpclmulAvx512` | x86-64 with VPCLMULQDQ + AVX-512 | 32 blocks per reduction on ZMM registers |
+//! | `GhashBackend::Pmull` | aarch64 with FEAT_PMULL | 8 blocks per reduction, Karatsuba |
+//! | `GhashBackend::RvZvkg` | riscv64 with RVV 1.0 + Zvkg | `vghsh.vv` |
+//! | `GhashBackend::RvZvbc` | riscv64 with RVV 1.0 + Zvbc | `vclmul`/`vclmulh` |
+//! | `GhashBackend::RvClmul` | riscv64 with Zbc or Zbkc | scalar `clmul`/`clmulh` |
 //!
-//! When both ZMM backends ([`aes::Backend::VaesAvx512`] and
-//! [`GhashBackend::VpclmulAvx512`]) are selected, sealing and opening run
+//! When both ZMM backends (`aes::Backend::VaesAvx512` and
+//! `GhashBackend::VpclmulAvx512`) are selected, sealing and opening run
 //! through a fused loop that encrypts and hashes 32 blocks per iteration
 //! (see `x86_avx512`); other backend combinations run CTR and GHASH as
 //! separate passes. On the fused path decryption writes plaintext into the
@@ -31,7 +35,9 @@
 //! ([`crate::accel::load`]) is enabled take part in it: while the selected
 //! AES backend runs slower than usual, a share of the records is sealed and
 //! opened with another AES backend. Records under 128-bit and under 256-bit
-//! keys are separate streams, since they cost differently per byte.
+//! keys are separate streams, since they cost differently per byte. A
+//! [`Ghash`] does not take part: it keeps the GHASH backend it was created
+//! with.
 //!
 //! An expanded key serves one backend only. A routable key therefore keeps
 //! a copy of the AES key (in a small allocation, wiped on drop) and expands
@@ -55,6 +61,7 @@
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+mod ghash;
 mod keys;
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
@@ -73,13 +80,16 @@ use crate::cpu::features;
 use crate::zeroize::zeroize_bytes;
 use keys::Keys;
 
+pub use ghash::{GHASH_BLOCK_LEN, Ghash};
+
 /// Maximum plaintext length in bytes (2^39 - 256 bits).
 const P_MAX: u64 = (1 << 36) - 32;
 /// Maximum additional-data length in bytes (2^64 - 1 bits).
 const A_MAX: u64 = (1 << 61) - 1;
 
-/// GHASH implementation backends. Exposed for differential testing; the
-/// dispatcher picks the best available one automatically.
+/// GHASH implementation backends. Exposed for differential testing (also
+/// through `Ghash::with_backend`); the dispatcher picks the best available
+/// one automatically.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]

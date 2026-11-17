@@ -9,7 +9,7 @@
 //! | SHA-1 (HMAC-SHA1 for TLS 1.2 CBC suites only) | SHA-NI | SHA1 | Zbb |
 //! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
 //! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
-//! | AES / GHASH (GCM; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
+//! | AES / GHASH (GCM, and [`gcm::Ghash`] on its own; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
 //! | AES decryption (CBC) | AES-NI, VAES | AES | Zvkned, Zknd |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |

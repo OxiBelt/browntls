@@ -1,19 +1,26 @@
 //! Symmetric ciphers and AEADs of `browntls-crypto`
 //! (`fuzz_targets/crypto_cipher.rs`).
 //!
-//! Reaches every public function of `aes`, `gcm`, `ccm`, `chacha` (ChaCha20,
-//! Poly1305 and the ChaCha20-Poly1305 AEAD), `aead`, `cbc` and `tls_cbc`,
-//! and checks:
+//! Reaches every public function of `aes`, `gcm` (AES-GCM and standalone
+//! GHASH), `ccm`, `chacha` (ChaCha20, Poly1305 and the ChaCha20-Poly1305
+//! AEAD), `aead`, `cbc` and `tls_cbc`, and checks:
 //!
 //! - AES blocks and CTR keystreams, AES-GCM, AES-CCM (every SP 800-38C
 //!   parameter set), ChaCha20-Poly1305 and AES-CBC against the RustCrypto
 //!   `aes`, `aes-gcm`, `ccm`, `chacha20poly1305` and `cbc` crates;
-//!   ChaCha20 against a reference block function in this harness and Poly1305
-//!   against a big-integer reference;
+//!   ChaCha20 against a reference block function in this harness, Poly1305
+//!   against a big-integer reference, and GHASH against a bit-serial
+//!   reference (for a fuzzed hash subkey) and, through the AES-GCM tag
+//!   relation, against the RustCrypto `aes` and `aes-gcm` crates;
 //! - every backend this CPU has (each AES, GHASH, ChaCha20 and Poly1305
 //!   backend, selected explicitly) against the oracle and therefore against
 //!   the portable one; constructors for unavailable backends fail with
-//!   `Unsupported`;
+//!   `Unsupported` (or, for `Poly1305` and `Ghash`, fall back to the
+//!   portable backend);
+//! - standalone GHASH fed in every documented way (whole padded fields,
+//!   streamed chunks, whole blocks, a padded last chunk, a plain stream,
+//!   whole blocks after a buffered partial block) gives the same value, and
+//!   `Ghash::new` takes the backend selected under each GHASH policy;
 //! - seal/open round trips; a flipped ciphertext, tag or AAD bit, and any
 //!   fuzzed ciphertext the oracle rejects, fails to open and wipes the
 //!   buffer; fuzzed ciphertexts the oracle accepts open to its plaintext;
@@ -37,6 +44,7 @@
 mod aes_aead;
 mod aes_block;
 mod chacha;
+mod ghash;
 mod tls_cbc;
 
 use browntls_crypto::Error;
@@ -45,13 +53,14 @@ use browntls_crypto::aead::{Aead, NONCE_LEN, TAG_LEN};
 use self::aes_aead::{op_ccm, op_ccm_tls, op_gcm};
 use self::aes_block::{op_aes, op_cbc};
 use self::chacha::{op_chacha, op_chacha_poly, op_poly1305};
+use self::ghash::op_ghash;
 use self::tls_cbc::op_tls_cbc;
 use crate::input::{Input, put_field, put_short_field};
 
 /// Most operations one input runs.
 pub const MAX_OPS: usize = 64;
 /// Number of operations.
-const OPS: u8 = 9;
+const OPS: u8 = 10;
 
 const OP_AES: u8 = 0;
 const OP_GCM: u8 = 1;
@@ -62,6 +71,7 @@ const OP_POLY1305: u8 = 5;
 const OP_CHACHA_POLY: u8 = 6;
 const OP_CBC: u8 = 7;
 const OP_TLS_CBC: u8 = 8;
+const OP_GHASH: u8 = 9;
 
 /// The `crypto_cipher` fuzz target.
 ///
@@ -86,7 +96,9 @@ const OP_TLS_CBC: u8 = 8;
 ///   ciphertext (field);
 /// - 8 TLS 1.2 CBC: MAC, order, width, backend, AES key (32), MAC key flag
 ///   and key, sequence number (u64), type, version (2), IV (16), plaintext
-///   (message), buffer slack, extra padding, tamper (u16), fuzzed fragment.
+///   (message), buffer slack, extra padding, tamper (u16), fuzzed fragment;
+/// - 9 GHASH: hash subkey (16), AAD (8-bit field), ciphertext (message),
+///   chunk plan (8-bit field), width, AES key (32), nonce (12).
 ///
 /// A message is a 16-bit length-prefixed field followed by an extension byte
 /// that appends `17 * n` pattern bytes.
@@ -105,7 +117,8 @@ pub fn run(data: &[u8]) {
             OP_POLY1305 => op_poly1305(&mut input),
             OP_CHACHA_POLY => op_chacha_poly(&mut input),
             OP_CBC => op_cbc(&mut input),
-            _ => op_tls_cbc(&mut input),
+            OP_TLS_CBC => op_tls_cbc(&mut input),
+            _ => op_ghash(&mut input),
         }
     }
 }
@@ -407,5 +420,31 @@ pub fn seeds() -> Vec<Vec<u8>> {
     put_field(&mut s, &bytes[..200]);
     s.push(255);
     seeds.push(s);
+    // GHASH: irregular chunks, whole blocks only, the zero subkey and a
+    // ciphertext long enough for every backend's widest grouping.
+    for (h, aad, msg, ext, plan, wide) in [
+        (
+            &bytes[100..116],
+            13usize,
+            40usize,
+            0u8,
+            &[3u8, 0x82, 17][..],
+            0u8,
+        ),
+        (&bytes[120..136], 32, 64, 0, &[16, 1][..], 1),
+        (&[0u8; 16][..], 0, 7, 0, &[][..], 0),
+        (&bytes[140..156], 20, 60, 255, &[5, 0x85, 0x90][..], 1),
+    ] {
+        let mut s = vec![OP_GHASH];
+        s.extend_from_slice(h);
+        put_short_field(&mut s, &bytes[..aad]);
+        put_field(&mut s, &bytes[..msg]);
+        s.push(ext);
+        put_short_field(&mut s, plan);
+        s.push(wide);
+        s.extend_from_slice(key);
+        s.extend_from_slice(&bytes[60..72]);
+        seeds.push(s);
+    }
     seeds
 }

@@ -116,7 +116,8 @@ crash is handled as a potential vulnerability under
 [SECURITY.md](../SECURITY.md); inputs and reports go to the private evidence
 repository below, never to public issues, logs or CI artifacts, which is why
 a failing CI job prints only the target, the kind of finding and the input's
-hash.
+hash, and saves no corpus to the Actions cache, which pull requests can read
+(the failing input may be a corpus entry).
 
 The original prerequisites, which remain the bar for each new crate or
 boundary:

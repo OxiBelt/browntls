@@ -21,6 +21,13 @@
 # the runner). Only the target, the exit status, the
 # kind of finding, libFuzzer's random seed, its final statistics and the
 # input's SHA-256 are printed.
+#
+# A failing input may be an entry of the target's corpus (restored from an
+# earlier run or generated as a seed) rather than a new mutation, so a failing
+# target's corpus is moved into FUZZ_FINDINGS too (<target>/corpus.XXXXXX/),
+# and nothing that later publishes fuzz/corpus, such as the fuzz workflow's
+# corpus cache, can carry the input. Only targets that ran clean keep a corpus
+# under fuzz/corpus.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -91,6 +98,9 @@ for target in "$@"; do
     fi
   done
   echo "::error title=Fuzz finding in ${target}::${target} failed (exit ${status}, ${kind}). The input and log are withheld from the public log; see fuzz/README.md, Continuous fuzzing."
+  quarantine="$(mktemp -d "${artifacts}corpus.XXXXXX")"
+  mv "corpus/${target}" "${quarantine}/"
+  echo "The ${target} corpus was moved to the findings directory."
   for input in "${artifacts}"*; do
     [[ -f "${input}" ]] && echo "input SHA-256: $(sha256sum "${input}" | cut -d' ' -f1)"
   done

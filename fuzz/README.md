@@ -166,7 +166,8 @@ one x86-64 runner (`ubuntu-26.04`):
   harness changed; a change to the shared fuzz infrastructure selects every
   target.
 - A daily run fuzzes every target for twenty minutes and keeps each target's
-  minimized corpus in the Actions cache, which later runs start from.
+  minimized corpus in the Actions cache, which later runs start from. A job
+  saves its corpus only when every target it ran was clean.
 - A manual run chooses the targets, the time per target and the
   granularity: one job per target, or one per topic running its targets one
   after another.
@@ -189,8 +190,19 @@ the input. The input and the log are not uploaded and are lost with the
 runner, and the seed alone does not replay the run (the starting corpus and
 the generated certificates differ), so a CI finding is a signal: fuzz that
 target locally until it reproduces, and handle the result as a potential
-vulnerability, as described under [Running](#running). A topic-granularity run
-keeps its own corpus, separate from the per-target corpora of the daily run.
+vulnerability, as described under [Running](#running).
+
+The input that fails can be an entry of the corpus the job started from (a
+cached corpus or a seed) rather than a new mutation. Pull requests, from forks
+too, can restore the Actions cache, so a saved corpus holding that input would
+publish what the printed hash identifies. The script therefore moves a failing
+target's corpus into `FUZZ_FINDINGS` (`<target>/corpus.XXXXXX/`; locally under
+`fuzz/findings/`, where it also helps to reproduce the finding), and the
+workflow saves no corpus from a job that failed, was cancelled or timed out.
+Once the finding is fixed, the next clean run saves a corpus again.
+
+A topic-granularity run keeps its own corpus, separate from the per-target
+corpora of the daily run.
 
 Record each manual campaign (revision, toolchain, targets, duration, result)
 with the change it supports.

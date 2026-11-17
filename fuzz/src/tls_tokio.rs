@@ -6,13 +6,16 @@
 //! (`tls_conn::setup::Knobs`), a mode byte (how each side is created: the
 //! `TlsConnector` entry point, `TlsAcceptor` or `LazyConfigAcceptor` with
 //! `into_stream`, `into_stream_with` or `from_parts`, the fallible futures,
-//! early data), two bytes per direction for the transport (largest chunk
+//! early data, and in bit 7 a server that returns from its accept future
+//! before the handshake for early data), two bytes per direction for the
+//! transport (largest chunk
 //! per call, and a mask of calls that return `Pending`), then up to 96
 //! operations: polls of the handshake futures, writes (plain or vectored),
 //! reads (`poll_read` or `poll_fill_buf` and `consume`), flushes,
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
-//! accessors, early data reads, the lazy acceptor's `take_io`, pumping
-//! until idle, and reconnection (resumption and 0-RTT).
+//! accessors, early data reads (through the stream's reader, which drives
+//! the handshake, or straight from the connection), the lazy acceptor's
+//! `take_io`, pumping until idle, and reconnection (resumption and 0-RTT).
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -177,7 +180,8 @@ enum Op {
     KeyUpdate,
     /// `side`: every accessor of that side's future or stream.
     Accessors,
-    /// The server reads accepted 0-RTT data.
+    /// The server reads accepted 0-RTT data: `side` 1 through the stream's
+    /// early data reader, 0 from the connection.
     EarlyRead,
     /// The lazy acceptor gives its transport back.
     TakeIo,
@@ -221,6 +225,9 @@ struct World {
     /// The client's connect returned before its handshake (0-RTT): the
     /// server's ordinary data then starts after the accepted early data.
     early_attempted: bool,
+    /// How many server streams were returned before their handshake
+    /// completed.
+    server_returned_early: usize,
 }
 
 fn cx() -> Context<'static> {
@@ -242,6 +249,7 @@ impl World {
             received: [Vec::new(), Vec::new()],
             early: Vec::new(),
             early_attempted: false,
+            server_returned_early: 0,
         };
         world.connect();
         world
@@ -294,12 +302,27 @@ impl World {
         };
         self.early_attempted = false;
 
-        let acceptor = TlsAcceptor::from(self.server_config.clone());
+        let acceptor =
+            TlsAcceptor::from(self.server_config.clone()).early_data(self.server_early());
         self.server = match (self.mode >> 3) & 3 {
             0 => self.accept(acceptor.accept(end(SERVER))),
             1 => self.accept(acceptor.accept_with(end(SERVER), |s| s.set_buffer_limit(Some(4096)))),
             _ => Server::Lazy(LazyConfigAcceptor::new(Acceptor::default(), end(SERVER))),
         };
+    }
+
+    /// Whether the server's accept future may return before the handshake.
+    fn server_early(&self) -> bool {
+        self.mode & 0x80 != 0
+    }
+
+    /// The server's stream, as its accept future returned it.
+    fn accepted(&mut self, stream: browntls_tokio::server::TlsStream<End>) {
+        if stream.get_ref().1.is_handshaking() {
+            assert!(self.server_early(), "a handshaking stream nobody asked for");
+            self.server_returned_early += 1;
+        }
+        self.server = Server::Ready(stream.into());
     }
 
     fn accept(&self, accept: Accept<End>) -> Server {
@@ -340,11 +363,13 @@ impl World {
                 Poll::Ready(Ok(start)) => {
                     let _ = start.client_hello().server_name();
                     let config = self.server_config.clone();
+                    let early = self.server_early();
                     let accept = match (self.mode >> 3) & 3 {
-                        2 => start.into_stream(config),
+                        2 => start.early_data(early).into_stream(config),
                         _ => {
                             let (accepted, io) = start.into_inner();
                             StartHandshake::from_parts(accepted, io)
+                                .early_data(early)
                                 .into_stream_with(config, |s| s.set_buffer_limit(Some(4096)))
                         }
                     };
@@ -354,12 +379,12 @@ impl World {
                 Poll::Pending => {}
             },
             Server::Accepting(f) => match Pin::new(f).poll(&mut cx) {
-                Poll::Ready(Ok(s)) => self.server = Server::Ready(s.into()),
+                Poll::Ready(Ok(s)) => self.accepted(s),
                 Poll::Ready(Err(_)) => self.server = Server::Gone,
                 Poll::Pending => {}
             },
             Server::Fallible(f) => match Pin::new(f).poll(&mut cx) {
-                Poll::Ready(Ok(s)) => self.server = Server::Ready(s.into()),
+                Poll::Ready(Ok(s)) => self.accepted(s),
                 Poll::Ready(Err((_, _io))) => self.server = Server::Gone,
                 Poll::Pending => {}
             },
@@ -578,10 +603,12 @@ fn play(data: &[u8]) -> Option<World> {
             },
             Op::Accessors => world.accessors(side),
             Op::EarlyRead => {
-                if let Server::Ready(TlsStream::Server(s)) = &mut world.server
-                    && let Some(mut early) = s.get_mut().1.early_data()
-                {
-                    let _ = early.read_to_end(&mut world.early);
+                if let Server::Ready(TlsStream::Server(s)) = &mut world.server {
+                    if side == SERVER {
+                        read_early(s, &mut world.early);
+                    } else if let Some(mut early) = s.get_mut().1.early_data() {
+                        let _ = early.read_to_end(&mut world.early);
+                    }
                 }
                 world.check();
             }
@@ -609,8 +636,27 @@ fn play(data: &[u8]) -> Option<World> {
     Some(world)
 }
 
+/// Reads what the stream's early data reader has, with as many polls as
+/// bring bytes (bounded): each also drives the handshake.
+fn read_early(stream: &mut browntls_tokio::server::TlsStream<End>, out: &mut Vec<u8>) {
+    let Some(mut reader) = stream.early_data() else {
+        return;
+    };
+    let mut cx = cx();
+    for _ in 0..64 {
+        let mut buf = [0; 512];
+        let mut rb = ReadBuf::new(&mut buf);
+        match Pin::new(&mut reader).poll_read(&mut cx, &mut rb) {
+            Poll::Ready(Ok(())) if !rb.filled().is_empty() => out.extend_from_slice(rb.filled()),
+            _ => break,
+        }
+    }
+}
+
 /// Seeds: every creation mode with a full exchange, 0-RTT on a resumed
-/// connection, a refused plain-text request, and damaged handshakes.
+/// connection (read after the handshake, and before its end by a server
+/// that returns early), a refused plain-text request, and damaged
+/// handshakes.
 pub fn seeds() -> Vec<Vec<u8>> {
     let op = |out: &mut Vec<u8>, op: Op, side: usize| {
         out.push(op as u8);
@@ -672,6 +718,52 @@ pub fn seeds() -> Vec<Vec<u8>> {
     put_short_field(&mut s, b"later");
     op(&mut s, Op::Pump, 0);
     seeds.push(s);
+    // 0-RTT read before the handshake completes: the server's accept
+    // returns early (mode bit 7), from each way of creating it, with and
+    // without 0.5-RTT data (configuration bit 7).
+    for (flags, mode) in [
+        (0x41u8, 0xc0u8),
+        (0xc1, 0xc0),
+        (0xc1, 0xe8),
+        (0x41, 0xd0),
+        (0xc1, 0xd8),
+    ] {
+        let mut s = vec![flags, 0, 0, 0, 0, mode, 255, 0, 255, 0];
+        op(&mut s, Op::Pump, 0);
+        op(&mut s, Op::Write, SERVER);
+        s.push(0);
+        put_short_field(&mut s, b"ticket");
+        op(&mut s, Op::Pump, 0);
+        op(&mut s, Op::Reconnect, 0);
+        op(&mut s, Op::Poll, CLIENT);
+        op(&mut s, Op::Write, CLIENT);
+        s.push(0);
+        put_short_field(&mut s, b"early request");
+        // The ClientHello and the early data go out; the lazy acceptor
+        // takes one poll more than the acceptor.
+        op(&mut s, Op::Flush, CLIENT);
+        op(&mut s, Op::Poll, SERVER);
+        op(&mut s, Op::Poll, SERVER);
+        op(&mut s, Op::Accessors, SERVER);
+        op(&mut s, Op::EarlyRead, SERVER);
+        // Sent at once as 0.5-RTT data, or waiting for the handshake.
+        op(&mut s, Op::Write, SERVER);
+        s.push(0);
+        put_short_field(&mut s, b"reply");
+        op(&mut s, Op::Pump, 0);
+        op(&mut s, Op::Write, SERVER);
+        s.push(1);
+        put_short_field(&mut s, b"reply");
+        op(&mut s, Op::Write, CLIENT);
+        s.push(1);
+        put_short_field(&mut s, b"later");
+        op(&mut s, Op::Pump, 0);
+        op(&mut s, Op::EarlyRead, SERVER);
+        op(&mut s, Op::EarlyRead, CLIENT);
+        op(&mut s, Op::Shutdown, SERVER);
+        op(&mut s, Op::Pump, 0);
+        seeds.push(s);
+    }
     // A lazy acceptor refusing a plain-text request, then giving the
     // transport back.
     let mut s = vec![1, 0, 0, 0, 0, 0x10, 255, 0, 255, 0];
@@ -730,6 +822,35 @@ mod tests {
         assert!(world.early_attempted);
         assert_eq!(world.early, b"early request");
         assert_eq!(world.received[SERVER], b"later");
+        assert_eq!(world.server_returned_early, 0);
+
+        // The server that returns early reads the 0-RTT data before its
+        // handshake completes, and answers at once with 0.5-RTT data.
+        let mut returned_early = 0;
+        for seed in seeds.iter().filter(|s| s[5] & 0x80 != 0) {
+            let half_rtt = seed[0] & 0x80 != 0;
+            let cut = seed
+                .windows(8)
+                .position(|w| w == [Op::Write as u8, SERVER as u8, 0, 5, b'r', b'e', b'p', b'l'])
+                .expect("the first answer");
+            // Up to the early read, then up to the answer.
+            let world = play(&seed[..cut]).expect("configurations");
+            assert_eq!(world.server_returned_early, 1, "{seed:02x?}");
+            assert_eq!(world.early, b"early request");
+            let world = play(&seed[..cut + 9]).expect("configurations");
+            let Server::Ready(server) = &world.server else {
+                panic!("no server stream");
+            };
+            assert!(server.get_ref().1.is_handshaking());
+            assert_eq!(world.sent[SERVER].len(), if half_rtt { 5 } else { 0 });
+
+            let world = play(seed).expect("configurations");
+            assert_eq!(world.early, b"early request");
+            assert_eq!(world.received[SERVER], b"later");
+            assert!(world.received[CLIENT].ends_with(b"reply"));
+            returned_early += world.server_returned_early;
+        }
+        assert_eq!(returned_early, 5);
 
         let refused = seeds
             .iter()

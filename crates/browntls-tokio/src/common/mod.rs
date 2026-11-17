@@ -19,7 +19,7 @@ use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 mod handshake;
-pub(crate) use handshake::{IoSession, MidHandshake};
+pub(crate) use handshake::{HandshakeFailure, IoSession, MidHandshake};
 
 /// Which directions of a stream are still open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

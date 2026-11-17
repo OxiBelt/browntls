@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 use browntls::ClientConnection;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::common::{Stream, StreamState};
+use crate::common::{HandshakeFailure, Stream, StreamState};
 
 /// The server declined the 0-RTT data, and the connection may not speak the
 /// application protocol it was written for, so it was not sent again (RFC
@@ -55,39 +55,11 @@ pub(crate) struct EarlyData {
     /// The ALPN protocols the ClientHello offered.
     offered_alpn: Vec<Vec<u8>>,
     /// The handshake failed: every later operation reports it.
-    failure: Option<Failure>,
+    failure: Option<HandshakeFailure>,
     /// A read waiting for the early phase to end; woken when any operation
     /// ends it, since that operation may have taken over the read's
     /// registration in the transport.
     read_waker: Option<Waker>,
-}
-
-/// A handshake failure kept to report again.
-#[derive(Debug)]
-struct Failure {
-    kind: io::ErrorKind,
-    tls: Option<browntls::Error>,
-    message: String,
-}
-
-impl Failure {
-    fn new(err: &io::Error) -> Self {
-        Self {
-            kind: err.kind(),
-            tls: err
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<browntls::Error>())
-                .cloned(),
-            message: err.to_string(),
-        }
-    }
-
-    fn error(&self) -> io::Error {
-        match &self.tls {
-            Some(tls) => io::Error::new(self.kind, tls.clone()),
-            None => io::Error::new(self.kind, self.message.clone()),
-        }
-    }
 }
 
 impl fmt::Debug for EarlyData {
@@ -185,7 +157,7 @@ where
         match poll {
             Poll::Ready(Ok(_)) => {}
             Poll::Ready(Err(err)) => {
-                early.failure = Some(Failure::new(&err));
+                early.failure = Some(HandshakeFailure::new(&err));
                 // Never resent now: do not keep the plaintext.
                 early.sent = Vec::new();
                 if let Some(waker) = early.read_waker.take() {

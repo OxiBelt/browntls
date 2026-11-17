@@ -23,6 +23,8 @@ use rcgen::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
+pub mod server_early;
+
 /// The provider under test: the native one when built, else RustCrypto.
 pub fn provider() -> Arc<CryptoProvider> {
     #[cfg(feature = "native")]

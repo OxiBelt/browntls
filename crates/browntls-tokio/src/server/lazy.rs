@@ -11,7 +11,7 @@ use browntls::server::{Accepted, AcceptedAlert, Acceptor, ClientHello};
 use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Accept, TlsStream};
+use super::{Accept, EarlyPhase, TlsStream};
 use crate::common::{MidHandshake, StreamState, SyncReadAdapter, poll_send_alert};
 
 /// Reads a ClientHello so the server can pick a [`ServerConfig`] for it
@@ -117,7 +117,7 @@ where
             match this.acceptor.accept() {
                 Ok(Some(accepted)) => {
                     if let Some(io) = this.io.take() {
-                        return Poll::Ready(Ok(StartHandshake { accepted, io }));
+                        return Poll::Ready(Ok(StartHandshake::from_parts(accepted, io)));
                     }
                 }
                 Ok(None) => {}
@@ -142,6 +142,7 @@ impl<IO> fmt::Debug for LazyConfigAcceptor<IO> {
 pub struct StartHandshake<IO> {
     accepted: Accepted,
     io: IO,
+    early_data: bool,
 }
 
 impl<IO> StartHandshake<IO>
@@ -150,7 +151,21 @@ where
 {
     /// Pairs a ClientHello accepted elsewhere with its transport.
     pub fn from_parts(accepted: Accepted, io: IO) -> Self {
-        Self { accepted, io }
+        Self {
+            accepted,
+            io,
+            early_data: false,
+        }
+    }
+
+    /// Whether the future [`into_stream`](Self::into_stream) returns may
+    /// resolve before the handshake completes, to read the client's 0-RTT
+    /// data: [`TlsAcceptor::early_data`](super::TlsAcceptor::early_data)
+    /// for a handshake continued here, with the same warning about replay.
+    /// Off by default.
+    pub fn early_data(mut self, enabled: bool) -> Self {
+        self.early_data = enabled;
+        self
     }
 
     /// The ClientHello.
@@ -166,12 +181,14 @@ where
     /// Like [`into_stream`](Self::into_stream), letting `f` adjust the
     /// [`ServerConnection`] first.
     ///
-    /// If `config` cannot serve the ClientHello, the returned future sends
-    /// the alert and then fails.
+    /// If `config` cannot serve the ClientHello, or what the client sent
+    /// after it is refused, the returned future sends the alert and then
+    /// fails.
     pub fn into_stream_with<F>(self, config: Arc<ServerConfig>, f: F) -> Accept<IO>
     where
         F: FnOnce(&mut ServerConnection),
     {
+        let half_rtt = config.send_half_rtt_data;
         let mut session = match self.accepted.into_connection(config) {
             Ok(session) => session,
             Err((error, alert)) => {
@@ -183,10 +200,21 @@ where
             }
         };
         f(&mut session);
+        // What the acceptor read past the ClientHello (early data, say) is
+        // processed now: the handshake would not look at it before it read
+        // more from the transport.
+        if let Err(error) = session.process_new_packets() {
+            return Accept(MidHandshake::SendAlert {
+                io: self.io,
+                alert: AcceptedAlert::from(session),
+                error: io::Error::new(io::ErrorKind::InvalidData, error),
+            });
+        }
         Accept(MidHandshake::Handshaking(TlsStream {
             io: self.io,
             session,
             st: StreamState::new(),
+            early: self.early_data.then(|| EarlyPhase::new(half_rtt)),
         }))
     }
 

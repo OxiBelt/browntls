@@ -1182,8 +1182,11 @@ Properties this design keeps:
   not an alternate. On x86-64 an expanded AES-GCM key takes 1664 bytes,
   which is the size of the key types with or without routing; each
   alternate of an expanded key adds as much on the heap (4992 bytes per key
-  for the three alternates of AVX-512 VAES). The key copy and the whole of
-  the alternates' storage are zeroised on drop.
+  for the three alternates of AVX-512 VAES). The alternates are listed once,
+  under the configuration and policies of that moment, and their storage is
+  sized for that list before any key is expanded into it, so it is never
+  moved while it holds key material. The key copy and the whole of the
+  alternates' storage are zeroised on drop.
 
 Limits:
 

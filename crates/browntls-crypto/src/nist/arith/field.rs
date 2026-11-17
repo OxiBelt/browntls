@@ -283,9 +283,36 @@ macro_rules! field_element {
             }
         }
 
-        crate::nist::arith::binop!(FieldElement, FieldElement, FieldElement, Add, add, AddAssign, add_assign, add);
-        crate::nist::arith::binop!(FieldElement, FieldElement, FieldElement, Sub, sub, SubAssign, sub_assign, sub);
-        crate::nist::arith::binop!(FieldElement, FieldElement, FieldElement, Mul, mul, MulAssign, mul_assign, mul);
+        crate::nist::arith::binop!(
+            FieldElement,
+            FieldElement,
+            FieldElement,
+            Add,
+            add,
+            AddAssign,
+            add_assign,
+            add
+        );
+        crate::nist::arith::binop!(
+            FieldElement,
+            FieldElement,
+            FieldElement,
+            Sub,
+            sub,
+            SubAssign,
+            sub_assign,
+            sub
+        );
+        crate::nist::arith::binop!(
+            FieldElement,
+            FieldElement,
+            FieldElement,
+            Mul,
+            mul,
+            MulAssign,
+            mul_assign,
+            mul
+        );
         crate::nist::arith::negop!(FieldElement);
     };
 }

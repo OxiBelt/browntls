@@ -1,4 +1,4 @@
-//! NIST P-256 (secp256r1 / prime256v1): ECDH, ECDSA, and field and scalar arithmetic.
+//! NIST P-256 (secp256r1 / prime256v1): ECDH, ECDSA, and field, scalar and point arithmetic.
 //!
 //! Backends: portable 64-bit Montgomery arithmetic everywhere; on x86-64 with
 //! BMI2 and ADX the field multiplication uses a `mulx`/`adcx`/`adox` kernel.

@@ -1,4 +1,4 @@
-//! NIST P-384 (secp384r1): ECDH, ECDSA, and field and scalar arithmetic.
+//! NIST P-384 (secp384r1): ECDH, ECDSA, and field, scalar and point arithmetic.
 //!
 //! Backends: the full-width product followed by a Montgomery reduction
 //! specialised to the shape of `p` everywhere; on x86-64 with BMI2 and ADX

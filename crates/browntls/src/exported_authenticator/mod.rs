@@ -20,10 +20,8 @@
 //!    certificate verifier and returns the certificates.
 //!
 //! The three methods exist on both sides of both connection APIs, with the
-//! same signatures, checks and errors:
-//! [`ClientConnection`](crate::client::ClientConnection) and
-//! [`ServerConnection`](crate::server::ServerConnection) (with the `std`
-//! feature), and
+//! same signatures, checks and errors: `ClientConnection` and
+//! `ServerConnection` (with the `std` feature), and
 //! [`UnbufferedClientConnection`](crate::client::UnbufferedClientConnection)
 //! and [`UnbufferedServerConnection`](crate::server::UnbufferedServerConnection)
 //! (also without `std`). Both APIs run the same code on the connection's

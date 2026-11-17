@@ -113,7 +113,8 @@ macro_rules! client_methods {
             /// `None` or cannot sign with any scheme the request allows.
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
-            /// has completed (with the connection's error once it has failed),
+            /// has completed (also when the handshake itself failed), with
+            /// the connection's error if it fails after that,
             /// for a malformed request or one of the wrong type, for a context
             /// already answered on this connection
             /// ([`PeerMisbehaved::ReusedAuthenticatorContext`](crate::PeerMisbehaved::ReusedAuthenticatorContext)),
@@ -145,13 +146,18 @@ macro_rules! client_methods {
             /// declined).
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
-            /// has completed, with [`Error::FailedToGetCurrentTime`] when the
-            /// time provider gives no time (the default without `std`), and
-            /// for a `request` not made or already answered here, a
-            /// malformed authenticator, a context already used, a `Finished`
-            /// that does not verify ([`Error::DecryptError`]), a signature
-            /// scheme the request did not allow, or a chain or signature the
-            /// verifier rejects. A failed validation records nothing.
+            /// has completed (also when the handshake itself failed), with
+            /// the connection's error if it fails after that (which may be
+            /// [`Error::DecryptError`] too, for a bad record: check the
+            /// connection before blaming the authenticator), with
+            /// [`Error::FailedToGetCurrentTime`] when the time provider gives
+            /// no time (the default without `std`), and for a `request` not
+            /// made or already answered here, a malformed authenticator, a
+            /// context already used, a spontaneous authenticator once 256
+            /// have been validated, a `Finished` that does not verify
+            /// ([`Error::DecryptError`]), a signature scheme the request did
+            /// not allow, or a chain or signature the verifier rejects. A
+            /// failed validation records nothing.
             pub fn validate_authenticator(
                 &mut self,
                 request: Option<&[u8]>,
@@ -262,7 +268,8 @@ macro_rules! server_methods {
             /// answering a request without a usable `certified_key`.
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
-            /// has completed (with the connection's error once it has failed),
+            /// has completed (also when the handshake itself failed), with
+            /// the connection's error if it fails after that,
             /// for a malformed request or one of the wrong type, for a context
             /// already answered on this connection
             /// ([`PeerMisbehaved::ReusedAuthenticatorContext`](crate::PeerMisbehaved::ReusedAuthenticatorContext)),
@@ -287,13 +294,17 @@ macro_rules! server_methods {
             /// authenticator (the client declined).
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
-            /// has completed, with [`Error::FailedToGetCurrentTime`] when the
-            /// time provider gives no time (the default without `std`), and
-            /// for a `request` not made or already answered here, a
-            /// malformed authenticator, a `Finished` that does not verify
-            /// ([`Error::DecryptError`]), a signature scheme the request did
-            /// not allow, or a chain or signature the verifier rejects. A
-            /// failed validation records nothing.
+            /// has completed (also when the handshake itself failed), with
+            /// the connection's error if it fails after that (which may be
+            /// [`Error::DecryptError`] too, for a bad record: check the
+            /// connection before blaming the authenticator), with
+            /// [`Error::FailedToGetCurrentTime`] when the time provider gives
+            /// no time (the default without `std`), and for a `request` not
+            /// made or already answered here, a malformed authenticator, a
+            /// `Finished` that does not verify ([`Error::DecryptError`]), a
+            /// signature scheme the request did not allow, or a chain or
+            /// signature the verifier rejects. A failed validation records
+            /// nothing.
             pub fn validate_authenticator(
                 &mut self,
                 request: &[u8],

@@ -41,6 +41,12 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
     /// Creates a record encrypter from the write key, the fixed IV and the
     /// `extra` bytes that seed the explicit nonce.
+    ///
+    /// An algorithm with an explicit nonce (AES-GCM, RFC 5288 §3) must give
+    /// record `seq` the explicit nonce `extra + seq` (big-endian, modulo
+    /// 2^64), which is how Linux kernel TLS continues the sequence after
+    /// [`Self::extract_keys`]; any other scheme can repeat a nonce once the
+    /// kernel takes over.
     fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn MessageEncrypter>;
 
     /// Creates a record decrypter from the read key and the fixed IV.
@@ -50,6 +56,11 @@ pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
     fn key_block_shape(&self) -> KeyBlockShape;
 
     /// Converts the key material into a form usable outside the library.
+    ///
+    /// For an algorithm with an explicit nonce the returned IV is the fixed
+    /// IV followed by `explicit`, the explicit nonce of sequence number zero;
+    /// the library advances it to the next record's before handing it out
+    /// (see [`crate::ExtractedSecrets`]).
     fn extract_keys(
         &self,
         key: AeadKey,
@@ -303,6 +314,34 @@ impl Nonce {
             *n ^= *i;
         }
         Self(nonce)
+    }
+
+    /// The TLS 1.2 AES-GCM nonce of record `seq` (RFC 5288 §3): the 4-byte
+    /// fixed IV, then the explicit nonce, which is the IV's last eight bytes
+    /// plus `seq` (big-endian, modulo 2^64).
+    ///
+    /// Distinct for every sequence number under one key, and unpredictable
+    /// across connections because the seed comes from the key block. Linux
+    /// kernel TLS counts the explicit nonce up in the same way, so a
+    /// connection handed to the kernel at sequence number `seq` continues
+    /// with [`Iv::advance_explicit`]`(seq)` and never repeats a nonce.
+    #[inline]
+    pub(crate) fn tls12_explicit(iv: &Iv, seq: u64) -> Self {
+        Self(iv.advance_explicit(seq).0)
+    }
+}
+
+impl Iv {
+    /// This IV with `seq` added to its last eight bytes (big-endian, modulo
+    /// 2^64): for a TLS 1.2 AES-GCM IV, the one whose explicit part is the
+    /// explicit nonce of record `seq` (see [`Nonce::tls12_explicit`]).
+    pub(crate) fn advance_explicit(&self, seq: u64) -> Self {
+        let mut iv = self.0;
+        let mut explicit = [0u8; 8];
+        explicit.copy_from_slice(&iv[NONCE_LEN - 8..]);
+        let advanced = u64::from_be_bytes(explicit).wrapping_add(seq);
+        put_u64(advanced, &mut iv[NONCE_LEN - 8..]);
+        Self(iv)
     }
 }
 

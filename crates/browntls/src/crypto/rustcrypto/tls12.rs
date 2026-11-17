@@ -135,7 +135,8 @@ impl<A: TlsAead> Tls12AeadAlgorithm for Gcm<A> {
         explicit: &[u8],
     ) -> Box<dyn MessageEncrypter> {
         // The full 12-byte IV is the fixed part followed by the explicit seed;
-        // the per-record explicit nonce is then `Nonce(iv, seq)[4..]`.
+        // the explicit nonce of record `seq` is the seed plus `seq`
+        // (`Nonce::tls12_explicit`), the sequence Linux kernel TLS continues.
         let mut iv = [0u8; NONCE_LEN];
         iv[..GCM_FIXED_IV_LEN].copy_from_slice(&write_iv[..GCM_FIXED_IV_LEN.min(write_iv.len())]);
         let n = explicit.len().min(GCM_EXPLICIT_NONCE_LEN);
@@ -194,7 +195,7 @@ impl<A: TlsAead> MessageEncrypter for GcmEncrypter<A> {
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        let nonce = Nonce::new(&self.iv, seq);
+        let nonce = Nonce::tls12_explicit(&self.iv, seq);
         let total_len = self.encrypted_payload_len(msg.payload.len());
         let mut payload = PrefixedPayload::with_capacity(total_len);
         payload.extend_from_slice(&nonce.0[GCM_FIXED_IV_LEN..]);

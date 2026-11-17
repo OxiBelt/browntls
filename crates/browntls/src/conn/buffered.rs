@@ -87,7 +87,9 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 "cannot extract secrets with unprocessed received data",
             ));
         }
-        if let Some(blocker) = self.kernel_handoff_blocker() {
+        if let Some(blocker) = self.kernel_handoff_blocker()
+            && blocker.is_in_flight()
+        {
             return Err(Error::General(alloc::format!(
                 "cannot extract secrets: {blocker}"
             )));
@@ -113,6 +115,19 @@ impl<Data: SideData> ConnectionCommon<Data> {
             return Some(crate::kernel::KernelHandoffBlocker::UnprocessedInput);
         }
         None
+    }
+
+    /// How many more bytes of TLS input complete the records received so
+    /// far: zero when the unprocessed input ends at a record boundary.
+    ///
+    /// Before a handover to the kernel, read at most this many bytes at a
+    /// time while [`Self::kernel_handoff_blocker`] reports
+    /// [`UnprocessedInput`]: anything beyond the boundary would be taken
+    /// from the kernel.
+    ///
+    /// [`UnprocessedInput`]: crate::kernel::KernelHandoffBlocker::UnprocessedInput
+    pub fn bytes_to_record_boundary(&self) -> usize {
+        self.deframer_buffer.bytes_to_record_boundary()
     }
 
     /// Hands the connection to the kernel: returns the secrets to install

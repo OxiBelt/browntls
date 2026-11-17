@@ -389,7 +389,7 @@ fn handoff_waits_for_everything_in_flight() {
         Some(KernelHandoffBlocker::Closed)
     );
     transfer(&mut client, &mut server);
-    assert!(client.dangerous_extract_secrets().is_err());
+    assert!(client.dangerous_into_kernel_connection().is_err());
 
     // Extraction disabled.
     let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
@@ -449,26 +449,78 @@ fn records_the_kernel_handles_itself_are_refused() {
     assert!(!conn.has_output(), "no answer to update_not_requested");
 }
 
+/// A NewSessionTicket (lifetime first byte `lifetime0`) split after its
+/// four-byte header.
+fn split_ticket(lifetime0: u8) -> (Vec<u8>, Vec<u8>) {
+    let body = [lifetime0, 0, 0, 60, 1, 2, 3, 4, 1, 0, 0, 1, 0xaa, 0, 0];
+    (vec![4, 0, 0, body.len() as u8], body.to_vec())
+}
+
 #[test]
 fn a_handshake_message_split_across_records_is_joined() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
     let (client, _server) = pair(prov::cipher_suite::TLS13_AES_128_GCM_SHA256, &chain);
     let (_, mut conn) = client.dangerous_into_kernel_connection().unwrap();
-    let msg = key_update(1);
-    conn.handle_record(ContentType::Handshake, &msg[..2])
-        .unwrap();
+    let before = conn.tls13_tickets_received();
+    let (head, tail) = split_ticket(0);
+    conn.handle_record(ContentType::Handshake, &head).unwrap();
+    conn.handle_record(ContentType::Handshake, &tail).unwrap();
+    assert_eq!(conn.tls13_tickets_received(), before + 1);
     assert!(!conn.has_output());
-    conn.handle_record(ContentType::Handshake, &msg[2..])
+
+    let (_, mut conn) = pair(prov::cipher_suite::TLS13_AES_128_GCM_SHA256, &chain)
+        .0
+        .dangerous_into_kernel_connection()
         .unwrap();
-    let outputs: Vec<_> = std::iter::from_fn(|| conn.pop_output()).collect();
-    assert!(matches!(outputs[0], KernelOutput::RxKeys(_)), "{outputs:?}");
-    assert!(
-        matches!(&outputs[1], KernelOutput::Record { typ: ContentType::Handshake, payload } if payload[..] == key_update(0)[..]),
-        "{outputs:?}"
-    );
-    assert!(matches!(outputs[2], KernelOutput::TxKeys(_)), "{outputs:?}");
-    assert_eq!(outputs.len(), 3);
+    conn.handle_record(ContentType::Handshake, &head).unwrap();
+    // No other record may come between the parts (RFC 8446 §5.1).
+    assert!(conn.handle_record(ContentType::Alert, &[1, 0]).is_err());
+}
+
+/// Linux pauses reception after any handshake record that starts with the
+/// KeyUpdate type: anything but one whole KeyUpdate in its own record would
+/// stall the connection, so it fails instead (with an alert), as do empty
+/// handshake records.
+#[test]
+fn records_that_would_stall_kernel_tls_are_refused() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let suite = prov::cipher_suite::TLS13_AES_128_GCM_SHA256;
+    let refused = |records: &[&[u8]]| {
+        let (_, mut conn) = pair(suite, &chain)
+            .0
+            .dangerous_into_kernel_connection()
+            .unwrap();
+        let (last, first) = records.split_last().unwrap();
+        for record in first {
+            conn.handle_record(ContentType::Handshake, record).unwrap();
+        }
+        assert!(conn.handle_record(ContentType::Handshake, last).is_err());
+        match conn.pop_output() {
+            Some(KernelOutput::Record { typ, payload }) => {
+                assert_eq!(typ, ContentType::Alert);
+                assert_eq!(payload[0], 2, "fatal");
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+    let msg = key_update(1);
+    refused(&[&msg[..2]]);
+    // A KeyUpdate after another message in its record: Linux would not
+    // pause, and could read on under the old key.
+    let (head, tail) = split_ticket(0);
+    refused(&[&[&head[..], &tail[..], &msg[..]].concat()]);
+    let (head, tail) = split_ticket(24);
+    refused(&[&head, &tail]);
+    refused(&[&[]]);
+
+    // TLS 1.2 has no KeyUpdate, so such a record always stalls.
+    let (_, mut conn) = pair(prov::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, &chain)
+        .0
+        .dangerous_into_kernel_connection()
+        .unwrap();
+    assert!(conn.handle_record(ContentType::Handshake, &msg).is_err());
 }
 
 /// Repeated `update_requested` without application data in between is
@@ -557,6 +609,8 @@ fn a_smaller_peer_record_size_limit_is_reported() {
     server_config.record_size_limit = Some(1000);
     let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
     do_handshake(&mut client, &mut server).unwrap();
+    // Known before the handover, so a driver can check kernel support.
+    assert_eq!(client.max_tx_payload_len(), Some(999));
     let (secrets, conn) = client.dangerous_into_kernel_connection().unwrap();
     // RFC 8449: the limit counts the TLS 1.3 content type byte.
     assert_eq!(conn.max_tx_payload_len(), Some(999));
@@ -639,4 +693,59 @@ fn post_handshake_auth_through_the_kernel() {
         server.post_handshake_auth_status(),
         Some(PostHandshakeAuthStatus::Authenticated)
     );
+}
+
+#[test]
+fn the_bytes_to_the_next_record_boundary_are_reported() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (mut client, mut server) = pair(prov::cipher_suite::TLS13_AES_128_GCM_SHA256, &chain);
+    assert_eq!(client.bytes_to_record_boundary(), 0);
+    server.writer().write_all(b"one").unwrap();
+    server.writer().write_all(b"two").unwrap();
+    let mut wire = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut wire).unwrap();
+    }
+    let first = 5 + usize::from(u16::from_be_bytes([wire[3], wire[4]]));
+    // Inside the first header, inside its body, at the boundary, inside the
+    // second record's header.
+    let mut fed = 0;
+    for step in [2, 5, first - 7, 1] {
+        client.read_tls(&mut &wire[fed..fed + step]).unwrap();
+        fed += step;
+        let expected = match fed {
+            2 => 3,
+            7 => first - 7,
+            f if f == first => 0,
+            _ => 4,
+        };
+        assert_eq!(client.bytes_to_record_boundary(), expected, "after {fed}");
+    }
+    client.read_tls(&mut &wire[fed..]).unwrap();
+    assert_eq!(client.bytes_to_record_boundary(), 0);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.bytes_to_record_boundary(), 0);
+}
+
+/// Linux takes no record payload limit below 64 bytes (63 for TLS 1.3), so
+/// a smaller configured `max_fragment_size` blocks the handover.
+#[test]
+fn a_fragment_size_below_the_kernel_floor_blocks_the_handover() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = client_config(&chain);
+    client_config.enable_secret_extraction = true;
+    client_config.max_fragment_size = Some(32);
+    let mut client = ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(client.max_tx_payload_len().is_some_and(|len| len < 63));
+    assert_eq!(
+        client.kernel_handoff_blocker(),
+        Some(KernelHandoffBlocker::FragmentTooSmall)
+    );
+    // Extracting the secrets alone is still allowed.
+    client.dangerous_extract_secrets().unwrap();
 }

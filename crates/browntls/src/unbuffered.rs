@@ -266,7 +266,9 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
                 "cannot extract secrets with a KeyUpdate pending",
             ));
         }
-        if let Some(blocker) = self.core.kernel_handoff_blocker() {
+        if let Some(blocker) = self.core.kernel_handoff_blocker()
+            && blocker.is_in_flight()
+        {
             return Err(Error::General(alloc::format!(
                 "cannot extract secrets: {blocker}"
             )));

@@ -220,8 +220,9 @@ impl<Data: SideData> Offloaded<Data> {
                 self.app_in.extend_from_slice(&payload);
                 continue;
             }
-            // Linux pauses reception after a TLS 1.3 KeyUpdate.
-            if self.tls13() && typ == ContentType::Handshake && payload.first() == Some(&24) {
+            // Linux pauses reception after a handshake record that starts
+            // with the KeyUpdate type, whatever the version.
+            if typ == ContentType::Handshake && payload.first() == Some(&24) {
                 self.rx_paused = true;
             }
             let result = self.conn.handle_record(typ, &payload);

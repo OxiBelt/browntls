@@ -752,6 +752,19 @@ encrypted, one fragment per record within the negotiated fragment length.
 them and `RxKeys` to install before the next record is read (Linux stops
 reading after a TLS 1.3 KeyUpdate until it has them).
 
+Linux decides that a KeyUpdate arrived from the first byte of each handshake
+record alone, for either version. A handshake record that starts with the
+KeyUpdate type but is not exactly one whole TLS 1.3 KeyUpdate (part of one, a
+fragment of another message that happens to start with that byte, any such
+record in TLS 1.2) would leave the kernel waiting for keys that never come, so
+`handle_record` fails it with `unexpected_message` instead. A KeyUpdate after
+other messages in its record is refused too: the kernel would not pause there
+and could read on under the old key. Empty handshake
+records and other records between the fragments of a handshake message are
+refused as the userspace deframer refuses them. Checks against application
+data interleaved with a handshake message (RFC 8446 §5.1) cannot be made: the
+kernel delivers that data to the application directly.
+
 The handover refuses, without losing anything, while something is in flight
 that the kernel could not continue: unread received data or accepted 0-RTT
 data, received bytes not yet processed or part of a record (the kernel must
@@ -759,8 +772,11 @@ start at a record boundary), queued records or plaintext, or a KeyUpdate still
 owed. `kernel_handoff_blocker` reports which, so a driver can drain it first;
 `dangerous_extract_secrets` applies the same checks. Secret extraction must be
 enabled, QUIC connections and suites without a kernel form (TLS 1.2 AES-CBC,
-AES-128-CCM-8) are refused. A partly received handshake message is carried
-over and completed from the kernel's records.
+AES-128-CCM-8) are refused, and so is a configured `max_fragment_size` below
+the smallest payload limit Linux takes (64 bytes, 63 for TLS 1.3).
+`dangerous_extract_secrets` keeps its own errors for disabled extraction and
+unsupported suites and adds only the in-flight checks. A partly received
+handshake message is carried over and completed from the kernel's records.
 
 The library's limits stay in force. The driver reports the application data
 records the kernel sent (`records_sent`); at the suite's confidentiality limit

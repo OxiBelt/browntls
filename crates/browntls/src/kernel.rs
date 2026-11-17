@@ -39,8 +39,8 @@ use core::fmt;
 
 use crate::common_state::CommonState;
 use crate::conn::{ConnectionCore, SideData};
-use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
-use crate::error::{Error, PeerMisbehaved};
+use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
+use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader as CodecReader;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
@@ -84,6 +84,25 @@ pub enum KernelHandoffBlocker {
     /// A KeyUpdate (an answer owed to the peer, or a key refresh) still has
     /// to be sent under the current key.
     KeyUpdatePending,
+    /// The configured `max_fragment_size` is below the smallest record
+    /// payload Linux accepts (64 bytes; 63 for TLS 1.3).
+    FragmentTooSmall,
+}
+
+impl KernelHandoffBlocker {
+    /// Something in flight that extracted secrets could not account for,
+    /// as opposed to a reason extraction itself fails (which
+    /// `dangerous_extract_secrets` reports with its own errors).
+    pub(crate) fn is_in_flight(self) -> bool {
+        matches!(
+            self,
+            Self::UnreadPlaintext
+                | Self::UnprocessedInput
+                | Self::UnsentRecords
+                | Self::UnsentPlaintext
+                | Self::KeyUpdatePending
+        )
+    }
 }
 
 impl fmt::Display for KernelHandoffBlocker {
@@ -99,6 +118,7 @@ impl fmt::Display for KernelHandoffBlocker {
             Self::UnsentRecords => "records are waiting to be written",
             Self::UnsentPlaintext => "application data is waiting to be sent",
             Self::KeyUpdatePending => "a KeyUpdate is waiting to be sent",
+            Self::FragmentTooSmall => "the maximum fragment size is below what kernel TLS takes",
         })
     }
 }
@@ -205,6 +225,11 @@ impl<Data: SideData> ConnectionCore<Data> {
         if common.key_update_owed || common.refresh_traffic_keys_pending {
             return Some(KernelHandoffBlocker::KeyUpdatePending);
         }
+        // `TLS_MIN_RECORD_SIZE_LIM` of net/tls, less the TLS 1.3 content type.
+        let floor = if common.is_tls13() { 63 } else { 64 };
+        if common.max_tx_payload_len().is_some_and(|len| len < floor) {
+            return Some(KernelHandoffBlocker::FragmentTooSmall);
+        }
         None
     }
 
@@ -240,6 +265,19 @@ impl<Data: SideData> ConnectionCore<Data> {
     }
 }
 
+impl CommonState {
+    /// [`KernelConnection::max_tx_payload_len`], known once the handshake
+    /// is complete: a driver can check before the handover that the kernel
+    /// supports the limit.
+    pub fn max_tx_payload_len(&self) -> Option<u16> {
+        let len = self.max_fragment_len();
+        match u16::try_from(len) {
+            Ok(len) if usize::from(len) < crate::msgs::message::MAX_PLAINTEXT_LEN => Some(len),
+            _ => None,
+        }
+    }
+}
+
 impl<Data: SideData> KernelConnection<Data> {
     /// The negotiated protocol version.
     pub fn protocol_version(&self) -> ProtocolVersion {
@@ -260,11 +298,7 @@ impl<Data: SideData> KernelConnection<Data> {
     /// `TLS_TX_MAX_PAYLOAD_LEN`), or its full-size records overflow the
     /// peer's limit. The TLS 1.3 content type byte is not included.
     pub fn max_tx_payload_len(&self) -> Option<u16> {
-        let len = self.core.common_state.max_fragment_len();
-        match u16::try_from(len) {
-            Ok(len) if usize::from(len) < crate::msgs::message::MAX_PLAINTEXT_LEN => Some(len),
-            _ => None,
-        }
+        self.core.common_state.max_tx_payload_len()
     }
 
     /// Handles one record the kernel decrypted that is not application
@@ -289,6 +323,10 @@ impl<Data: SideData> KernelConnection<Data> {
         if self.core.common_state.has_received_close_notify {
             self.core.state = Ok(state);
             return Ok(());
+        }
+        if let Some((alert, err)) = self.refuse_record(typ, payload) {
+            let err = self.core.common_state.send_fatal_alert(alert, err);
+            return Err(self.core.fail(err));
         }
         let state = match typ {
             ContentType::Handshake => self.handle_handshake(state, payload)?,
@@ -319,6 +357,47 @@ impl<Data: SideData> KernelConnection<Data> {
         self.send_due_key_update()
     }
 
+    /// The checks the deframer makes in userspace that still apply to a
+    /// whole record, and the one record shape kernel TLS cannot continue.
+    fn refuse_record(&self, typ: ContentType, payload: &[u8]) -> Option<(AlertDescription, Error)> {
+        let joining = !self.core.deframer.joiner.is_empty();
+        if typ == ContentType::Handshake && payload.is_empty() {
+            return Some((
+                AlertDescription::DecodeError,
+                InvalidMessage::InvalidEmptyPayload.into(),
+            ));
+        }
+        if typ != ContentType::Handshake && joining {
+            return Some((
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into(),
+            ));
+        }
+        // Linux pauses reception after any handshake record whose first
+        // byte is the KeyUpdate type, until new receive keys are set. Only
+        // a record that is exactly one whole TLS 1.3 KeyUpdate brings them;
+        // anything else (a fragment, a continuation that starts with that
+        // byte) would leave the connection stalled for good.
+        let whole_key_update = self.version == ProtocolVersion::TLSv1_3
+            && !joining
+            && payload.len() == 5
+            && payload[1..4] == [0, 0, 1];
+        if typ == ContentType::Handshake
+            && payload.first() == Some(&u8::from(HandshakeType::KeyUpdate))
+            && !whole_key_update
+        {
+            return Some((
+                AlertDescription::UnexpectedMessage,
+                Error::General(
+                    "a handshake record starting with the KeyUpdate type that is not one \
+                     whole KeyUpdate stalls kernel TLS"
+                        .into(),
+                ),
+            ));
+        }
+        None
+    }
+
     /// Joins `payload` onto any partial handshake message and processes
     /// every complete one.
     fn handle_handshake(
@@ -327,6 +406,7 @@ impl<Data: SideData> KernelConnection<Data> {
         mut data: &[u8],
     ) -> Result<Box<dyn crate::conn::State<Data>>, Error> {
         let version = self.version;
+        let starts_with_key_update = data.first() == Some(&u8::from(HandshakeType::KeyUpdate));
         loop {
             let take = data.len().min(self.core.deframer.joiner.room());
             if take > 0 {
@@ -388,6 +468,24 @@ impl<Data: SideData> KernelConnection<Data> {
                         );
                         return Err(self.core.fail(err));
                     }
+                    // Linux pauses reception only for a record that starts
+                    // with the KeyUpdate. After other messages in the same
+                    // record nothing stops a second reader of the socket
+                    // (splice, another thread) from reading on under the old
+                    // key before the new one is installed. Refusing costs
+                    // interoperability with peers that coalesce a KeyUpdate
+                    // with other messages, which is legal but rare.
+                    if !starts_with_key_update {
+                        let err = self.core.common_state.send_fatal_alert(
+                            AlertDescription::UnexpectedMessage,
+                            Error::General(
+                                "a KeyUpdate after other messages in its record is not \
+                                 supported by kernel TLS"
+                                    .into(),
+                            ),
+                        );
+                        return Err(self.core.fail(err));
+                    }
                     match state.extract_secrets() {
                         Ok(secrets) => self.queue(KernelOutput::RxKeys(secrets.rx)),
                         Err(err) => return Err(self.core.fail(err)),
@@ -403,7 +501,7 @@ impl<Data: SideData> KernelConnection<Data> {
                 // does not fit before it fills up.
                 let err = self.core.common_state.send_fatal_alert(
                     AlertDescription::DecodeError,
-                    crate::error::InvalidMessage::HandshakePayloadTooLarge,
+                    InvalidMessage::HandshakePayloadTooLarge,
                 );
                 return Err(self.core.fail(err));
             }
@@ -432,6 +530,11 @@ impl<Data: SideData> KernelConnection<Data> {
     /// transmit keys) and a TLS 1.2 connection queues `close_notify`;
     /// [`Self::may_send_application_data`] tells whether more data may be
     /// sent. Fails once the limit has been passed and no refresh is possible.
+    ///
+    /// Report records before carrying out the outputs queued so far: once
+    /// [`KernelOutput::TxKeys`] is installed the count starts again for the
+    /// new key, so records sent under the old key but reported later would
+    /// be counted against the new one.
     ///
     /// Callers that cannot count records exactly must overcount: Linux
     /// closes a record at the end of every `send` without `MSG_MORE`, so

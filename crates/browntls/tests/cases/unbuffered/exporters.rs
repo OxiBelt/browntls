@@ -104,6 +104,29 @@ fn early_exporter_unavailable_without_accepted_0rtt() {
     assert_eq!(ub_early(&c.conn), None);
     assert_eq!(ub_early(&s.conn), None);
 
+    // A failed connection exports nothing, on either API: here the client
+    // gets a ServerHelloDone where its ServerHello should be.
+    const SERVER_HELLO_DONE: [u8; 9] = [0x16, 0x03, 0x03, 0x00, 0x04, 0x0e, 0, 0, 0];
+    prime(&cc, &sc);
+    let mut c = ub_client(&cc, Feed::Whole);
+    c.early_to_send = b"0rtt".to_vec();
+    c.take_output();
+    assert!(ub_early(&c.conn).is_some());
+    c.give_input(&SERVER_HELLO_DONE);
+    assert!(c.failed());
+    assert_eq!(ub_early(&c.conn), None, "after a fatal error");
+    prime(&cc, &sc);
+    let mut c = b_client(&cc);
+    c.conn.early_data().unwrap().write_all(b"0rtt").unwrap();
+    c.take_output();
+    c.give_input(&SERVER_HELLO_DONE);
+    assert!(c.failed());
+    assert!(
+        c.conn
+            .export_early_keying_material([0u8; 32], EARLY_LABEL, None)
+            .is_err()
+    );
+
     // Arguments are checked before anything is derived.
     prime(&cc, &sc);
     let mut c = ub_client(&cc, Feed::Whole);

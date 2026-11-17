@@ -539,6 +539,11 @@ impl<Data: SideData> ConnectionCore<Data> {
                 "export_early_keying_material: context too long",
             ));
         }
+        // Like the regular exporter, nothing is exported once the
+        // connection has failed.
+        if let Err(err) = &self.state {
+            return Err(err.clone());
+        }
         match &self.common_state.early_exporter {
             Some(exporter) => exporter.export_keying_material(output, label, context),
             None => Err(Error::General(

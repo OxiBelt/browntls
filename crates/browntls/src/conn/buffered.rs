@@ -44,7 +44,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Available on a client from the moment it offers 0-RTT (see
     /// `ClientConnection::early_data`) and on a server once it has accepted
     /// 0-RTT; the client loses it again if the server rejects 0-RTT, since
-    /// the two sides would no longer agree on the value. Like 0-RTT data the
+    /// the two sides would no longer agree on the value; neither side has it
+    /// once the connection has failed. Like 0-RTT data the
     /// output is bound to the ClientHello and the resumption PSK only: it is
     /// not forward secret and an attacker who replays the ClientHello
     /// replays it too. Use [`Self::export_keying_material`] for anything

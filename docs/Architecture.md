@@ -350,7 +350,8 @@ export_early_keying_material` is the separate early exporter that §7.5
 recommends, from `early_exporter_master_secret` (logged as
 `EARLY_EXPORTER_SECRET`; checked against RFC 8448 §4). A client has it from
 the moment it offers 0-RTT and loses it if the server rejects 0-RTT; a
-server has it once it accepts 0-RTT. Like 0-RTT data it is not forward
+server has it once it accepts 0-RTT. After a fatal error neither side
+exports anything. Like 0-RTT data it is not forward
 secret and replays with the ClientHello.
 
 `tls_exporter_channel_binding` is the RFC 9266 `tls-exporter` channel

@@ -94,6 +94,62 @@ fn resumption_with_zero_rtt() {
 }
 
 #[test]
+fn external_psk_rotation_invalidates_quic_ticket() {
+    use browntls::crypto::hash::HashAlgorithm;
+    use browntls::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let psk = |key: u8| {
+        Arc::new(
+            ExternalPsk::new(
+                b"quic-rotation".to_vec(),
+                vec![key; 32],
+                HashAlgorithm::SHA256,
+            )
+            .unwrap(),
+        )
+    };
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(16);
+
+    let mut old_client_config = b_client_config(&chain);
+    old_client_config.external_psks = vec![psk(0x42)];
+    old_client_config.require_external_psk = true;
+    let old_client_config = Arc::new(old_client_config);
+    let mut old_server_config = b_server_config(&chain);
+    old_server_config.external_psks = Some(Arc::new(vec![psk(0x42)]));
+    old_server_config.require_external_psk = true;
+    old_server_config.session_storage = cache.clone();
+
+    let mut client = b_client(&old_client_config);
+    let mut server = b_server(&Arc::new(old_server_config));
+    handshake(&mut client, &mut server).unwrap();
+    assert!(!client.conn.resumed() && !server.conn.resumed());
+
+    // Cloning retains the ticket store. Replacing the EPSK makes the client
+    // reject that old ticket and authenticate a full QUIC handshake instead.
+    let mut new_client_config = (*old_client_config).clone();
+    new_client_config.external_psks = vec![psk(0x43)];
+    let new_client_config = Arc::new(new_client_config);
+    let mut new_server_config = b_server_config(&chain);
+    new_server_config.external_psks = Some(Arc::new(vec![psk(0x43)]));
+    new_server_config.require_external_psk = true;
+    new_server_config.session_storage = cache;
+    let new_server_config = Arc::new(new_server_config);
+
+    let mut client = b_client(&new_client_config);
+    let mut server = b_server(&new_server_config);
+    handshake(&mut client, &mut server).unwrap();
+    assert!(!client.conn.resumed() && !server.conn.resumed());
+
+    // A ticket issued after rotation is still resumable over QUIC.
+    let mut client = b_client(&new_client_config);
+    let mut server = b_server(&new_server_config);
+    handshake(&mut client, &mut server).unwrap();
+    assert!(client.conn.resumed() && server.conn.resumed());
+}
+
+#[test]
 fn server_rejecting_zero_rtt_gives_no_keys() {
     let chain = server_chain(KeyType::EcdsaP256);
     let (client_config, server_config) = zero_rtt_configs(&chain);

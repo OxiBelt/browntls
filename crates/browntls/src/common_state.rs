@@ -321,11 +321,21 @@ impl CommonState {
     }
 
     /// The external PSK to record in a ticket issued on this connection.
-    pub(crate) fn external_psk_binding(&self) -> Option<crate::psk::ExternalPskBinding> {
-        self.external_psk
+    pub(crate) fn external_psk_binding(
+        &self,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> Result<Option<crate::psk::ExternalPskBinding>, Error> {
+        let Some(psk) = self
+            .external_psk
             .as_ref()
             .filter(|_| self.external_psk_confirmed)
-            .map(|psk| crate::psk::ExternalPskBinding::of(psk))
+        else {
+            return Ok(None);
+        };
+        crate::psk::ExternalPskBinding::of(psk, suites, resumption_secret)
+            .map(Some)
+            .ok_or_else(|| Error::general("external PSK hash is unavailable in the provider"))
     }
 
     /// Whether every negotiated component claims FIPS validation.

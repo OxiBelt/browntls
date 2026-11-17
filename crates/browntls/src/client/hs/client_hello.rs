@@ -470,7 +470,7 @@ pub(super) fn emit_client_hello_for_retry(
         // `require_external_psk`, other sessions are not offered at all.
         let ticket_usable = match inner.external_psk() {
             Some(binding) => config.external_psks.iter().any(|psk| {
-                binding.matches(psk)
+                binding.matches(psk, &config.provider.cipher_suites, inner.secret())
                     && psk.usable_by_client(&input.server_name, &input.alpn_protocols)
             }),
             None => !config.require_external_psk,

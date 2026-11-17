@@ -44,7 +44,8 @@ impl fmt::Display for EarlyDataNotResent {
 impl std::error::Error for EarlyDataNotResent {}
 
 /// A stream returned before its handshake, while it may send early data.
-#[derive(Debug)]
+///
+/// `Debug` shows lengths and state only: `sent` is application plaintext.
 pub(crate) struct EarlyData {
     /// The early data written so far, kept to resend if the server
     /// declines it.
@@ -86,6 +87,18 @@ impl Failure {
             Some(tls) => io::Error::new(self.kind, tls.clone()),
             None => io::Error::new(self.kind, self.message.clone()),
         }
+    }
+}
+
+impl fmt::Debug for EarlyData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EarlyData")
+            .field("sent_len", &self.sent.len())
+            .field("resent", &self.resent)
+            .field("offered_alpn", &self.offered_alpn.len())
+            .field("failure", &self.failure)
+            .field("read_waker", &self.read_waker.is_some())
+            .finish()
     }
 }
 
@@ -173,6 +186,8 @@ where
             Poll::Ready(Ok(_)) => {}
             Poll::Ready(Err(err)) => {
                 early.failure = Some(Failure::new(&err));
+                // Never resent now: do not keep the plaintext.
+                early.sent = Vec::new();
                 if let Some(waker) = early.read_waker.take() {
                     waker.wake();
                 }

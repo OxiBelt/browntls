@@ -102,7 +102,7 @@ features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
 are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
 `browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which
-adds `mio` and `socket2` (both MIT, on `libc`) as runtime dependencies of
+adds `mio` (MIT) and `socket2` (MIT OR Apache-2.0), both on `libc`, as runtime dependencies of
 that feature alone, also without a `cargo vet` audit yet. The crate's manifest carries the
 metadata a crates.io release needs (description, documentation, readme,
 keywords, categories, an `include` list and the licence file), but it stays

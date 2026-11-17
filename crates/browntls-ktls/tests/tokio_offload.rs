@@ -1,7 +1,8 @@
 //! `AsyncKtlsStream` against the running kernel over loopback TCP: both
 //! ends offloaded, one end offloaded against a userspace `browntls-tokio`
 //! peer, data in flight at the handover, key updates answered by a read
-//! while the socket is full, split halves, closure and refusals.
+//! while the socket is full, split halves, closure (also with small socket
+//! buffers that are full at the shutdown) and refusals.
 //!
 //! The tests that need kernel TLS are skipped without the `tls` module
 //! unless `BROWNTLS_KTLS_REQUIRED=1`.
@@ -29,7 +30,7 @@ use browntls_ktls::{AsyncKtlsStream, HandoffError, StreamHandoffError};
 use browntls_tokio::{TlsAcceptor, TlsConnector, client, server};
 use common::*;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
 
 const LEN: usize = 200_000;
@@ -145,7 +146,10 @@ async fn both_ends_offloaded_for_every_suite() {
             assert_eq!(read_n_async(&mut tls, LEN).await, down, "{suite:?}");
             timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
             // Nothing may be written after close_notify.
-            let err = tls.write(b"late").await.unwrap_err();
+            let err = timeout(LIMIT, tls.write(b"late"))
+                .await
+                .unwrap()
+                .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::BrokenPipe, "{suite:?}");
             assert!(read_to_end_async(&mut tls).await.unwrap().is_empty());
         };
@@ -231,26 +235,34 @@ async fn kernel_server_with_userspace_client() {
     }
 }
 
-/// Writes until the socket takes no more; returns how much it took.
+/// Writes until the socket takes no more, and still takes no more after
+/// whatever carries the bytes on (a relay) has had time to drain it;
+/// returns how much it took.
 async fn fill<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> usize {
     let mut sent = 0;
-    // Large writes, then small ones, until not even a small record fits.
-    for chunk in [usize::MAX, 64] {
-        poll_fn(|cx| {
-            while sent < data.len() {
-                let end = data.len().min(sent.saturating_add(chunk));
-                match Pin::new(&mut *w).poll_write(cx, &data[sent..end]) {
-                    Poll::Ready(Ok(n)) => sent += n,
-                    Poll::Ready(Err(err)) => panic!("{err}"),
-                    Poll::Pending => break,
+    loop {
+        let before = sent;
+        // Large writes, then small ones, until not even a small record fits.
+        for chunk in [usize::MAX, 64] {
+            poll_fn(|cx| {
+                while sent < data.len() {
+                    let end = data.len().min(sent.saturating_add(chunk));
+                    match Pin::new(&mut *w).poll_write(cx, &data[sent..end]) {
+                        Poll::Ready(Ok(n)) => sent += n,
+                        Poll::Ready(Err(err)) => panic!("{err}"),
+                        Poll::Pending => break,
+                    }
                 }
-            }
-            Poll::Ready(())
-        })
-        .await;
+                Poll::Ready(())
+            })
+            .await;
+        }
+        assert!(sent < data.len(), "the socket never filled");
+        if sent == before {
+            return sent;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(sent < data.len(), "the socket never filled");
-    sent
 }
 
 /// Whether `wire` holds a TLS 1.3 record as long as a protected KeyUpdate
@@ -430,6 +442,7 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
             let mut server = acceptor(limit).accept(server_tcp).await.unwrap();
             let mut tls = if accept_early {
                 // Accepted 0-RTT data comes first out of the kernel stream.
+                assert!(server.get_mut().1.early_data().is_some());
                 server_kernel(server).await
             } else {
                 assert!(server.get_mut().1.early_data().is_none());
@@ -484,6 +497,68 @@ async fn truncation_is_reported() {
     assert_eq!(got, b"partial");
     let err = tls.read(&mut [0u8; 8]).await.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+/// A megabyte written into small socket buffers and shut down at once
+/// arrives whole, with `close_notify` behind it: `shutdown` does not send
+/// the FIN ahead of what the kernel still holds for want of room. The
+/// small receive window keeps TCP's segments small, so a record seldom
+/// fits the room there is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_with_a_full_socket_delivers_everything() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+    for round in 0..8u8 {
+        let listener = TcpSocket::new_v4().unwrap();
+        listener.set_recv_buffer_size(4096).unwrap();
+        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listener.listen(1).unwrap();
+        let connecting = TcpSocket::new_v4().unwrap();
+        connecting.set_send_buffer_size(4096).unwrap();
+        let (client_tcp, server_tcp) = tokio::join!(
+            connecting.connect(listener.local_addr().unwrap()),
+            listener.accept(),
+        );
+        let (client_tcp, (server_tcp, _)) = (client_tcp.unwrap(), server_tcp.unwrap());
+        let (client, server) = tokio::join!(
+            TlsConnector::from(Arc::new(pki.client_config(suite))).connect(localhost(), client_tcp),
+            TlsAcceptor::from(Arc::new(pki.server_config(suite))).accept(server_tcp),
+        );
+        let (client, mut server) = (client.unwrap(), server.unwrap());
+        let mut tls = client_kernel(client).await;
+
+        let up = pattern(1 << 20, round);
+        let expected = up.clone();
+        let reader = tokio::spawn(async move {
+            // A slow reader: the kernel end is ahead of it throughout.
+            let mut got = Vec::new();
+            let mut chunk = vec![0u8; 8192];
+            loop {
+                let n = timeout(LIMIT, server.read(&mut chunk))
+                    .await
+                    .expect("read timed out")
+                    .expect("the stream was cut short");
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&chunk[..n]);
+                tokio::time::sleep(Duration::from_micros(200)).await;
+            }
+            timeout(LIMIT, server.shutdown()).await.unwrap().unwrap();
+            got
+        });
+        write_all_async(&mut tls, &up).await;
+        timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
+        // The kernel's own late failure to send would show up here.
+        assert!(
+            read_to_end_async(&mut tls).await.unwrap().is_empty(),
+            "round {round}"
+        );
+        assert!(reader.await.unwrap() == expected, "round {round}");
+    }
 }
 
 /// A peer that has closed TCP is not handed over: the kernel attaches the

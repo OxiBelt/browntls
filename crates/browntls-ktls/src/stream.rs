@@ -80,10 +80,12 @@ pub enum HandoffError<C, S> {
         /// Application data the handover had already taken from the
         /// connection, to be read before anything the connection yields.
         received: Vec<u8>,
-        /// What stood in the way: the kernel lacks TLS support, the
-        /// connection cannot be offloaded (a [`KernelHandoffBlocker`]
-        /// wrapped as [`io::ErrorKind::Unsupported`]), or I/O failed while
-        /// the handshake was completed or the received records drained.
+        /// What stood in the way: the kernel did not attach the `tls`
+        /// upper layer protocol (no `tls` module: `ENOENT`; a peer that
+        /// has already closed TCP: `ENOTCONN`), the connection cannot be
+        /// offloaded (a [`KernelHandoffBlocker`] wrapped as
+        /// [`io::ErrorKind::Unsupported`]), or I/O failed while the
+        /// handshake was completed or the received records drained.
         error: io::Error,
     },
     /// The kernel took part of the connection's state and then failed: the
@@ -149,6 +151,14 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// The socket may be non-blocking: `WouldBlock` then means "call again when
 /// the socket is readable or writable", since a read may first have to send
 /// a control record (a KeyUpdate answer) that did not fit.
+///
+/// Known kernel limitation, on non-blocking sockets only: Linux reports a
+/// write as done once the record is encrypted, even when TCP had no room
+/// for all of it, and sends the rest when room appears. Shutting the
+/// socket's write side or closing it before that drops what is left, and
+/// the peer sees a truncated stream. After the last write, wait until the
+/// socket is writable before closing it; a blocking socket needs no such
+/// care.
 ///
 /// Known kernel limitation: Linux pauses reception when a handshake record
 /// merely starts with the KeyUpdate type byte, or holds only the start of a
@@ -368,25 +378,28 @@ where
             }
         }
         KernelHandoffBlocker::UnprocessedInput => {
-            let missing = conn.bytes_to_record_boundary();
-            if missing > 0 {
-                // Exactly the rest of the record: what follows is the
-                // kernel's.
-                let mut limited = Read::take(&mut *socket, missing as u64);
-                if conn.read_tls(&mut limited)? == 0 {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
-            }
             let state = conn.process_new_packets().map_err(invalid_data)?;
-            if state.peer_has_closed()
-                && conn.kernel_handoff_blocker() == Some(KernelHandoffBlocker::UnprocessedInput)
-            {
+            if conn.kernel_handoff_blocker() != Some(blocker) {
+                return Ok(());
+            }
+            if state.peer_has_closed() {
                 // Processing stops at the peer's close_notify: what follows
-                // it would stay unprocessed for good.
+                // it, whole or in part, would stay unprocessed for good.
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "data follows the peer's close_notify",
                 ));
+            }
+            let missing = conn.bytes_to_record_boundary();
+            if missing == 0 {
+                // Whole records that processing left in place.
+                return Err(unsupported(blocker));
+            }
+            // Exactly the rest of the record: what follows is the kernel's.
+            // The next step processes it.
+            let mut limited = Read::take(&mut *socket, missing as u64);
+            if conn.read_tls(&mut limited)? == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
             }
         }
         other => return Err(unsupported(other)),

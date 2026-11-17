@@ -880,7 +880,11 @@ the same socket (an attached `tls` ULP is accepted), and a peer
 before any key is installed. Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
-hanging. A close_notify followed by more data before the handover is refused.
+hanging. A close_notify followed by more data before the handover, a whole
+record or part of one, is refused without waiting for the rest. On a
+non-blocking socket the kernel may still hold part of a record after a write
+returned (see `AsyncKtlsStream` below): the caller waits for writability
+before closing.
 
 What follows the handover lives in one `Engine` (`src/engine.rs`): the
 `KernelConnection`, the plaintext from before the handover, a control record
@@ -907,21 +911,32 @@ finds the socket full registers for writability as well as readability.
 Tokio keeps one waker per direction, and the stream may be split into halves
 on two tasks, so the reader and a parked writer register a waker that wakes
 both: neither can lose its wakeup to the other's registration. `poll_shutdown`
-queues `close_notify` once, sends what waits and shuts the socket's write
-side. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
+queues `close_notify` once, sends what waits, waits until the kernel reports
+room to send, and shuts the socket's write side. The wait is for a kernel
+limitation of non-blocking sockets: Linux reports a write as done once the
+record is encrypted, even when TCP had no room for all of it
+(`tls_sw_sendmsg` does not pass on the `EAGAIN` of its push), and sends the
+rest from a work item when room appears; a FIN or a close before that drops
+what is left, and the peer sees a truncated stream. While the rest waits the
+socket is not writable, which `poll` shows and Tokio's cached readiness does
+not, so the stream asks the kernel. Between room appearing and the work item
+running nothing tells userspace, so the wait narrows the window without
+closing it; the documentation says to let the peer confirm the last bytes
+where they matter. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
 running kernel like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
 offloaded server against a userspace client (tickets, KeyUpdate, closure), a
 KeyUpdate answered by a read while the socket is full (the answer seen on the
 wire by a relay), split halves across key updates, a client still in its
-0-RTT phase, truncation, a peer that closed TCP before the handover (the
+0-RTT phase, truncation, a megabyte written into small socket buffers and
+shut down at once, a peer that closed TCP before the handover (the
 kernel attaches the upper layer protocol to an established connection only,
 `ENOTCONN`; the stream goes on in userspace), and refusals that return the
 stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
-`unsafe_code = "deny"`: `setsockopt`, `fcntl`, and `sendmsg`/`recvmsg` with one
-control message. Its invariants are listed at its top: borrowed descriptors,
+`unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
+without waiting, and `sendmsg`/`recvmsg` with one control message. Its invariants are listed at its top: borrowed descriptors,
 pointers only into live values with their lengths, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
 sized with `CMSG_SPACE`, and no value created from kernel output but plain

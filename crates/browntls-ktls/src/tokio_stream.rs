@@ -36,10 +36,11 @@ pub enum StreamHandoffError<S> {
     /// The stream goes on in userspace when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded,
     /// or the peer's `record_size_limit` needs a newer kernel), when it is
-    /// the kernel's refusal of the `tls` upper layer protocol (no `tls`
-    /// module: `ENOENT`; a peer that has already closed TCP: `ENOTCONN`,
-    /// since the kernel attaches it to an established connection only), or
-    /// when it wraps
+    /// the kernel's refusal to attach the `tls` upper layer protocol,
+    /// which comes with an operating system error code (no `tls` module:
+    /// `ENOENT`; a peer that has already closed TCP: `ENOTCONN`, since the
+    /// kernel attaches it to an established connection only) and before
+    /// anything was taken from the stream, or when it wraps
     /// [`EarlyDataNotResent`](browntls_tokio::client::EarlyDataNotResent).
     /// After any other error the stream has failed like one whose read or
     /// write returned that error.
@@ -121,12 +122,25 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// room again; a write or flush sends it too. A TCP connection that ends
 /// without `close_notify` fails the read with `UnexpectedEof`. Errors from
 /// the connection are [`io::ErrorKind::InvalidData`] with the
-/// [`browntls::Error`] inside; the stream has then failed for good, and
-/// `flush` or `shutdown` sends its alert.
+/// [`browntls::Error`] inside; the stream has then failed for good.
+/// `shutdown` sends its alert; `flush` does when the socket has room at
+/// once, and reports the failure either way.
 ///
 /// [`tokio::io::split`] gives halves for two tasks. The limitation of
 /// [`KtlsStream`](crate::KtlsStream) with KeyUpdate records that are not
 /// one whole KeyUpdate applies here too.
+///
+/// Known kernel limitation: on a non-blocking socket Linux reports a write
+/// as done once the record is encrypted, even when TCP had no room for all
+/// of it, and sends the rest when room appears; nothing tells userspace
+/// when that has happened. Closing the socket, or its write side, before
+/// then drops what is left, and the peer sees a truncated stream.
+/// `shutdown` therefore waits until the kernel reports room to send before
+/// it shuts the write side, which covers the wait for room but not the
+/// moment between room appearing and the kernel sending. Call `shutdown`
+/// before dropping a stream that has written, and where the last bytes
+/// matter, let the peer confirm them (its `close_notify`, read until end
+/// of file) before the stream is dropped.
 ///
 /// ```no_run
 /// # async fn run(
@@ -164,6 +178,8 @@ pub struct AsyncKtlsStream<Data> {
     read_waker: Option<Waker>,
     /// `shutdown` has queued `close_notify`.
     closing: bool,
+    /// `shutdown` has seen room to send after everything was written.
+    drained: bool,
 }
 
 /// Nothing in the stream is pinned: the socket and the connection state
@@ -214,6 +230,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             write_waker: None,
             read_waker: None,
             closing: false,
+            drained: false,
         }
     }
 
@@ -489,9 +506,9 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
         this.poll_writable(cx, |engine, fd| engine.flush(fd))
     }
 
-    /// Sends `close_notify` (an alert instead, after a failure), then
-    /// shuts the socket's write side. Reads go on until the peer's
-    /// `close_notify`.
+    /// Sends `close_notify` (an alert instead, after a failure), waits
+    /// until the socket has room to send, then shuts its write side.
+    /// Reads go on until the peer's `close_notify`.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.closing {
@@ -502,6 +519,22 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
         if this.engine.has_outputs() {
             match this.poll_writable(cx, |engine, fd| engine.flush_outputs(fd)) {
                 Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        if !this.drained {
+            // The kernel may still hold part of a record TCP had no room
+            // for (see the type's documentation), in which case the socket
+            // is not writable; a FIN now would go out ahead of it. Tokio's
+            // cached readiness cannot tell, so the kernel is asked.
+            let room = this.poll_writable(cx, |_, fd| match sys::writable(fd) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(io::ErrorKind::WouldBlock.into()),
+                Err(err) => Err(err),
+            });
+            match room {
+                Poll::Ready(Ok(())) => this.drained = true,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
             }

@@ -22,15 +22,15 @@ use crate::tls_config::fixtures::{
 use crate::tls_config::sign::key_schemes;
 use crate::tls_config::verifiers::{name_verdict, server_name};
 
-type Alg = &'static dyn SignatureVerificationAlgorithm;
+pub(super) type Alg = &'static dyn SignatureVerificationAlgorithm;
 
-fn supported(p: usize) -> &'static WebPkiSupportedAlgorithms {
+pub(super) fn supported(p: usize) -> &'static WebPkiSupportedAlgorithms {
     [&native::SUPPORTED_SIG_ALGS, &rustcrypto::SUPPORTED_SIG_ALGS][p]
 }
 
 /// Keys whose fixture certificates end the paths, in end-entity choice
 /// order; choices 4 and 5 are the root and the intermediate.
-const END_ENTITIES: [usize; 4] = [P256, P384, ED25519, RSA];
+pub(super) const END_ENTITIES: [usize; 4] = [P256, P384, ED25519, RSA];
 
 /// The serial number the clean CRL lists.
 const CLEAN_SERIAL: &[u8] = &[0x7b, 4, 5, 6];
@@ -43,11 +43,11 @@ const NOT_AFTER: u64 = unix_date(4096, 1, 1);
 const CRL_THIS_UPDATE: u64 = unix_date(2026, 11, 1);
 const CRL_NEXT_UPDATE: u64 = unix_date(2027, 11, 1);
 
-fn secs(t: u64) -> UnixTime {
+pub(super) fn secs(t: u64) -> UnixTime {
     UnixTime::since_unix_epoch(core::time::Duration::from_secs(t))
 }
 
-fn fixture_cert(which: usize) -> &'static CertificateDer<'static> {
+pub(super) fn fixture_cert(which: usize) -> &'static CertificateDer<'static> {
     let fx = fixtures::get();
     match END_ENTITIES.get(which) {
         Some(&k) => &fx.keys[k].chain[0],
@@ -56,19 +56,19 @@ fn fixture_cert(which: usize) -> &'static CertificateDer<'static> {
     }
 }
 
-fn parse(der: &'static CertificateDer<'static>) -> EndEntityCert<'static> {
+pub(super) fn parse(der: &'static CertificateDer<'static>) -> EndEntityCert<'static> {
     EndEntityCert::try_from(der).expect("fixture certificate")
 }
 
 /// The `algorithm` contents of a `SubjectPublicKeyInfo` SEQUENCE.
-fn spki_algorithm(spki: &[u8]) -> Vec<u8> {
+pub(super) fn spki_algorithm(spki: &[u8]) -> Vec<u8> {
     let (_, contents, _) = tlv(spki).expect("SPKI");
     let (_, algorithm, _) = tlv(contents).expect("SPKI algorithm");
     algorithm.to_vec()
 }
 
 /// The `signatureAlgorithm` contents of a certificate or CRL.
-fn signature_algorithm(signed: &[u8]) -> Vec<u8> {
+pub(super) fn signature_algorithm(signed: &[u8]) -> Vec<u8> {
     let (_, contents, _) = tlv(signed).expect("signed structure");
     let (_, _, rest) = tlv(contents).expect("signed data");
     let (_, algorithm, _) = tlv(rest).expect("signature algorithm");
@@ -77,14 +77,18 @@ fn signature_algorithm(signed: &[u8]) -> Vec<u8> {
 
 /// Whether `algs` has an algorithm for a signature with `signature` made
 /// by a key with SPKI algorithm `key`.
-fn covered(algs: &[&dyn SignatureVerificationAlgorithm], signature: &[u8], key: &[u8]) -> bool {
+pub(super) fn covered(
+    algs: &[&dyn SignatureVerificationAlgorithm],
+    signature: &[u8],
+    key: &[u8],
+) -> bool {
     algs.iter().any(|a| {
         a.signature_alg_id().matches_signature(signature)
             && a.public_key_alg_id().matches_public_key(key)
     })
 }
 
-fn corrupt(input: &mut Input<'_>, bytes: &mut [u8]) {
+pub(super) fn corrupt(input: &mut Input<'_>, bytes: &mut [u8]) {
     let at = usize::from(input.u16()) % bytes.len();
     bytes[at] ^= input.byte() | 1;
 }
@@ -453,18 +457,18 @@ pub(super) fn path_op(input: &mut Input<'_>) {
 }
 
 /// A signature by a fixture key over [`MESSAGE`].
-struct Signed {
-    key: usize,
-    scheme: SignatureScheme,
-    spki: Vec<u8>,
-    signature: Vec<u8>,
+pub(super) struct Signed {
+    pub(super) key: usize,
+    pub(super) scheme: SignatureScheme,
+    pub(super) spki: Vec<u8>,
+    pub(super) signature: Vec<u8>,
 }
 
-const MESSAGE: &[u8] = b"pki_api signature";
+pub(super) const MESSAGE: &[u8] = b"pki_api signature";
 
 /// Signatures by every fixture key with each of its schemes (native), and
 /// with its first scheme by RustCrypto where that loads the key.
-fn signatures() -> &'static [Signed] {
+pub(super) fn signatures() -> &'static [Signed] {
     static SIGNED: OnceLock<Vec<Signed>> = OnceLock::new();
     SIGNED.get_or_init(|| {
         let fx = fixtures::get();

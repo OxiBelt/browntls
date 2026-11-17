@@ -443,7 +443,7 @@ impl World {
             (SERVER, _, Server::Accepting(f)) => {
                 let _ = (f.get_ref().is_some(), f.get_mut().is_some());
             }
-            (_, Client::Ready(s), _) | (_, _, Server::Ready(s)) => {
+            (CLIENT, Client::Ready(s), _) | (SERVER, _, Server::Ready(s)) => {
                 let _ = s.get_ref().1.is_handshaking();
                 let _ = s.get_mut().1.wants_write();
                 match s {

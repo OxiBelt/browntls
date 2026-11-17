@@ -40,7 +40,10 @@ use browntls::unbuffered::{
 use browntls::{ClientConfig, CommonState, ServerConfig, SideData};
 
 use crate::input::{Input, put_short_field};
+
+mod seeds;
 use crate::tls_conn::setup::{Knobs, Pki, assert_prefix, assert_same_secrets, server_name};
+pub use seeds::seeds;
 
 const MAX_OPS: usize = 64;
 const MAX_CONNECTIONS: usize = 4;
@@ -61,7 +64,8 @@ enum Op {
     Deliver,
     /// Drive both sides and deliver everything until idle.
     Pump,
-    /// `label, flags, context, length (u16)`: exporters on both sides.
+    /// `label, flags, context, length (u16)`: exporters (regular and
+    /// early) and the channel binding on both sides.
     Export,
     /// Every accessor; agreement once both are connected.
     Accessors,
@@ -624,6 +628,39 @@ impl World {
         if let (Some(c), Some(s)) = (c, s) {
             assert_eq!(c, s, "exporters disagree");
         }
+        // The early exporter: equal once the server has accepted 0-RTT
+        // (the client loses it if the server rejects it).
+        let c = self.client.as_ref().and_then(|c| {
+            c.export_early_keying_material(vec![0u8; len], label, context)
+                .ok()
+        });
+        let s = self.server.as_ref().and_then(|s| {
+            s.export_early_keying_material(vec![0u8; len], label, context)
+                .ok()
+        });
+        if let (Some(c), Some(s)) = (c, s)
+            && !self.corrupted
+        {
+            assert_eq!(c, s, "early exporters disagree");
+        }
+        // RFC 9266 channel binding: the exporter with a fixed label.
+        let bindings = [
+            self.client
+                .as_ref()
+                .and_then(|c| c.tls_exporter_channel_binding().ok()),
+            self.server
+                .as_ref()
+                .and_then(|s| s.tls_exporter_channel_binding().ok()),
+        ];
+        if let [Some(c), Some(s)] = bindings {
+            assert_eq!(c, s, "channel bindings disagree");
+        }
+        if let (Some(binding), Some(client)) = (bindings[0], &self.client) {
+            let exported = client
+                .export_keying_material([0u8; 32], b"EXPORTER-Channel-Binding", Some(&[]))
+                .expect("the exporter that gave the binding");
+            assert_eq!(binding, exported);
+        }
     }
 
     fn accessors(&self) {
@@ -810,158 +847,4 @@ pub fn run(data: &[u8]) {
     }
     world.accessors();
     world.check();
-}
-
-// ------------------------------------------------------------------ seeds
-
-struct Seed(Vec<u8>);
-
-impl Seed {
-    fn new(knobs: [u8; 5], connect: &[u8]) -> Self {
-        Self([&knobs[..], connect].concat())
-    }
-
-    fn op(mut self, op: Op, args: &[u8]) -> Self {
-        self.0.push(op as u8);
-        self.0.extend_from_slice(args);
-        self
-    }
-
-    fn step(mut self, op: Op, side: u8, flags: u8, cap: u16, data: &[u8]) -> Self {
-        self.0.extend_from_slice(&[op as u8, side]);
-        StepArgs { flags, cap, data }.write(&mut self.0);
-        self
-    }
-
-    /// Drives the handshake to completion, then exchanges data, rotates
-    /// keys, exports and checks.
-    fn conversation(self) -> Self {
-        self.op(Op::Pump, &[])
-            .op(Op::Accessors, &[])
-            .step(Op::Drive, 0, RETRY | 0x10, 0, b"ping")
-            .step(Op::Drive, 1, RETRY | 0x10 | 0x80, 0, b"pong")
-            .op(Op::Deliver, &[0, 0, 3, 0, 0, 0])
-            .op(Op::Deliver, &[1, 0, 0, 0, 0, 0])
-            .step(Op::Step, 1, 0x80, 0, b"")
-            .step(Op::Drive, 0, RETRY | 0x80, 0, b"")
-            .step(Op::Drive, 1, 0x80, 0, b"")
-            .op(Op::Export, &[4, b't', b'e', b's', b't', 1, 1, b'c', 0, 48])
-            .op(Op::Export, &[0, 0, 0, 0, 0])
-            .step(Op::Drive, 1, RETRY | 0x50, 0, b"rekey")
-            .op(Op::Pump, &[])
-            .op(Op::Check, &[])
-    }
-}
-
-/// Starting inputs for `tls_unbuffered`.
-#[must_use]
-pub fn seeds() -> Vec<Vec<u8>> {
-    let mut seeds = Vec::new();
-    let flags = [0x00u8, 0x01, 0x02, 0x05, 0x0a, 0x1d, 0x2e, 0x33];
-    let auth = [0x40u8, 0x41, 0x80, 0x06, 0x13, 0x22, 0x00, 0x00];
-    for (flags, auth) in flags.into_iter().zip(auth) {
-        seeds.push(Seed::new([flags, auth, 0, 0, 0], &[0]).conversation().0);
-    }
-
-    // Small output buffers, with and without retrying; no done().
-    let seed = Seed::new([0x01, 0x40, 0, 0, 0], &[0])
-        .step(Op::Step, 0, 0, 10, b"")
-        .step(Op::Step, 0, RETRY, 10, b"")
-        .step(Op::Step, 0, 2, 0, b"")
-        .step(Op::Step, 0, 0, 0, b"")
-        .op(Op::Deliver, &[0, 0, 100, 0, 0, 0])
-        .step(Op::Drive, 1, RETRY, 0, b"")
-        .op(Op::Deliver, &[0, 0, 0, 0, 0, 0])
-        .step(Op::Drive, 1, RETRY, 0, b"")
-        .op(Op::Pump, &[])
-        .step(Op::Drive, 0, 0x10, 5, b"too large for five bytes")
-        .step(Op::Drive, 0, 0x10 | RETRY, 5, b"retried")
-        .step(Op::Drive, 1, 0x20, 3, b"")
-        .step(Op::Drive, 1, 0x20 | RETRY, 3, b"")
-        .op(Op::Pump, &[])
-        .op(Op::Accessors, &[])
-        .op(Op::Check, &[]);
-    seeds.push(seed.0);
-
-    // Half-RTT data from the server through TransmitTlsData, then 0-RTT
-    // on a resumed connection, then extraction.
-    let resume = [2u8, 5, b's', b't', b'a', b't', b'e'];
-    let seed = Seed::new([0x41 | 0x80, 0x44, 0, 0, 0], &resume)
-        .step(Op::Drive, 0, RETRY, 0, b"")
-        .op(Op::Deliver, &[0, 0, 0, 0, 0, 0])
-        .step(Op::Drive, 1, RETRY | 4 | 0x10, 0, b"half")
-        .op(Op::Pump, &[])
-        .op(Op::Check, &[])
-        .op(
-            Op::Reconnect,
-            &[1 | 2, 5, 4, b'f', b'u', b'z', b'z', 1, b'x'],
-        )
-        .step(Op::Drive, 0, RETRY | 8, 0, b"early")
-        .op(Op::Deliver, &[0, 0, 0, 0, 0, 0])
-        .step(Op::Drive, 1, RETRY | 0x80, 0, b"")
-        .op(Op::Pump, &[])
-        .op(Op::Accessors, &[])
-        .op(Op::Check, &[])
-        .op(Op::Extract, &[])
-        .op(Op::Reconnect, &[4])
-        .op(Op::RejectEarlyData, &[])
-        .op(Op::ResumptionData, &[1, b'y'])
-        .step(Op::Drive, 0, RETRY | 8 | 2, 3, &[7; 200])
-        .op(Op::Pump, &[])
-        .op(Op::Check, &[]);
-    seeds.push(seed.0);
-    let seed = Seed::new([0x41, 0x04, 0, 0, 0], &[0])
-        .conversation()
-        .op(Op::Extract, &[]);
-    seeds.push(seed.0);
-
-    // Damage, replay and invented bytes; closing.
-    let seed = Seed::new([0x00, 0x00, 0, 0, 0], &[0])
-        .op(Op::Pump, &[])
-        .step(Op::Drive, 0, RETRY | 0x10, 0, b"one")
-        .step(Op::Drive, 0, RETRY | 0x10, 0, b"two")
-        .op(Op::Deliver, &[0, 0, 0, 6, 0, 30])
-        .op(Op::Pump, &[])
-        .step(Op::Drive, 1, RETRY | 0x10, 0, b"three")
-        .op(Op::Deliver, &[1, 0, 0, 4, 0, 9])
-        .op(Op::Pump, &[])
-        .op(Op::Inject, &[0, 0, 7, 0x17, 3, 3, 0, 2, 1, 2])
-        .op(Op::Pump, &[])
-        .op(Op::Accessors, &[]);
-    seeds.push(seed.0);
-    let seed = Seed::new([0x00, 0x00, 0, 0, 0], &[0])
-        .op(Op::Pump, &[])
-        .step(Op::Drive, 0, RETRY | 0x40, 0, b"bye")
-        .op(Op::Pump, &[])
-        .step(Op::Drive, 1, RETRY | 0x20, 0, b"")
-        .op(Op::Pump, &[])
-        .op(Op::Check, &[]);
-    seeds.push(seed.0);
-    seeds.push(Seed::new([0x02, 0x00, 0, 0, 0], &[0]).op(Op::Pump, &[]).0);
-
-    // Post-handshake client authentication in TLS 1.3 (deferred client
-    // authentication), refused while handshaking, then answered twice;
-    // and refused in TLS 1.2.
-    let seed = Seed::new([0x01, 0x03, 0, 0, 0], &[0])
-        .op(Op::PostHandshakeAuth, &[])
-        .op(Op::Pump, &[])
-        .op(Op::PostHandshakeAuth, &[])
-        .op(Op::PostHandshakeAuth, &[])
-        .op(Op::Pump, &[])
-        .op(Op::Accessors, &[])
-        .step(Op::Drive, 0, RETRY | 0x10, 0, b"authenticated")
-        .op(Op::PostHandshakeAuth, &[])
-        .step(Op::Drive, 1, RETRY, 0, b"")
-        .op(Op::Deliver, &[1, 0, 0, 0, 0, 0])
-        .step(Op::Drive, 0, RETRY, 0, b"")
-        .op(Op::Pump, &[])
-        .op(Op::Accessors, &[])
-        .op(Op::Check, &[]);
-    seeds.push(seed.0);
-    let seed = Seed::new([0x02, 0x03, 0, 0, 0], &[0])
-        .op(Op::Pump, &[])
-        .op(Op::PostHandshakeAuth, &[])
-        .op(Op::Accessors, &[]);
-    seeds.push(seed.0);
-    seeds
 }

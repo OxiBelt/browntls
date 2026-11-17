@@ -360,6 +360,12 @@ with the extended master secret, which the TLS 1.2 exporter requires
 anyway; since browntls never renegotiates, the RFC 9266 §4.2 renegotiation
 exclusion does not arise.
 
+`UnbufferedConnectionCommon` has the same three, through the same code
+(`ConnectionCore::export_keying_material` and
+`ConnectionCore::export_early_keying_material`). An unbuffered client builds
+its ClientHello in `new`, so its early exporter is there as soon as the
+connection exists when that ClientHello offers 0-RTT.
+
 ### TLS 1.3 external PSKs
 
 External pre-shared keys (RFC 9846 §4.3.11) live in `browntls::psk`. An

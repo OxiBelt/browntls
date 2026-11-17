@@ -55,25 +55,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<T, Error> {
-        let out = output.as_mut();
-        if out.is_empty() {
-            return Err(Error::general(
-                "export_early_keying_material: output buffer is empty",
-            ));
-        }
-        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
-            return Err(Error::general(
-                "export_early_keying_material: context too long",
-            ));
-        }
-        match &self.core.common_state.early_exporter {
-            Some(exporter) => exporter.export_keying_material(out, label, context)?,
-            None => {
-                return Err(Error::General(
-                    "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
-                ));
-            }
-        }
+        self.core
+            .export_early_keying_material(output.as_mut(), label, context)?;
         Ok(output)
     }
 

@@ -499,3 +499,4 @@ include!("unbuffered/early_data.rs");
 include!("unbuffered/key_update.rs");
 include!("unbuffered/rustls_interop.rs");
 include!("unbuffered/status_and_auth.rs");
+include!("unbuffered/exporters.rs");

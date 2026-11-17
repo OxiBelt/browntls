@@ -345,8 +345,9 @@ impl CommonState {
 
     /// Whether the connection wants to read more TLS bytes: not when buffered
     /// plaintext is waiting for the application, not after the peer closed,
-    /// and not while too many control records wait to be written (see
-    /// [`Self::control_backlog_full`]).
+    /// and not while more control records (such as answers the peer's
+    /// messages call for) wait to be written than the send buffer limit,
+    /// capped at 64 KiB, allows.
     pub fn wants_read(&self) -> bool {
         self.received_plaintext.is_empty()
             && !self.has_received_close_notify

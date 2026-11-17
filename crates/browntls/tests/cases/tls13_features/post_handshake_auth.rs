@@ -286,10 +286,7 @@ fn expand_label(
     let label_len = [u8::try_from(6 + label.len()).unwrap()];
     let mut out = vec![0u8; len];
     expander
-        .expand_slice(
-            &[&out_len, &label_len, b"tls13 ", label, &[0]],
-            &mut out,
-        )
+        .expand_slice(&[&out_len, &label_len, b"tls13 ", label, &[0]], &mut out)
         .unwrap();
     out
 }
@@ -488,7 +485,10 @@ fn empty_application_data_does_not_renew_the_certificate_request_budget() {
     for i in 0..8u8 {
         feed(&mut client, &server.certificate_request(&[i; 8]));
         // RFC 9846 §5.1 allows zero-length application data records.
-        feed(&mut client, &server.record(ContentType::ApplicationData, b""));
+        feed(
+            &mut client,
+            &server.record(ContentType::ApplicationData, b""),
+        );
         client.process_new_packets().unwrap();
         take_tls(&mut client);
     }
@@ -510,7 +510,10 @@ fn empty_application_data_does_not_renew_the_key_update_budget() {
     let (mut client, mut server) = ForgedServer::connect(config, &chain);
     for _ in 0..8 {
         feed(&mut client, &server.key_update_requested());
-        feed(&mut client, &server.record(ContentType::ApplicationData, b""));
+        feed(
+            &mut client,
+            &server.record(ContentType::ApplicationData, b""),
+        );
         client.process_new_packets().unwrap();
         take_tls(&mut client);
     }
@@ -528,7 +531,10 @@ fn application_data_renews_the_key_update_budget() {
     let (mut client, mut server) = ForgedServer::connect(config, &chain);
     for _ in 0..16 {
         feed(&mut client, &server.key_update_requested());
-        feed(&mut client, &server.record(ContentType::ApplicationData, b"x"));
+        feed(
+            &mut client,
+            &server.record(ContentType::ApplicationData, b"x"),
+        );
         client.process_new_packets().unwrap();
         let mut byte = [0u8; 1];
         client.reader().read_exact(&mut byte).unwrap();

@@ -54,6 +54,29 @@ impl DeframerVecBuffer {
         self.used > 0
     }
 
+    /// How many more bytes complete the records buffered so far: zero when
+    /// the unconsumed bytes end at a record boundary, otherwise what the
+    /// last, partial record (or its header) still lacks. Only headers are
+    /// read, never validated: a malformed one is the deframer's to report.
+    pub(crate) fn bytes_to_record_boundary(&self) -> usize {
+        let mut rest = &self.buf[..self.used];
+        loop {
+            if rest.len() < HEADER_SIZE {
+                return if rest.is_empty() {
+                    0
+                } else {
+                    HEADER_SIZE - rest.len()
+                };
+            }
+            let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
+            let total = HEADER_SIZE + len;
+            if rest.len() < total {
+                return total - rest.len();
+            }
+            rest = &rest[total..];
+        }
+    }
+
     /// Appends `bytes`, failing if the buffer limit would be exceeded.
     #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), Error> {

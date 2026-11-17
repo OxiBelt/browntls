@@ -266,7 +266,40 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
                 "cannot extract secrets with a KeyUpdate pending",
             ));
         }
+        if let Some(blocker) = self.core.kernel_handoff_blocker()
+            && blocker.is_in_flight()
+        {
+            return Err(Error::General(alloc::format!(
+                "cannot extract secrets: {blocker}"
+            )));
+        }
         self.core.dangerous_extract_secrets()
+    }
+
+    /// What keeps this connection from being handed to the kernel now, if
+    /// anything (see [`crate::kernel`]).
+    ///
+    /// The incoming buffer belongs to the caller, so this cannot see it:
+    /// hand over only once every byte received so far has been processed
+    /// and nothing of a partial record is buffered, so that the kernel
+    /// starts at a record boundary.
+    pub fn kernel_handoff_blocker(&self) -> Option<crate::kernel::KernelHandoffBlocker> {
+        self.core.kernel_handoff_blocker()
+    }
+
+    /// Hands the connection to the kernel: returns the secrets to install
+    /// (`TLS_TX`, `TLS_RX`) and the [`KernelConnection`] that handles the
+    /// records the kernel passes back.
+    ///
+    /// Fails, and drops the connection, when
+    /// [`Self::kernel_handoff_blocker`] reports anything; check that first.
+    /// The caller's incoming buffer must hold no unprocessed bytes.
+    ///
+    /// [`KernelConnection`]: crate::kernel::KernelConnection
+    pub fn dangerous_into_kernel_connection(
+        self,
+    ) -> Result<(ExtractedSecrets, crate::kernel::KernelConnection<Data>), Error> {
+        self.core.into_kernel_connection()
     }
 }
 

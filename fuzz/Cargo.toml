@@ -199,6 +199,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_kernel"
+path = "fuzz_targets/tls_kernel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tls_ech"
 path = "fuzz_targets/tls_ech.rs"
 test = false

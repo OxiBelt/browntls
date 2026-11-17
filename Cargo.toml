@@ -4,6 +4,7 @@ members = [
   "crates/browntls-crypto",
   "crates/browntls-pki",
   "crates/browntls",
+  "crates/browntls-tokio",
   "crates/browntls-e2e",
   "crates/browntls-entropy",
 ]
@@ -21,6 +22,7 @@ publish = false
 [workspace.dependencies]
 browntls-crypto = { path = "crates/browntls-crypto", version = "=0.1.0-dev", default-features = false }
 browntls-pki = { path = "crates/browntls-pki", version = "=0.1.0-dev", default-features = false }
+browntls = { path = "crates/browntls", version = "=0.1.0-dev", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

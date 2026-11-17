@@ -17,6 +17,9 @@ browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
   crypto::*  (mount point)           no_std + alloc; no cryptography
   crypto::native     (default provider, browntls-crypto)
   crypto::rustcrypto (optional provider, RustCrypto crates)
+       ^
+       |
+browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls
 ```
 
 | Crate | Role | `unsafe` |
@@ -24,6 +27,7 @@ browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
 | `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, HPKE, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
+| `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API | Forbidden |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -504,6 +508,48 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   `EncodeTlsData` first, then the error is returned on every call. A client
   writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
   after its ClientHello.
+
+### Asynchronous streams (`browntls-tokio`)
+
+`browntls-tokio` adapts the buffered API to Tokio's `AsyncRead`,
+`AsyncBufRead` and `AsyncWrite`; it depends only on Tokio's I/O traits (no
+Tokio feature, no runtime). Each poll pairs the connection with the
+transport for its duration (`common::Stream`) and drives `read_tls` and
+`write_tls` through adapters that turn the task context's `Pending` into
+`WouldBlock`, the design of tokio-rustls:
+
+- `TlsConnector`/`TlsAcceptor` return futures (`Connect`, `Accept`, and
+  `into_fallible` variants that hand the transport back on error) that run
+  the handshake. A handshake that can neither read nor write while still
+  in progress (the peer's `close_notify` mid-handshake) ends with
+  `UnexpectedEof` instead of polling forever, the asynchronous counterpart
+  of the `complete_io` fix.
+- Reads return plaintext through `Reader::into_first_chunk`, which lends the
+  first buffered chunk for the connection's lifetime so `poll_fill_buf` can
+  return it. A read whose records queue an answer (an alert, a KeyUpdate
+  answer, a post-handshake authentication response) writes and flushes it
+  as far as the transport takes it at once, since the peer may wait for it
+  (a server awaiting client authentication before it responds); records
+  that writes queued are left to them. Such a write may replace a parked
+  writer's write-readiness registration in the transport (tokio-rustls's
+  crate documentation gives wakeup problems of this kind as its reason for
+  not writing during reads), so it registers a waker for both the reading
+  and the writing task: writability wakes the writer even if the reader is
+  never polled again, and nothing is woken at a mere `Pending`, which would
+  spin a task that polls both directions. A write that moved bytes also
+  wakes the writer at once. An answer the transport took only in part
+  stays the reads' to finish. A read that fails writes and flushes the
+  alert and wakes the writer, which then sees the failure.
+- A write encrypts what the send buffer takes and writes queued records
+  until the transport blocks; a write that took nothing returns `Pending`
+  only while records wait for the transport, so a retry cannot spin.
+- `shutdown` queues `close_notify` once and then shuts the transport's write
+  side. Writes after it fail with `BrokenPipe` without reaching the
+  connection (RFC 9846 §6.1). The peer's `close_notify` is end of file;
+  end of file without it is `UnexpectedEof`.
+- TLS errors surface as `io::Error` of kind `InvalidData` wrapping
+  `browntls::Error`; the alert describing a local failure is written if
+  the transport takes it at once.
 
 ### Delegated credentials (RFC 9345)
 
@@ -1148,8 +1194,9 @@ entropy from the optional `getrandom` crate feature.
 - Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`
   (optional), the RustCrypto crates (only with `rustcrypto`) and the
   pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
-  with `zlib`, `brotli`, `zstd`) for `browntls`. Independent implementations (RustCrypto, rustls with ring,
-  rcgen) are dev-dependencies used as test oracles.
+  with `zlib`, `brotli`, `zstd`) for `browntls`; `tokio` (I/O traits only)
+  for `browntls-tokio`. Independent implementations (RustCrypto, rustls with
+  ring, tokio-rustls, rcgen) are dev-dependencies used as test oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.
 
@@ -1160,7 +1207,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128/256/1024 with and without vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the x86-64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
 | Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and one API-sequence target per topic that together reach every public function ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and daily |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |

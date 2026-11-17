@@ -76,6 +76,13 @@
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 //!
+//! # Kernel TLS
+//!
+//! [`client::TlsStream::into_kernel_handoff`] and its server counterpart
+//! ready a stream for kernel TLS offload: every queued record written, the
+//! input read exactly up to a record boundary, the received plaintext set
+//! aside. See [`kernel`].
+//!
 //! # Errors
 //!
 //! Errors are `io::Error`s. A TLS failure (a bad record, an alert from the
@@ -123,6 +130,7 @@ macro_rules! ready {
 
 pub mod client;
 mod common;
+pub mod kernel;
 pub mod server;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};

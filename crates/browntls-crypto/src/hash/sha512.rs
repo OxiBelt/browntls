@@ -396,11 +396,15 @@ macro_rules! sha512_variant {
 
 sha512_variant!(
     /// SHA-512.
-    Sha512, H512, 64
+    Sha512,
+    H512,
+    64
 );
 sha512_variant!(
     /// SHA-384.
-    Sha384, H384, 48
+    Sha384,
+    H384,
+    48
 );
 
 #[cfg(test)]

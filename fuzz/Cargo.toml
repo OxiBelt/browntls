@@ -6,7 +6,7 @@ name = "browntls-fuzz"
 description = "Fuzz targets for the browntls codecs, PKI and handshake state machines"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "Apache-2.0"
 publish = false
 

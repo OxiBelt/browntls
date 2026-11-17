@@ -455,11 +455,13 @@ macro_rules! aes_variant {
 
 aes_variant!(
     /// AES-128 (encryption only).
-    Aes128, 16
+    Aes128,
+    16
 );
 aes_variant!(
     /// AES-256 (encryption only).
-    Aes256, 32
+    Aes256,
+    32
 );
 
 #[cfg(test)]

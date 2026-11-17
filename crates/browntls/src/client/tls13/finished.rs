@@ -292,7 +292,7 @@ struct ExpectTraffic {
     /// The transcript through our Finished, when we offered
     /// `post_handshake_auth`.
     post_handshake_transcript: Option<HandshakeHash>,
-    /// CertificateRequests answered since the server last sent
+    /// CertificateRequests answered since the server last sent non-empty
     /// application data; see [`MAX_POST_HANDSHAKE_AUTH_REQUESTS`].
     post_handshake_requests_since_data: u8,
     key_schedule: KeyScheduleTraffic,
@@ -422,7 +422,7 @@ impl ExpectTraffic {
         }
 
         // Each answer costs a signature: refuse a server that keeps
-        // asking without sending application data in between.
+        // asking without sending (non-empty) application data in between.
         self.post_handshake_requests_since_data =
             self.post_handshake_requests_since_data.saturating_add(1);
         if self.post_handshake_requests_since_data > MAX_POST_HANDSHAKE_AUTH_REQUESTS {
@@ -513,8 +513,13 @@ impl State<ClientConnectionData> for ExpectTraffic {
     fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
         match m.payload {
             MessagePayload::ApplicationData(payload) => {
-                cx.common.received_key_update_requests = 0;
-                self.post_handshake_requests_since_data = 0;
+                // A zero-length record (RFC 9846 §5.1 allows them) gives
+                // the application nothing, so it does not renew the
+                // request budgets.
+                if !payload.bytes().is_empty() {
+                    cx.common.received_key_update_requests = 0;
+                    self.post_handshake_requests_since_data = 0;
+                }
                 cx.common.take_received_plaintext(payload);
             }
             MessagePayload::Handshake {

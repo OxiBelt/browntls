@@ -244,7 +244,9 @@ empty `certificate_request_context` is `illegal_parameter` (§4.4.2); its
 extensions are checked as in the handshake. Each answer costs a signature,
 so a client answers at most eight requests while the server sends no
 application data and then aborts with `unexpected_message`, the same local
-resource bound as for KeyUpdate requests.
+resource bound as for KeyUpdate requests. On the client only a record with
+application data in it renews either budget: a zero-length application data
+record (§5.1) gives the application nothing and does not.
 
 A server learns the offer from the ClientHello (`ServerConnection::
 post_handshake_auth_offered`). `ServerConnection::request_client_auth`

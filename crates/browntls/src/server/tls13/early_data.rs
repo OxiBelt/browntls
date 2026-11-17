@@ -116,11 +116,14 @@ impl State<ServerConnectionData> for ExpectAndSkipRejectedEarlyData {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
         // RFC 8446 §4.2.10: "skipping all records with an external content
         // type of application_data ... up to the configured max_early_data_size".
-        if let MessagePayload::ApplicationData(skip_data) = &m.payload
-            && skip_data.bytes().len() <= self.skip_data_left
-        {
-            self.skip_data_left -= skip_data.bytes().len();
-            return Ok(self);
+        // Each record costs at least one byte, so the limit also bounds how
+        // many (empty) records are skipped.
+        if let MessagePayload::ApplicationData(skip_data) = &m.payload {
+            let cost = skip_data.bytes().len().max(1);
+            if cost <= self.skip_data_left {
+                self.skip_data_left -= cost;
+                return Ok(self);
+            }
         }
         self.next.handle(cx, m)
     }

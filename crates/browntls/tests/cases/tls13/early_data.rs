@@ -330,17 +330,21 @@ fn early_data_disabled_in_client_config_is_not_sent() {
 /// Offers 0-RTT data under a ticket the server (budget `server_max`, its own
 /// empty session store) does not recognise, so it rejects the early data and
 /// skips records, then feeds it up to `count` forged application_data
-/// records of `payload_len` bytes. Returns how many it skipped before
-/// failing, and the error.
+/// records of `payload_len` bytes. With `retry`, the server only takes P-384
+/// and answers with a HelloRetryRequest first, so it skips records without
+/// a decryption key. Returns how many it skipped before failing, and the
+/// error.
 fn skip_forged_early_records(
     suite: browntls::SupportedCipherSuite,
     server_max: u32,
+    retry: bool,
     payload_len: u16,
     count: usize,
 ) -> (usize, Option<Error>) {
     use std::io::Write;
     let chain = server_chain(KeyType::EcdsaP256);
-    let mut client_config = tls13_only_client(&chain, Some(&[suite]), None);
+    let groups = [prov::kx_group::X25519, prov::kx_group::SECP384R1];
+    let mut client_config = tls13_only_client(&chain, Some(&[suite]), Some(&groups));
     client_config.enable_early_data = true;
     let client_config = Arc::new(client_config);
     let issuer_cache: Arc<dyn browntls::server::StoresServerSessions> =
@@ -350,10 +354,19 @@ fn skip_forged_early_records(
         &early_data_server(&chain, 1024, &issuer_cache),
     );
 
-    let cache: Arc<dyn browntls::server::StoresServerSessions> =
-        browntls::server::ServerSessionMemoryCache::new(8);
+    let mut provider = prov::default_provider();
+    if retry {
+        provider.kx_groups = vec![prov::kx_group::SECP384R1];
+    }
+    let mut target = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    target.max_early_data_size = server_max;
     let mut client = ClientConnection::new(client_config, server_name()).unwrap();
-    let mut server = ServerConnection::new(early_data_server(&chain, server_max, &cache)).unwrap();
+    let mut server = ServerConnection::new(Arc::new(target)).unwrap();
     client.early_data().unwrap().write_all(b"").unwrap();
     // The ClientHello only: no genuine early data record is charged.
     let mut hello = Vec::new();
@@ -361,7 +374,12 @@ fn skip_forged_early_records(
     server.read_tls(&mut &hello[..]).unwrap();
     server.process_new_packets().unwrap();
     assert!(server.is_handshaking());
-    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
+    let kind = if retry {
+        HandshakeKind::FullWithHelloRetryRequest
+    } else {
+        HandshakeKind::Full
+    };
+    assert_eq!(server.handshake_kind(), Some(kind));
 
     let mut record = vec![0x17, 0x03, 0x03];
     record.extend_from_slice(&payload_len.to_be_bytes());
@@ -400,7 +418,7 @@ fn rejected_early_data_charges_every_skipped_record() {
             .chain([(0, expansion, 20_000)]);
         for (server_max, payload_len, count) in cases {
             let budget = if server_max == 0 { 16_384 } else { server_max as usize };
-            let got = skip_forged_early_records(suite, server_max, payload_len, count);
+            let got = skip_forged_early_records(suite, server_max, false, payload_len, count);
             if got != (budget, Some(Error::DecryptError)) {
                 wrong.push(format!(
                     "{suite:?}, budget {budget}, {payload_len}-byte records: {got:?}"
@@ -409,4 +427,23 @@ fn rejected_early_data_charges_every_skipped_record() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn rejected_early_data_after_hello_retry_request_charges_empty_records() {
+    init_logging();
+    // After a HelloRetryRequest no key is tried: records are charged their
+    // length, and an empty one byte. Past the budget, the next record is
+    // read as the second ClientHello would be.
+    let suite = prov::default_provider().cipher_suites[0];
+    for (server_max, payload_len, budget, count) in
+        [(16, 0, 16, 1000), (16, 1, 16, 1000), (16, 4, 4, 1000), (0, 0, 16_384, 20_000)]
+    {
+        let (skipped, err) = skip_forged_early_records(suite, server_max, true, payload_len, count);
+        assert_eq!(skipped, budget, "budget {server_max}, {payload_len}-byte records");
+        assert!(
+            matches!(err, Some(Error::InappropriateMessage { .. })),
+            "{err:?}"
+        );
+    }
 }

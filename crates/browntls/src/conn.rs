@@ -633,10 +633,11 @@ impl<Data: SideData> ConnectionCore<Data> {
     }
 
     /// Reads one plaintext handshake message out of `buffer` without
-    /// advancing the state machine; used by the server `Acceptor`.
+    /// advancing the state machine; used by the server acceptors (buffered
+    /// and unbuffered).
     pub(crate) fn first_handshake_message(
         &mut self,
-        buffer: &mut DeframerVecBuffer,
+        buffer: &mut impl DeframerBuffer,
     ) -> Result<Option<Message<'static>>, Error> {
         loop {
             match self.deframer.pop(

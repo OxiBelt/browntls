@@ -12,8 +12,9 @@
 //! `refresh_traffic_keys`, `done` or not, which payload accessor);
 //! delivery of a fuzzed amount of the transmitted bytes, optionally
 //! damaged, replayed or with bytes inserted; raw bytes; exporters,
-//! accessors, resumption data, early data refusal, reconnection
-//! (resumption and 0-RTT) and secret extraction.
+//! accessors, resumption data, early data refusal, post-handshake client
+//! authentication requests, reconnection (resumption and 0-RTT) and secret
+//! extraction.
 //!
 //! Checked properties:
 //! * application and 0-RTT data a side reads is a prefix of what the peer
@@ -23,12 +24,15 @@
 //!   enough; 0-RTT data beyond `bytes_left` is refused;
 //! * both sides export the same keying material, extract matching traffic
 //!   secrets, and agree on the negotiated parameters;
+//! * a post-handshake client authentication the server reports as
+//!   authenticated was answered by the client, with its certificate;
 //! * nothing panics.
 
 use std::sync::Arc;
 
 use browntls::client::{ClientConnectionData, UnbufferedClientConnection};
-use browntls::server::{ServerConnectionData, UnbufferedServerConnection};
+use browntls::ech::EchStatus;
+use browntls::server::{PostHandshakeAuthStatus, ServerConnectionData, UnbufferedServerConnection};
 use browntls::unbuffered::{
     ConnectionState, EarlyDataError, EncodeError, EncryptError, InsufficientSizeError,
     TransmitTlsData, UnbufferedConnectionCommon,
@@ -73,9 +77,11 @@ enum Op {
     ResumptionData,
     /// `reject_early_data` on the server.
     RejectEarlyData,
+    /// `request_client_auth` on the server (RFC 9846 §4.7.2).
+    PostHandshakeAuth,
 }
 
-const OPS: usize = Op::RejectEarlyData as usize + 1;
+const OPS: usize = Op::PostHandshakeAuth as usize + 1;
 
 const ALL_OPS: [Op; OPS] = [
     Op::Step,
@@ -90,6 +96,7 @@ const ALL_OPS: [Op; OPS] = [
     Op::Check,
     Op::ResumptionData,
     Op::RejectEarlyData,
+    Op::PostHandshakeAuth,
 ];
 
 /// What one step does with the state it gets.
@@ -639,16 +646,22 @@ impl World {
             let _ = (
                 client.tls13_tickets_received(),
                 client.is_early_data_accepted(),
+                client.post_handshake_auth_responses(),
                 client.fips(),
                 format!("{client:?}"),
             );
+            // The configurations never enable either.
+            assert!(client.delegated_credential().is_none());
+            assert_eq!(client.ech_status(), EchStatus::NotOffered);
         }
         if let Some(server) = &self.server {
             let _ = (
                 server.server_name().map(str::len),
                 server.fips(),
+                server.post_handshake_auth_offered(),
                 format!("{server:?}"),
             );
+            assert_eq!(server.ech_status(), EchStatus::NotOffered);
             if let Some(data) = server.received_resumption_data() {
                 assert!(
                     self.resumption_data.iter().any(|d| d == data),
@@ -676,6 +689,34 @@ impl World {
         }
         let server = self.server.as_ref().expect("server");
         assert_eq!(server.server_name(), Some("localhost"));
+        if server.post_handshake_auth_status() == Some(PostHandshakeAuthStatus::Authenticated) {
+            let client = self.client.as_ref().expect("client");
+            assert!(client.post_handshake_auth_responses() > 0);
+            assert_eq!(s.peer_certificates(), Some(&pki.client_chain[..]));
+        }
+    }
+
+    /// `request_client_auth`: refused unless the TLS 1.3 handshake is
+    /// complete and the client offered `post_handshake_auth`; never two at
+    /// a time.
+    fn post_handshake_auth(&mut self) {
+        let Some(server) = &mut self.server else {
+            return;
+        };
+        let offered = server.post_handshake_auth_offered();
+        let before = server.post_handshake_auth_status();
+        match server.request_client_auth() {
+            Ok(()) => {
+                assert!(offered && !server.is_handshaking());
+                assert_ne!(before, Some(PostHandshakeAuthStatus::Requested));
+                assert_eq!(
+                    server.post_handshake_auth_status(),
+                    Some(PostHandshakeAuthStatus::Requested)
+                );
+                assert!(server.request_client_auth().is_err());
+            }
+            Err(_) => assert_eq!(server.post_handshake_auth_status(), before),
+        }
     }
 
     fn extract(&mut self) {
@@ -764,6 +805,7 @@ pub fn run(data: &[u8]) {
                     server.reject_early_data();
                 }
             }
+            Op::PostHandshakeAuth => world.post_handshake_auth(),
         }
     }
     world.accessors();
@@ -896,5 +938,30 @@ pub fn seeds() -> Vec<Vec<u8>> {
         .op(Op::Check, &[]);
     seeds.push(seed.0);
     seeds.push(Seed::new([0x02, 0x00, 0, 0, 0], &[0]).op(Op::Pump, &[]).0);
+
+    // Post-handshake client authentication in TLS 1.3 (deferred client
+    // authentication), refused while handshaking, then answered twice;
+    // and refused in TLS 1.2.
+    let seed = Seed::new([0x01, 0x03, 0, 0, 0], &[0])
+        .op(Op::PostHandshakeAuth, &[])
+        .op(Op::Pump, &[])
+        .op(Op::PostHandshakeAuth, &[])
+        .op(Op::PostHandshakeAuth, &[])
+        .op(Op::Pump, &[])
+        .op(Op::Accessors, &[])
+        .step(Op::Drive, 0, RETRY | 0x10, 0, b"authenticated")
+        .op(Op::PostHandshakeAuth, &[])
+        .step(Op::Drive, 1, RETRY, 0, b"")
+        .op(Op::Deliver, &[1, 0, 0, 0, 0, 0])
+        .step(Op::Drive, 0, RETRY, 0, b"")
+        .op(Op::Pump, &[])
+        .op(Op::Accessors, &[])
+        .op(Op::Check, &[]);
+    seeds.push(seed.0);
+    let seed = Seed::new([0x02, 0x03, 0, 0, 0], &[0])
+        .op(Op::Pump, &[])
+        .op(Op::PostHandshakeAuth, &[])
+        .op(Op::Accessors, &[]);
+    seeds.push(seed.0);
     seeds
 }

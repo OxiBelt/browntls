@@ -251,8 +251,10 @@ record (§5.1) gives the application nothing and does not.
 A server learns the offer from the ClientHello (`ServerConnection::
 post_handshake_auth_offered`). `ServerConnection::request_client_auth`
 needs a completed TLS 1.3 handshake, the offer, a verifier that offers
-client authentication and no request still unanswered (one at a time,
-which bounds the state kept per connection). The request's
+client authentication, no request still unanswered (one at a time,
+which bounds the state kept per connection), and no `close_notify` in
+either direction (after the client's, nothing it sends is processed, so a
+request would stay unanswered). The request's
 `certificate_request_context` is an 8-byte request counter followed by 24
 random bytes: unique on the connection and unpredictable (§4.4.2). The
 answer may come after any amount of application data or KeyUpdates, but
@@ -266,6 +268,15 @@ after the Finished does `peer_certificates` change and
 is `Declined` (and `certificate_required` when the verifier makes client
 authentication mandatory). A resumed handshake may be followed by
 post-handshake authentication, as §4.4.2 allows.
+
+The unbuffered connections have the same methods
+(`UnbufferedServerConnection::{post_handshake_auth_offered,
+request_client_auth, post_handshake_auth_status}`,
+`UnbufferedClientConnection::post_handshake_auth_responses`) over the same
+state and checks (`ConnectionCore::request_client_auth`). The request is
+queued like any handshake message, so the next `process_tls_records`
+offers it through `EncodeTlsData` before anything else, and a client's
+answer leaves through `EncodeTlsData` as soon as the request is processed.
 
 With `ServerConfig::request_client_auth_after_handshake` set, a server
 leaves client authentication out of a TLS 1.3 handshake whose client
@@ -553,7 +564,10 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   by application data. After a fatal error the alert is offered through
   `EncodeTlsData` first, then the error is returned on every call. A client
   writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
-  after its ClientHello.
+  after its ClientHello. The connection-specific accessors of the buffered
+  types are there too: `ech_status` on both sides, the server's
+  post-handshake authentication methods, and the client's
+  `delegated_credential` and `post_handshake_auth_responses`.
 
 ### Asynchronous streams (`browntls-tokio`)
 

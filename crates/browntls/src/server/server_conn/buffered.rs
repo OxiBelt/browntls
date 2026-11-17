@@ -129,7 +129,9 @@ impl ServerConnection {
     ///
     /// Requires a completed TLS 1.3 handshake with a client that offered
     /// `post_handshake_auth`, a client certificate verifier that offers
-    /// client authentication, and no request still unanswered. The answer
+    /// client authentication, no request still unanswered, and no
+    /// `close_notify` sent or received (the client would never answer). The
+    /// answer
     /// arrives through [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
     /// and is checked with the configured verifier: follow it with
     /// [`Self::post_handshake_auth_status`]. A client may take its time and
@@ -138,24 +140,7 @@ impl ServerConnection {
     /// makes it mandatory, or messages interleaved with the answer end the
     /// connection with the corresponding alert.
     pub fn request_client_auth(&mut self) -> Result<(), Error> {
-        let core = &mut self.inner.core;
-        if core.common_state.is_handshaking() {
-            return Err(Error::HandshakeNotComplete);
-        }
-        if !core.common_state.is_tls13() {
-            return Err(Error::General(
-                "post-handshake client authentication requires TLS 1.3".into(),
-            ));
-        }
-        let state = match &mut core.state {
-            Ok(state) => state,
-            Err(err) => return Err(err.clone()),
-        };
-        let mut cx = crate::conn::Context {
-            common: &mut core.common_state,
-            data: &mut core.data,
-        };
-        state.request_client_auth(&mut cx)
+        self.inner.core.request_client_auth()
     }
 
     /// The state of the most recent [`Self::request_client_auth`], or

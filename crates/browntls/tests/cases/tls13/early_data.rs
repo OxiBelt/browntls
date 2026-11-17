@@ -412,12 +412,21 @@ fn rejected_early_data_charges_every_skipped_record() {
         }
         // AES-GCM, AES-CCM, ChaCha20-Poly1305: a 16-byte tag and the content type.
         let expansion = 1 + 16;
-        let cases = [(16, 0, 1000), (16, 1, 1000), (16, 16, 1000), (16, expansion, 1000)]
-            .into_iter()
-            // Early data off: the 16384-byte fallback budget.
-            .chain([(0, expansion, 20_000)]);
+        let cases = [
+            (16, 0, 1000),
+            (16, 1, 1000),
+            (16, 16, 1000),
+            (16, expansion, 1000),
+        ]
+        .into_iter()
+        // Early data off: the 16384-byte fallback budget.
+        .chain([(0, expansion, 20_000)]);
         for (server_max, payload_len, count) in cases {
-            let budget = if server_max == 0 { 16_384 } else { server_max as usize };
+            let budget = if server_max == 0 {
+                16_384
+            } else {
+                server_max as usize
+            };
             let got = skip_forged_early_records(suite, server_max, false, payload_len, count);
             if got != (budget, Some(Error::DecryptError)) {
                 wrong.push(format!(
@@ -436,11 +445,17 @@ fn rejected_early_data_after_hello_retry_request_charges_empty_records() {
     // length, and an empty one byte. Past the budget, the next record is
     // read as the second ClientHello would be.
     let suite = prov::default_provider().cipher_suites[0];
-    for (server_max, payload_len, budget, count) in
-        [(16, 0, 16, 1000), (16, 1, 16, 1000), (16, 4, 4, 1000), (0, 0, 16_384, 20_000)]
-    {
+    for (server_max, payload_len, budget, count) in [
+        (16, 0, 16, 1000),
+        (16, 1, 16, 1000),
+        (16, 4, 4, 1000),
+        (0, 0, 16_384, 20_000),
+    ] {
         let (skipped, err) = skip_forged_early_records(suite, server_max, true, payload_len, count);
-        assert_eq!(skipped, budget, "budget {server_max}, {payload_len}-byte records");
+        assert_eq!(
+            skipped, budget,
+            "budget {server_max}, {payload_len}-byte records"
+        );
         assert!(
             matches!(err, Some(Error::InappropriateMessage { .. })),
             "{err:?}"

@@ -618,6 +618,28 @@ impl ConnectionCore<ServerConnectionData> {
         Self::for_server_with(config, None)
     }
 
+    /// Queues a post-handshake CertificateRequest (RFC 9846 §4.7.2); the
+    /// body of the buffered and unbuffered `request_client_auth`.
+    pub(crate) fn request_client_auth(&mut self) -> Result<(), Error> {
+        if self.common_state.is_handshaking() {
+            return Err(Error::HandshakeNotComplete);
+        }
+        if !self.common_state.is_tls13() {
+            return Err(Error::General(
+                "post-handshake client authentication requires TLS 1.3".into(),
+            ));
+        }
+        let state = match &mut self.state {
+            Ok(state) => state,
+            Err(err) => return Err(err.clone()),
+        };
+        let mut cx = crate::conn::Context {
+            common: &mut self.common_state,
+            data: &mut self.data,
+        };
+        state.request_client_auth(&mut cx)
+    }
+
     /// A QUIC server (RFC 9001): TLS 1.3 only, with a QUIC-capable suite,
     /// and 0-RTT announced only with the sentinel size (§4.6.1).
     pub(crate) fn for_quic_server(
@@ -725,6 +747,52 @@ impl UnbufferedServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// What was decided about Encrypted Client Hello. With
+    /// [`EchStatus::Accepted`](crate::ech::EchStatus::Accepted), the
+    /// handshake used the client's encrypted ClientHello, and
+    /// [`Self::server_name`] is the name it carried.
+    pub fn ech_status(&self) -> crate::ech::EchStatus {
+        self.inner.core.data.ech.status()
+    }
+
+    /// Whether the client offered TLS 1.3 post-handshake authentication
+    /// (`post_handshake_auth`, RFC 9846 §4.3.6), once its ClientHello has
+    /// been processed.
+    pub fn post_handshake_auth_offered(&self) -> bool {
+        self.inner.core.data.post_handshake_auth_offered
+    }
+
+    /// Asks the client for a certificate after the handshake (RFC 9846
+    /// §4.7.2): queues a CertificateRequest with a fresh, unpredictable
+    /// `certificate_request_context`.
+    ///
+    /// The same rules as
+    /// [`ServerConnection::request_client_auth`](crate::server::ServerConnection::request_client_auth)
+    /// apply: a completed TLS 1.3 handshake with a client that offered
+    /// `post_handshake_auth`, a client certificate verifier that offers
+    /// client authentication, and no request still unanswered. Call it
+    /// between calls of
+    /// [`process_tls_records`](crate::unbuffered::UnbufferedConnectionCommon::process_tls_records),
+    /// not while a state it returned is held. The next call then offers
+    /// the CertificateRequest through
+    /// [`ConnectionState::EncodeTlsData`](crate::unbuffered::ConnectionState::EncodeTlsData)
+    /// before anything else; the client's answer arrives with the records
+    /// `process_tls_records` processes and is checked with the configured
+    /// verifier: follow it with [`Self::post_handshake_auth_status`]. A
+    /// refused certificate, a bad signature or Finished, a missing
+    /// certificate when the verifier makes it mandatory, or messages
+    /// interleaved with the answer end the connection with the
+    /// corresponding alert.
+    pub fn request_client_auth(&mut self) -> Result<(), Error> {
+        self.inner.core.request_client_auth()
+    }
+
+    /// The state of the most recent [`Self::request_client_auth`], or
+    /// `None` if none was made.
+    pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
+        self.inner.core.data.post_handshake_auth
     }
 
     /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].

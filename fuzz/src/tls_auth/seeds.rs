@@ -148,9 +148,10 @@ pub fn seeds() -> Vec<Vec<u8>> {
     seeds.push(vec![5, 0, 0x10, 0, 0, 3, 0, 1, 0x51, 0x80, 4, 0, 5]);
     seeds.push(vec![5, 0, 0x10, 0, 0, 2, 0, 2, 0, 5]);
 
-    // 6: exported authenticators over TLS 1.3 and TLS 1.2: each exchange
-    // with each identity, tampered and not, then fuzzed messages
-    for version in 0..2u8 {
+    // 6: exported authenticators over TLS 1.3 and TLS 1.2 (mode bit 0),
+    // with a buffered or unbuffered client (bit 1) and server (bit 2): each
+    // exchange with each identity, tampered and not
+    for mode in 0..8u8 {
         let mut seed = Vec::new();
         for (exchange, identity) in [
             (0u8, 0u8),
@@ -166,7 +167,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
         ] {
             seed.push(6);
             if seed.len() == 1 {
-                seed.push(version);
+                seed.push(mode);
             }
             seed.push(exchange);
             if exchange < 2 {
@@ -200,6 +201,10 @@ pub fn seeds() -> Vec<Vec<u8>> {
         &[17, 0, 0, 9, 3, b'a', b'b', b'c', 0, 4, 0, 13, 0, 0],
     );
     seed.push(0);
+    // the same between two unbuffered ends
+    let mut unbuffered = seed.clone();
+    unbuffered[1] = 6;
     seeds.push(seed);
+    seeds.push(unbuffered);
     seeds
 }

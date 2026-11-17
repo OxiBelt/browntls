@@ -326,3 +326,87 @@ fn early_data_disabled_in_client_config_is_not_sent() {
     assert!(client.early_data().is_none());
     assert!(!client.is_early_data_accepted());
 }
+
+/// Offers 0-RTT data under a ticket the server (budget `server_max`, its own
+/// empty session store) does not recognise, so it rejects the early data and
+/// skips records, then feeds it up to `count` forged application_data
+/// records of `payload_len` bytes. Returns how many it skipped before
+/// failing, and the error.
+fn skip_forged_early_records(
+    suite: browntls::SupportedCipherSuite,
+    server_max: u32,
+    payload_len: u16,
+    count: usize,
+) -> (usize, Option<Error>) {
+    use std::io::Write;
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = tls13_only_client(&chain, Some(&[suite]), None);
+    client_config.enable_early_data = true;
+    let client_config = Arc::new(client_config);
+    let issuer_cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    prime_ticket(
+        &client_config,
+        &early_data_server(&chain, 1024, &issuer_cache),
+    );
+
+    let cache: Arc<dyn browntls::server::StoresServerSessions> =
+        browntls::server::ServerSessionMemoryCache::new(8);
+    let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+    let mut server = ServerConnection::new(early_data_server(&chain, server_max, &cache)).unwrap();
+    client.early_data().unwrap().write_all(b"").unwrap();
+    // The ClientHello only: no genuine early data record is charged.
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+    server.read_tls(&mut &hello[..]).unwrap();
+    server.process_new_packets().unwrap();
+    assert!(server.is_handshaking());
+    assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
+
+    let mut record = vec![0x17, 0x03, 0x03];
+    record.extend_from_slice(&payload_len.to_be_bytes());
+    record.resize(5 + usize::from(payload_len), 0xa5);
+    for sent in 0..count {
+        let mut input = &record[..];
+        while !input.is_empty() {
+            server.read_tls(&mut input).unwrap();
+        }
+        if let Err(err) = server.process_new_packets() {
+            return (sent, Some(err));
+        }
+    }
+    (count, None)
+}
+
+#[test]
+fn rejected_early_data_charges_every_skipped_record() {
+    init_logging();
+    // Records no longer than the AEAD expansion carry no plaintext, but each
+    // still costs an authentication attempt: each is charged one byte, so
+    // the number of skipped records never exceeds the skip budget.
+    let mut wrong = Vec::new();
+    for suite in prov::default_provider().cipher_suites.clone() {
+        // CCM_8 has a shorter tag and its own integrity limit.
+        if suite.version() != &version::TLS13
+            || suite.suite() == CipherSuite::TLS13_AES_128_CCM_8_SHA256
+        {
+            continue;
+        }
+        // AES-GCM, AES-CCM, ChaCha20-Poly1305: a 16-byte tag and the content type.
+        let expansion = 1 + 16;
+        let cases = [(16, 0, 1000), (16, 1, 1000), (16, 16, 1000), (16, expansion, 1000)]
+            .into_iter()
+            // Early data off: the 16384-byte fallback budget.
+            .chain([(0, expansion, 20_000)]);
+        for (server_max, payload_len, count) in cases {
+            let budget = if server_max == 0 { 16_384 } else { server_max as usize };
+            let got = skip_forged_early_records(suite, server_max, payload_len, count);
+            if got != (budget, Some(Error::DecryptError)) {
+                wrong.push(format!(
+                    "{suite:?}, budget {budget}, {payload_len}-byte records: {got:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

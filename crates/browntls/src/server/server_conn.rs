@@ -173,6 +173,11 @@ pub struct ServerConfig {
     pub enable_secret_extraction: bool,
 
     /// How much 0-RTT data to accept; zero disables early data.
+    ///
+    /// It also bounds the rejected 0-RTT records skipped during the
+    /// handshake: their plaintext, and their number (each costs at least one
+    /// byte). With zero, up to 16384 bytes are skipped for a client holding
+    /// an older ticket.
     pub max_early_data_size: u32,
 
     /// Whether to send application data before the client's Finished.

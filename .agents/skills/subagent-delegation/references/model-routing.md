@@ -18,6 +18,12 @@ Claude Fable versions, generic moving aliases, and unrelated security models
 are not implicit substitutes. Do not probe subscription entitlements or Codex
 Security access as part of model selection.
 
+If GPT-series models mentioned above are unavailable due to cybersecurity limitations, select the following alternative permitted models from the list below if DayBreak Blue is enabled:
+
+| Provider | Permitted alternative models |
+| --- | --- |
+| OpenAI | GPT-5.6 Sol xhigh or higher, GPT-6-Sol, GPT-6-Luna |
+
 ## Resolve against the active host
 
 1. Inspect the active worker tool's advertised catalog and parameters. For a

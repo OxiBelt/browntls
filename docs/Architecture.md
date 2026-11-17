@@ -101,6 +101,13 @@ that existing provider designs map onto it:
   (`SigningKey`, `Signer`), randomness and key loading, plus hooks that export
   traffic secrets for kernel TLS offload.
 
+Extracted secrets (`ExtractedSecrets`) are in the form Linux kernel TLS takes.
+TLS 1.2 AES-GCM gives record `seq` the explicit nonce `seed + seq` (modulo
+2^64, the seed coming from the key block), and the extracted IV carries the
+explicit nonce of the next record: the kernel counts up from the value it is
+given, so it continues the library's sequence exactly. TLS 1.3 and ChaCha20-Poly1305 nonces are the IV XORed
+with the sequence number on both sides.
+
 Providers shipped in the `browntls` crate:
 
 | Provider | Feature | Backing |

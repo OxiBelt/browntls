@@ -583,9 +583,18 @@ impl<Data: SideData> ConnectionCore<Data> {
         let st = self.state?;
         let record_layer = &self.common_state.record_layer;
         let PartiallyExtractedSecrets { tx, rx } = st.extract_secrets()?;
-        Ok(ExtractedSecrets {
-            tx: (record_layer.write_seq(), tx),
-            rx: (record_layer.read_seq(), rx),
+        let (tx_seq, rx_seq) = (record_layer.write_seq(), record_layer.read_seq());
+        Ok(match self.common_state.negotiated_version {
+            // The kernel continues TLS 1.2 explicit nonces from the IV it is
+            // given: hand it the next record's (`Nonce::tls12_explicit`).
+            Some(ProtocolVersion::TLSv1_2) => ExtractedSecrets {
+                tx: (tx_seq, tx.with_tls12_explicit_nonce_at(tx_seq)),
+                rx: (rx_seq, rx.with_tls12_explicit_nonce_at(rx_seq)),
+            },
+            _ => ExtractedSecrets {
+                tx: (tx_seq, tx),
+                rx: (rx_seq, rx),
+            },
         })
     }
 

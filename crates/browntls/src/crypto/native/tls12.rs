@@ -142,9 +142,10 @@ pub(crate) static AES_256_GCM: Gcm<Aes256Gcm> = Gcm {
 
 impl<A: Aead + 'static> Tls12AeadAlgorithm for Gcm<A> {
     fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn MessageEncrypter> {
-        // The explicit nonce of record `seq` is `(extra XOR seq)`: unique per
-        // record under one key, and not a counter an observer can predict
-        // across connections (as rustls and BoringSSL do).
+        // The explicit nonce of record `seq` is `extra + seq` (see
+        // `Nonce::tls12_explicit`): unique per record under one key, not a
+        // counter an observer can predict across connections, and the
+        // sequence Linux kernel TLS continues after secret extraction.
         match A::new(key.as_ref()) {
             Ok(cipher) => Box::new(GcmEncrypter {
                 cipher,
@@ -202,7 +203,7 @@ impl<A: Aead> MessageEncrypter for GcmEncrypter<A> {
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        let nonce = Nonce::new(&self.iv, seq);
+        let nonce = Nonce::tls12_explicit(&self.iv, seq);
         let total_len = self.encrypted_payload_len(msg.payload.len());
         let mut payload = PrefixedPayload::with_capacity(total_len);
         payload.extend_from_slice(&nonce.0[GCM_FIXED_IV_LEN..]);
@@ -408,8 +409,8 @@ mod tests {
             );
             let wire = opaque.encode();
             if shape.explicit_nonce_len == 8 {
-                // explicit nonce = extra XOR seq
-                assert_eq!(&wire[5..13], &[2, 2, 2, 2, 2, 2, 2, 5]);
+                // explicit nonce = extra + seq
+                assert_eq!(&wire[5..13], &[2, 2, 2, 2, 2, 2, 2, 9]);
             }
 
             for i in 5..wire.len() {

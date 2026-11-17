@@ -686,6 +686,12 @@ pub(super) fn aead12_op(input: &mut Input<'_>) {
     let plain = &plain[..plain.len().min(2048)];
 
     let sealed = tls12_seal(suite, (key, iv, extra), order, typ, plain, seq);
+    if !suite.record.is_block_cipher() && shape.explicit_nonce_len == 8 {
+        // AES-GCM: the explicit nonce counts up from the seed, the sequence
+        // Linux kernel TLS continues after secret extraction.
+        let seed = u64::from_be_bytes(extra.try_into().unwrap());
+        assert_eq!(sealed[..8], seed.wrapping_add(seq).to_be_bytes());
+    }
     if !suite.record.is_block_cipher()
         && let Some(SupportedCipherSuite::Tls12(other)) = counterpart(p, suite.common.suite)
     {

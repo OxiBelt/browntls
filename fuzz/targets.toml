@@ -103,7 +103,7 @@ topic = "tls-extensions"
 sources = [
   "crates/browntls/src/delegated_credential.rs",
   "crates/browntls/src/crypto/native/delegated_credential.rs",
-  "crates/browntls/src/exported_authenticator.rs",
+  "crates/browntls/src/exported_authenticator/**",
 ]
 
 [targets.pki_cert]

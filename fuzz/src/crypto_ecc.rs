@@ -1,10 +1,12 @@
 //! `browntls_crypto` elliptic curves: X25519 and Ed25519 (`curve25519`), X448
-//! and Ed448 (`curve448`), and ECDH and ECDSA on P-256, P-384 and P-521
-//! (`nist`).
+//! and Ed448 (`curve448`), ECDH and ECDSA on P-256, P-384 and P-521
+//! (`nist`), and their field, scalar and point arithmetic (`nist_arith`,
+//! `nist_group`).
 //!
 //! Every result is checked against an independent implementation:
 //! `x25519-dalek`, `ed25519-dalek`, `x448`, `ed448-goldilocks` and the
-//! RustCrypto `p256`, `p384` and `p521` crates. Beyond that: X25519 on every
+//! RustCrypto `p256`, `p384` and `p521` crates (num-bigint for NIST field
+//! elements, which RustCrypto keeps private). Beyond that: X25519 on every
 //! backend, and with load-aware routing (`accel::load`) sending a fuzzed
 //! share of the calls to a fuzzed alternate backend; NIST public keys, ECDH,
 //! signing and verification also under the portable backend (acceleration
@@ -17,7 +19,7 @@
 //! order, non-canonical Ed25519 keys).
 //!
 //! The input is a program of up to [`MAX_OPS`] operations, each a selector
-//! byte (25 operations) followed by its arguments (fields have a 16-bit
+//! byte (31 operations) followed by its arguments (fields have a 16-bit
 //! length prefix, short fields an 8-bit one):
 //!
 //! | Op | Operation | Arguments |
@@ -31,12 +33,16 @@
 //! | 10–14 | P-256: keys, SEC 1 points, DER documents, signing, verification | see `crypto_ecc/nist.rs`; each ends with a routing alternate and share |
 //! | 15–19 | P-384 | as 10–14 |
 //! | 20–24 | P-521 | as 10–14 |
+//! | 25–27 | P-256, P-384, P-521 field and scalar arithmetic | see `crypto_ecc/nist_arith.rs` |
+//! | 28–30 | P-256, P-384, P-521 point arithmetic | see `crypto_ecc/nist_group.rs` |
 //!
 //! Scalars and seeds come from the input, so every input replays exactly.
 
 mod curve25519;
 mod curve448;
 mod nist;
+mod nist_arith;
+mod nist_group;
 
 use crate::input::{Input, put_field, put_short_field};
 
@@ -45,7 +51,7 @@ pub const MAX_OPS: usize = 8;
 /// Longest message.
 const MAX_MSG: usize = 1024;
 /// Number of operations.
-const OPS: usize = 25;
+const OPS: usize = 31;
 
 /// Applies one fuzzed edit to `bytes` (none, flip, truncate, insert,
 /// delete); returns whether it changed anything.
@@ -116,7 +122,13 @@ pub fn run(data: &[u8]) {
             21 => nist::p521::public(input),
             22 => nist::p521::der(input),
             23 => nist::p521::sign(input),
-            _ => nist::p521::verify(input),
+            24 => nist::p521::verify(input),
+            25 => nist_arith::p256::arith(input),
+            26 => nist_arith::p384::arith(input),
+            27 => nist_arith::p521::arith(input),
+            28 => nist_group::p256::points(input),
+            29 => nist_group::p384::points(input),
+            _ => nist_group::p521::points(input),
         }
     }
 }
@@ -512,6 +524,93 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 .field(msg)
                 .bytes(&[4, 1])
                 .bytes(&[0, 100]),
+        ]);
+    }
+    for (curve, fl) in [(0u8, 32usize), (1, 48), (2, 66)] {
+        let op = 25 + curve;
+        // Field and scalar arithmetic: small values and modulus minus small
+        // values, a reduction of twice the scalar length and generation
+        // with enough bytes; then rejected candidates (the modulus, short
+        // and fuzzed encodings), an over-long reduction and a failing
+        // byte source.
+        seeds.extend([
+            Seed::op(op)
+                .bytes(&[1, 0x12, 0x34])
+                .bytes(&[2, 0, 1])
+                .bytes(&[2, 0, 7])
+                .bytes(&[1, 0xab, 0xcd])
+                .short(&vec![0xa7; 2 * fl])
+                .short(&vec![0x3c; 2 * fl]),
+            Seed::op(op)
+                .bytes(&[2, 0, 0])
+                .bytes(&[3])
+                .short(&[1; 5])
+                .bytes(&[2, 0, 0])
+                .bytes(&[0])
+                .bytes(&vec![0xff; fl])
+                .short(&vec![0x5a; 2 * fl + 1])
+                .short(&[9; 3]),
+            Seed::op(op)
+                .bytes(&[0])
+                .bytes(&vec![0x11; fl])
+                .bytes(&[1, 0, 0])
+                .bytes(&[1, 0, 0])
+                .bytes(&[3])
+                .short(&vec![0x22; fl])
+                .short(&[])
+                .short(&vec![0xff; 4 * fl]),
+        ]);
+    }
+    for (curve, fl) in [(0u8, 32usize), (1, 48), (2, 66)] {
+        let op = 28 + curve;
+        // Point arithmetic: a multiple of the base point in each form
+        // (unedited), the identity, random coordinates behind tags 4 and
+        // 2, raw bytes and an edited point; zero and the order (reduced to
+        // zero) as scalars.
+        seeds.extend([
+            Seed::op(op)
+                .bytes(&[1, 0x12, 0x34])
+                .bytes(&[2, 0, 5])
+                .bytes(&[1, 0x01, 0x23, 1])
+                .bytes(&NONE)
+                .bytes(&[0]),
+            Seed::op(op)
+                .bytes(&[2, 0, 9])
+                .bytes(&[1, 0x56, 0x78])
+                .bytes(&[1, 0x0a, 0xbc, 0])
+                .bytes(&NONE)
+                .bytes(&[1]),
+            Seed::op(op)
+                .bytes(&[1, 0, 0])
+                .bytes(&[2, 0, 0])
+                .bytes(&[2])
+                .bytes(&[1]),
+            Seed::op(op)
+                .bytes(&[1, 0, 3])
+                .bytes(&[1, 0, 4])
+                .bytes(&[3, 4])
+                .bytes(&vec![0x5a; 2 * fl])
+                .bytes(&[0]),
+            Seed::op(op)
+                .bytes(&[1, 0, 3])
+                .bytes(&[1, 0, 4])
+                .bytes(&[3, 2])
+                .bytes(&vec![0x07; fl])
+                .bytes(&[1]),
+            Seed::op(op)
+                .bytes(&[0])
+                .bytes(&vec![0x33; fl])
+                .bytes(&[3])
+                .short(&[0x44; 7])
+                .bytes(&[0])
+                .short(&[4, 1, 2])
+                .bytes(&[0]),
+            Seed::op(op)
+                .bytes(&[1, 0, 1])
+                .bytes(&[1, 0, 2])
+                .bytes(&[1, 0, 7, 0])
+                .bytes(&[1, 0, 9, 0x10])
+                .bytes(&[1]),
         ]);
     }
     seeds.into_iter().map(|s| s.0).collect()

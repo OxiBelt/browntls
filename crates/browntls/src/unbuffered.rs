@@ -58,6 +58,7 @@ use crate::msgs::deframer::DeframerSliceBuffer;
 use crate::msgs::message::HEADER_SIZE;
 use crate::record_layer::PreEncryptAction;
 use crate::suites::ExtractedSecrets;
+use crate::vecbuf::ChunkVecBuffer;
 
 /// The plaintext length of a KeyUpdate message (RFC 9846 §4.7.3): the
 /// handshake header and the one-byte request.
@@ -206,6 +207,43 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
         self.core
             .export_keying_material(output.as_mut(), label, context)?;
         Ok(output)
+    }
+
+    /// Derives keying material from the early exporter (RFC 9846 §7.5,
+    /// `early_exporter_master_secret`), the exporter for use with 0-RTT data.
+    ///
+    /// Available on a client whose ClientHello offers 0-RTT (it is built by
+    /// `UnbufferedClientConnection::new`, before
+    /// [`TransmitTlsData::may_encrypt_early_data`] offers a writer) and on a
+    /// server once it has accepted 0-RTT; the client loses
+    /// it again if the server rejects 0-RTT, since the two sides would no
+    /// longer agree on the value, and neither has it once the connection
+    /// has failed. Like 0-RTT data the output is bound to the
+    /// ClientHello and the resumption PSK only: it is not forward secret and
+    /// an attacker who replays the ClientHello replays it too. Use
+    /// [`Self::export_keying_material`] for anything else; the two never
+    /// return the same value.
+    pub fn export_early_keying_material<T: AsMut<[u8]>>(
+        &self,
+        mut output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
+        self.core
+            .export_early_keying_material(output.as_mut(), label, context)?;
+        Ok(output)
+    }
+
+    /// The `tls-exporter` channel binding of RFC 9266: 32 bytes exported
+    /// with the label `EXPORTER-Channel-Binding` and an empty context.
+    ///
+    /// Defined only when the handshake produced a unique master secret
+    /// (RFC 9266 §2): always in TLS 1.3, and in TLS 1.2 only with the
+    /// extended master secret (RFC 7627), which the TLS 1.2 exporter already
+    /// requires. browntls never renegotiates, so the value is fixed for the
+    /// connection (RFC 9266 §4.2). Fails until the handshake is complete.
+    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
+        self.export_keying_material([0u8; 32], b"EXPORTER-Channel-Binding", Some(&[]))
     }
 
     /// Extracts the traffic secrets for kernel TLS offload.
@@ -605,27 +643,38 @@ impl<Data> EncodeTlsData<'_, Data> {
     /// error carries that record's length. May be called again to copy
     /// more, into the rest of the same buffer or another one.
     pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncodeError> {
-        let queue = &mut self.conn.core.common_state.sendable_tls;
-        let mut written = 0;
-        while let Some(record) = queue.chunk() {
-            let len = record.len();
-            let Some(out) = outgoing_tls.get_mut(written..written + len) else {
-                if written == 0 {
-                    return Err(EncodeError::InsufficientSize(InsufficientSizeError {
-                        required_size: len,
-                    }));
-                }
-                break;
-            };
-            out.copy_from_slice(record);
-            queue.consume(len);
-            written += len;
-        }
+        let written = encode_queued(&mut self.conn.core.common_state.sendable_tls, outgoing_tls)?;
         if written > 0 {
             self.conn.wants_write = true;
         }
         Ok(written)
     }
+}
+
+/// Moves as many whole records from the front of `queue` as fit into
+/// `outgoing_tls`; fails, moving nothing, when not even the first one fits.
+/// Shared by [`EncodeTlsData::encode`] and
+/// [`UnbufferedAcceptedAlert::encode`](crate::server::UnbufferedAcceptedAlert::encode).
+pub(crate) fn encode_queued(
+    queue: &mut ChunkVecBuffer,
+    outgoing_tls: &mut [u8],
+) -> Result<usize, EncodeError> {
+    let mut written = 0;
+    while let Some(record) = queue.chunk() {
+        let len = record.len();
+        let Some(out) = outgoing_tls.get_mut(written..written + len) else {
+            if written == 0 {
+                return Err(EncodeError::InsufficientSize(InsufficientSizeError {
+                    required_size: len,
+                }));
+            }
+            break;
+        };
+        out.copy_from_slice(record);
+        queue.consume(len);
+        written += len;
+    }
+    Ok(written)
 }
 
 impl<Data> fmt::Debug for EncodeTlsData<'_, Data> {

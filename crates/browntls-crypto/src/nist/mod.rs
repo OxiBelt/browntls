@@ -1,9 +1,27 @@
-//! NIST prime-order curves P-256, P-384 and P-521: ECDH and ECDSA (FIPS 186-5, SEC 1).
+//! NIST prime-order curves P-256, P-384 and P-521: ECDH and ECDSA (FIPS 186-5,
+//! SEC 1), and the curves' field, scalar and point arithmetic.
 //!
 //! Each curve has its own module ([`p256`], [`p384`], [`p521`]) with the same
 //! API: [`p256::SecretKey`] (generation, raw / RFC 5915 / PKCS#8 loading,
 //! ECDH), [`p256::PublicKey`] (SEC 1 and `SubjectPublicKeyInfo`),
 //! [`p256::SigningKey`] / [`p256::Signature`] and the [`p256::verify`] family.
+//!
+//! For protocols beyond ECDH and ECDSA, each module also exposes its
+//! arithmetic, named after the RustCrypto `primeorder` / `elliptic-curve`
+//! types without implementing their traits: [`p256::FieldElement`] (integers
+//! modulo the field prime `p`), [`p256::Scalar`] (integers modulo the group
+//! order `n`, zeroised on drop), and the points [`p256::AffinePoint`] (with
+//! its SEC 1 encoding [`p256::Sec1Point`]) and [`p256::ProjectivePoint`],
+//! which convert to and from [`p256::PublicKey`]. Decoders reject
+//! non-canonical values and points off the curve instead of reducing or
+//! accepting them ([`p256::Scalar::from_bytes_reduced`] reduces on request).
+//! Arithmetic, inversion, the group law (complete formulas), scalar
+//! multiplication and comparisons are constant time, and an `Option` or
+//! `Result` reveals only its variant (whether a value was zero, a square root
+//! exists, an encoding was canonical); SEC 1 decoding is variable time, for
+//! public encodings, and
+//! [`p256::ProjectivePoint::mul_by_generator_and_mul_add_vartime`] is the
+//! variable-time double multiplication of verification, for public inputs.
 //!
 //! # Implementation
 //!
@@ -45,9 +63,13 @@
 //! backend; one call runs on one backend throughout. Only completed
 //! operations are timed: of the verifications those that accepted the
 //! signature, and of the signatures those with the curve's TLS hash (the
-//! others are routed without being timed).
+//! others are routed without being timed). The arithmetic types are not
+//! routed: each of their field and point operations runs on the backend the
+//! curve's acceleration policy selects at the time of the call, and scalar
+//! arithmetic is portable code on every backend.
 
 mod api;
+mod arith;
 mod curve;
 mod ecdsa;
 mod jacobian;

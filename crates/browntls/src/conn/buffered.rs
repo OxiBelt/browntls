@@ -1,10 +1,9 @@
 //! The buffered I/O API around the connection core.
 
-use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::ops::{Deref, DerefMut};
 
-use super::{ConnectionCore, SideData, State};
+use super::{ConnectionCore, SideData};
 use crate::common_state::{CommonState, IoState};
 use crate::error::Error;
 use crate::msgs::deframer::DeframerVecBuffer;
@@ -44,7 +43,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Available on a client from the moment it offers 0-RTT (see
     /// `ClientConnection::early_data`) and on a server once it has accepted
     /// 0-RTT; the client loses it again if the server rejects 0-RTT, since
-    /// the two sides would no longer agree on the value. Like 0-RTT data the
+    /// the two sides would no longer agree on the value; neither side has it
+    /// once the connection has failed. Like 0-RTT data the
     /// output is bound to the ClientHello and the resumption PSK only: it is
     /// not forward secret and an attacker who replays the ClientHello
     /// replays it too. Use [`Self::export_keying_material`] for anything
@@ -55,25 +55,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<T, Error> {
-        let out = output.as_mut();
-        if out.is_empty() {
-            return Err(Error::general(
-                "export_early_keying_material: output buffer is empty",
-            ));
-        }
-        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
-            return Err(Error::general(
-                "export_early_keying_material: context too long",
-            ));
-        }
-        match &self.core.common_state.early_exporter {
-            Some(exporter) => exporter.export_keying_material(out, label, context)?,
-            None => {
-                return Err(Error::General(
-                    "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
-                ));
-            }
-        }
+        self.core
+            .export_early_keying_material(output.as_mut(), label, context)?;
         Ok(output)
     }
 
@@ -111,10 +94,6 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Rotates the traffic keys (TLS 1.3 only), asking the peer to do the same.
     pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
         self.core.refresh_traffic_keys()
-    }
-
-    pub(crate) fn replace_state(&mut self, new: Box<dyn State<Data>>) {
-        self.core.state = Ok(new);
     }
 }
 

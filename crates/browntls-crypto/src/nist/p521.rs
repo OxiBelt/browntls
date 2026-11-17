@@ -1,4 +1,4 @@
-//! NIST P-521 (secp521r1): ECDH and ECDSA.
+//! NIST P-521 (secp521r1): ECDH, ECDSA, and field, scalar and point arithmetic.
 //!
 //! Backends: the full-width product followed by a fold and rotation for the
 //! Mersenne prime `p = 2^521 - 1` everywhere; on x86-64 with BMI2 and ADX the
@@ -21,4 +21,13 @@ super::api::curve_module! {
     limbs = 9,
     field_len = 66,
     tls_hash = Sha512
+}
+
+super::arith::arith_module! {
+    name = "P-521",
+    soft = P521,
+    fast = Fast,
+    backend = P521Backend,
+    limbs = 9,
+    field_len = 66
 }

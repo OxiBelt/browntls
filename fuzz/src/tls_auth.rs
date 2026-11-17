@@ -13,10 +13,10 @@
 //!   peers' clocks and an optional tampering are fuzz-chosen, so that the
 //!   expiry and seven-day boundaries of RFC 9345 §4.1.3 are crossed;
 //! * RFC 9261 exported authenticators between a connected client and server
-//!   (TLS 1.3 or TLS 1.2): requests with fuzzed contexts and extensions,
-//!   answers with fuzz-chosen certificates or declined, spontaneous server
-//!   authenticators, tampered and replayed authenticators, and fuzzed
-//!   request and authenticator bytes.
+//!   (TLS 1.3 or TLS 1.2, each end buffered or unbuffered): requests with
+//!   fuzzed contexts and extensions, answers with fuzz-chosen certificates
+//!   or declined, spontaneous server authenticators, tampered and replayed
+//!   authenticators, and fuzzed request and authenticator bytes.
 //!
 //! Checked properties: decoding matches an independent parser of RFC 9345
 //! §4 and re-encodes byte for byte; issuance succeeds exactly when the
@@ -26,7 +26,8 @@
 //! credential; a peer accepts a credential exactly when it is within its
 //! validity window and untampered; an authenticator validates once, for the
 //! request it answers, with the expected chain (or none when declined);
-//! any altered, replayed or fuzzed authenticator is rejected.
+//! any altered, replayed or fuzzed authenticator is rejected; no exchange
+//! queues TLS records on either connection.
 //!
 //! Input: up to 32 operations, each an operation byte followed by its
 //! arguments (see [`run`]).
@@ -56,6 +57,7 @@ mod credential;
 mod exported;
 mod handshake;
 mod seeds;
+mod unbuffered;
 
 pub use self::seeds::seeds;
 
@@ -446,7 +448,8 @@ struct State {
 ///    a valid time for `expiry`;
 /// 5. handshake with a credential: clock offset, server clock skew, valid
 ///    time, credential key, tampering;
-/// 6. exported authenticators: version (first use), then one exchange.
+/// 6. exported authenticators: version and connection APIs (first use),
+///    then one exchange.
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);

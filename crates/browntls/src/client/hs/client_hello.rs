@@ -48,6 +48,12 @@ fn find_session(
     let now = config.current_time().ok()?;
     // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume.
     let quic = cx.common.is_quic();
+    // RFC 9849 §6.1: an ECH offer is TLS 1.3 only and may not resume a
+    // TLS 1.2 session. Such a session is not even looked up: its session
+    // ID went out in the clear next to the hidden server name, so any use
+    // of it in the outer ClientHello would link the two connections.
+    #[cfg(feature = "tls12")]
+    let ech_offer = matches!(config.ech_mode, Some(EchMode::Enable(_)));
 
     let found = config
         .resumption
@@ -58,6 +64,7 @@ fn find_session(
             #[cfg(feature = "tls12")]
             {
                 if quic
+                    || ech_offer
                     || config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled
                 {
                     return None;
@@ -218,8 +225,8 @@ pub(in crate::client) fn start_handshake(
         inner.session_id = session_id;
     }
 
-    // RFC 9849 §6.1: an ECH offer needs TLS 1.3, and may not resume a
-    // TLS 1.2 session.
+    // RFC 9849 §6.1: an ECH offer needs TLS 1.3. `find_session` already
+    // left out TLS 1.2 sessions, before the session ID above was chosen.
     let ech = match &config.ech_mode {
         Some(EchMode::Enable(ech_config)) => {
             if !supports_tls13 {
@@ -228,15 +235,13 @@ pub(in crate::client) fn start_handshake(
                 ));
             }
             #[cfg(feature = "tls12")]
-            if matches!(
+            debug_assert!(!matches!(
                 &resuming,
                 Some(Retrieved {
                     value: ClientSessionValue::Tls12(_),
                     ..
                 })
-            ) {
-                resuming = None;
-            }
+            ));
             Some(ClientEch::offer(
                 ech_config,
                 config.provider.secure_random,

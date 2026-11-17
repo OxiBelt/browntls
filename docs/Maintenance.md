@@ -88,7 +88,8 @@ at least a year: 1.53.x is supported until September 2027 (1.51.x until March
 2027; 1.47.x ended in September 2026). Raise the bound when Tokio names a
 newer LTS line, and before the line it names ends. `Cargo.lock` holds the
 newest release, so CI's `Tokio lower bound` job also builds and tests
-`browntls-tokio` against the first release of the bound.
+`browntls-tokio` and `browntls-ktls` (its `tokio` feature) against the first
+release of the bound.
 
 `browntls-tokio` depends on `tokio` with no features enabled: it uses only the
 I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), and the
@@ -99,7 +100,10 @@ stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
 `browntls-tokio` alone, with no `cargo vet` audit yet. The test-only
 features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
-are dev-dependencies (`safe-to-run`). The crate's manifest carries the
+are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
+`browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which
+adds `mio` and `socket2` (both MIT, on `libc`) as runtime dependencies of
+that feature alone, also without a `cargo vet` audit yet. The crate's manifest carries the
 metadata a crates.io release needs (description, documentation, readme,
 keywords, categories, an `include` list and the licence file), but it stays
 `publish = false` with the rest of the workspace until the release

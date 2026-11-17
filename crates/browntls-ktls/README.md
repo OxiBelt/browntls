@@ -19,12 +19,45 @@ The configuration must set `enable_secret_extraction`. When the kernel or
 the connection cannot be offloaded, the connection and the socket come back
 unharmed in `HandoffError::Refused`.
 
+## Tokio
+
+The `tokio` feature adds `AsyncKtlsStream`, the same offload on a
+`tokio::net::TcpStream` with `AsyncRead` and `AsyncWrite`.
+`AsyncKtlsStream::from_client` and `from_server` take a
+[browntls-tokio](../browntls-tokio/README.md) stream: they ready it with
+`into_kernel_handoff` (handshake and 0-RTT phase completed, queued records
+written, input read up to a record boundary), install the keys, and return
+the application data received before that from the first reads.
+
+```rust
+use browntls_ktls::{AsyncKtlsStream, StreamHandoffError};
+
+let tls = connector.connect(server_name, tcp).await?;
+match AsyncKtlsStream::from_client(tls).await {
+    // The kernel protects the records from here on.
+    Ok(ktls) => serve(ktls).await,
+    // Nothing was given to the kernel: go on in userspace, reading
+    // `received` before anything from `stream`.
+    Err(StreamHandoffError::Refused { stream, received, .. }) => {
+        serve_in_userspace(stream, received).await
+    }
+    // The connection is lost.
+    Err(StreamHandoffError::Failed(error)) => Err(error),
+}
+```
+
+`AsyncKtlsStream::new` takes a connection that is already at rest (as
+`KernelHandoff::into_parts` returns it) and its socket. The feature enables
+Tokio's `net` only; the runtime is the application's.
+
 `src/sys.rs` holds the crate's only `unsafe` code, the socket options and
 `sendmsg`/`recvmsg` control messages of kernel TLS; see the invariants at its
 top.
 
 ## Testing
 
-`cargo test -p browntls-ktls` runs the handover tests over loopback TCP. They
-are skipped when the `tls` module is missing, unless
-`BROWNTLS_KTLS_REQUIRED=1` is set (CI sets it after `sudo modprobe tls`).
+`cargo test -p browntls-ktls --all-features` runs the handover tests over
+loopback TCP, for `KtlsStream` (`tests/offload.rs`) and for
+`AsyncKtlsStream` (`tests/tokio_offload.rs`, feature `tokio`). They are
+skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
+is set (CI sets it after `sudo modprobe tls`).

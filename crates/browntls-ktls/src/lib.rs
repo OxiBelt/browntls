@@ -37,6 +37,16 @@
 //! take, [`KtlsStream::new`] returns the connection and the socket
 //! unharmed ([`HandoffError::Refused`]), so the caller can go on in
 //! userspace.
+//!
+//! # Tokio
+//!
+//! With the `tokio` feature, `AsyncKtlsStream` is the same offload on a
+//! `tokio::net::TcpStream`, with `AsyncRead` and `AsyncWrite`. Its
+//! `from_client` and `from_server` take a `browntls-tokio` stream, ready it
+//! (`into_kernel_handoff`: handshake and 0-RTT phase completed, queued
+//! records written, input read up to a record boundary) and hand it to the
+//! kernel; a refusal returns the stream with the application data already
+//! taken from it.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -44,9 +54,17 @@ mod crypto_info;
 pub use crypto_info::{CryptoInfo, UnsupportedCipher};
 
 #[cfg(target_os = "linux")]
+mod engine;
+#[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
 mod sys;
 
 #[cfg(target_os = "linux")]
 pub use stream::{HandoffError, KtlsStream, Offload};
+
+#[cfg(all(target_os = "linux", feature = "tokio"))]
+mod tokio_stream;
+#[cfg(all(target_os = "linux", feature = "tokio"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use tokio_stream::{AsyncKtlsStream, StreamHandoffError};

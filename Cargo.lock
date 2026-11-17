@@ -312,8 +312,10 @@ name = "browntls-ktls"
 version = "0.1.0-dev"
 dependencies = [
  "browntls",
+ "browntls-tokio",
  "libc",
  "rcgen",
+ "tokio",
 ]
 
 [[package]]

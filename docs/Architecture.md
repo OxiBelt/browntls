@@ -29,7 +29,7 @@ browntls-ktls       Linux kernel TLS offload of browntls connections
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API | Forbidden |
-| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
+| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -873,6 +873,40 @@ before any key is installed. Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
 hanging. A close_notify followed by more data before the handover is refused.
+
+What follows the handover lives in one `Engine` (`src/engine.rs`): the
+`KernelConnection`, the plaintext from before the handover, a control record
+in transit and the backlog. It owns no socket; every call takes the
+descriptor, and reports `WouldBlock` only for what it documents (a read when
+the kernel has no record, a write or flush when the socket has no room).
+`KtlsStream` is that engine with a socket.
+
+`AsyncKtlsStream` (feature `tokio`) is the engine with a
+`tokio::net::TcpStream`, implementing `AsyncRead` and `AsyncWrite`. Each
+system call runs inside `TcpStream::try_io`, so a call that finds the socket
+not ready clears Tokio's readiness and the task is woken when it changes;
+plaintext from before the handover, the peer's closure and a failure are
+reported without the socket. `AsyncKtlsStream::from_client` and `from_server`
+take a `browntls-tokio` stream over a `TcpStream`: they refuse what driving
+cannot clear and attach the `tls` upper layer protocol before anything is
+taken from the stream, ready it with
+[`into_kernel_handoff`](#asynchronous-streams-browntls-tokio), check the
+record size and install the keys. Until the keys go in, every failure returns
+the stream and the plaintext taken (`StreamHandoffError::Refused`), so it can
+go on in userspace. `AsyncKtlsStream::new` takes a connection already at rest
+and its socket. A read that owes the peer something (a KeyUpdate answer) and
+finds the socket full registers for writability as well as readability.
+Tokio keeps one waker per direction, and the stream may be split into halves
+on two tasks, so the reader and a parked writer register a waker that wakes
+both: neither can lose its wakeup to the other's registration. `poll_shutdown`
+queues `close_notify` once, sends what waits and shuts the socket's write
+side. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
+running kernel like those of `KtlsStream`: both ends offloaded for every
+suite with KeyUpdates, data in flight at the handover kept in order, an
+offloaded server against a userspace client (tickets, KeyUpdate, closure), a
+KeyUpdate answered by a read while the socket is full (the answer seen on the
+wire by a relay), split halves across key updates, a client still in its
+0-RTT phase, truncation, and refusals that return the stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `fcntl`, and `sendmsg`/`recvmsg` with one

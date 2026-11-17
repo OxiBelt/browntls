@@ -469,10 +469,10 @@ fn signatures() -> &'static [Signed] {
     SIGNED.get_or_init(|| {
         let fx = fixtures::get();
         let mut out = Vec::new();
-        for k in 0..KEY_COUNT {
-            let der = fx.keys[k].der();
+        for (k, fixture) in fx.keys.iter().enumerate().take(KEY_COUNT) {
+            let der = fixture.der();
             let mut keys = vec![native::sign::any_supported_type(&der).expect("native key")];
-            if fx.keys[k].rustcrypto {
+            if fixture.rustcrypto {
                 keys.push(rustcrypto::sign::any_supported_type(&der).expect("RustCrypto key"));
             }
             for (i, key) in keys.iter().enumerate() {

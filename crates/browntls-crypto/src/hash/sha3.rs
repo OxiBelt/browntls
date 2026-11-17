@@ -120,15 +120,21 @@ macro_rules! sha3_variant {
 
 sha3_variant!(
     /// SHA3-256.
-    Sha3_256, 136, 32
+    Sha3_256,
+    136,
+    32
 );
 sha3_variant!(
     /// SHA3-384.
-    Sha3_384, 104, 48
+    Sha3_384,
+    104,
+    48
 );
 sha3_variant!(
     /// SHA3-512.
-    Sha3_512, 72, 64
+    Sha3_512,
+    72,
+    64
 );
 
 /// Output stream of an extendable-output function.
@@ -206,11 +212,13 @@ macro_rules! shake_variant {
 
 shake_variant!(
     /// SHAKE128.
-    Shake128, 168
+    Shake128,
+    168
 );
 shake_variant!(
     /// SHAKE256.
-    Shake256, 136
+    Shake256,
+    136
 );
 
 #[cfg(test)]

@@ -755,9 +755,9 @@ pub(super) fn helpers(input: &mut Input<'_>) {
     assert_eq!(&iv.as_ref()[..n], &raw[..n]);
     assert!(iv.as_ref()[n..].iter().all(|b| *b == 0));
     let nonce = Nonce::new(&iv, seq);
-    for i in 0..NONCE_LEN {
+    for (i, &byte) in nonce.0.iter().enumerate() {
         let s = if i < 4 { 0 } else { seq.to_be_bytes()[i - 4] };
-        assert_eq!(nonce.0[i], iv.as_ref()[i] ^ s);
+        assert_eq!(byte, iv.as_ref()[i] ^ s);
     }
     let iv2 = Iv::from(nonce.0);
     assert_eq!(Nonce::new(&iv2, 0).0, nonce.0);

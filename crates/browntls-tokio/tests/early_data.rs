@@ -300,3 +300,96 @@ async fn a_failed_early_phase_fails_every_later_operation() {
     assert!(tls_error(&err).is_some(), "{err:?}");
     peer.abort();
 }
+
+/// Whether `secret` appears in `debug`, either as text or as the run of
+/// decimal byte values a derived `Debug` of a byte vector prints (in
+/// `{:?}` or `{:#?}` form).
+fn debug_reveals(debug: &str, secret: &[u8]) -> bool {
+    let text = std::str::from_utf8(secret).unwrap();
+    // As written, as `Debug` of a string escapes it, and by its token alone.
+    if debug.contains(text) || debug.contains(SECRET_TOKEN) {
+        return true;
+    }
+    let numbers: Vec<u8> = debug
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse::<u8>().ok())
+        .collect();
+    numbers.windows(secret.len()).any(|w| w == secret)
+}
+
+const SECRET_TOKEN: &str = "early-data-debug-secret";
+const SECRET_REQUEST: &[u8] =
+    b"GET / HTTP/1.1\r\nAuthorization: Bearer early-data-debug-secret\r\n\r\n";
+
+#[tokio::test]
+async fn stream_debug_output_omits_buffered_early_data() {
+    let setup = Setup::new();
+    setup.first_connection().await;
+
+    let (c, s) = duplex(64 * 1024);
+    let client_side = async {
+        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        client.write_all(SECRET_REQUEST).await.unwrap();
+        assert!(client.get_ref().1.is_handshaking());
+        for debug in [format!("{client:?}"), format!("{client:#?}")] {
+            assert!(!debug_reveals(&debug, SECRET_REQUEST), "{debug}");
+            assert!(debug.contains("sent_len"), "{debug}");
+        }
+        let wrapped = browntls_tokio::TlsStream::Client(client);
+        assert!(!debug_reveals(&format!("{wrapped:?}"), SECRET_REQUEST));
+        let browntls_tokio::TlsStream::Client(mut client) = wrapped else {
+            unreachable!()
+        };
+        client.flush().await.unwrap();
+        assert!(client.get_ref().1.is_early_data_accepted());
+        assert!(!debug_reveals(&format!("{client:?}"), SECRET_REQUEST));
+        client.shutdown().await.unwrap();
+        // Kept open until the server is done writing its tickets.
+        client
+    };
+    let server_side = async {
+        let mut server = setup.acceptor(1024).accept(s).await.unwrap();
+        let mut early = Vec::new();
+        server
+            .get_mut()
+            .1
+            .early_data()
+            .expect("early data accepted")
+            .read_to_end(&mut early)
+            .unwrap();
+        assert_eq!(early, SECRET_REQUEST);
+        assert!(!debug_reveals(&format!("{server:?}"), SECRET_REQUEST));
+        let mut rest = Vec::new();
+        server.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty());
+    };
+    timeout(LIMIT, async { tokio::join!(client_side, server_side) })
+        .await
+        .expect("timed out");
+}
+
+#[tokio::test]
+async fn stream_debug_output_omits_early_data_after_a_failed_early_phase() {
+    let setup = Setup::new();
+    setup.first_connection().await;
+    let (c, mut s) = duplex(64 * 1024);
+    let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+    client.write_all(SECRET_REQUEST).await.unwrap();
+    let peer = tokio::spawn(async move {
+        let mut hello = [0; 4096];
+        let _ = s.read(&mut hello).await;
+        s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        s
+    });
+    let err = timeout(LIMIT, client.flush()).await.unwrap().unwrap_err();
+    assert!(tls_error(&err).is_some(), "{err:?}");
+    for debug in [format!("{client:?}"), format!("{client:#?}")] {
+        assert!(!debug_reveals(&debug, SECRET_REQUEST), "{debug}");
+    }
+    // The kept bytes can never be resent now, so they are already dropped.
+    assert!(format!("{client:?}").contains("sent_len: 0"));
+    peer.abort();
+}

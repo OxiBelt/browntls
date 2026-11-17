@@ -132,18 +132,42 @@ macro_rules! parameter_set {
 
 parameter_set!(
     /// ML-KEM-512 (security category 1).
-    MlKem512, "ML-KEM-512", k = 2, eta1 = 3, eta2 = 2, du = 10, dv = 4,
-    ek = 800, dk = 1632, ct = 768
+    MlKem512,
+    "ML-KEM-512",
+    k = 2,
+    eta1 = 3,
+    eta2 = 2,
+    du = 10,
+    dv = 4,
+    ek = 800,
+    dk = 1632,
+    ct = 768
 );
 parameter_set!(
     /// ML-KEM-768 (security category 3); used by `X25519MLKEM768`,
     /// `SecP256r1MLKEM768` and `MLKEM768`.
-    MlKem768, "ML-KEM-768", k = 3, eta1 = 2, eta2 = 2, du = 10, dv = 4,
-    ek = 1184, dk = 2400, ct = 1088
+    MlKem768,
+    "ML-KEM-768",
+    k = 3,
+    eta1 = 2,
+    eta2 = 2,
+    du = 10,
+    dv = 4,
+    ek = 1184,
+    dk = 2400,
+    ct = 1088
 );
 parameter_set!(
     /// ML-KEM-1024 (security category 5); used by `SecP384r1MLKEM1024` and
     /// `MLKEM1024`.
-    MlKem1024, "ML-KEM-1024", k = 4, eta1 = 2, eta2 = 2, du = 11, dv = 5,
-    ek = 1568, dk = 3168, ct = 1568
+    MlKem1024,
+    "ML-KEM-1024",
+    k = 4,
+    eta1 = 2,
+    eta2 = 2,
+    du = 11,
+    dv = 5,
+    ek = 1568,
+    dk = 3168,
+    ct = 1568
 );

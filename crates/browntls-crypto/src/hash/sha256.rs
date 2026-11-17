@@ -322,11 +322,15 @@ macro_rules! sha256_variant {
 
 sha256_variant!(
     /// SHA-256.
-    Sha256, H256, 32
+    Sha256,
+    H256,
+    32
 );
 sha256_variant!(
     /// SHA-224.
-    Sha224, H224, 28
+    Sha224,
+    H224,
+    28
 );
 
 #[cfg(test)]

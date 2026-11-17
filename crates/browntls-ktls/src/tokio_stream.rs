@@ -37,7 +37,9 @@ pub enum StreamHandoffError<S> {
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded,
     /// or the peer's `record_size_limit` needs a newer kernel), when it is
     /// the kernel's refusal of the `tls` upper layer protocol (no `tls`
-    /// module: `ENOENT`), or when it wraps
+    /// module: `ENOENT`; a peer that has already closed TCP: `ENOTCONN`,
+    /// since the kernel attaches it to an established connection only), or
+    /// when it wraps
     /// [`EarlyDataNotResent`](browntls_tokio::client::EarlyDataNotResent).
     /// After any other error the stream has failed like one whose read or
     /// write returned that error.
@@ -327,8 +329,9 @@ macro_rules! from_stream {
             ///
             /// The stream's configuration must have
             /// `enable_secret_extraction` set. A stream that cannot be
-            /// offloaded, and a kernel without TLS support, are found out
-            /// before anything is taken from the stream. Then the stream
+            /// offloaded, a kernel without TLS support and a peer that
+            /// has already closed TCP are found out before anything is
+            /// taken from the stream. Then the stream
             /// is readied with `into_kernel_handoff` (its handshake and
             /// 0-RTT phase completed, queued records written, the input
             /// read up to a record boundary) and the keys are installed.

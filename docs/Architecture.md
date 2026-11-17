@@ -906,7 +906,10 @@ suite with KeyUpdates, data in flight at the handover kept in order, an
 offloaded server against a userspace client (tickets, KeyUpdate, closure), a
 KeyUpdate answered by a read while the socket is full (the answer seen on the
 wire by a relay), split halves across key updates, a client still in its
-0-RTT phase, truncation, and refusals that return the stream.
+0-RTT phase, truncation, a peer that closed TCP before the handover (the
+kernel attaches the upper layer protocol to an established connection only,
+`ENOTCONN`; the stream goes on in userspace), and refusals that return the
+stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `fcntl`, and `sendmsg`/`recvmsg` with one

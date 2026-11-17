@@ -28,7 +28,7 @@ use browntls::{ClientConfig, ProtocolVersion, ServerConfig, SupportedCipherSuite
 use browntls_ktls::{AsyncKtlsStream, HandoffError, StreamHandoffError};
 use browntls_tokio::{TlsAcceptor, TlsConnector, client, server};
 use common::*;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -469,10 +469,12 @@ async fn truncation_is_reported() {
     let (client, mut server) = pair(&pki, suite).await;
     write_all_async(&mut server, b"partial").await;
     timeout(LIMIT, server.flush()).await.unwrap().unwrap();
+    // Handed over first: the kernel refuses the upper layer protocol once
+    // the peer's FIN has arrived.
+    let mut tls = client_kernel(client).await;
     let (tcp, _) = server.into_inner();
     drop(tcp);
 
-    let mut tls = client_kernel(client).await;
     let mut got = Vec::new();
     let err = timeout(LIMIT, tls.read_to_end(&mut got))
         .await
@@ -482,6 +484,48 @@ async fn truncation_is_reported() {
     assert_eq!(got, b"partial");
     let err = tls.read(&mut [0u8; 8]).await.unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+/// A peer that has closed TCP is not handed over: the kernel attaches the
+/// `tls` upper layer protocol to an established connection only. The
+/// stream comes back untouched and yields in userspace what the peer sent.
+#[tokio::test]
+async fn a_peer_that_closed_tcp_is_left_to_userspace() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+    let (client, mut server) = pair(&pki, suite).await;
+    write_all_async(&mut server, b"last words").await;
+    timeout(LIMIT, server.shutdown()).await.unwrap().unwrap();
+    drop(server);
+    // The FIN has arrived once the socket reports its read side closed.
+    timeout(LIMIT, async {
+        let (tcp, _) = client.get_ref();
+        while !tcp
+            .ready(Interest::READABLE)
+            .await
+            .unwrap()
+            .is_read_closed()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the peer's FIN did not arrive");
+
+    let Err(StreamHandoffError::Refused {
+        stream: mut client,
+        received,
+        error,
+    }) = AsyncKtlsStream::from_client(client).await
+    else {
+        panic!("handed over after the peer closed TCP");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::NotConnected, "{error}");
+    assert!(received.is_empty());
+    assert_eq!(read_to_end_async(&mut client).await.unwrap(), b"last words");
 }
 
 /// `into_kernel_handoff` and `AsyncKtlsStream::new` by hand, which keeps

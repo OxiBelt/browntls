@@ -111,6 +111,14 @@ pub(crate) enum Processed {
     EarlyData(Range<usize>),
 }
 
+/// Where the read key stood before a handshake message was processed; see
+/// [`ConnectionCore::check_read_key_change`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadEpoch {
+    decrypting: bool,
+    seq: u64,
+}
+
 /// The state after [`ConnectionCore::process_one`], and what it consumed
 /// (`None`: no complete unit was buffered).
 pub(crate) type Step<Data> = (Box<dyn State<Data>>, Option<Processed>);
@@ -292,8 +300,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         let mut processed = Processed::Message;
         let result = match item {
             Deframed::Handshake { len, version } => {
-                let decrypt_epoch = self.common_state.record_layer.read_seq();
-                let was_decrypting = self.common_state.record_layer.is_decrypting();
+                let epoch = self.read_epoch();
                 let bytes = &self.deframer.joiner.buffered()[..len];
                 let parse_version = self.common_state.negotiated_version.unwrap_or(version);
                 let result = match HandshakeMessagePayload::read_version(
@@ -318,21 +325,7 @@ impl<Data: SideData> ConnectionCore<Data> {
                     }
                 };
                 self.deframer.joiner.consume(len);
-                // RFC 8446 §5.1: a handshake message that changes the read
-                // key must end its record; nothing may follow it under the
-                // old key.
-                let key_changed = self.common_state.record_layer.is_decrypting() != was_decrypting
-                    || (self.common_state.record_layer.is_decrypting()
-                        && self.common_state.record_layer.read_seq() < decrypt_epoch);
-                match result {
-                    Ok(_) if key_changed && !self.deframer.joiner.is_empty() => {
-                        Err(self.common_state.send_fatal_alert(
-                            AlertDescription::UnexpectedMessage,
-                            PeerMisbehaved::KeyEpochWithPendingFragment,
-                        ))
-                    }
-                    other => other,
-                }
+                result.and_then(|next| self.check_read_key_change(epoch).map(|()| next))
             }
             Deframed::Record {
                 typ,
@@ -380,6 +373,37 @@ impl<Data: SideData> ConnectionCore<Data> {
             Ok(new_state) => Ok((new_state, Some(processed))),
             Err(err) => Err(self.fail(err)),
         }
+    }
+
+    /// The read key epoch, to check a handshake message against with
+    /// [`Self::check_read_key_change`] once it is processed.
+    pub(crate) fn read_epoch(&self) -> ReadEpoch {
+        let record_layer = &self.common_state.record_layer;
+        ReadEpoch {
+            decrypting: record_layer.is_decrypting(),
+            seq: record_layer.read_seq(),
+        }
+    }
+
+    /// RFC 8446 §5.1: a handshake message that changes the read key must end
+    /// its record; nothing may follow it under the old key. Fails with an
+    /// `unexpected_message` alert when the read key changed since `before`
+    /// while handshake bytes are still buffered.
+    ///
+    /// Every handshake message processed by the state machine is checked:
+    /// [`Self::process_one`] does it, and so do the server acceptors after
+    /// the ClientHello they read.
+    pub(crate) fn check_read_key_change(&mut self, before: ReadEpoch) -> Result<(), Error> {
+        let record_layer = &self.common_state.record_layer;
+        let changed = record_layer.is_decrypting() != before.decrypting
+            || (record_layer.is_decrypting() && record_layer.read_seq() < before.seq);
+        if changed && !self.deframer.joiner.is_empty() {
+            return Err(self.common_state.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::KeyEpochWithPendingFragment,
+            ));
+        }
+        Ok(())
     }
 
     /// Records `err` as the connection's final state and lets the side data

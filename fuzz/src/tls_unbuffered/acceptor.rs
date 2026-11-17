@@ -10,6 +10,15 @@
 //!   refused by both acceptors' `into_connection` with the same error and an
 //!   `internal_error` alert (other refusals may depend on the session cache,
 //!   which the two would share, so they are not compared);
+//! * the connection an acceptor makes behaves as an
+//!   `UnbufferedServerConnection::new` fed the same bytes: with the same
+//!   configuration on a fresh session store (so that neither resumes a
+//!   session the other used), both end with the same error or none, and
+//!   with the same alert when it is a plaintext record. The documented
+//!   difference is allowed: a `change_cipher_spec` ahead of the ClientHello
+//!   is `IllegalMiddleboxChangeCipherSpec` through the acceptor and
+//!   `InappropriateMessage` on a new connection. (This also checks what the
+//!   two acceptors share, which the first property cannot.)
 //! * `discard` never exceeds the input; a spent acceptor discards nothing
 //!   and fails with an empty alert; an alert buffer that is too small is
 //!   reported with the size needed and nothing is consumed;
@@ -19,10 +28,13 @@
 use std::sync::Arc;
 
 use browntls::server::{
-    Acceptor, ClientHello, UnbufferedAcceptedAlert, UnbufferedAcceptor, UnbufferedServerConnection,
+    Acceptor, ClientHello, ServerSessionMemoryCache, UnbufferedAcceptedAlert, UnbufferedAcceptor,
+    UnbufferedServerConnection,
 };
-use browntls::unbuffered::{EncodeError, InsufficientSizeError};
-use browntls::{CipherSuite, Error, NamedGroup, ServerConfig, SignatureScheme};
+use browntls::unbuffered::{ConnectionState, EncodeError, InsufficientSizeError};
+use browntls::{
+    CipherSuite, ContentType, Error, NamedGroup, PeerMisbehaved, ServerConfig, SignatureScheme,
+};
 
 use super::{CLIENT, Op, SERVER, Seed, World};
 use crate::input::Input;
@@ -37,6 +49,9 @@ const RESUMPTION_DATA: u8 = 4;
 const REJECT_EARLY_DATA: u8 = 8;
 /// Flag: offer a one-byte buffer to the alert first.
 const SHORT_ALERT: u8 = 0x10;
+/// Flag: append a handshake fragment (a Finished header) to the first
+/// record of the input, as if it had followed the ClientHello in its record.
+const TAIL: u8 = 0x20;
 /// Flag: format every status with `Debug`.
 const DEBUG: u8 = 0x80;
 
@@ -142,7 +157,8 @@ impl World {
     pub(super) fn accept(&mut self, input: &mut Input<'_>) {
         let chunk = usize::from(input.byte());
         let flags = input.byte();
-        let bytes = self.inbuf[SERVER].clone();
+        let mut bytes = self.inbuf[SERVER].clone();
+        let tailed = flags & TAIL != 0 && append_handshake_tail(&mut bytes);
         let step = if chunk == 0 {
             bytes.len().max(1)
         } else {
@@ -219,6 +235,7 @@ impl World {
         } else {
             self.server_config.clone()
         };
+        compare_with_new(&bytes, &config);
         // A configuration refused up front touches no shared state, so the
         // model can be asked too.
         let refused_up_front = UnbufferedServerConnection::new(config.clone()).err();
@@ -256,6 +273,108 @@ impl World {
         self.server = Some(conn);
         self.failed[SERVER] = false;
         self.closed[SERVER] = false;
+        self.corrupted |= tailed;
+    }
+}
+
+/// Appends a Finished header to the first record of `bytes` when that is a
+/// whole handshake record with room for it; whether it did.
+fn append_handshake_tail(bytes: &mut Vec<u8>) -> bool {
+    const FINISHED_HEADER: [u8; 4] = [0x14, 0, 0, 0x20];
+    if bytes.len() < 5 || bytes[0] != 0x16 {
+        return false;
+    }
+    let len = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
+    let end = 5 + len;
+    let Ok(new_len) = u16::try_from(len + FINISHED_HEADER.len()) else {
+        return false;
+    };
+    if end > bytes.len() || usize::from(new_len) > 1 << 14 {
+        return false;
+    }
+    bytes.splice(end..end, FINISHED_HEADER);
+    bytes[3..5].copy_from_slice(&new_len.to_be_bytes());
+    true
+}
+
+/// Runs `conn` over `incoming` until it waits for more input: the error it
+/// ended with, if any, and every record it sent.
+fn settle(
+    conn: &mut UnbufferedServerConnection,
+    mut incoming: Vec<u8>,
+) -> (Option<Error>, Vec<u8>) {
+    let mut out = Vec::new();
+    for _ in 0..256 {
+        let status = conn.process_tls_records(&mut incoming);
+        let discard = status.discard;
+        let end = match status.state {
+            Ok(ConnectionState::EncodeTlsData(mut encode)) => {
+                // Any one record fits.
+                let mut buf = vec![0u8; 1 << 15];
+                let n = encode.encode(&mut buf).unwrap();
+                out.extend_from_slice(&buf[..n]);
+                None
+            }
+            Ok(ConnectionState::TransmitTlsData(transmit)) => {
+                transmit.done();
+                None
+            }
+            Ok(ConnectionState::ReadTraffic(_) | ConnectionState::ReadEarlyData(_)) => None,
+            Ok(_) => Some(None),
+            Err(err) => Some(Some(err)),
+        };
+        incoming.drain(..discard);
+        if let Some(end) = end {
+            return (end, out);
+        }
+    }
+    (None, out)
+}
+
+/// Feeds `bytes`, which hold a whole ClientHello, to an acceptor and to
+/// `UnbufferedServerConnection::new`, both with `config` on a fresh session
+/// store, and checks that they end the same way.
+fn compare_with_new(bytes: &[u8], config: &ServerConfig) {
+    let mut fresh = config.clone();
+    fresh.session_storage = ServerSessionMemoryCache::new(8);
+    let fresh = Arc::new(fresh);
+    let Ok(mut created) = UnbufferedServerConnection::new(fresh.clone()) else {
+        // Refused up front: compared in `World::accept`.
+        return;
+    };
+    let (n_err, n_out) = settle(&mut created, bytes.to_vec());
+
+    let mut acceptor = UnbufferedAcceptor::new();
+    let mut incoming = bytes.to_vec();
+    let status = acceptor.accept(&mut incoming);
+    incoming.drain(..status.discard);
+    let Ok(Some(accepted)) = status.state else {
+        panic!("a ClientHello read in pieces was not read whole");
+    };
+    let (a_err, a_out) = match accepted.into_connection(fresh) {
+        Ok(mut conn) => settle(&mut conn, incoming),
+        Err((err, mut alert)) => (Some(err), encode_all(&mut alert, false)),
+    };
+
+    let documented = matches!(
+        (&a_err, &n_err),
+        (
+            Some(Error::PeerMisbehaved(
+                PeerMisbehaved::IllegalMiddleboxChangeCipherSpec
+            )),
+            Some(Error::InappropriateMessage {
+                got_type: ContentType::ChangeCipherSpec,
+                ..
+            })
+        )
+    );
+    assert!(
+        documented || a_err == n_err,
+        "through an acceptor: {a_err:?}; created with the configuration: {n_err:?}"
+    );
+    let plain_alert = |out: &[u8]| out.len() == 7 && out[0] == 0x15;
+    if plain_alert(&a_out) || plain_alert(&n_out) {
+        assert_eq!(a_out, n_out, "the alerts differ");
     }
 }
 
@@ -276,6 +395,15 @@ pub(super) fn seeds() -> Vec<Vec<u8>> {
             .op(Op::Accept, &[chunk, flags])
             .conversation()
             .op(Op::Accessors, &[]);
+        seeds.push(seed.0);
+    }
+
+    // Handshake bytes after the ClientHello in its record: refused once
+    // TLS 1.3 changes the read key, kept for later in TLS 1.2.
+    for (knobs, chunk) in [([0x01, 0x00, 0, 0, 0], 0), ([0x02, 0x00, 0, 0, 0], 5)] {
+        let seed = hello_to_server(Seed::new(knobs, &[0]))
+            .op(Op::Accept, &[chunk, TAIL | DEBUG])
+            .op(Op::Pump, &[]);
         seeds.push(seed.0);
     }
 

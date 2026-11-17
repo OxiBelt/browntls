@@ -216,6 +216,11 @@ impl Acceptor {
     /// the configuration, is refused; so is a call after the acceptor
     /// returned a ClientHello or an error. A refusal comes with the alert to
     /// send to the client (empty for a call after completion).
+    ///
+    /// These checks see the ClientHello as sent. With Encrypted Client
+    /// Hello that is the outer one, so a defect only there is refused here,
+    /// although a connection created with the ECH keys, which checks only the
+    /// inner ClientHello it decrypts, would go on.
     pub fn accept(&mut self) -> Result<Option<Accepted>, (Error, AcceptedAlert)> {
         let Some(mut connection) = self.inner.take() else {
             return Err((
@@ -298,7 +303,12 @@ impl Accepted {
     /// Continues the handshake with `config`.
     ///
     /// The connection then behaves as a [`ServerConnection::new`] with
-    /// `config` that read the same bytes. `config` is checked as there
+    /// `config` that read the same bytes. One refusal differs in its error,
+    /// not its alert: a `change_cipher_spec` record ahead of the ClientHello,
+    /// with no cookie sealer in `config`, is
+    /// [`PeerMisbehaved::IllegalMiddleboxChangeCipherSpec`](crate::PeerMisbehaved::IllegalMiddleboxChangeCipherSpec)
+    /// here and [`Error::InappropriateMessage`] there (`unexpected_message`
+    /// both). `config` is checked as there
     /// (cookie sealer, ECH role, `max_fragment_size`, `record_size_limit`);
     /// ECH is processed with its keys; the ClientHello is then handled with
     /// it. On error the alert to send is returned too: the handshake's own,

@@ -128,6 +128,11 @@ fn checked(
 /// ClientHello as [`hs::ExpectClientHello`] does: stateless retry cookie,
 /// version, suite and group, certificate, early data, the first flight.
 ///
+/// As for every handshake message, a ClientHello that changes the read key
+/// (TLS 1.3) must end its record (RFC 8446 §5.1): handshake bytes that
+/// followed it in its record, still in the joiner, are refused
+/// ([`ConnectionCore::check_read_key_change`]).
+///
 /// On error the core has failed ([`ConnectionCore::fail`]: a TLS 1.2
 /// session it resumed is forgotten) and a fatal alert is queued, also when
 /// `config` itself is refused (`internal_error`).
@@ -136,7 +141,10 @@ pub(super) fn configure(
     hello: AcceptedHello,
     config: Arc<ServerConfig>,
 ) -> Result<(), Error> {
-    match handshake_with(core, hello, config) {
+    let epoch = core.read_epoch();
+    let result = handshake_with(core, hello, config)
+        .and_then(|state| core.check_read_key_change(epoch).map(|()| state));
+    match result {
         Ok(state) => {
             core.state = Ok(state);
             Ok(())

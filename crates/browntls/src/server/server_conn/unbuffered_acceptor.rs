@@ -29,8 +29,9 @@ use crate::vecbuf::ChunkVecBuffer;
 /// continuing a stateless HelloRetryRequest, RFC 9846 §4.3.2; the handshake
 /// refuses them unless the ClientHello carries a valid cookie). The
 /// ClientHello may span records; its bytes are copied into the connection's
-/// handshake joiner, which holds at most one maximum-size handshake message,
-/// as [`UnbufferedConnectionCommon::process_tls_records`] does.
+/// handshake joiner, as [`UnbufferedConnectionCommon::process_tls_records`]
+/// does, which holds at most one maximum-size handshake message with its
+/// header plus one record of plaintext received after it.
 pub struct UnbufferedAcceptor {
     inner: Option<ConnectionCore<ServerConnectionData>>,
 }
@@ -64,6 +65,11 @@ impl UnbufferedAcceptor {
     /// with the error and the alert to send. Once a ClientHello or an error
     /// was returned, every call fails with an empty alert and discards
     /// nothing.
+    ///
+    /// These checks see the ClientHello as sent. With Encrypted Client
+    /// Hello that is the outer one, so a defect only there is refused here,
+    /// although a connection created with the ECH keys, which checks only the
+    /// inner ClientHello it decrypts, would go on.
     pub fn accept(&mut self, incoming_tls: &mut [u8]) -> UnbufferedAcceptStatus {
         let Some(mut core) = self.inner.take() else {
             return UnbufferedAcceptStatus {
@@ -145,7 +151,12 @@ impl UnbufferedAccepted {
     /// an `UnbufferedServerConnection::new(config)` that read the same bytes:
     /// pass the bytes not discarded to
     /// [`process_tls_records`](UnbufferedConnectionCommon::process_tls_records),
-    /// which offers the server's first flight. Accepted 0-RTT data is reported
+    /// which offers the server's first flight. One refusal differs in its
+    /// error, not its alert: a `change_cipher_spec` record ahead of the
+    /// ClientHello, with no cookie sealer in `config`, is
+    /// [`PeerMisbehaved::IllegalMiddleboxChangeCipherSpec`](crate::PeerMisbehaved::IllegalMiddleboxChangeCipherSpec)
+    /// here and [`Error::InappropriateMessage`] there (`unexpected_message`
+    /// both). Accepted 0-RTT data is reported
     /// in place, and is replayable by an attacker (see
     /// [`ServerConfig::max_early_data_size`]).
     ///

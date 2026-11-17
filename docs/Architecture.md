@@ -586,10 +586,22 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   checks and settings of a connection created with `config`
   (`ServerConfig::apply_to`), lets `config`'s ECH keys replace the
   ClientHello with the inner one, and hands it to
-  `ExpectClientHello::with_certified_key`. The same core (deframer, joiner,
-  common state) goes on, so the connection behaves as one created with
-  `config` that read the same bytes; an unbuffered one reports 0-RTT data in
-  place, from the bytes the acceptor did not discard. Every refusal fails the
+  `ExpectClientHello::with_certified_key`, then checks that a ClientHello
+  that changed the read key ended its record (RFC 8446 §5.1, the check
+  `ConnectionCore::process_one` makes for every handshake message). The same
+  core (deframer, joiner, common state) goes on, so the connection behaves as
+  one created with `config` that read the same bytes; an unbuffered one
+  reports 0-RTT data in place, from the bytes the acceptor did not discard.
+  Three differences remain. An alert record ahead of the ClientHello is
+  refused by an acceptor (`InappropriateMessage`, `unexpected_message`, as in
+  rustls), while a new connection ignores a warning alert there and reports
+  a fatal one. With no cookie sealer, a `change_cipher_spec` ahead of the
+  ClientHello is `IllegalMiddleboxChangeCipherSpec` through an acceptor and
+  `InappropriateMessage` on a new connection (both `unexpected_message`).
+  With ECH, the acceptor checks the outer ClientHello before decryption, so a
+  defect only there (duplicate key shares or certificate compression
+  algorithms, no `signature_algorithms`) is refused, where a new connection
+  checks only the inner ClientHello. Every refusal fails the
   core (`ConnectionCore::fail`, which forgets a TLS 1.2 session it resumed)
   and queues a fatal alert, `internal_error` for a refused configuration;
   `AcceptedAlert::write` or `UnbufferedAcceptedAlert::encode` (the

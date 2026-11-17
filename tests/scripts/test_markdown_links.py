@@ -150,16 +150,33 @@ class MarkdownLinksTests(unittest.TestCase):
             f"[d]({long}%zz)",
         )) + "\n")
         messages = self.messages()
-        self.assertEqual(5, len(messages))
+        expected = (
+            "local link target is not tracked",
+            "Markdown anchor does not exist",
+            "undefined Markdown reference",
+            "duplicate Markdown reference",
+            "malformed percent encoding",
+        )
+        self.assertEqual(
+            sorted(expected),
+            sorted(next(e for e in expected if e in m) for m in messages),
+        )
         for message in messages:
             self.assertIn("(5", message)
             self.assertLess(len(message), 2 * CHECKER.MAX_REPORTED_VALUE_CHARS + 100)
 
-    def test_control_characters_are_escaped(self):
-        self.write("README.md", "[bad](/\x1b[31mred)\n")
+    def test_control_characters_and_backslashes_are_escaped(self):
+        self.write("README.md", "[bad](/\x1b[31mred\u202e\\u{1b})\n")
         [message] = self.messages()
         self.assertNotIn("\x1b", message)
-        self.assertIn("\\u{1b}[31mred", message)
+        self.assertNotIn("\u202e", message)
+        self.assertIn("\\u{1b}[31mred\\u{202e}\\u{5c}u{1b}", message)
+
+    def test_diagnostics_before_an_unreadable_link_are_kept(self):
+        self.write("README.md", "[a](missing.md)\n[b](http://[::1)\n")
+        messages = self.messages()
+        self.assertTrue(any("not tracked" in m for m in messages))
+        self.assertTrue(any("cannot read tracked Markdown" in m for m in messages))
 
     def test_retained_diagnostics_are_capped_and_total_is_reported(self):
         self.write("README.md", "".join(f"[m](missing-{i}.md)\n" for i in range(10)))
@@ -167,7 +184,7 @@ class MarkdownLinksTests(unittest.TestCase):
         self.assertEqual(10, report.total)
         self.assertEqual(3, len(report.diagnostics))
         stderr = io.StringIO()
-        with mock.patch.object(CHECKER, "scan", lambda root: report), \
+        with mock.patch.object(CHECKER, "MAX_DIAGNOSTICS", 3), \
                 contextlib.redirect_stderr(stderr):
             status = CHECKER.main(["--repo-root", str(self.root)])
         self.assertEqual(1, status)

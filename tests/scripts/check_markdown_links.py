@@ -69,6 +69,10 @@ class _DiagnosticSink:
         self.retained: list[Diagnostic] = []
         self.total = 0
 
+    @property
+    def full(self) -> bool:
+        return len(self.retained) >= self.limit
+
     def add(self, path: PurePosixPath, line: int, message: str) -> None:
         self.total += 1
         if len(self.retained) < self.limit:
@@ -76,10 +80,17 @@ class _DiagnosticSink:
 
 
 def _excerpt(value: str) -> str:
-    """Return printable, bounded text for quoting `value` in a diagnostic."""
+    """Return printable, bounded text for quoting `value` in a diagnostic.
+
+    At most MAX_REPORTED_VALUE_CHARS characters of `value` are quoted. A
+    backslash or non-printable character is written as an escape such as
+    `\\u{1b}`, so the result is at most about ten times that length.
+    """
     shown = value[:MAX_REPORTED_VALUE_CHARS]
     escaped = "".join(
-        character if character.isprintable() else f"\\u{{{ord(character):x}}}"
+        character
+        if character.isprintable() and character != "\\"
+        else f"\\u{{{ord(character):x}}}"
         for character in shown
     )
     if len(value) > MAX_REPORTED_VALUE_CHARS:
@@ -256,17 +267,22 @@ def _scan_markdown(
     link_lines = _active_lines(text, strip_inline_code=True)
     reference_definitions: dict[str, str] = {}
     # A destination is checked once per source file, however often it is used.
+    # Once no further diagnostic can be retained, only the fact that a
+    # destination has a problem is remembered, not its message.
     checked: dict[str, str | None] = {}
 
     def check_destination(line_number: int, destination: str) -> None:
         if destination not in checked:
-            checked[destination] = _local_link_problem(
+            problem = _local_link_problem(
                 repo_root=repo_root,
                 source=source,
                 raw_destination=destination,
                 tracked=tracked,
                 anchor_cache=anchor_cache,
             )
+            if problem is not None and sink.full:
+                problem = ""
+            checked[destination] = problem
         problem = checked[destination]
         if problem is not None:
             sink.add(source, line_number, problem)
@@ -302,11 +318,15 @@ def _scan_markdown(
             check_destination(line_number, destination)
 
 
-def scan(repo_root: Path, *, max_diagnostics: int = MAX_DIAGNOSTICS) -> ScanReport:
-    """Scan tracked Markdown, keeping at most `max_diagnostics` diagnostics."""
+def scan(repo_root: Path, *, max_diagnostics: int | None = None) -> ScanReport:
+    """Scan tracked Markdown.
+
+    The first `max_diagnostics` diagnostics found (default MAX_DIAGNOSTICS)
+    are retained and returned sorted; `total` counts every diagnostic.
+    """
     repo_root = repo_root.resolve()
     tracked = _tracked_files(repo_root)
-    sink = _DiagnosticSink(max_diagnostics)
+    sink = _DiagnosticSink(MAX_DIAGNOSTICS if max_diagnostics is None else max_diagnostics)
     anchor_cache: dict[PurePosixPath, set[str]] = {}
     for source in _markdown_files_to_scan(tracked):
         try:
@@ -323,6 +343,7 @@ def scan(repo_root: Path, *, max_diagnostics: int = MAX_DIAGNOSTICS) -> ScanRepo
 
 
 def scan_repository(repo_root: Path) -> list[Diagnostic]:
+    """Return the retained diagnostics; see `scan()` for the total count."""
     return scan(repo_root).diagnostics
 
 

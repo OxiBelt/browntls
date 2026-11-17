@@ -38,6 +38,46 @@ parameter encodings (RFC 4055) are first mapped to one canonical constant
 (`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
 path validation and by handshake signature verification alike).
 
+### Certificate inspection
+
+`browntls-pki` parses a certificate once, eagerly: every field and extension
+it interprets is decoded and validated before any check runs. That parsed
+view is public as `Cert` (the rustls-webpki name), so applications inspect
+exactly what path validation sees rather than reparsing the DER with another
+library. `Cert::try_from` applies the strict policy used for end entities and
+intermediates (strict DER, version 3, no duplicate decoded extension, no
+unknown critical extension) to any certificate, CA or not; `EndEntityCert`
+dereferences to it and adds the verification methods. Parsing checks no
+signature, validity period or trust.
+
+- Extensions: every extension as an undecoded `Extension`, and typed views of
+  the ones the parser decodes (basic constraints, key usage, extended key
+  usage, subject and authority key identifiers, subject alternative names,
+  name constraints, CRL distribution points). Values validated at parse time
+  iterate without errors. Two parts that path validation reads leniently are
+  parsed strictly on access instead, so their errors come per item: each CRL
+  distribution point, and the issuer names of an authority key identifier.
+  Changing the parser to reject them up front would have changed which
+  certificates path validation accepts.
+- Names: `GeneralName` covers every RFC 5280 choice; the ones the crate does
+  not decode keep their tag and contents. `Name` parses an X.501 name (issuer,
+  subject, trust anchor subject, `directoryName`, TLS `DistinguishedName`)
+  into RDNs and attributes, rejecting anything that is not strict DER: empty
+  RDNs, `SET OF` elements out of order (X.690 §11.6), universal tags in the
+  wrong form, and names over 64 KiB. Attribute values are not interpreted
+  beyond a string accessor for the UTF-8-compatible string types.
+  `valid_dns_names` returns the `dNSName`s that server name verification can
+  match, which is not a substitute for `verify_is_valid_for_subject_name`.
+- Signatures: `SignedData` reads the `SEQUENCE { tbs, AlgorithmIdentifier,
+  BIT STRING }` of a certificate, CRL or certification request, or takes a raw
+  (message, algorithm, signature) triple, and verifies it against a
+  `SubjectPublicKeyInfo` through `verify_signed_data`, the function path
+  validation uses, including the RSASSA-PSS canonical forms.
+
+Everything returned borrows from the input, and work is linear in input
+lengths that the parser already bounds (64 KiB per certificate element, 4 GiB
+for a signed structure's `tbs`).
+
 ## Crypto provider mount point
 
 `browntls::crypto` defines the provider interface, modelled on rustls 0.23 so

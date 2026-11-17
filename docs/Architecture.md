@@ -1108,18 +1108,28 @@ number unchanged. The PSK and authenticated modes are not implemented.
 `browntls_crypto::nist::{p256, p384, p521}` expose, besides keys, ECDH and
 ECDSA, the curves' arithmetic for other protocols, named after the RustCrypto
 `primeorder` / `elliptic-curve` 0.14 types without implementing their
-traits: `FieldElement` (integers modulo `p`) and `Scalar` (integers modulo
-the group order `n`). Both stay in the Montgomery form of the curve code,
-always fully reduced; decoders reject values at or above the modulus
+traits: `FieldElement` (integers modulo `p`), `Scalar` (integers modulo the
+group order `n`), `AffinePoint` (with the identity as a flag and SEC 1
+encoding to and from `Sec1Point`, the identity as `00`) and
+`ProjectivePoint`, which convert to and from `PublicKey`. Values stay in the
+Montgomery form of the curve code, always fully reduced; decoders reject
+values at or above the modulus and points off the curve
 (`Scalar::from_bytes_reduced` reduces up to twice the scalar length on
-request). Arithmetic, inversion (safegcd), square roots (`p = 3 mod 4`) and
-comparisons are constant time; an `Option` or `Result` reveals only whether
-a value was zero, a root exists or an encoding was canonical. Field
-operations run on the backend the curve's policy selects at each call
-(BMI2/ADX or portable) and are not routed by `accel::load`; scalar
-arithmetic is the portable Montgomery code on every backend. `Scalar` is
-zeroised on drop; `FieldElement` is `Copy` and implements `Zeroize` for
-callers that hold secret ones; `Debug` prints neither value.
+request). Arithmetic, inversion (safegcd), square roots (`p = 3 mod 4`),
+comparisons, the group law (the complete RCB formulas, total on every
+input), scalar multiplication (`mul`: signed fixed windows over a table
+built by complete additions, so any point including the identity;
+`mul_by_generator`: the comb table) and normalisation are constant time; an
+`Option` or `Result` reveals only whether a value was zero, a root exists or
+an encoding was canonical. SEC 1 decoding is variable time, for public
+encodings, and `ProjectivePoint::mul_by_generator_and_mul_add_vartime` is
+the verification's variable-time double multiplication, for public inputs.
+Field and point operations run on the backend the curve's policy selects at
+each call (BMI2/ADX or portable) and are not routed by `accel::load`;
+scalar arithmetic is the portable Montgomery code on every backend.
+`Scalar` is zeroised on drop; field elements and points are `Copy` and
+implement `Zeroize` for callers that hold secret ones; `Debug` prints none
+of their values.
 
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
@@ -1330,7 +1340,8 @@ other sizes are not routed). That includes their uses by the native TLS
 provider once an application calls `load::enable`; for AES-GCM that means
 keys created after the call. AES-CCM, AES-CBC, the AES block types, RSA
 verification, FFDHE, X448, Ed25519, Ed448, the hash functions and the
-public NIST arithmetic types (`FieldElement`, `Scalar`) are not routed.
+public NIST arithmetic types (`FieldElement`, `Scalar`, `AffinePoint`,
+`ProjectivePoint`) are not routed.
 
 ### Operating-system interface
 

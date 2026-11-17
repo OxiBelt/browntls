@@ -1,43 +1,50 @@
-//! Public field and scalar arithmetic of P-256, P-384 and P-521.
+//! Public field, scalar and point arithmetic of P-256, P-384 and P-521.
 //!
 //! [`arith_module!`] declares, in each curve module, `FieldElement` (the
-//! integers modulo the field prime `p`) and `Scalar` (the integers modulo the
-//! group order `n`) with the same API on every curve. The names follow the
+//! integers modulo the field prime `p`), `Scalar` (the integers modulo the
+//! group order `n`), `AffinePoint` with its SEC 1 encoding `Sec1Point`, and
+//! `ProjectivePoint`, with the same API on every curve. The names follow the
 //! RustCrypto `primeorder` / `elliptic-curve` 0.14 vocabulary where it fits;
 //! none of their traits is implemented and nothing depends on them. The
-//! generic functions of [`field`] and [`scalar`] do the work; the macros
-//! only wrap them in per-curve types.
+//! generic functions of [`field`], [`scalar`] and [`point`] do the work; the
+//! macros only wrap them in per-curve types.
 //!
 //! # Representation
 //!
-//! Both types hold their value in Montgomery form (`x R mod m`, with
-//! `R = 2^(64 N)`), the form of the curve code underneath, so no conversion
-//! happens between operations. The portable and the BMI2/ADX field backends
-//! share that form, so a value computed on one is valid on the other. Every
-//! value is fully reduced (below its modulus): the constructors reject or
-//! reduce anything else, and every operation keeps the invariant.
+//! Field elements, scalars and point coordinates hold their values in
+//! Montgomery form (`x R mod m`, with `R = 2^(64 N)`), the form of the curve
+//! code underneath, so no conversion happens between operations. The
+//! portable and the BMI2/ADX field backends share that form, so a value
+//! computed on one is valid on the other. Every value is fully reduced
+//! (below its modulus): the constructors reject or reduce anything else, and
+//! every operation keeps the invariant.
 //!
 //! # Backends
 //!
-//! Each field operation runs on the backend the curve's acceleration policy
-//! selects at the time of the call ([`crate::accel`]): the BMI2/ADX kernels
-//! where the CPU has them, the portable code otherwise or under
-//! `browntls_force_soft`. Scalar arithmetic is the generic word-by-word
-//! Montgomery code (`mont`) on every backend, as it is for ECDSA. These
-//! operations do **not** take part in load-aware routing
+//! Each field and point operation runs on the backend the curve's
+//! acceleration policy selects at the time of the call ([`crate::accel`]):
+//! the BMI2/ADX kernels where the CPU has them, the portable code otherwise
+//! or under `browntls_force_soft`. Scalar arithmetic is the generic
+//! word-by-word Montgomery code (`mont`) on every backend, as it is for
+//! ECDSA. These operations do **not** take part in load-aware routing
 //! ([`crate::accel::load`]): only the key, ECDH and ECDSA entry points of
 //! the curve modules are routed and timed.
 //!
 //! # Constant time
 //!
 //! Arithmetic (addition, subtraction, negation, multiplication, squaring,
-//! inversion, square roots, comparisons) is constant time in the values:
-//! no branch or memory access depends on them. Comparisons return a
+//! inversion, square roots, comparisons, the group law, scalar
+//! multiplication, normalisation) is constant time in the values: no branch
+//! or memory access depends on them. Comparisons return a
 //! [`crate::ct::Choice`]. Where a result is an `Option` or a `Result`, its
-//! variant is public: decoding reveals whether the encoding was canonical,
-//! [`field::invert`] and [`scalar::invert`] whether the value was zero, and
-//! [`field::sqrt`] whether a square root exists. The work done before that
-//! outcome is still constant time.
+//! variant is public: decoding reveals whether the encoding was canonical
+//! and the point on the curve, [`field::invert`] and [`scalar::invert`]
+//! whether the value was zero, and [`field::sqrt`] whether a square root
+//! exists. The work done before that outcome is still constant time. Two
+//! exceptions say so in their documentation: SEC 1 decoding and encoding
+//! handle public data (an encoding's length shows whether the point is the
+//! identity), and `ProjectivePoint::mul_by_generator_and_mul_add_vartime`
+//! is the variable-time double multiplication of signature verification.
 //!
 //! # Secrets
 //!
@@ -49,9 +56,16 @@
 //! [`crate::zeroize::Zeroize`], so a caller that keeps a secret one can hold
 //! it in a [`crate::zeroize::Zeroizing`]. As for the existing key types,
 //! copies that the compiler makes in registers or on the stack during
-//! arithmetic are not wiped. `Debug` prints neither type's value.
+//! arithmetic are not wiped. Points are `Copy` like field elements and
+//! implement `Zeroize` (leaving the identity); `ProjectivePoint::mul` wipes
+//! the canonical copy of its scalar but not its result or the multiples of
+//! the point it tabulates, as for ECDH. `Debug` prints the value of none of
+//! these types (only of `Sec1Point`, which is an encoding).
 
+pub(crate) mod affine;
 pub(crate) mod field;
+pub(crate) mod point;
+pub(crate) mod projective;
 pub(crate) mod scalar;
 
 use crate::Error;
@@ -251,6 +265,8 @@ macro_rules! arith_module {
 
         crate::nist::arith::field::field_element!($doc_name, ArithBackends, $soft, $n, $field_len);
         crate::nist::arith::scalar::scalar_type!($doc_name, ArithBackends, $soft, $n, $field_len);
+        crate::nist::arith::affine::affine_point!($doc_name, ArithBackends, $soft, $n, $field_len);
+        crate::nist::arith::projective::projective_point!($doc_name, ArithBackends, $soft, $n);
     };
 }
 

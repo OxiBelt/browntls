@@ -1,4 +1,4 @@
-//! NIST P-521 (secp521r1): ECDH, ECDSA, and field and scalar arithmetic.
+//! NIST P-521 (secp521r1): ECDH, ECDSA, and field, scalar and point arithmetic.
 //!
 //! Backends: the full-width product followed by a fold and rotation for the
 //! Mersenne prime `p = 2^521 - 1` everywhere; on x86-64 with BMI2 and ADX the

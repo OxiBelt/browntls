@@ -153,7 +153,7 @@ impl<IO> Connect<IO> {
     pub fn get_ref(&self) -> Option<&IO> {
         match &self.0 {
             MidHandshake::Handshaking(stream) => Some(&stream.io),
-            MidHandshake::Error { io, .. } => Some(io),
+            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::End => None,
         }
     }
@@ -162,7 +162,7 @@ impl<IO> Connect<IO> {
     pub fn get_mut(&mut self) -> Option<&mut IO> {
         match &mut self.0 {
             MidHandshake::Handshaking(stream) => Some(&mut stream.io),
-            MidHandshake::Error { io, .. } => Some(io),
+            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::End => None,
         }
     }

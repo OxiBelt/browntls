@@ -524,6 +524,11 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   in progress (the peer's `close_notify` mid-handshake) ends with
   `UnexpectedEof` instead of polling forever, the asynchronous counterpart
   of the `complete_io` fix.
+- `LazyConfigAcceptor` drives `server::Acceptor` over the transport until
+  it yields the ClientHello (`StartHandshake`, which picks the
+  `ServerConfig`). A refusal, from the acceptor or from
+  `Accepted::into_connection`, writes and flushes the `AcceptedAlert` before
+  the future fails; `take_io` returns the transport afterwards.
 - Reads return plaintext through `Reader::into_first_chunk`, which lends the
   first buffered chunk for the connection's lifetime so `poll_fill_buf` can
   return it. A read whose records queue an answer (an alert, a KeyUpdate

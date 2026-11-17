@@ -70,6 +70,32 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 }
 ```
 
+## Choosing the configuration per ClientHello
+
+`LazyConfigAcceptor` reads the ClientHello before the server picks a
+`ServerConfig`; `StartHandshake::into_stream` continues with it. A transport
+that does not start with a ClientHello is answered with an alert, and
+`take_io` hands it back, to answer a plain-text HTTP request, say.
+
+```rust,no_run
+use std::sync::Arc;
+
+use browntls_tokio::browntls::server::Acceptor;
+use browntls_tokio::browntls::ServerConfig;
+use browntls_tokio::LazyConfigAcceptor;
+use tokio::net::TcpStream;
+
+async fn accept(
+    tcp: TcpStream,
+    by_name: impl Fn(Option<&str>) -> Arc<ServerConfig>,
+) -> std::io::Result<()> {
+    let start = LazyConfigAcceptor::new(Acceptor::default(), tcp).await?;
+    let config = by_name(start.client_hello().server_name());
+    let _tls = start.into_stream(config).await?;
+    Ok(())
+}
+```
+
 ## Behaviour
 
 - **Flushing.** Records the transport does not take at once stay queued: call

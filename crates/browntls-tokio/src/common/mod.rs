@@ -670,6 +670,25 @@ where
     st.track(cx, poll)
 }
 
+/// Writes `alert` to `io` and flushes it. `Ready` once it is out, or once
+/// the transport failed or took nothing: the caller then reports the error
+/// that caused the alert, not the transport's.
+pub(crate) fn poll_send_alert<IO: AsyncWrite + Unpin>(
+    io: &mut IO,
+    alert: &mut browntls::server::AcceptedAlert,
+    cx: &mut Context<'_>,
+) -> Poll<()> {
+    loop {
+        match alert.write(&mut SyncWriteAdapter { io, cx }) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+            Err(_) => return Poll::Ready(()),
+        }
+    }
+    Pin::new(io).poll_flush(cx).map(|_| ())
+}
+
 /// Gives `browntls`'s blocking `read_tls` an [`AsyncRead`], turning
 /// `Pending` into `WouldBlock`.
 pub(crate) struct SyncReadAdapter<'a, 'b, T> {

@@ -12,6 +12,9 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, StreamState};
 
+mod lazy;
+pub use lazy::{LazyConfigAcceptor, StartHandshake};
+
 /// Accepts server handshakes with a shared [`ServerConfig`].
 ///
 /// Cheap to clone; create one per configuration and reuse it.
@@ -96,7 +99,7 @@ impl<IO> Accept<IO> {
     pub fn get_ref(&self) -> Option<&IO> {
         match &self.0 {
             MidHandshake::Handshaking(stream) => Some(&stream.io),
-            MidHandshake::Error { io, .. } => Some(io),
+            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::End => None,
         }
     }
@@ -105,7 +108,7 @@ impl<IO> Accept<IO> {
     pub fn get_mut(&mut self) -> Option<&mut IO> {
         match &mut self.0 {
             MidHandshake::Handshaking(stream) => Some(&mut stream.io),
-            MidHandshake::Error { io, .. } => Some(io),
+            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::End => None,
         }
     }

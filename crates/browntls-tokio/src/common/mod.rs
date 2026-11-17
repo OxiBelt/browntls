@@ -18,6 +18,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+mod coalesce;
 mod handshake;
 pub(crate) use handshake::{IoSession, MidHandshake};
 
@@ -821,7 +822,9 @@ impl<T: AsyncRead + Unpin> Read for SyncReadAdapter<'_, '_, T> {
 }
 
 /// Gives `browntls`'s blocking `write_tls` an [`AsyncWrite`], turning
-/// `Pending` into `WouldBlock`.
+/// `Pending` into `WouldBlock`. The records `write_tls` offers go to a
+/// transport with a vectored write as they are, and to any other gathered
+/// into one write (see [`coalesce`]).
 pub(crate) struct SyncWriteAdapter<'a, 'b, T> {
     pub(crate) io: &'a mut T,
     pub(crate) cx: &'a mut Context<'b>,
@@ -845,7 +848,13 @@ impl<T: AsyncWrite + Unpin> Write for SyncWriteAdapter<'_, '_, T> {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.poll_with(|io, cx| io.poll_write_vectored(cx, bufs))
+        self.poll_with(|io, cx| {
+            if io.is_write_vectored() {
+                io.poll_write_vectored(cx, bufs)
+            } else {
+                coalesce::poll_write_coalesced(io, cx, bufs)
+            }
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {

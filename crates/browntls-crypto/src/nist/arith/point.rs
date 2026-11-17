@@ -2,8 +2,11 @@
 //!
 //! A projective point is always a valid representative of a curve point:
 //! the generator, the identity `(0 : 1 : 0)`, a validated affine point
-//! lifted to `Z = 1`, or the output of the complete formulas (or of the
-//! scalar multiplications built on them) applied to such points. The
+//! lifted to `Z = 1`, the output of the complete formulas (or of the
+//! scalar multiplications built on them) applied to such points, or the
+//! output of the variable-time Jacobian double multiplication converted by
+//! `jacobian::to_projective` (`(X Z : Y : Z^3)`, which maps the Jacobian
+//! identity `(1 : 1 : 0)` to `(0 : 1 : 0)`). The
 //! complete formulas of Renes, Costello and Batina need nothing more: no
 //! case of their inputs (identity, equal points, opposite points) is
 //! exceptional. An affine point carries an identity mask (all ones for the
@@ -42,13 +45,16 @@ pub(crate) fn from_affine<A: Arith<N>, const N: usize>(a: &Affine<N>, inf: u64) 
 }
 
 fn to_affine_with<C: Curve<N>, const N: usize>(p: &Projective<N>) -> (Affine<N>, u64) {
-    // The inverse of Z = 0 is 0, which maps the identity to (0, 0).
     let zi = C::invert(&p.z);
+    let inf = mont::is_zero(&p.z);
+    // The identity's coordinates are (0, 0), selected by its mask rather
+    // than left to the inversion's mapping of 0 to 0.
+    let m = mont::barrier(inf);
     let a = Affine {
-        x: C::mul(&p.x, &zi),
-        y: C::mul(&p.y, &zi),
+        x: mont::select(m, &[0; N], &C::mul(&p.x, &zi)),
+        y: mont::select(m, &[0; N], &C::mul(&p.y, &zi)),
     };
-    (a, mont::is_zero(&p.z))
+    (a, inf)
 }
 
 /// Normalises to affine coordinates and the identity mask (constant time:

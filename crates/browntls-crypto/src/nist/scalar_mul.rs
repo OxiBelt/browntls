@@ -2,6 +2,9 @@
 //!
 //! * [`mul`]: constant-time variable-base multiplication (ECDH) with signed
 //!   5-bit fixed windows and a masked table scan.
+//! * [`mul_projective`]: the same for a projective base, any point including
+//!   the identity (the public `ProjectivePoint::mul`); its table is built by
+//!   complete additions instead of mixed ones.
 //! * [`mul_base`]: constant-time fixed-base multiplication (key generation,
 //!   ECDSA signing) using the precomputed comb table and signed Booth digits
 //!   of the curve's comb width.
@@ -9,8 +12,8 @@
 //!   verification only (all inputs are public there), using interleaved
 //!   width-6 (base point) and width-5 (public key) wNAF.
 //!
-//! Scalars are plain little-endian limbs `< n`. Booth recoding is used for both
-//! constant-time variants: the `(w + 1)`-bit window starting one bit below the
+//! Scalars are plain little-endian limbs `< n`. Booth recoding is used for all
+//! three constant-time variants: the `(w + 1)`-bit window starting one bit below the
 //! digit's position is mapped to a signed digit in `[-2^(w-1), 2^(w-1)]`, so
 //! tables only need positive multiples and negation is a masked `Y` flip.
 

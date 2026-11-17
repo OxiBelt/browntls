@@ -1127,9 +1127,10 @@ the verification's variable-time double multiplication, for public inputs.
 Field and point operations run on the backend the curve's policy selects at
 each call (BMI2/ADX or portable) and are not routed by `accel::load`;
 scalar arithmetic is the portable Montgomery code on every backend.
-`Scalar` is zeroised on drop; field elements and points are `Copy` and
-implement `Zeroize` for callers that hold secret ones; `Debug` prints none
-of their values.
+`Scalar` is zeroised on drop; field elements, points and `Sec1Point`
+encodings (which may encode a secret point) are `Copy` and implement
+`Zeroize` for callers that hold secret ones; `Debug` prints none of their
+values, encodings included (`Sec1Point::as_bytes` gives the bytes).
 
 The table states the design target; [Status](#status) records what has been
 implemented and executed.

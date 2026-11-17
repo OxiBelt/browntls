@@ -17,6 +17,7 @@
 
 use browntls_crypto::Error;
 use browntls_crypto::accel::{self, Algorithm, Policy};
+use browntls_crypto::rand::FixedRng;
 use browntls_crypto::zeroize::Zeroize;
 use num_bigint::BigUint;
 
@@ -140,18 +141,23 @@ macro_rules! curve_group {
                 assert_eq!(AffinePoint::IDENTITY.y(), FieldElement::ZERO);
                 assert_eq!(format!("{g:?}"), "ProjectivePoint(..)");
                 assert_eq!(format!("{:?}", AffinePoint::GENERATOR), "AffinePoint(..)");
-                assert_eq!(
-                    format!("{:?}", AffinePoint::IDENTITY.to_sec1_point(false)),
-                    "Sec1Point([0])"
-                );
+                let mut e = AffinePoint::GENERATOR.to_sec1_point(true);
+                assert_eq!(format!("{e:?}"), "Sec1Point(..)");
+                e.zeroize();
+                assert_eq!(e.as_bytes(), [0]);
+                assert_eq!(e, AffinePoint::IDENTITY.to_sec1_point(false));
                 assert_eq!(ours::COMPRESSED_LEN, 1 + $fl);
             }
 
             fn multiplication(rng: &mut XorShift) {
                 let base = ProjectivePoint::mul_by_generator(
-                    &Scalar::generate(&browntls_crypto::rand::OsRng).unwrap(),
+                    &Scalar::from_bytes_reduced(&rng.bytes(2 * $fl)).unwrap(),
                 );
                 let their_base = theirs(&base);
+                // The base has Z != 1 (a comb output); this identity is not
+                // the representative (0 : 1 : 0).
+                let zero = base.double() - base - base;
+                assert_eq!(zero, ProjectivePoint::IDENTITY);
                 for k in &scalars(rng) {
                     let t = their_scalar(k);
                     let kg = ProjectivePoint::mul_by_generator(k);
@@ -168,6 +174,8 @@ macro_rules! curve_group {
                     acc *= k;
                     assert_eq!(acc, base.mul(k));
                     assert!(ProjectivePoint::IDENTITY.mul(k).is_identity().declassify());
+                    assert!(zero.mul(k).is_identity().declassify());
+                    assert_eq!(zero + kg, kg);
                     // The variable-time double multiplication agrees.
                     let b = Scalar::from_bytes_reduced(&rng.bytes($fl)).unwrap();
                     let want = kg + base.mul(&b);
@@ -181,6 +189,10 @@ macro_rules! curve_group {
                             &b,
                             &ProjectivePoint::IDENTITY
                         ),
+                        kg
+                    );
+                    assert_eq!(
+                        ProjectivePoint::mul_by_generator_and_mul_add_vartime(k, &b, &zero),
                         kg
                     );
                     // b B = -k G cancels.
@@ -357,8 +369,9 @@ macro_rules! curve_group {
                 }
             }
 
-            fn public_keys() {
-                let key = ours::SecretKey::generate(&browntls_crypto::rand::OsRng).unwrap();
+            fn public_keys(rng: &mut XorShift) {
+                let seed = rng.bytes(4 * $fl);
+                let key = ours::SecretKey::generate(&FixedRng::new(&seed)).unwrap();
                 let public = key.public_key();
                 let d = Scalar::from_bytes(&key.to_bytes()[..]).unwrap();
                 let point = ProjectivePoint::mul_by_generator(&d);
@@ -386,7 +399,8 @@ macro_rules! curve_group {
                     &public.to_uncompressed()[..]
                 );
                 // ECDH is the x-coordinate of d Q.
-                let peer = ours::SecretKey::generate(&browntls_crypto::rand::OsRng).unwrap();
+                let seed = rng.bytes(4 * $fl);
+                let peer = ours::SecretKey::generate(&FixedRng::new(&seed)).unwrap();
                 let shared = key.diffie_hellman(&peer.public_key()).unwrap();
                 let product = peer.public_key().to_projective().mul(&d);
                 assert_eq!(product.to_affine().x().to_bytes(), shared);
@@ -413,7 +427,7 @@ macro_rules! curve_group {
                     multiplication(&mut rng);
                     group_law(&mut rng);
                     encodings(&mut rng);
-                    public_keys();
+                    public_keys(&mut rng);
                     wiping();
                 }
                 accel::set_policy(Algorithm::$alg, Policy::PREFERRED).unwrap();

@@ -59,8 +59,9 @@
 //! arithmetic are not wiped. Points are `Copy` like field elements and
 //! implement `Zeroize` (leaving the identity); `ProjectivePoint::mul` wipes
 //! the canonical copy of its scalar but not its result or the multiples of
-//! the point it tabulates, as for ECDH. `Debug` prints the value of none of
-//! these types (only of `Sec1Point`, which is an encoding).
+//! the point it tabulates, as for ECDH. `Sec1Point`, which may encode a
+//! secret point, is `Copy` and implements `Zeroize` (leaving the identity's
+//! encoding) as well. `Debug` prints the value of none of these types.
 
 pub(crate) mod affine;
 pub(crate) mod field;

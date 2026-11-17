@@ -181,7 +181,10 @@ macro_rules! group_ops {
                 assert_eq!(affine.neg().ct_eq(&affine).declassify(), identity);
                 let e = affine.to_sec1_point(args.compress);
                 assert_eq!(AffinePoint::from_sec1_bytes(e.as_ref()), Ok(affine));
-                assert_eq!(format!("{e:?}"), format!("Sec1Point({:?})", e.as_bytes()));
+                assert_eq!(format!("{e:?}"), "Sec1Point(..)");
+                let mut wiped_encoding = e;
+                wiped_encoding.zeroize();
+                assert_eq!(wiped_encoding.as_bytes(), [0]);
                 out.push(e.as_bytes().to_vec());
                 // The group law against the oracle.
                 let bp = p.mul(&b);
@@ -212,6 +215,29 @@ macro_rules! group_ops {
                 );
                 check(&p.double(), &(tp + tp), "double");
                 check(&p.neg(), &-tp, "neg");
+                // Bases other than Z = 1 and the canonical identity: a sum
+                // (Z != 1 in general) and an identity of another
+                // representative (Z = 0, Y != 1 in general).
+                let q = ag + p;
+                let tq = ::$rc::ProjectivePoint::GENERATOR * ta + tp;
+                check(&q.mul(&b), &(tq * tb), "b (a G + P)");
+                assert_eq!(
+                    ProjectivePoint::mul_by_generator_and_mul_add_vartime(&a, &b, &q),
+                    ag + q.mul(&b),
+                    "variable-time double multiplication, sum base"
+                );
+                let zero = p.double() - p - p;
+                assert!(zero.is_identity().declassify());
+                assert_eq!(zero, ProjectivePoint::IDENTITY);
+                assert_eq!(zero.to_affine(), AffinePoint::IDENTITY);
+                assert!(zero.mul(&b).is_identity().declassify());
+                assert_eq!(zero + p, p);
+                assert_eq!(
+                    ProjectivePoint::mul_by_generator_and_mul_add_vartime(&a, &b, &zero),
+                    ag,
+                    "variable-time double multiplication, identity base"
+                );
+                out.push(enc(&q.mul(&b), args.compress));
                 assert_eq!(p.add(&p), p.double());
                 assert!(p.sub(&p).is_identity().declassify());
                 assert_eq!(ag + affine, ag + p, "mixed addition");

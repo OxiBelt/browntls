@@ -206,6 +206,13 @@ macro_rules! affine_point {
         crate::nist::arith::negop!(AffinePoint);
 
         /// A SEC 1 encoded point, as written by [`AffinePoint::to_sec1_point`].
+        ///
+        /// It may encode a secret point (an ECDH product, for example), so
+        /// like the arithmetic types its `Debug` does not print the bytes
+        /// (use [`Sec1Point::as_bytes`]); it is `Copy`, not wiped on drop,
+        /// and implements [`Zeroize`](crate::zeroize::Zeroize), which leaves
+        /// the identity's encoding `00`. Its `==` compares bytes in variable
+        /// time: compare secret points with [`AffinePoint::ct_eq`] instead.
         #[derive(Clone, Copy, PartialEq, Eq)]
         pub struct Sec1Point {
             bytes: [u8; UNCOMPRESSED_LEN],
@@ -229,7 +236,15 @@ macro_rules! affine_point {
 
         impl core::fmt::Debug for Sec1Point {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.debug_tuple("Sec1Point").field(&self.as_bytes()).finish()
+                f.write_str("Sec1Point(..)")
+            }
+        }
+
+        /// Overwrites the bytes with zero and leaves the identity's encoding.
+        impl crate::zeroize::Zeroize for Sec1Point {
+            fn zeroize(&mut self) {
+                crate::zeroize::zeroize_bytes(&mut self.bytes);
+                self.len = 1;
             }
         }
 

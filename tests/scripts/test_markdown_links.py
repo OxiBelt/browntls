@@ -1,11 +1,14 @@
 """Regression coverage for the repository's documented Markdown subset."""
 
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -117,6 +120,61 @@ class MarkdownLinksTests(unittest.TestCase):
 [explicit](#explicit)
 """)
         self.assertEqual([], self.messages())
+
+    def test_repeated_long_reference_is_checked_once_and_reported_briefly(self):
+        uses = 4096
+        destination = "/" + "x" * 65536
+        self.write("README.md", f"[r]: {destination}\n" + "[x][r]\n" * uses)
+        with mock.patch.object(
+            CHECKER, "_local_link_problem", wraps=CHECKER._local_link_problem
+        ) as problem:
+            report = CHECKER.scan(self.root)
+        self.assertEqual(1, problem.call_count)
+        self.assertEqual(uses, report.total)
+        self.assertEqual(CHECKER.MAX_DIAGNOSTICS, len(report.diagnostics))
+        bound = CHECKER.MAX_REPORTED_VALUE_CHARS + 100
+        for diagnostic in report.diagnostics:
+            self.assertIn("must be repository-relative", diagnostic.message)
+            self.assertIn("(65537 characters)", diagnostic.message)
+            self.assertLess(len(diagnostic.message), bound)
+
+    def test_long_values_are_shortened_in_every_diagnostic(self):
+        long = "y" * 5000
+        self.write("target.md", "# Target\n")
+        self.write("README.md", "\n".join((
+            f"[a](missing-{long}.md)",
+            f"[b](target.md#{long})",
+            f"[c][undefined-{long}]",
+            f"[{long}]: #one",
+            f"[{long}]: #two",
+            f"[d]({long}%zz)",
+        )) + "\n")
+        messages = self.messages()
+        self.assertEqual(5, len(messages))
+        for message in messages:
+            self.assertIn("(5", message)
+            self.assertLess(len(message), 2 * CHECKER.MAX_REPORTED_VALUE_CHARS + 100)
+
+    def test_control_characters_are_escaped(self):
+        self.write("README.md", "[bad](/\x1b[31mred)\n")
+        [message] = self.messages()
+        self.assertNotIn("\x1b", message)
+        self.assertIn("\\u{1b}[31mred", message)
+
+    def test_retained_diagnostics_are_capped_and_total_is_reported(self):
+        self.write("README.md", "".join(f"[m](missing-{i}.md)\n" for i in range(10)))
+        report = CHECKER.scan(self.root, max_diagnostics=3)
+        self.assertEqual(10, report.total)
+        self.assertEqual(3, len(report.diagnostics))
+        stderr = io.StringIO()
+        with mock.patch.object(CHECKER, "scan", lambda root: report), \
+                contextlib.redirect_stderr(stderr):
+            status = CHECKER.main(["--repo-root", str(self.root)])
+        self.assertEqual(1, status)
+        output = stderr.getvalue()
+        self.assertEqual(3, output.count("local link target is not tracked"))
+        self.assertIn("7 further error(s) not shown", output)
+        self.assertIn("failed with 10 error(s)", output)
 
 
 if __name__ == "__main__":

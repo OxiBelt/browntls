@@ -315,6 +315,83 @@ pub(crate) fn check_oid(v: &[u8]) -> Result<(), Error> {
     if start { Ok(()) } else { Err(Error::BadDer) }
 }
 
+/// Whether `a` may precede `b` in a DER `SET OF` (X.690 §11.6): the
+/// encodings compare as octet strings, the shorter padded at its end with
+/// zero octets. Equal encodings may follow each other.
+pub(crate) fn set_of_ordered(a: &[u8], b: &[u8]) -> bool {
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x < y;
+        }
+    }
+    true
+}
+
+/// `Debug` as lower-case hexadecimal.
+pub(crate) struct HexDebug<'a>(pub(crate) &'a [u8]);
+
+impl core::fmt::Debug for HexDebug<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// `Debug` of `OBJECT IDENTIFIER` contents in dotted decimal notation, or
+/// in hexadecimal when they are malformed or an arc exceeds 64 bits.
+pub(crate) struct OidDebug<'a>(pub(crate) &'a [u8]);
+
+impl OidDebug<'_> {
+    /// Whether the contents are well formed with every subidentifier
+    /// fitting in 64 bits.
+    fn decodable(&self) -> bool {
+        if check_oid(self.0).is_err() {
+            return false;
+        }
+        let mut acc: u64 = 0;
+        for &b in self.0 {
+            if acc > u64::MAX >> 7 {
+                return false;
+            }
+            acc = (acc << 7) | u64::from(b & 0x7f);
+            if b & 0x80 == 0 {
+                acc = 0;
+            }
+        }
+        true
+    }
+}
+
+impl core::fmt::Debug for OidDebug<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if !self.decodable() {
+            return HexDebug(self.0).fmt(f);
+        }
+        let mut acc: u64 = 0;
+        let mut first = true;
+        for &b in self.0 {
+            acc = (acc << 7) | u64::from(b & 0x7f);
+            if b & 0x80 != 0 {
+                continue;
+            }
+            if first {
+                // The first subidentifier encodes 40 * X + Y (X.690 §8.19.4).
+                let x = (acc / 40).min(2);
+                write!(f, "{x}.{}", acc - 40 * x)?;
+                first = false;
+            } else {
+                write!(f, ".{acc}")?;
+            }
+            acc = 0;
+        }
+        Ok(())
+    }
+}
+
 /// Named bits of a `BIT STRING` (RFC 5280 `KeyUsage`, `ReasonFlags`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BitFlags<'a> {
@@ -328,6 +405,13 @@ impl BitFlags<'_> {
         self.bits
             .get(n / 8)
             .is_some_and(|byte| (byte >> shift) & 1 == 1)
+    }
+}
+
+impl<'a> BitFlags<'a> {
+    /// The named-bit octets, without the unused-bit count.
+    pub(crate) fn bits(&self) -> &'a [u8] {
+        self.bits
     }
 }
 
@@ -430,6 +514,41 @@ mod tests {
         assert!(!flags.bit_set(100));
         let mut r = Reader::new(&[0x03, 0x02, 0x01, 0x00]);
         assert_eq!(r.bit_string_no_unused_bits(), Err(Error::BadDer));
+    }
+
+    #[test]
+    fn set_of_order() {
+        assert!(set_of_ordered(b"\x30\x01\x00", b"\x30\x01\x01"));
+        assert!(!set_of_ordered(b"\x30\x01\x01", b"\x30\x01\x00"));
+        assert!(set_of_ordered(b"\x30\x01\x00", b"\x30\x01\x00"));
+        // The shorter encoding is padded with zero octets.
+        assert!(set_of_ordered(b"\x30\x01", b"\x30\x01\x00"));
+        assert!(set_of_ordered(b"\x30\x01\x00", b"\x30\x01"));
+        assert!(set_of_ordered(b"\x30\x01", b"\x30\x01\x01"));
+        assert!(!set_of_ordered(b"\x30\x01\x01", b"\x30\x01"));
+    }
+
+    #[test]
+    fn debug_forms() {
+        use alloc::format;
+        assert_eq!(format!("{:?}", HexDebug(&[0x00, 0xab])), "00ab");
+        assert_eq!(format!("{:?}", OidDebug(&[0x55, 0x04, 0x03])), "2.5.4.3");
+        assert_eq!(
+            format!(
+                "{:?}",
+                OidDebug(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x01])
+            ),
+            "1.2.840.113549.1.9.1"
+        );
+        assert_eq!(format!("{:?}", OidDebug(&[0x09, 0x92, 0x26])), "0.9.2342");
+        // First subidentifier above 80: arc 2.
+        assert_eq!(format!("{:?}", OidDebug(&[0x81, 0x34, 0x03])), "2.100.3");
+        // Malformed or over-long: hexadecimal.
+        assert_eq!(format!("{:?}", OidDebug(&[0x2b, 0x81])), "2b81");
+        let long = [0xffu8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f];
+        assert_eq!(format!("{:?}", OidDebug(&long)), "ffffffffffffffffff7f");
+        let max = [0x81u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f];
+        assert_eq!(format!("{:?}", OidDebug(&max)), "2.18446744073709551535");
     }
 
     #[test]

@@ -18,9 +18,21 @@ use crate::{
 pub type PathVerifier<'a> = &'a dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>;
 
 /// A parsed end-entity certificate.
+///
+/// Dereferences to [`Cert`], whose accessors ([`Cert::der`],
+/// [`Cert::subject`], [`Cert::subject_alt_names`], [`Cert::extensions`]
+/// and so on) inspect the certificate; the methods here verify it.
 #[derive(Debug)]
 pub struct EndEntityCert<'a> {
     pub(crate) inner: Cert<'a>,
+}
+
+impl<'a> core::ops::Deref for EndEntityCert<'a> {
+    type Target = Cert<'a>;
+
+    fn deref(&self) -> &Cert<'a> {
+        &self.inner
+    }
 }
 
 impl<'a> TryFrom<&'a CertificateDer<'a>> for EndEntityCert<'a> {
@@ -99,48 +111,6 @@ impl<'a> EndEntityCert<'a> {
     ) -> Result<(), Error> {
         let spki = Spki::from_contents(self.inner.spki)?;
         signed_data::verify_signature(alg, &spki, msg, signature)
-    }
-
-    /// The certificate's `SubjectPublicKeyInfo` (DER, with outer SEQUENCE).
-    #[must_use]
-    pub fn subject_public_key_info(&self) -> SubjectPublicKeyInfoDer<'a> {
-        SubjectPublicKeyInfoDer::from_slice(self.inner.spki_der)
-    }
-
-    /// The certificate's DER encoding.
-    #[must_use]
-    pub fn der(&self) -> CertificateDer<'a> {
-        CertificateDer::from_slice(self.inner.der)
-    }
-
-    /// The `serialNumber` contents: big-endian two's complement, as encoded.
-    #[must_use]
-    pub fn serial(&self) -> &'a [u8] {
-        self.inner.serial
-    }
-
-    /// The `issuer` `Name` contents (without the outer SEQUENCE).
-    #[must_use]
-    pub fn issuer(&self) -> &'a [u8] {
-        self.inner.issuer
-    }
-
-    /// The `subject` `Name` contents (without the outer SEQUENCE).
-    #[must_use]
-    pub fn subject(&self) -> &'a [u8] {
-        self.inner.subject
-    }
-
-    /// `validity.notBefore`.
-    #[must_use]
-    pub fn not_before(&self) -> UnixTime {
-        self.inner.not_before
-    }
-
-    /// `validity.notAfter`.
-    #[must_use]
-    pub fn not_after(&self) -> UnixTime {
-        self.inner.not_after
     }
 
     /// Whether the certificate carries the `DelegationUsage` extension

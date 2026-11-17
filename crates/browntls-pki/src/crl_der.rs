@@ -270,11 +270,12 @@ impl<'a> IssuingDistributionPoint<'a> {
                 continue;
             };
             let has_common_uri = GeneralNames::new(Some(names)).any(|name| {
-                let Ok(GeneralName::Uri(uri)) = name else {
+                let Ok(GeneralName::UniformResourceIdentifier(uri)) = name else {
                     return false;
                 };
-                GeneralNames::new(Some(self.full_names))
-                    .any(|idp| matches!(idp, Ok(GeneralName::Uri(u)) if u == uri))
+                GeneralNames::new(Some(self.full_names)).any(
+                    |idp| matches!(idp, Ok(GeneralName::UniformResourceIdentifier(u)) if u == uri),
+                )
             });
             if has_common_uri {
                 return true;

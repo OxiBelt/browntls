@@ -129,7 +129,9 @@ impl ServerConnection {
     ///
     /// Requires a completed TLS 1.3 handshake with a client that offered
     /// `post_handshake_auth`, a client certificate verifier that offers
-    /// client authentication, and no request still unanswered. The answer
+    /// client authentication, no request still unanswered, and no
+    /// `close_notify` sent or received (the client would never answer). The
+    /// answer
     /// arrives through [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
     /// and is checked with the configured verifier: follow it with
     /// [`Self::post_handshake_auth_status`]. A client may take its time and

@@ -633,6 +633,19 @@ impl ConnectionCore<ServerConnectionData> {
             Ok(state) => state,
             Err(err) => return Err(err.clone()),
         };
+        // A record whose encryption failed has used up its sequence number;
+        // nothing may follow it.
+        if self.common_state.encrypt_failed {
+            return Err(Error::EncryptError);
+        }
+        // RFC 9846 §6.1: the client sends nothing after its close_notify,
+        // and we would process nothing it sent, so a request would never be
+        // answered.
+        if self.common_state.has_received_close_notify {
+            return Err(Error::General(
+                "cannot request client authentication after the client's close_notify".into(),
+            ));
+        }
         let mut cx = crate::conn::Context {
             common: &mut self.common_state,
             data: &mut self.data,
@@ -768,11 +781,12 @@ impl UnbufferedServerConnection {
     /// §4.7.2): queues a CertificateRequest with a fresh, unpredictable
     /// `certificate_request_context`.
     ///
-    /// The same rules as
-    /// [`ServerConnection::request_client_auth`](crate::server::ServerConnection::request_client_auth)
-    /// apply: a completed TLS 1.3 handshake with a client that offered
+    /// The same rules as for the buffered `ServerConnection` apply: a
+    /// completed TLS 1.3 handshake with a client that offered
     /// `post_handshake_auth`, a client certificate verifier that offers
-    /// client authentication, and no request still unanswered. Call it
+    /// client authentication, no request still unanswered, and no
+    /// `close_notify` sent or received (the client would never answer).
+    /// Call it
     /// between calls of
     /// [`process_tls_records`](crate::unbuffered::UnbufferedConnectionCommon::process_tls_records),
     /// not while a state it returned is held. The next call then offers

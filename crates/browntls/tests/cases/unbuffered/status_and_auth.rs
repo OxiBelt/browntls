@@ -116,6 +116,43 @@ fn unbuffered_server_requests_client_auth_after_the_handshake() {
 }
 
 #[test]
+fn certificate_request_is_offered_before_pending_input() {
+    init_logging();
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = client_chain(KeyType::EcdsaP256);
+    let cc = pha_client(&server_chain, Some(&client_chain));
+    let sc = pha_server(&server_chain, &client_chain, true);
+    let mut c = b_client(&cc);
+    let mut s = ub_server(&sc, Feed::Whole);
+    handshake(&mut c, &mut s);
+
+    // Client data waits, unprocessed, in the server's input buffer.
+    c.send(b"waiting");
+    let data = c.take_output();
+    assert!(!data.is_empty());
+    s.incoming.extend_from_slice(&data);
+    s.conn.request_client_auth().unwrap();
+    let status = s.conn.process_tls_records(&mut s.incoming);
+    assert_eq!(status.discard, 0, "nothing read before the request is out");
+    match status.state {
+        Ok(ConnectionState::EncodeTlsData(mut e)) => {
+            let mut buf = vec![0u8; 4096];
+            let n = e.encode(&mut buf).unwrap();
+            s.outgoing.extend_from_slice(&buf[..n]);
+        }
+        other => panic!("{other:?}"),
+    }
+    pump(&mut c, &mut s);
+    assert!(!s.failed(), "{}", s.describe());
+    assert_eq!(s.take_received(), b"waiting");
+    assert_eq!(
+        s.conn.post_handshake_auth_status(),
+        Some(PostHandshakeAuthStatus::Authenticated)
+    );
+    assert_eq!(c.conn.post_handshake_auth_responses(), 1);
+}
+
+#[test]
 fn unbuffered_client_answers_a_buffered_server() {
     init_logging();
     let server_chain = server_chain(KeyType::EcdsaP256);
@@ -196,6 +233,32 @@ fn unbuffered_request_client_auth_refusals() {
     assert!(s.conn.request_client_auth().is_err());
     assert_eq!(s.conn.post_handshake_auth_status(), None);
     exchange(&mut c, &mut s, b"nothing was queued");
+
+    // After our close_notify, and after the client's (RFC 9846 §6.1: the
+    // client would never answer).
+    let cc = pha_client(&server_chain, Some(&client_chain));
+    let mut c = b_client(&cc);
+    let mut s = ub_server(&sc, Feed::Whole);
+    handshake(&mut c, &mut s);
+    s.close_requested = true;
+    pump(&mut c, &mut s);
+    assert!(
+        s.conn.request_client_auth().is_err(),
+        "after our close_notify"
+    );
+    assert_eq!(s.conn.post_handshake_auth_status(), None);
+    let mut c = b_client(&cc);
+    let mut s = ub_server(&sc, Feed::Whole);
+    handshake(&mut c, &mut s);
+    c.conn.send_close_notify();
+    pump(&mut c, &mut s);
+    assert!(s.peer_closed);
+    assert!(
+        s.conn.request_client_auth().is_err(),
+        "after the client's close_notify"
+    );
+    assert_eq!(s.conn.post_handshake_auth_status(), None);
+    assert!(s.take_output().is_empty(), "nothing was queued");
 
     // TLS 1.2 has no post-handshake authentication.
     #[cfg(feature = "tls12")]

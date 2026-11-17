@@ -251,8 +251,10 @@ record (§5.1) gives the application nothing and does not.
 A server learns the offer from the ClientHello (`ServerConnection::
 post_handshake_auth_offered`). `ServerConnection::request_client_auth`
 needs a completed TLS 1.3 handshake, the offer, a verifier that offers
-client authentication and no request still unanswered (one at a time,
-which bounds the state kept per connection). The request's
+client authentication, no request still unanswered (one at a time,
+which bounds the state kept per connection), and no `close_notify` in
+either direction (after the client's, nothing it sends is processed, so a
+request would stay unanswered). The request's
 `certificate_request_context` is an 8-byte request counter followed by 24
 random bytes: unique on the connection and unpredictable (§4.4.2). The
 answer may come after any amount of application data or KeyUpdates, but

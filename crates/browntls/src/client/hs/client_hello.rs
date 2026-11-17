@@ -81,6 +81,31 @@ fn find_session(
         return None;
     }
 
+    // The session was authenticated under another configuration's server
+    // certificate verifier or client credentials (a shared store): resuming
+    // would skip this configuration's verifier entirely.
+    let compatible = match &found.value {
+        ClientSessionValue::Tls13(inner) => inner.compatible_config(&config.session_binding()),
+        #[cfg(feature = "tls12")]
+        ClientSessionValue::Tls12(inner) => inner.compatible_config(&config.session_binding()),
+    };
+    if !compatible {
+        debug!("Not resuming session: established under another verifier or client credentials");
+        return None;
+    }
+
+    // A session authenticated with a delegated credential (RFC 9345) keeps
+    // that authentication; only a configuration that accepts delegated
+    // credentials may resume it.
+    if matches!(
+        &found.value,
+        ClientSessionValue::Tls13(inner)
+            if inner.delegated_credential_expiry().is_some() && !config.enable_delegated_credentials
+    ) {
+        debug!("Not resuming delegated-credential session: delegated credentials are disabled");
+        return None;
+    }
+
     if matches!(
         &found.value,
         ClientSessionValue::Tls13(inner) if inner.delegated_credential_expired_at(now)

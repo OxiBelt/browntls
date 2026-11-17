@@ -196,6 +196,34 @@ Not implemented: RFC 6066 `max_fragment_length` (not "Recommended" in
 RFC 9846 Table 1; `record_size_limit` and the local `max_fragment_size`
 setting cover the use case).
 
+### Client session resumption
+
+A saved client session (TLS 1.2 session ID or ticket, TLS 1.3 ticket) is
+bound to the identities of the `Arc`s that established it: the
+configuration's server certificate verifier and its client certificate
+resolver (`ClientConfig::client_auth_cert_resolver`). A configuration offers a
+stored session only when both are the same objects, compared by address and
+held weakly, so the store keeps neither alive and a later allocation cannot
+reuse the address while the session exists. A session authenticated with a
+delegated credential is offered only while `enable_delegated_credentials` is
+set.
+
+A `ClientSessionStore` shared between configurations, or a cloned
+configuration given another verifier with
+`DangerousClientConfig::set_certificate_verifier`, therefore makes a full
+handshake under its own verifier rather than resuming a session another
+verifier accepted, and does not reuse a TLS 1.2 session whose client identity
+another resolver chose. Configurations that share the verifier and resolver
+(for example clones) keep resuming each other's sessions. Equivalent but
+distinct verifier objects do not match, and a verifier whose own policy
+changes at run time keeps its sessions; give such configurations separate
+stores.
+
+Configurations sharing a store still share its slots: an incompatible TLS 1.3
+ticket is consumed and dropped (no older ticket or TLS 1.2 session is tried
+instead), and the next full handshake replaces the single TLS 1.2 session
+kept per server name. This costs resumptions, never verification.
+
 ### Post-handshake client authentication (RFC 9846 §4.7.2)
 
 A client offers `post_handshake_auth` when `ClientConfig::

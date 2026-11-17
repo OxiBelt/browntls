@@ -469,3 +469,37 @@ fn server_rejects_external_psk_ticket_at_delegated_credential_deadline() {
     assert_eq!(server.handshake_kind(), Some(HandshakeKind::Full));
     assert_eq!(client.external_psk_identity(), Some(&b"combined"[..]));
 }
+
+#[test]
+fn session_from_delegated_credential_needs_delegated_credentials_enabled() {
+    init_logging();
+    let chain = delegation_server_chain(KeyType::EcdsaP256);
+    let (dc, key) = issue(&chain, SignatureScheme::ED25519, seconds_after(now(), 60));
+    let dc_key = certified_key(&chain)
+        .with_delegated_credential(dc.clone(), key)
+        .unwrap();
+    let server_config = Arc::new(server_with(dc_key));
+    let with_dc = Arc::new(dc_client(&chain));
+
+    let mut client = ClientConnection::new(with_dc.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.delegated_credential(), Some(&dc));
+    take_tickets(&mut client, &mut server);
+
+    // A clone sharing the store and the verifier, but not accepting
+    // delegated credentials, must not resume the session they authenticated.
+    let mut without_dc = (*with_dc).clone();
+    without_dc.enable_delegated_credentials = false;
+    let mut client = ClientConnection::new(Arc::new(without_dc), server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config.clone()).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    assert!(client.delegated_credential().is_none());
+
+    // The configuration that accepts them still resumes.
+    let mut client = ClientConnection::new(with_dc, server_name()).unwrap();
+    let mut server = ServerConnection::new(server_config).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+}

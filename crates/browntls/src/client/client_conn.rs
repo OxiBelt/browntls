@@ -19,6 +19,7 @@ use crate::error::Error;
 use crate::key_log::KeyLog;
 use crate::log::trace;
 use crate::msgs::enums::NamedGroup;
+use crate::msgs::persist::ClientConfigBinding;
 #[cfg(feature = "tls12")]
 use crate::msgs::persist::Tls12ClientSessionValue;
 use crate::msgs::persist::Tls13ClientSessionValue;
@@ -337,6 +338,15 @@ impl ClientConfig {
             .ok_or(Error::FailedToGetCurrentTime)
     }
 
+    /// The objects a session saved by this configuration is bound to; see
+    /// [`ClientConfigBinding`].
+    pub(crate) fn session_binding(&self) -> ClientConfigBinding<'_> {
+        ClientConfigBinding {
+            server_cert_verifier: &self.verifier,
+            client_creds: &self.client_auth_cert_resolver,
+        }
+    }
+
     pub(crate) fn verifier(&self) -> &dyn ServerCertVerifier {
         &*self.verifier
     }
@@ -383,6 +393,11 @@ pub enum ClientHelloPadding {
 }
 
 /// Session resumption settings.
+///
+/// Cloning shares the session store. A stored session is bound to the
+/// server certificate verifier and client certificate resolver objects of
+/// the configuration that established it, and only a configuration using
+/// those same objects resumes it; another one makes a full handshake.
 #[derive(Clone, Debug)]
 pub struct Resumption {
     pub(super) store: Arc<dyn ClientSessionStore>,

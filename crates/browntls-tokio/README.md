@@ -127,7 +127,11 @@ repeat.
 - **Answers.** A read that receives a message calling for an answer (a TLS
   1.3 `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`)
   writes the answer at once if the transport has room, so a task that only
-  reads does not leave the peer waiting for it.
+  reads does not leave the peer waiting for it. While more answers than the
+  connection's send buffer limit (at most 64 KiB) are still unwritten, a
+  read takes no more input and waits for the transport to take them (a
+  write on another task that sends them wakes it), so a peer that keeps
+  asking and reads nothing cannot make them pile up.
 
 ## Features
 

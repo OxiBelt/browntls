@@ -776,6 +776,17 @@ fn queued_tls<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -
 
 #[test]
 fn stream_read_answers_a_key_update_and_keeps_reading() {
+    stream_read_answers_a_key_update(None);
+}
+
+#[test]
+fn stream_read_writes_answers_past_the_control_backlog_and_keeps_reading() {
+    // One KeyUpdate answer is more than this limit lets wait unwritten, so
+    // the connection stops wanting to read until the answer is out.
+    stream_read_answers_a_key_update(Some(16));
+}
+
+fn stream_read_answers_a_key_update(limit: Option<usize>) {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
     let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
@@ -784,6 +795,7 @@ fn stream_read_answers_a_key_update_and_keeps_reading() {
     transfer(&mut server, &mut client);
     client.process_new_packets().unwrap();
     assert_eq!(client.protocol_version(), Some(version::TLS13.version));
+    client.set_buffer_limit(limit.or(Some(64 * 1024)));
 
     // The peer's KeyUpdate(update_requested) and its next record arrive in
     // separate reads, so answering the KeyUpdate is a pass that reads nothing.

@@ -5,8 +5,9 @@
 //! Adapted from tokio-rustls (`src/common/mod.rs`, Copyright (c) 2017
 //! quininer kel, MIT OR Apache-2.0), used here under Apache-2.0. Changes:
 //! browntls types, writes that cannot spin on a connection that takes no
-//! plaintext, a handshake exit when no progress is possible, and reads that
-//! send the answers the peer waits for.
+//! plaintext, a handshake exit when no progress is possible, reads that
+//! send the answers the peer waits for, and reads that wait for those
+//! answers to be written before they take more input.
 
 use std::io::{self, BufRead as _, IoSlice, Read, Write};
 use std::ops::{Deref, DerefMut};
@@ -71,6 +72,12 @@ pub(crate) struct StreamState {
     /// may take over the transport's write-readiness registration, so it
     /// wakes this waker afterwards to let the writer register again.
     pub(crate) write_waker: Option<Waker>,
+    /// The waker of a read waiting for queued TLS bytes to be written
+    /// before it takes more input (`Stream::write_before_reading`). A write,
+    /// flush or shutdown may take over the transport's write-readiness
+    /// registration and write those bytes itself, so it wakes this waker
+    /// when it moved bytes or failed.
+    pub(crate) read_waker: Option<Waker>,
     /// A read queued TLS bytes the peer may be waiting for, and they are
     /// not all written yet: later reads keep writing them.
     pub(crate) answering: bool,
@@ -83,8 +90,34 @@ impl StreamState {
             need_flush: false,
             deferred_error: None,
             write_waker: None,
+            read_waker: None,
             answering: false,
         }
+    }
+
+    /// Records the waker of a read about to wait for queued TLS bytes to be
+    /// written.
+    fn park_reader(&mut self, cx: &Context<'_>) {
+        match &mut self.read_waker {
+            Some(waker) if waker.will_wake(cx.waker()) => {}
+            slot => *slot = Some(cx.waker().clone()),
+        }
+    }
+
+    /// After a write-side poll: wakes a read waiting for queued bytes when
+    /// the poll moved bytes or failed, then records `cx` if it is `Pending`.
+    fn settle<T>(
+        &mut self,
+        cx: &Context<'_>,
+        wrote: bool,
+        poll: Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        if (wrote || matches!(poll, Poll::Ready(Err(_))))
+            && let Some(waker) = self.read_waker.take()
+        {
+            waker.wake();
+        }
+        self.track(cx, poll)
     }
 
     /// Records the waker of a write-side poll about to return `Pending`.
@@ -151,6 +184,8 @@ pub(crate) struct Stream<'a, IO, C> {
     pub(crate) eof: bool,
     /// TLS bytes were written to the transport and not flushed yet.
     pub(crate) need_flush: bool,
+    /// Some TLS bytes reached the transport during this poll.
+    pub(crate) wrote: bool,
 }
 
 impl<'a, IO, C, SD> Stream<'a, IO, C>
@@ -165,6 +200,7 @@ where
             session,
             eof: false,
             need_flush: false,
+            wrote: false,
         }
     }
 
@@ -206,7 +242,12 @@ where
         let mut writer = SyncWriteAdapter { io: self.io, cx };
         match self.session.write_tls(&mut writer) {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
-            result => Poll::Ready(result),
+            result => {
+                if matches!(result, Ok(n) if n > 0) {
+                    self.wrote = true;
+                }
+                Poll::Ready(result)
+            }
         }
     }
 
@@ -297,7 +338,9 @@ where
     /// them before it sends what this read waits for. Records already
     /// queued by writes are left to the writer, unless a read failed (the
     /// alert must go out). Touching the write side wakes the parked
-    /// writer, whose registration it may have replaced.
+    /// writer, whose registration it may have replaced. When the connection
+    /// stops reading until its queued records are written, the read writes
+    /// them itself and waits for writability rather than taking more input.
     pub(crate) fn poll_fill_buf(
         mut self,
         cx: &mut Context<'_>,
@@ -352,6 +395,14 @@ where
             return Poll::Ready(Err(err));
         }
 
+        let no_plaintext = matches!(
+            self.session.reader().into_first_chunk(),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock
+        );
+        if no_plaintext && !io_pending && !self.eof && self.session.wants_write() {
+            return self.write_before_reading(cx, st);
+        }
+
         match self.session.reader().into_first_chunk() {
             Ok(chunk) => Poll::Ready(Ok(chunk)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -365,6 +416,62 @@ where
                 Poll::Pending
             }
             Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
+    /// A read that cannot go on until queued TLS bytes are written: the
+    /// connection stops reading while the control records it owes the peer
+    /// (KeyUpdate answers, post-handshake authentication responses) pile up
+    /// unwritten, so that a peer that sends requests and reads nothing
+    /// cannot grow them without bound. Writes everything queued, the
+    /// writer's records ahead of the answers included, and polls again once
+    /// it is out; otherwise waits for writability. Like the answers above,
+    /// the write registers a waker for a parked writer too, and wakes it at
+    /// once when bytes moved or the transport failed. A read left waiting is
+    /// recorded in `st`: a write that takes the registration over wakes it.
+    fn write_before_reading(
+        &mut self,
+        cx: &mut Context<'_>,
+        st: &mut StreamState,
+    ) -> Poll<io::Result<&'a [u8]>> {
+        let joint = joint_waker(cx.waker(), st.write_waker.as_ref());
+        let mut jcx = Context::from_waker(&joint);
+        let mut wrote = false;
+        let outcome = loop {
+            if !self.session.wants_write() {
+                let _ = Pin::new(&mut *self.io).poll_flush(&mut jcx);
+                break Ok(true);
+            }
+            match self.write_io(&mut jcx) {
+                Poll::Ready(Ok(0)) => {
+                    break Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "transport accepted no TLS bytes",
+                    ));
+                }
+                Poll::Ready(Ok(_)) => wrote = true,
+                Poll::Pending => break Ok(false),
+                Poll::Ready(Err(err)) => break Err(err),
+            }
+        };
+        if (wrote || outcome.is_err())
+            && let Some(waker) = st.write_waker.take()
+        {
+            waker.wake();
+        }
+        match outcome {
+            Err(err) => Poll::Ready(Err(err)),
+            Ok(true) => {
+                // Reading may resume: poll again.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Ok(false) => {
+                // A writer may take the registration over and write the
+                // bytes itself: it wakes this read when it does.
+                st.park_reader(cx);
+                Poll::Pending
+            }
         }
     }
 
@@ -606,8 +713,10 @@ where
     if !st.state.writeable() {
         return Poll::Ready(Err(write_after_shutdown()));
     }
-    let poll = Stream::new(io, session).as_mut_pin().poll_write(cx, buf);
-    st.track(cx, poll)
+    let mut stream = Stream::new(io, session);
+    let poll = stream.as_mut_pin().poll_write(cx, buf);
+    let wrote = stream.wrote;
+    st.settle(cx, wrote, poll)
 }
 
 /// `AsyncWrite::poll_write_vectored` for a stream in `st`.
@@ -626,10 +735,10 @@ where
     if !st.state.writeable() {
         return Poll::Ready(Err(write_after_shutdown()));
     }
-    let poll = Stream::new(io, session)
-        .as_mut_pin()
-        .poll_write_vectored(cx, bufs);
-    st.track(cx, poll)
+    let mut stream = Stream::new(io, session);
+    let poll = stream.as_mut_pin().poll_write_vectored(cx, bufs);
+    let wrote = stream.wrote;
+    st.settle(cx, wrote, poll)
 }
 
 /// `AsyncWrite::poll_flush`: writes every queued TLS byte and flushes the
@@ -645,8 +754,10 @@ where
     C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
     SD: SideData,
 {
-    let poll = Stream::new(io, session).as_mut_pin().poll_flush(cx);
-    st.track(cx, poll)
+    let mut stream = Stream::new(io, session);
+    let poll = stream.as_mut_pin().poll_flush(cx);
+    let wrote = stream.wrote;
+    st.settle(cx, wrote, poll)
 }
 
 /// `AsyncWrite::poll_shutdown`: queues `close_notify` (once), writes it and
@@ -666,8 +777,10 @@ where
         session.send_close_notify();
         st.state.shutdown_write();
     }
-    let poll = Stream::new(io, session).as_mut_pin().poll_shutdown(cx);
-    st.track(cx, poll)
+    let mut stream = Stream::new(io, session);
+    let poll = stream.as_mut_pin().poll_shutdown(cx);
+    let wrote = stream.wrote;
+    st.settle(cx, wrote, poll)
 }
 
 /// Writes `alert` to `io` and flushes it. `Ready` once it is out, or once

@@ -159,8 +159,8 @@ where they live:
   data, which cannot be rekeyed, stops short of the limit. No KeyUpdate (and
   no ticket) is sent after our own `close_notify` (§6.1). The limit is not
   enforced on received records. A peer that keeps requesting updates without
-  sending application data in between is cut off after eight requests, a
-  local resource bound.
+  sending non-empty application data in between is cut off after eight
+  requests, a local resource bound.
 - Record layer: a protected `change_cipher_spec` record, or one whose value
   is not 0x01, is `unexpected_message`.
 - Rejected 0-RTT: a server that declines early data skips the client's
@@ -508,7 +508,20 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 - Buffered (`std`): `ClientConnection`/`ServerConnection` own a receive
   buffer (`DeframerVecBuffer`, at most one maximum-size record),
   queue received plaintext and outgoing records, and offer `read_tls`,
-  `write_tls`, `reader()` and `writer()`.
+  `write_tls`, `reader()` and `writer()`. The send buffer limit
+  (`set_buffer_limit`, 64 KiB by default) caps the application data a
+  write takes; control records (handshake messages, alerts, KeyUpdates)
+  are queued whatever the limit, but the outgoing queue counts them apart
+  (`ChunkVecBuffer::control_len`). Once the handshake is done, while more
+  control bytes wait unwritten than the limit allows (capped at 64 KiB),
+  `wants_read` is false and `read_tls` fails: a peer that keeps asking for
+  answers (KeyUpdate `update_requested`, post-handshake CertificateRequest)
+  while it reads nothing cannot grow the queue without bound. The check
+  falls between reads: the records one `read_tls` took in (at most one
+  maximum-size record's worth) are processed in full, so the queue may pass
+  the bound by what they call for (one KeyUpdate, or one post-handshake
+  authentication answer per CertificateRequest among them). Reading resumes once `write_tls` has taken the backlog;
+  `complete_io` writes before it reads, so it never meets the bound.
 - Unbuffered (`unbuffered.rs`, no `std` needed):
   `UnbufferedClientConnection`/`UnbufferedServerConnection`.
   `process_tls_records(&mut incoming)` parses records from the front of the
@@ -585,7 +598,13 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   spin a task that polls both directions. A write that moved bytes also
   wakes the writer at once. An answer the transport took only in part
   stays the reads' to finish. A read that fails writes and flushes the
-  alert and wakes the writer, which then sees the failure.
+  alert and wakes the writer, which then sees the failure. When the
+  connection stops reading because the control records it owes are past
+  the bound (see the buffered API above), a read writes everything queued,
+  the writer's records ahead of the answers included, with the same joint
+  waker, and waits for writability instead of taking more input or
+  polling itself again. A write, flush or shutdown that takes the
+  registration over wakes that read once it moves bytes or fails.
 - A write encrypts what the send buffer takes and writes queued records
   until the transport blocks; a write that took nothing returns `Pending`
   only while records wait for the transport, so a retry cannot spin.

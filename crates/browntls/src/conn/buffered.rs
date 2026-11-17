@@ -123,12 +123,22 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Reads TLS bytes from `rd` into the connection. Returns the number of
     /// bytes read; zero means the transport reached end of file.
     ///
-    /// Fails if received plaintext is waiting for the application, so that a
-    /// peer cannot force unbounded buffering.
+    /// Fails if received plaintext is waiting for the application, or if the
+    /// handshake is over and too many control records (KeyUpdate answers,
+    /// post-handshake authentication responses, alerts) wait to be written,
+    /// so that a peer cannot force unbounded buffering in either direction.
+    /// [`CommonState::wants_read`](crate::CommonState::wants_read) is false in
+    /// both cases.
     pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
         if self.core.common_state.received_plaintext.is_full() {
             return Err(std::io::Error::other(
                 "received plaintext buffer full; read it with reader() first",
+            ));
+        }
+        let common = &self.core.common_state;
+        if common.may_send_application_data && common.control_backlog_full() {
+            return Err(std::io::Error::other(
+                "too many queued TLS records; write them with write_tls() first",
             ));
         }
         let n = self.deframer_buffer.read(rd)?;

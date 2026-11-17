@@ -166,9 +166,12 @@ where they live:
 - Rejected 0-RTT: a server that declines early data skips the client's
   undecryptable records while their plaintext totals at most
   `max_early_data_size` (§4.2.10); each record is charged its length less
-  the suite's tag and content type byte, an upper bound on its plaintext
-  (`RecordLayer::doing_trial_decryption`). One byte more fails with
-  `bad_record_mac`.
+  the suite's tag and content type byte, an upper bound on its plaintext,
+  and at least one byte, so the budget also bounds the number of records
+  tried (`RecordLayer::doing_trial_decryption`). One byte more fails with
+  `bad_record_mac`. After a HelloRetryRequest no key is tried: records are
+  charged their length, at least one byte, and the next one past the budget
+  is read as the second ClientHello.
 - Alerts: `general_error` (117) exists; `user_canceled` is ignored at either
   level in TLS 1.3 (the peer must follow it with `close_notify`), within the
   same bound as TLS 1.2 warning alerts; every other alert except

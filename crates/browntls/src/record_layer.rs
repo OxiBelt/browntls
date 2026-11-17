@@ -58,7 +58,8 @@ pub(crate) struct RecordLayer {
     decrypt_state: DirectionState,
     confidentiality_limit: u64,
     /// Remaining plaintext bytes of records that may fail decryption
-    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.2.10).
+    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.2.10); each
+    /// skipped record costs at least one byte.
     trial_decryption_len: Option<usize>,
     /// The record size limit we announced (RFC 8449), once negotiated.
     inbound_size_limit: Option<InboundSizeLimit>,
@@ -339,6 +340,11 @@ impl RecordLayer {
     /// adds, which is active by the time the client's records arrive. It is
     /// capped at the 256 bytes RFC 9846 §5.2 allows; without a write key
     /// nothing is subtracted (the stricter, ciphertext-based budget).
+    ///
+    /// Every record is charged at least one byte, even one too short to
+    /// carry plaintext: each skipped record cost a decryption attempt, so
+    /// the budget also bounds how many records are tried, not only how
+    /// much data they could hold.
     fn doing_trial_decryption(&mut self, requested: usize) -> bool {
         let overhead = if self.encrypt_state == DirectionState::Active {
             self.message_encrypter
@@ -347,7 +353,7 @@ impl RecordLayer {
         } else {
             0
         };
-        let plaintext_bound = requested.saturating_sub(overhead);
+        let plaintext_bound = requested.saturating_sub(overhead).max(1);
         match self
             .trial_decryption_len
             .and_then(|value| value.checked_sub(plaintext_bound))
@@ -505,6 +511,46 @@ mod tests {
         assert_eq!(
             decrypt(&mut rl, inner(64, 0)),
             Err(Error::PeerSentOversizedRecord)
+        );
+    }
+
+    /// Fails every record, as undecryptable 0-RTT data does.
+    struct AlwaysFails;
+
+    impl MessageDecrypter for AlwaysFails {
+        fn decrypt<'a>(
+            &mut self,
+            _msg: InboundOpaqueMessage<'a>,
+            _seq: u64,
+        ) -> Result<InboundPlainMessage<'a>, Error> {
+            Err(Error::DecryptError)
+        }
+    }
+
+    #[test]
+    fn trial_decryption_charges_at_least_one_byte_per_record() {
+        let mut rl = RecordLayer::new();
+        rl.set_message_encrypter(Box::new(NoTag), u64::MAX);
+        rl.set_message_decrypter_with_trial_decryption(Box::new(AlwaysFails), 4);
+        // A record of the expansion alone (or shorter) carries no plaintext
+        // but still costs one byte.
+        for len in [0, 1, 0, 1] {
+            assert_eq!(decrypt(&mut rl, alloc::vec![0; len]), Ok(0));
+        }
+        assert_eq!(rl.trial_decryption_len, Some(0));
+        assert_eq!(
+            decrypt(&mut rl, alloc::vec![0; 1]),
+            Err(Error::DecryptError)
+        );
+
+        // Longer records are charged their length less the expansion.
+        rl.set_message_decrypter_with_trial_decryption(Box::new(AlwaysFails), 4);
+        assert_eq!(decrypt(&mut rl, alloc::vec![0; 4]), Ok(0));
+        assert_eq!(rl.trial_decryption_len, Some(1));
+        assert_eq!(decrypt(&mut rl, alloc::vec![0; 2]), Ok(0));
+        assert_eq!(
+            decrypt(&mut rl, alloc::vec![0; 1]),
+            Err(Error::DecryptError)
         );
     }
 

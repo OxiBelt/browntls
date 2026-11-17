@@ -1,20 +1,21 @@
 //! The exported-authenticator operation of the `tls_auth` target
 //! (RFC 9261): requests, answers, spontaneous server authenticators,
 //! tampered, replayed and fuzzed messages between a connected client and
-//! server.
+//! server, each buffered or unbuffered.
 
 use std::sync::Arc;
 
+use browntls::client::UnbufferedClientConnection;
 use browntls::exported_authenticator::{AuthenticatorRequestExtensions, authenticator_context};
 use browntls::pki_types::ServerName;
-use browntls::server::WebPkiClientVerifier;
+use browntls::server::{UnbufferedServerConnection, WebPkiClientVerifier};
 use browntls::sign::{CertifiedKey, SingleCertAndKey};
 use browntls::{
     ClientConfig, ClientConnection, DistinguishedName, ServerConfig, ServerConnection,
     SignatureScheme, SupportedProtocolVersion, version,
 };
 
-use super::handshake::pump;
+use super::unbuffered::{Client, End, Server, connect};
 use super::{State, fixture, pick_scheme, tls13_scheme};
 use crate::input::Input;
 
@@ -22,8 +23,8 @@ use crate::input::Input;
 
 /// A connected pair and what each side has used.
 pub(super) struct Ea {
-    client: ClientConnection,
-    server: ServerConnection,
+    client: Client,
+    server: Server,
     /// Contexts of requests each side made.
     client_requests: Vec<Vec<u8>>,
     server_requests: Vec<Vec<u8>>,
@@ -31,7 +32,13 @@ pub(super) struct Ea {
     pending: Vec<Vec<u8>>,
 }
 
-fn connect_ea(versions: &[&'static SupportedProtocolVersion]) -> Ea {
+/// A connected pair over `versions`; each end uses the unbuffered API when
+/// its flag says so.
+fn connect_ea(
+    versions: &[&'static SupportedProtocolVersion],
+    unbuffered_client: bool,
+    unbuffered_server: bool,
+) -> Ea {
     let fixture = fixture();
     let client_config = ClientConfig::builder_with_provider(fixture.provider.clone())
         .with_protocol_versions(versions)
@@ -51,13 +58,19 @@ fn connect_ea(versions: &[&'static SupportedProtocolVersion]) -> Ea {
         .with_client_cert_verifier(verifier)
         .with_cert_resolver(Arc::new(SingleCertAndKey::from(fixture.ea_server.clone())));
     let name = ServerName::try_from("localhost").expect("name");
-    let mut client = ClientConnection::new(Arc::new(client_config), name).expect("client");
-    let mut server = ServerConnection::new(Arc::new(server_config)).expect("server");
-    let (client_res, server_res) = pump(&mut client, &mut server);
-    assert!(
-        client_res.is_ok() && server_res.is_ok(),
-        "{client_res:?} {server_res:?}"
-    );
+    let (client_config, server_config) = (Arc::new(client_config), Arc::new(server_config));
+    let mut client = if unbuffered_client {
+        End::unbuffered(UnbufferedClientConnection::new(client_config, name).expect("client"))
+    } else {
+        End::Buffered(ClientConnection::new(client_config, name).expect("client"))
+    };
+    let mut server = if unbuffered_server {
+        End::unbuffered(UnbufferedServerConnection::new(server_config).expect("server"))
+    } else {
+        End::Buffered(ServerConnection::new(server_config).expect("server"))
+    };
+    let result = connect(&mut client, &mut server);
+    assert!(result.is_ok(), "{result:?}");
     Ea {
         client,
         server,
@@ -135,13 +148,16 @@ fn tampered(input: &mut Input, authenticator: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Exchange input: on first use a version byte (bit 0: TLS 1.2), then the
-/// exchange selector and its arguments.
+/// Exchange input: on first use a mode byte (bit 0: TLS 1.2, bit 1: an
+/// unbuffered client, bit 2: an unbuffered server), then the exchange
+/// selector and its arguments.
 pub(super) fn exported(input: &mut Input, state: &mut State) {
     if state.ea.is_none() {
         static TLS13: &[&SupportedProtocolVersion] = &[&version::TLS13];
         static TLS12: &[&SupportedProtocolVersion] = &[&version::TLS12];
-        state.ea = Some(connect_ea(if input.bool() { TLS12 } else { TLS13 }));
+        let mode = input.byte();
+        let versions = if mode & 1 != 0 { TLS12 } else { TLS13 };
+        state.ea = Some(connect_ea(versions, mode & 2 != 0, mode & 4 != 0));
     }
     let Some(ea) = state.ea.as_mut() else {
         return;
@@ -309,4 +325,8 @@ pub(super) fn exported(input: &mut Input, state: &mut State) {
             }
         }
     }
+    // The messages travel over the application protocol: no exchange
+    // queues TLS records on either connection.
+    assert_eq!(ea.client.take_output().map(|out| out.len()), Ok(0));
+    assert_eq!(ea.server.take_output().map(|out| out.len()), Ok(0));
 }

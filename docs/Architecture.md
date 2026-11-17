@@ -709,7 +709,15 @@ be built with a struct literal; `CertifiedKey::new` remains.
 
 `browntls::exported_authenticator` adds `request_authenticator`,
 `authenticator` and `validate_authenticator` to `ClientConnection` and
-`ServerConnection`. The messages are carried by the application protocol,
+`ServerConnection` (with `std`) and to `UnbufferedClientConnection` and
+`UnbufferedServerConnection` (also without `std`); QUIC connections do not
+have them. One macro per side defines the methods, with the same signatures
+and documentation, on the buffered and the unbuffered type, and their
+bodies call the same code on the `ConnectionCore` both APIs drive (the
+exporter, the context lists, the request digests, the verifier calls and
+the clock). Without `std` the default time provider has no clock, so
+validation fails with `FailedToGetCurrentTime` unless the configuration
+has one. The messages are carried by the application protocol,
 not the record layer. A client request is a `ClientCertificateRequest`
 (type 17), a server request a TLS 1.3 `CertificateRequest`; the answer is
 TLS 1.3 `Certificate`, `CertificateVerify` and `Finished` messages, or a lone

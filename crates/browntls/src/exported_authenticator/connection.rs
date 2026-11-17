@@ -11,7 +11,9 @@ use super::{
     Answered, AuthenticatorState, CERTIFICATE, CERTIFICATE_REQUEST, CERTIFICATE_VERIFY,
     CLIENT_CERTIFICATE_REQUEST, FINISHED, SPONTANEOUS_CONTEXT_LEN, request_digest,
 };
+use crate::client::ClientConnectionData;
 use crate::common_state::Side;
+use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::hash::Hash;
 use crate::crypto::tls13::{Hkdf, OkmBlock};
 use crate::crypto::{CryptoProvider, zeroize_vec};
@@ -21,6 +23,7 @@ use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::msgs::base::PayloadU8;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::handshake::CertificatePayloadTls13;
+use crate::server::ServerConnectionData;
 use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::verify::{DigitallySignedStruct, HandshakeSignatureValid};
@@ -100,28 +103,71 @@ impl Keys {
 }
 
 /// The connection's exporter, without context.
-pub(super) trait Exporter {
+trait Exporter {
     /// Fills `output` from the exporter with `label` and an empty context.
     fn export(&self, label: &[u8], output: &mut [u8]) -> Result<(), Error>;
 }
 
-#[cfg(feature = "std")]
-impl<Data: crate::conn::SideData> Exporter for crate::conn::ConnectionCommon<Data> {
+/// The exporter of every connection, buffered or unbuffered: both drive the
+/// same [`ConnectionCore`].
+impl<Data: SideData> Exporter for ConnectionCore<Data> {
     fn export(&self, label: &[u8], output: &mut [u8]) -> Result<(), Error> {
         // RFC 9261 §5.1: "context_value is empty (zero length)". In TLS 1.2
         // (RFC 5705) a zero-length context differs from no context: its
         // two length octets enter the PRF seed. In TLS 1.3 both hash the
         // empty string.
         self.export_keying_material(output, label, Some(&[]))
-            .map(|_| ())
     }
 }
 
+/// Where a side's crypto provider lives.
+pub(super) trait HasProvider {
+    /// The provider, or `None` while it is not known yet (a server learns
+    /// its configuration from the ClientHello).
+    fn provider(&self) -> Option<&CryptoProvider>;
+}
+
+impl HasProvider for ClientConnectionData {
+    fn provider(&self) -> Option<&CryptoProvider> {
+        Some(self.config.crypto_provider())
+    }
+}
+
+impl HasProvider for ServerConnectionData {
+    fn provider(&self) -> Option<&CryptoProvider> {
+        self.authenticators
+            .config
+            .as_ref()
+            .map(|c| &**c.crypto_provider())
+    }
+}
+
+/// One side of an established connection, as exported authenticators see
+/// it: its exporter, negotiated suite and crypto provider.
 pub(super) struct Connection<'a> {
-    pub(super) side: Side,
-    pub(super) suite: Option<SupportedCipherSuite>,
-    pub(super) provider: &'a CryptoProvider,
-    pub(super) export: &'a dyn Exporter,
+    side: Side,
+    suite: Option<SupportedCipherSuite>,
+    provider: &'a CryptoProvider,
+    export: &'a dyn Exporter,
+}
+
+/// The `side` connection driven by `core` (buffered or unbuffered), once
+/// its handshake has completed; [`Error::HandshakeNotComplete`] before.
+pub(super) fn connection<Data: SideData + HasProvider>(
+    core: &ConnectionCore<Data>,
+    side: Side,
+) -> Result<Connection<'_>, Error> {
+    let common = &core.common_state;
+    if common.is_handshaking() {
+        return Err(Error::HandshakeNotComplete);
+    }
+    let provider = core.data.provider().ok_or(Error::HandshakeNotComplete)?;
+    Ok(Connection {
+        side,
+        suite: common.negotiated_cipher_suite(),
+        provider,
+        export: core,
+    })
 }
 
 impl Connection<'_> {

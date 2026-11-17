@@ -41,7 +41,7 @@ fn send<A: browntls::SideData, B: browntls::SideData>(
 }
 
 /// Runs the handshake; returns each side's first error.
-pub(super) fn pump(
+fn pump(
     client: &mut ClientConnection,
     server: &mut ServerConnection,
 ) -> (Result<(), Error>, Result<(), Error>) {

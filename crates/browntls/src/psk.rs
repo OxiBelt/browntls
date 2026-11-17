@@ -10,6 +10,9 @@
 //! browntls always combines an external PSK with an (EC)DHE exchange
 //! (`psk_dhe_ke`); the `psk_ke` mode, which would give up forward secrecy
 //! (RFC 9257), is neither offered nor accepted.
+//! Resumption tickets derived from an external-PSK session are bound to the
+//! key bytes. [`ExternalPsk::with_key_generation`] can additionally invalidate
+//! those tickets without changing the key.
 //!
 //! The guidance of RFC 9257 that browntls cannot enforce is the caller's
 //! responsibility:
@@ -29,6 +32,7 @@ use core::fmt;
 use browntls_pki::{DnsName, ServerName};
 
 use crate::crypto::hash::HashAlgorithm;
+use crate::ct::constant_time_eq;
 use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::base::PayloadU16;
@@ -36,7 +40,7 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
-use crate::tls13::key_schedule::{BinderLabel, derive_imported_psk};
+use crate::tls13::key_schedule::{BinderLabel, derive_imported_psk, hkdf_expand_label_block};
 
 /// An external pre-shared key and the parameters provisioned with it.
 ///
@@ -50,6 +54,7 @@ pub struct ExternalPsk {
     alpn_protocol: Option<Vec<u8>>,
     max_early_data_size: u32,
     import_context: Option<Vec<u8>>,
+    key_generation: Option<Vec<u8>>,
 }
 
 impl ExternalPsk {
@@ -59,6 +64,9 @@ impl ExternalPsk {
 
     /// The longest key accepted, in bytes (a local bound).
     pub const MAX_KEY_LEN: usize = 1024;
+
+    /// The longest caller-provided key generation accepted, in bytes.
+    pub const MAX_KEY_GENERATION_LEN: usize = u16::MAX as usize;
 
     /// An external PSK named `identity`, used with the TLS 1.3 cipher suites
     /// whose hash is `hash` (SHA-256 or SHA-384).
@@ -92,6 +100,7 @@ impl ExternalPsk {
             alpn_protocol: None,
             max_early_data_size: 0,
             import_context: None,
+            key_generation: None,
         })
     }
 
@@ -153,6 +162,23 @@ impl ExternalPsk {
         Ok(self)
     }
 
+    /// Adds an opaque generation for invalidating resumption credentials.
+    ///
+    /// browntls always binds tickets to the key material itself. This value is
+    /// additional: changing it invalidates tickets even when the key bytes stay
+    /// the same, while accidentally reusing it cannot make a rotated key accept
+    /// old tickets. It is local configuration, independently applied by each
+    /// endpoint, and is not sent on the wire.
+    pub fn with_key_generation(mut self, generation: Vec<u8>) -> Result<Self, Error> {
+        if generation.is_empty() || generation.len() > Self::MAX_KEY_GENERATION_LEN {
+            return Err(Error::general(
+                "external PSK key generation must be 1 to 65535 bytes",
+            ));
+        }
+        self.key_generation = Some(generation);
+        Ok(self)
+    }
+
     /// The external identity.
     pub fn identity(&self) -> &[u8] {
         &self.identity
@@ -188,6 +214,11 @@ impl ExternalPsk {
         self.import_context.as_deref()
     }
 
+    /// The caller-provided key generation, when one was configured.
+    pub fn key_generation(&self) -> Option<&[u8]> {
+        self.key_generation.as_deref()
+    }
+
     /// Whether the key may be offered on a connection to `server_name`
     /// that offers the ALPN protocols `alpn`.
     pub(crate) fn usable_by_client(&self, server_name: &ServerName<'_>, alpn: &[Vec<u8>]) -> bool {
@@ -221,6 +252,35 @@ impl ExternalPsk {
     pub(crate) fn key(&self) -> &[u8] {
         &self.key
     }
+
+    /// A per-ticket verifier for this key and optional generation.
+    fn ticket_key_tag(
+        &self,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> Option<Vec<u8>> {
+        let suite = tls13_suite_for_hash(suites, self.hash)?;
+        let secret_len = u16::try_from(resumption_secret.len()).ok()?.to_be_bytes();
+        let generation = self.key_generation.as_deref().unwrap_or_default();
+        let generation_len = u16::try_from(generation.len()).ok()?.to_be_bytes();
+
+        // Hash the variable-length context first so HKDF-Expand-Label's
+        // one-byte context length cannot constrain an application generation.
+        let mut context = suite.common.hash_provider.start();
+        context.update(&secret_len);
+        context.update(resumption_secret);
+        context.update(&[u8::from(self.key_generation.is_some())]);
+        context.update(&generation_len);
+        context.update(generation);
+        let context = context.finish();
+
+        let key = suite.hkdf_provider.extract_from_secret(None, self.key());
+        Some(
+            hkdf_expand_label_block(&*key, b"ext psk bind", context.as_ref())
+                .as_ref()
+                .to_vec(),
+        )
+    }
 }
 
 impl Drop for ExternalPsk {
@@ -238,6 +298,7 @@ impl fmt::Debug for ExternalPsk {
             .field("server_name", &self.server_name)
             .field("max_early_data_size", &self.max_early_data_size)
             .field("imported", &self.import_context.is_some())
+            .field("has_key_generation", &self.key_generation.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -245,24 +306,60 @@ impl fmt::Debug for ExternalPsk {
 /// What a resumption ticket records of the external PSK its session was
 /// established with: the PSK is looked up again (and its restrictions
 /// checked again) when the ticket is used.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ExternalPskBinding {
     pub(crate) identity: Vec<u8>,
     /// The importer context, for a PSK used through the importer (RFC 9258).
     pub(crate) import_context: Option<Vec<u8>>,
+    /// A per-ticket tag derived from the key material and resumption secret.
+    pub(crate) key_tag: Vec<u8>,
 }
 
 impl ExternalPskBinding {
-    pub(crate) fn of(psk: &ExternalPsk) -> Self {
-        Self {
+    pub(crate) fn of(
+        psk: &ExternalPsk,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> Option<Self> {
+        Some(Self {
             identity: psk.identity.clone(),
             import_context: psk.import_context.clone(),
-        }
+            key_tag: psk.ticket_key_tag(suites, resumption_secret)?,
+        })
     }
 
     /// Whether `psk` is the key this binding names, used the same way.
-    pub(crate) fn matches(&self, psk: &ExternalPsk) -> bool {
-        psk.identity == self.identity && psk.import_context == self.import_context
+    pub(crate) fn matches(
+        &self,
+        psk: &ExternalPsk,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> bool {
+        if psk.identity != self.identity || psk.import_context != self.import_context {
+            return false;
+        }
+        let Some(mut tag) = psk.ticket_key_tag(suites, resumption_secret) else {
+            return false;
+        };
+        let matches = constant_time_eq(&tag, &self.key_tag);
+        crate::crypto::zeroize_vec(&mut tag);
+        matches
+    }
+}
+
+impl Drop for ExternalPskBinding {
+    fn drop(&mut self) {
+        crate::crypto::zeroize_vec(&mut self.key_tag);
+    }
+}
+
+impl fmt::Debug for ExternalPskBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternalPskBinding")
+            .field("identity", &PayloadU16::new(self.identity.clone()))
+            .field("imported", &self.import_context.is_some())
+            .field("key_tag_len", &self.key_tag.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -616,6 +713,110 @@ mod tests {
         assert!(ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 16], HashAlgorithm::SHA1).is_err());
         assert!(
             ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 1025], HashAlgorithm::SHA384).is_err()
+        );
+    }
+
+    #[test]
+    fn key_generation_bounds() {
+        let psk = || {
+            ExternalPsk::new(b"id".to_vec(), alloc::vec![0x42; 32], HashAlgorithm::SHA256).unwrap()
+        };
+        assert_eq!(psk().key_generation(), None);
+        assert!(psk().with_key_generation(Vec::new()).is_err());
+        assert!(
+            psk()
+                .with_key_generation(alloc::vec![0; ExternalPsk::MAX_KEY_GENERATION_LEN + 1])
+                .is_err()
+        );
+        let generation = alloc::vec![0x5a; ExternalPsk::MAX_KEY_GENERATION_LEN];
+        assert_eq!(
+            psk()
+                .with_key_generation(generation.clone())
+                .unwrap()
+                .key_generation(),
+            Some(generation.as_slice())
+        );
+    }
+
+    #[test]
+    fn ticket_binding_covers_key_generation_and_ticket_secret() {
+        fn key(byte: u8, generation: Option<&[u8]>) -> ExternalPsk {
+            let psk = ExternalPsk::new(
+                b"identity".to_vec(),
+                alloc::vec![byte; 32],
+                HashAlgorithm::SHA256,
+            )
+            .unwrap();
+            match generation {
+                Some(generation) => psk.with_key_generation(generation.to_vec()).unwrap(),
+                None => psk,
+            }
+        }
+
+        #[cfg(feature = "native")]
+        let suites = crate::crypto::native::default_provider().cipher_suites;
+        #[cfg(all(not(feature = "native"), feature = "rustcrypto"))]
+        let suites = crate::crypto::rustcrypto::default_provider().cipher_suites;
+
+        let secret = [0x11; 32];
+        let original = key(0x42, None);
+        let binding = ExternalPskBinding::of(&original, &suites, &secret).unwrap();
+        assert_eq!(binding.key_tag.len(), 32);
+        assert!(binding.matches(&key(0x42, None), &suites, &secret));
+        assert!(!binding.matches(&key(0x43, None), &suites, &secret));
+        assert!(!binding.matches(&key(0x42, Some(b"one")), &suites, &secret));
+        assert!(!binding.matches(&key(0x42, None), &suites, &[0x12; 32]));
+
+        #[cfg(feature = "rustcrypto")]
+        {
+            use ::hmac::{Hmac, KeyInit, Mac};
+            use sha2::Digest;
+
+            let hmac = |key: &[u8], parts: &[&[u8]]| {
+                let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).unwrap();
+                for part in parts {
+                    mac.update(part);
+                }
+                mac.finalize().into_bytes().to_vec()
+            };
+            let context = sha2::Sha256::digest([&[0, 32][..], &secret, &[0], &[0, 0]].concat());
+            let prk = hmac(&[0; 32], &[&[0x42; 32]]);
+            let mut info = Vec::from(&[0, 32, 18][..]);
+            info.extend_from_slice(b"tls13 ext psk bind");
+            info.push(32);
+            info.extend_from_slice(&context);
+            assert_eq!(binding.key_tag, hmac(&prk, &[&info, &[1]]));
+        }
+
+        #[cfg(all(feature = "native", feature = "rustcrypto"))]
+        {
+            let rustcrypto = crate::crypto::rustcrypto::default_provider().cipher_suites;
+            assert_eq!(
+                binding.key_tag,
+                ExternalPskBinding::of(&original, &rustcrypto, &secret)
+                    .unwrap()
+                    .key_tag
+            );
+        }
+
+        let generated = key(0x42, Some(b"one"));
+        let binding = ExternalPskBinding::of(&generated, &suites, &secret).unwrap();
+        assert!(binding.matches(&key(0x42, Some(b"one")), &suites, &secret));
+        assert!(!binding.matches(&key(0x42, Some(b"two")), &suites, &secret));
+        assert!(!binding.matches(&key(0x43, Some(b"one")), &suites, &secret));
+
+        let sha384 = ExternalPsk::new(
+            b"identity-384".to_vec(),
+            alloc::vec![0x42; 48],
+            HashAlgorithm::SHA384,
+        )
+        .unwrap();
+        assert_eq!(
+            ExternalPskBinding::of(&sha384, &suites, &[0x22; 48])
+                .unwrap()
+                .key_tag
+                .len(),
+            48
         );
     }
 

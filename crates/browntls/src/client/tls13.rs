@@ -230,16 +230,20 @@ pub(super) fn handle_server_hello(
                     // it forward (we offered the ticket only while the PSK
                     // is configured); reported once the server's Finished
                     // verifies.
-                    cx.common.external_psk = resuming_session
-                        .as_ref()
-                        .and_then(|session| session.external_psk())
-                        .and_then(|binding| {
-                            config
-                                .external_psks
-                                .iter()
-                                .find(|psk| binding.matches(psk))
-                                .cloned()
-                        });
+                    cx.common.external_psk = resuming_session.as_ref().and_then(|session| {
+                        let binding = session.external_psk()?;
+                        config
+                            .external_psks
+                            .iter()
+                            .find(|psk| {
+                                binding.matches(
+                                    psk,
+                                    &config.provider.cipher_suites,
+                                    session.secret(),
+                                )
+                            })
+                            .cloned()
+                    });
                 }
                 Some(psk) => {
                     debug!("Using external PSK");

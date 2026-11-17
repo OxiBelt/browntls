@@ -272,7 +272,7 @@ pub struct Reader<'a> {
 }
 
 #[cfg(feature = "std")]
-impl Reader<'_> {
+impl<'a> Reader<'a> {
     fn check_no_bytes_state(&self) -> std::io::Result<()> {
         if self.common.has_received_close_notify {
             // Clean EOF: the peer closed the session.
@@ -286,6 +286,24 @@ impl Reader<'_> {
             ));
         }
         Err(std::io::ErrorKind::WouldBlock.into())
+    }
+
+    /// The first contiguous chunk of received plaintext, borrowed for as long
+    /// as the connection was, for callers (such as an asynchronous
+    /// `fill_buf`) that must return it past this `Reader`.
+    ///
+    /// Consume what was used with [`std::io::BufRead::consume`] on a new
+    /// `Reader`. The results match [`std::io::Read::read`]: an empty slice
+    /// only after the peer's `close_notify`, `WouldBlock` while no plaintext
+    /// is buffered yet, and `UnexpectedEof` when the transport closed without
+    /// a `close_notify`.
+    pub fn into_first_chunk(self) -> std::io::Result<&'a [u8]> {
+        if self.common.received_plaintext.is_empty() {
+            self.check_no_bytes_state()?;
+            return Ok(&[]);
+        }
+        let common: &'a CommonState = self.common;
+        Ok(common.received_plaintext.chunk().unwrap_or(&[]))
     }
 }
 

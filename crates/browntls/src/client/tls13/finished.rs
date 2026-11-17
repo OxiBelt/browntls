@@ -361,12 +361,16 @@ impl ExpectTraffic {
             nst.ticket.0.clone(),
             &secret,
             Arc::new(server_cert_chain),
+            &self.config.session_binding(),
             now,
             nst.lifetime,
             nst.age_add,
             nst.exts.max_early_data_size.unwrap_or(0),
         )
-        .with_external_psk(cx.common.external_psk_binding())
+        .with_external_psk(
+            cx.common
+                .external_psk_binding(&self.config.provider.cipher_suites, &secret)?,
+        )
         .with_delegated_credential_expiry(cx.data.delegated_credential_expiry);
         if let Some(params) = cx.common.quic.as_ref().and_then(|q| q.peer_params.as_ref()) {
             value.set_quic_params(params);

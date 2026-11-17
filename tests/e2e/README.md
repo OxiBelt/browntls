@@ -65,6 +65,10 @@ allows it, with browntls as server against the peer's client:
   implementing it (GnuTLS) must respect, and, as a browntls client, GREASE
   values (RFC 8701), `ticket_request` (RFC 9149) and a ClientHello padded to
   1024 bytes (RFC 7685);
+- the asynchronous streams of `browntls-tokio` (`browntls-e2e --async`, a
+  single-threaded Tokio runtime, confirmed by `"io":"async"` in the output):
+  TLS 1.3 with client authentication and TLS 1.2 in both roles, and TLS 1.3
+  resumption as a client;
 - Encrypted Client Hello (RFC 9849, suites `browntls` and `go`), with keys
   made per run by `browntls-e2e ech-keygen` (X25519, public name
   `ech-public.test`) in both server topologies. Shared mode (`ech-shared*`):

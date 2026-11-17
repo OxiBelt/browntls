@@ -90,7 +90,10 @@ pub(super) fn emit_ticket(
         now,
         age_add,
     );
-    value.set_external_psk(cx.common.external_psk_binding());
+    value.set_external_psk(
+        cx.common
+            .external_psk_binding(&config.provider.cipher_suites, &secret)?,
+    );
     value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
     let plain = value.get_encoding();
 

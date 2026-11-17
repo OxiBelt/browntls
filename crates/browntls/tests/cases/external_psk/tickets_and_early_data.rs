@@ -252,6 +252,121 @@ fn tickets_of_external_psk_sessions_keep_the_psk() {
     assert_eq!(client.peer_certificates().unwrap(), chain.cert_chain());
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PskRotation {
+    Key,
+    Generation,
+    ImportedKey,
+}
+
+fn rotating_psk(rotation: PskRotation, after: bool) -> ExternalPsk {
+    let key = match rotation {
+        PskRotation::Key | PskRotation::ImportedKey if after => 0x43,
+        _ => 0x42,
+    };
+    let psk = ExternalPsk::new(b"rotating".to_vec(), vec![key; 32], HashAlgorithm::SHA256).unwrap();
+    match rotation {
+        PskRotation::Generation => psk
+            .with_key_generation(if after { b"two" } else { b"one" }.to_vec())
+            .unwrap(),
+        PskRotation::ImportedKey => psk.imported(b"application".to_vec()).unwrap(),
+        PskRotation::Key => psk,
+    }
+}
+
+#[test]
+fn rotation_invalidates_external_psk_tickets() {
+    init_logging();
+    for stateless in [false, true] {
+        for rotation in [
+            PskRotation::Key,
+            PskRotation::Generation,
+            PskRotation::ImportedKey,
+        ] {
+            let chain = server_chain(KeyType::EcdsaP256);
+            let cache: Arc<dyn browntls::server::StoresServerSessions> =
+                browntls::server::ServerSessionMemoryCache::new(16);
+            let ticketer = prov::Ticketer::new().unwrap();
+            let server = |psk: ExternalPsk| {
+                let mut config = psk_only_server(vec![psk]);
+                config.require_external_psk = true;
+                if stateless {
+                    config.ticketer = ticketer.clone();
+                    config.session_storage = Arc::new(browntls::server::NoServerSessionStorage {});
+                } else {
+                    config.session_storage = cache.clone();
+                }
+                Arc::new(config)
+            };
+
+            let mut client_config = client_with(&chain, vec![rotating_psk(rotation, false)]);
+            client_config.require_external_psk = true;
+            let client_config = Arc::new(client_config);
+
+            // Establish the old external-PSK session and retain its tickets.
+            let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+            let mut old = ServerConnection::new(server(rotating_psk(rotation, false))).unwrap();
+            do_handshake(&mut client, &mut old).unwrap();
+            take_tickets(&mut client, &mut old);
+
+            // A client that still offers an old ticket cannot resume after
+            // the server rotates the key or generation. Key rotation also
+            // makes its following external-PSK binder invalid; generation is
+            // local ticket policy, so the unchanged raw key can authenticate
+            // a new full handshake.
+            let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+            let mut rotated = ServerConnection::new(server(rotating_psk(rotation, true))).unwrap();
+            let result = do_handshake(&mut client, &mut rotated);
+            match rotation {
+                PskRotation::Generation => {
+                    result.unwrap();
+                    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+                    assert_eq!(rotated.handshake_kind(), Some(HandshakeKind::Full));
+                    assert_eq!(rotated.external_psk_identity(), Some(&b"rotating"[..]));
+                }
+                PskRotation::Key | PskRotation::ImportedKey => {
+                    assert!(
+                        result.is_err(),
+                        "{rotation:?}, stateless={stateless}: client={:?}, server={:?}",
+                        client.handshake_kind(),
+                        rotated.handshake_kind()
+                    );
+                    assert_eq!(rotated.external_psk_identity(), None);
+                }
+            }
+
+            // Once the client rotates too, it discards the remaining old
+            // ticket locally and performs a full handshake under the new key.
+            let mut new_client_config = (*client_config).clone();
+            new_client_config.external_psks = vec![Arc::new(rotating_psk(rotation, true))];
+            let new_client_config = Arc::new(new_client_config);
+            let mut client =
+                ClientConnection::new(new_client_config.clone(), server_name()).unwrap();
+            let mut rotated = ServerConnection::new(server(rotating_psk(rotation, true))).unwrap();
+            do_handshake(&mut client, &mut rotated).unwrap();
+            assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+            assert_eq!(rotated.handshake_kind(), Some(HandshakeKind::Full));
+            assert_eq!(client.external_psk_identity(), Some(&b"rotating"[..]));
+            take_tickets(&mut client, &mut rotated);
+
+            // Fresh tickets resume, and descendants retain the new binding.
+            let mut client =
+                ClientConnection::new(new_client_config.clone(), server_name()).unwrap();
+            let mut rotated = ServerConnection::new(server(rotating_psk(rotation, true))).unwrap();
+            do_handshake(&mut client, &mut rotated).unwrap();
+            assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+            assert_eq!(rotated.handshake_kind(), Some(HandshakeKind::Resumed));
+            take_tickets(&mut client, &mut rotated);
+
+            let mut client = ClientConnection::new(new_client_config, server_name()).unwrap();
+            let mut rotated = ServerConnection::new(server(rotating_psk(rotation, true))).unwrap();
+            do_handshake(&mut client, &mut rotated).unwrap();
+            assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+            assert_eq!(rotated.handshake_kind(), Some(HandshakeKind::Resumed));
+        }
+    }
+}
+
 #[test]
 fn imported_psk_tickets_keep_the_import_context() {
     init_logging();

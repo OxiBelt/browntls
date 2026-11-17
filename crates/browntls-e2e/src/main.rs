@@ -18,7 +18,7 @@
 //!
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
-//!         --record-size-limit N|none
+//!         --record-size-limit N|none, --async
 //! CLIENT: --grease, --ticket-request NEW,RESUMPTION, --padding N
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
 //!         --ech-trial-decryption, --ech-public-name-check
@@ -29,7 +29,10 @@
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values; `--ticket-request`
 //! sends the RFC 9149 extension; `--padding` pads the ClientHello to at
-//! least N bytes (RFC 7685).
+//! least N bytes (RFC 7685). `--async` runs the client's or server's
+//! connections through `browntls-tokio` on a single-threaded Tokio runtime
+//! instead of the blocking `StreamOwned` (same exchange and output, with
+//! `"io":"async"`; a client then does not retry after an ECH rejection).
 //!
 //! Encrypted Client Hello (RFC 9849): `ech-keygen` writes an X25519 key for
 //! every native HPKE suite with that KEM to `DIR/ech-config` (one
@@ -65,6 +68,7 @@
 //! This is test tooling: it loads keys from files given on the command line
 //! and has no hardening beyond the library defaults it configures.
 
+mod async_io;
 mod client_facing;
 mod output;
 
@@ -167,6 +171,8 @@ struct Options {
     /// Back-end servers of the client-facing server: (inner server name,
     /// address).
     backends: Vec<(String, String)>,
+    /// Client and server I/O through `browntls-tokio` (`--async`).
+    async_io: bool,
 }
 
 impl Options {
@@ -191,6 +197,7 @@ impl Options {
                 "--ech-retry" => Some(&mut o.ech_retry),
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
+                "--async" => Some(&mut o.async_io),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -525,6 +532,9 @@ fn listen(o: &Options) -> Result<TcpListener> {
 
 fn server(o: &Options) -> Result<()> {
     let config = server_config(o, o.ech_server()?)?;
+    if o.async_io {
+        return async_io::server(o, config);
+    }
     let listener = listen(o)?;
     let mut failed = None;
     for index in 0..o.accept {
@@ -645,6 +655,9 @@ fn client(o: &Options) -> Result<()> {
     config.ech_mode = o.ech_client(None)?;
     let mut config = Arc::new(config);
     let server_name = ServerName::try_from(name.to_owned()).map_err(|e| e.to_string())?;
+    if o.async_io {
+        return async_io::client(o, config, server_name, message);
+    }
 
     let mut retried = false;
     let mut index = 0;

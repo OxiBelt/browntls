@@ -311,14 +311,16 @@ impl CompleteClientHelloHandling {
                                 .as_ref()
                                 .and_then(|resolver| resolver.resolve(&binding.identity))
                                 .filter(|psk| {
-                                    binding.matches(psk)
-                                        && psk.usable_by_server(
-                                            cx.data.sni.as_ref(),
-                                            cx.common.alpn_protocol.as_deref(),
-                                        )
-                                        && psk
-                                            .cipher_suite()
-                                            .is_none_or(|cs| cs == self.suite.common.suite)
+                                    binding.matches(
+                                        psk,
+                                        &self.config.provider.cipher_suites,
+                                        &resume.master_secret.0,
+                                    ) && psk.usable_by_server(
+                                        cx.data.sni.as_ref(),
+                                        cx.common.alpn_protocol.as_deref(),
+                                    ) && psk
+                                        .cipher_suite()
+                                        .is_none_or(|cs| cs == self.suite.common.suite)
                                 })
                             else {
                                 continue;

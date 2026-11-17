@@ -53,6 +53,7 @@ impl Seed {
             .transfer(0, 0, 0, 0)
             .transfer(1, 0, 0, 3)
             .op(Op::Read, &[1, 0, 4])
+            .op(Op::Read, &[1, 3, 2])
             .op(Op::Read, &[1, 1, 0])
             .op(Op::Read, &[0, 2, 0])
             .op(

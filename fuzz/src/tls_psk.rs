@@ -152,17 +152,19 @@ fn construct(input: &mut Input) {
     assert_eq!(psk.alpn_protocol(), None);
     assert_eq!(psk.max_early_data_size(), 0);
     assert_eq!(psk.import_context(), None);
+    assert_eq!(psk.key_generation(), None);
 
     let mut suite = None;
     let mut name = None;
     let mut alpn = None;
     let mut early = 0;
     let mut context = None;
+    let mut generation = None;
     for _ in 0..8 {
         if input.is_empty() {
             break;
         }
-        match input.choose(5) {
+        match input.choose(6) {
             0 => {
                 let s = CipherSuite::from(input.u16());
                 suite = Some(s);
@@ -182,7 +184,7 @@ fn construct(input: &mut Input) {
                 early = input.u32();
                 psk = psk.with_early_data(early);
             }
-            _ => {
+            4 => {
                 let ctx = if input.bool() {
                     stretch(input.short_field(), 65_500 + usize::from(input.byte() % 64))
                 } else {
@@ -201,6 +203,25 @@ fn construct(input: &mut Input) {
                     }
                 }
             }
+            _ => {
+                let value = if input.bool() {
+                    stretch(input.short_field(), 65_534 + usize::from(input.byte() % 4))
+                } else {
+                    input.short_field().to_vec()
+                };
+                let fits = !value.is_empty() && value.len() <= ExternalPsk::MAX_KEY_GENERATION_LEN;
+                match psk.with_key_generation(value.clone()) {
+                    Ok(with_generation) => {
+                        assert!(fits, "invalid key generation accepted");
+                        generation = Some(value);
+                        psk = with_generation;
+                    }
+                    Err(_) => {
+                        assert!(!fits, "valid key generation refused");
+                        return;
+                    }
+                }
+            }
         }
         assert_eq!(psk.identity(), &identity[..]);
         assert_eq!(psk.hash(), hash);
@@ -209,6 +230,7 @@ fn construct(input: &mut Input) {
         assert_eq!(psk.alpn_protocol(), alpn.as_deref());
         assert_eq!(psk.max_early_data_size(), early);
         assert_eq!(psk.import_context(), context.as_deref());
+        assert_eq!(psk.key_generation(), generation.as_deref());
     }
     // The resolver finds keys by identity.
     let resolver = vec![Arc::new(psk)];
@@ -644,6 +666,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
     put_short_field(&mut seed, b"h2");
     seed.extend_from_slice(&[3, 0, 0, 4, 0, 4, 0]);
     put_short_field(&mut seed, b"ctx");
+    seed.extend_from_slice(&[5, 0]);
+    put_short_field(&mut seed, b"generation");
     seeds.push(seed);
     for (id_sel, key_sel, key_arg, hash, ctx_len) in [
         (0u8, 2u8, 32u8, 0u8, 0u8),

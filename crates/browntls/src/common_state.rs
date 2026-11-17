@@ -321,11 +321,21 @@ impl CommonState {
     }
 
     /// The external PSK to record in a ticket issued on this connection.
-    pub(crate) fn external_psk_binding(&self) -> Option<crate::psk::ExternalPskBinding> {
-        self.external_psk
+    pub(crate) fn external_psk_binding(
+        &self,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> Result<Option<crate::psk::ExternalPskBinding>, Error> {
+        let Some(psk) = self
+            .external_psk
             .as_ref()
             .filter(|_| self.external_psk_confirmed)
-            .map(|psk| crate::psk::ExternalPskBinding::of(psk))
+        else {
+            return Ok(None);
+        };
+        crate::psk::ExternalPskBinding::of(psk, suites, resumption_secret)
+            .map(Some)
+            .ok_or_else(|| Error::general("external PSK hash is unavailable in the provider"))
     }
 
     /// Whether every negotiated component claims FIPS validation.
@@ -468,6 +478,12 @@ impl CommonState {
             Limit::Yes => self.sendable_tls.apply_limit(payload.len()),
             Limit::No => payload.len(),
         };
+        // Nothing to send (an empty write, or a full send buffer): the
+        // fragmenter would still make one empty record of it, letting the
+        // buffer grow past its limit with every retried write.
+        if len == 0 {
+            return 0;
+        }
         let payload = payload.split_at(len).0;
         let fragments = len
             .div_ceil(self.message_fragmenter.max_fragment_len())

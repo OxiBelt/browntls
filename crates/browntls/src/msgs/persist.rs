@@ -10,13 +10,15 @@ use super::codec::{Codec, Reader};
 use super::handshake::CertificateChain;
 #[cfg(feature = "tls12")]
 use super::handshake::SessionId;
+use crate::client::ResolvesClientCert;
 use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::InvalidMessage;
 use crate::psk::ExternalPskBinding;
-use crate::sync::Arc;
+use crate::sync::{Arc, Weak};
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
 use crate::tls13::Tls13CipherSuite;
+use crate::verify::ServerCertVerifier;
 
 /// A value with the time it was retrieved from storage, for age computations.
 pub(crate) struct Retrieved<T> {
@@ -92,6 +94,7 @@ impl Tls13ClientSessionValue {
         ticket: Vec<u8>,
         secret: &[u8],
         server_cert_chain: Arc<CertificateChain<'static>>,
+        binding: &ClientConfigBinding<'_>,
         time_now: UnixTime,
         lifetime_secs: u32,
         age_add: u32,
@@ -108,6 +111,7 @@ impl Tls13ClientSessionValue {
                 time_now,
                 lifetime_secs,
                 server_cert_chain,
+                binding,
             ),
             external_psk: None,
             delegated_credential_expiry: None,
@@ -213,6 +217,7 @@ impl Tls12ClientSessionValue {
         ticket: Vec<u8>,
         master_secret: &[u8],
         server_cert_chain: Arc<CertificateChain<'static>>,
+        binding: &ClientConfigBinding<'_>,
         time_now: UnixTime,
         lifetime_secs: u32,
         extended_ms: bool,
@@ -227,6 +232,7 @@ impl Tls12ClientSessionValue {
                 time_now,
                 lifetime_secs,
                 server_cert_chain,
+                binding,
             ),
         }
     }
@@ -266,6 +272,20 @@ impl fmt::Debug for Tls12ClientSessionValue {
     }
 }
 
+/// The client configuration objects that decided how a session was
+/// authenticated: the server certificate verifier that accepted the server
+/// and the resolver that chose the client's credentials.
+///
+/// A session store may be shared between configurations (it sits behind an
+/// `Arc` in [`crate::client::Resumption`]). Resuming skips server
+/// certificate verification and keeps the original client identity, so a
+/// session must only be offered by a configuration that uses the very same
+/// verifier and resolver objects that established it.
+pub(crate) struct ClientConfigBinding<'a> {
+    pub(crate) server_cert_verifier: &'a Arc<dyn ServerCertVerifier>,
+    pub(crate) client_creds: &'a Arc<dyn ResolvesClientCert>,
+}
+
 /// What every client session value shares.
 #[derive(Clone)]
 pub struct ClientSessionCommon {
@@ -274,6 +294,13 @@ pub struct ClientSessionCommon {
     epoch: u64,
     lifetime_secs: u32,
     server_cert_chain: Arc<CertificateChain<'static>>,
+    /// Identity of the verifier that authenticated the server. A `Weak`
+    /// keeps the allocation (so its address cannot be reused by another
+    /// verifier while the session lives) without keeping the verifier
+    /// itself alive in the cache.
+    server_cert_verifier: Weak<dyn ServerCertVerifier>,
+    /// Identity of the resolver that chose the client's credentials.
+    client_creds: Weak<dyn ResolvesClientCert>,
 }
 
 impl ClientSessionCommon {
@@ -283,6 +310,7 @@ impl ClientSessionCommon {
         time_now: UnixTime,
         lifetime_secs: u32,
         server_cert_chain: Arc<CertificateChain<'static>>,
+        binding: &ClientConfigBinding<'_>,
     ) -> Self {
         Self {
             ticket,
@@ -290,7 +318,25 @@ impl ClientSessionCommon {
             epoch: time_now.as_secs(),
             lifetime_secs: lifetime_secs.min(MAX_TICKET_LIFETIME),
             server_cert_chain,
+            server_cert_verifier: Arc::downgrade(binding.server_cert_verifier),
+            client_creds: Arc::downgrade(binding.client_creds),
         }
+    }
+
+    /// Whether `binding` names the same verifier and client credential
+    /// resolver objects that established this session. Only the object
+    /// identities are compared (not their behavior or configuration), so a
+    /// replaced verifier never inherits a session, even an equivalent one.
+    /// The addresses are compared without the trait-object metadata, which
+    /// may differ for the same object.
+    pub(crate) fn compatible_config(&self, binding: &ClientConfigBinding<'_>) -> bool {
+        core::ptr::addr_eq(
+            self.server_cert_verifier.as_ptr(),
+            Arc::as_ptr(binding.server_cert_verifier),
+        ) && core::ptr::addr_eq(
+            self.client_creds.as_ptr(),
+            Arc::as_ptr(binding.client_creds),
+        )
     }
 
     pub(crate) fn server_cert_chain(&self) -> &CertificateChain<'static> {
@@ -476,13 +522,14 @@ impl Codec<'_> for ServerSessionValue {
             None => 0u8.encode(bytes),
             Some(binding) => {
                 match &binding.import_context {
-                    None => 1u8.encode(bytes),
-                    Some(_) => 2u8.encode(bytes),
+                    None => 3u8.encode(bytes),
+                    Some(_) => 4u8.encode(bytes),
                 }
                 PayloadU16::encode_slice(&binding.identity, bytes);
                 if let Some(context) = &binding.import_context {
                     PayloadU16::encode_slice(context, bytes);
                 }
+                PayloadU8::new(binding.key_tag.clone()).encode(bytes);
             }
         }
         match self.delegated_credential_expiry {
@@ -532,15 +579,20 @@ impl Codec<'_> for ServerSessionValue {
         let age_obfuscation_offset = u32::read(r)?;
         let external_psk = match u8::read(r)? {
             0 => None,
-            tag @ (1 | 2) => {
+            tag @ (3 | 4) => {
                 let identity = PayloadU16::read(r)?.0;
                 let import_context = match tag {
-                    2 => Some(PayloadU16::read(r)?.0),
+                    4 => Some(PayloadU16::read(r)?.0),
                     _ => None,
                 };
+                let key_tag = PayloadU8::read(r)?.0;
+                if !matches!(key_tag.len(), 32 | 48) {
+                    return Err(InvalidMessage::IllegalEmptyValue);
+                }
                 Some(ExternalPskBinding {
                     identity,
                     import_context,
+                    key_tag,
                 })
             }
             _ => return Err(InvalidMessage::IllegalEmptyValue),
@@ -649,6 +701,7 @@ mod tests {
             let binding = ExternalPskBinding {
                 identity: b"psk".to_vec(),
                 import_context,
+                key_tag: alloc::vec![0x55; 32],
             };
             v.set_external_psk(Some(binding.clone()));
             let enc = v.get_encoding();
@@ -659,6 +712,36 @@ mod tests {
         let mut enc = sample().get_encoding();
         *enc.last_mut().unwrap() = 3;
         assert!(ServerSessionValue::read_bytes(&enc).is_err());
+
+        // Identity-only records from before key binding are unsafe to resume.
+        for (import_context, current_tag, legacy_tag) in
+            [(None, 3, 1), (Some(b"ctx".to_vec()), 4, 2)]
+        {
+            let mut v = sample();
+            v.set_external_psk(Some(ExternalPskBinding {
+                identity: b"legacy".to_vec(),
+                import_context,
+                key_tag: alloc::vec![0x55; 32],
+            }));
+            let mut enc = v.get_encoding();
+            let marker = [current_tag, 0, 6, b'l', b'e', b'g', b'a', b'c', b'y'];
+            let at = enc
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap();
+            enc[at] = legacy_tag;
+            assert!(ServerSessionValue::read_bytes(&enc).is_err());
+        }
+
+        for len in [31, 49] {
+            let mut v = sample();
+            v.set_external_psk(Some(ExternalPskBinding {
+                identity: b"psk".to_vec(),
+                import_context: None,
+                key_tag: alloc::vec![0x55; len],
+            }));
+            assert!(ServerSessionValue::read_bytes(&v.get_encoding()).is_err());
+        }
     }
 
     #[test]
@@ -671,6 +754,102 @@ mod tests {
         let v = sample();
         let stale = v.set_freshness(500_000u32.wrapping_add(0x1234), now);
         assert!(!stale.is_fresh());
+    }
+
+    #[derive(Debug)]
+    struct DummyVerifier;
+    impl ServerCertVerifier for DummyVerifier {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &browntls_pki::ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<crate::verify::ServerCertVerified, crate::Error> {
+            Err(crate::Error::General("dummy".into()))
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &crate::verify::DigitallySignedStruct,
+        ) -> Result<crate::verify::HandshakeSignatureValid, crate::Error> {
+            Err(crate::Error::General("dummy".into()))
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &crate::verify::DigitallySignedStruct,
+        ) -> Result<crate::verify::HandshakeSignatureValid, crate::Error> {
+            Err(crate::Error::General("dummy".into()))
+        }
+        fn supported_verify_schemes(&self) -> Vec<crate::enums::SignatureScheme> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Debug)]
+    struct DummyResolver;
+    impl ResolvesClientCert for DummyResolver {
+        fn resolve(
+            &self,
+            _: &[&[u8]],
+            _: &[crate::enums::SignatureScheme],
+        ) -> Option<Arc<crate::crypto::signer::CertifiedKey>> {
+            None
+        }
+        fn has_certs(&self) -> bool {
+            false
+        }
+    }
+
+    fn binding_objects() -> (Arc<dyn ServerCertVerifier>, Arc<dyn ResolvesClientCert>) {
+        (Arc::new(DummyVerifier), Arc::new(DummyResolver))
+    }
+
+    #[test]
+    fn client_value_config_binding() {
+        let (verifier, creds) = binding_objects();
+        let (other_verifier, other_creds) = binding_objects();
+        let binding = ClientConfigBinding {
+            server_cert_verifier: &verifier,
+            client_creds: &creds,
+        };
+        let now = UnixTime::since_unix_epoch(core::time::Duration::from_secs(100));
+        let common = ClientSessionCommon::new(
+            alloc::vec![1],
+            &[2],
+            now,
+            60,
+            Arc::new(CertificateChain::default()),
+            &binding,
+        );
+        // The same objects, also through cloned `Arc`s, are compatible.
+        let (verifier2, creds2) = (verifier.clone(), creds.clone());
+        assert!(common.compatible_config(&ClientConfigBinding {
+            server_cert_verifier: &verifier2,
+            client_creds: &creds2,
+        }));
+        assert!(common.clone().compatible_config(&binding));
+        // Another verifier or another resolver, even of the same type, is not.
+        assert!(!common.compatible_config(&ClientConfigBinding {
+            server_cert_verifier: &other_verifier,
+            client_creds: &creds,
+        }));
+        assert!(!common.compatible_config(&ClientConfigBinding {
+            server_cert_verifier: &verifier,
+            client_creds: &other_creds,
+        }));
+        // The session does not keep the verifier alive, and a verifier
+        // allocated after it was dropped never matches.
+        drop((verifier, verifier2));
+        let (fresh_verifier, _) = binding_objects();
+        assert!(!common.compatible_config(&ClientConfigBinding {
+            server_cert_verifier: &fresh_verifier,
+            client_creds: &creds,
+        }));
     }
 
     #[test]
@@ -690,9 +869,23 @@ mod tests {
             alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));
         let created = UnixTime::since_unix_epoch(core::time::Duration::from_secs(100));
         let expiry = UnixTime::since_unix_epoch(core::time::Duration::from_secs(200));
-        let mut v =
-            Tls13ClientSessionValue::new(suite, alloc::vec![1], &[2], chain, created, 60, 5, 0)
-                .with_delegated_credential_expiry(Some(expiry));
+        let (verifier, creds) = binding_objects();
+        let binding = ClientConfigBinding {
+            server_cert_verifier: &verifier,
+            client_creds: &creds,
+        };
+        let mut v = Tls13ClientSessionValue::new(
+            suite,
+            alloc::vec![1],
+            &[2],
+            chain,
+            &binding,
+            created,
+            60,
+            5,
+            0,
+        )
+        .with_delegated_credential_expiry(Some(expiry));
         assert_eq!(v.max_early_data_size(), 0);
         assert!(!v.delegated_credential_expired_at(created));
         let later = UnixTime::since_unix_epoch(core::time::Duration::from_secs(130));

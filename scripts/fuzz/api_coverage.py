@@ -42,7 +42,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-CRATES = ("crates/browntls", "crates/browntls-crypto", "crates/browntls-pki")
+CRATES = (
+    "crates/browntls",
+    "crates/browntls-crypto",
+    "crates/browntls-pki",
+    "crates/browntls-tokio",
+)
 DEFAULT_EXEMPTIONS = REPO / "fuzz" / "api-coverage-exemptions.txt"
 
 PUB_FN = re.compile(

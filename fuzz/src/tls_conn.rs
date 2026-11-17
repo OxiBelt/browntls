@@ -70,7 +70,8 @@ enum Op {
     Pump,
     /// `side, method, data`: `writer()` write or write_vectored.
     Write,
-    /// `side, method, size`: `reader()` read, `BufRead` or `read_to_end`.
+    /// `side, method, size`: `reader()` read, `BufRead`, `read_to_end` or
+    /// `into_first_chunk`.
     Read,
     /// `data`: `ClientConnection::early_data` write.
     EarlyWrite,
@@ -416,7 +417,7 @@ impl World {
     }
 
     /// Reads the buffered plaintext of `side` with `method` (0: `read`,
-    /// 1: `BufRead`, 2: `read_to_end`): all of it, or about `size` bytes
+    /// 1: `BufRead`, 2: `read_to_end`, 3: `into_first_chunk`): all of it, or about `size` bytes
     /// when that is not zero. Returns the number of bytes read.
     fn read_with(&mut self, side: usize, method: u8, size: usize) -> usize {
         let Some(conn) = self.conns[side].as_mut() else {
@@ -431,7 +432,7 @@ impl World {
                 break;
             }
             let mut reader = conn.reader();
-            let n = match method % 3 {
+            let n = match method % 4 {
                 0 => {
                     let n = want.min(buf.len());
                     match reader.read(&mut buf[..n]) {
@@ -447,6 +448,15 @@ impl World {
                         let n = chunk.len().min(want);
                         self.recv[from].extend_from_slice(&chunk[..n]);
                         reader.consume(n);
+                        n
+                    }
+                    Err(_) => 0,
+                },
+                3 => match reader.into_first_chunk() {
+                    Ok(chunk) => {
+                        let n = chunk.len().min(want);
+                        self.recv[from].extend_from_slice(&chunk[..n]);
+                        conn.reader().consume(n);
                         n
                     }
                     Err(_) => 0,

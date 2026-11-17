@@ -11,6 +11,8 @@ browntls is in initial development. The workspace contains:
 - `crates/browntls-pki`: PKI types, PEM decoding and X.509 path validation.
 - `crates/browntls`: the TLS 1.2 / TLS 1.3 protocol, the crypto provider
   mount point, and the built-in providers.
+- `crates/browntls-tokio`: asynchronous TLS streams for Tokio
+  ([README](crates/browntls-tokio/README.md)).
 
 See [Architecture](docs/Architecture.md) for the design and
 [Roadmap](docs/Roadmap.md) for implementation status and gaps. The code has not

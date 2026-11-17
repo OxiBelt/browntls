@@ -843,3 +843,48 @@ fn complete_io_fails_when_the_transport_accepts_no_bytes() {
         .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
 }
+
+#[test]
+fn writes_into_a_full_send_buffer_queue_no_records() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.protocol_version(), Some(version::TLS13.version));
+    let _ = queued_tls(&mut client);
+
+    // An empty write sends nothing.
+    assert_eq!(client.writer().write(&[]).unwrap(), 0);
+    assert!(!client.wants_write());
+
+    // Fill the send buffer, then retry: the retries take nothing and must
+    // queue nothing either (not even empty records).
+    client.set_buffer_limit(Some(4096));
+    let mut taken = 0;
+    while let n @ 1.. = client.writer().write(&[0x5a; 1000]).unwrap() {
+        taken += n;
+    }
+    for _ in 0..1000 {
+        assert_eq!(client.writer().write(&[0x5a; 1000]).unwrap(), 0);
+    }
+    let tls = queued_tls(&mut client);
+    let mut records = 0;
+    let mut rest = tls.as_slice();
+    while !rest.is_empty() {
+        let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
+        // More than the AEAD tag and the content type: some plaintext.
+        assert!(len > 17, "a record without plaintext was queued");
+        rest = &rest[5 + len..];
+        records += 1;
+    }
+    assert!(records <= 5, "{records} records for {taken} bytes");
+
+    // The peer receives exactly the plaintext that was taken.
+    server.read_tls(&mut tls.as_slice()).unwrap();
+    server.process_new_packets().unwrap();
+    let mut received = vec![0; taken + 1];
+    assert_eq!(server.reader().read(&mut received).unwrap(), taken);
+}

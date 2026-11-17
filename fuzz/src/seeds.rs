@@ -78,6 +78,11 @@ pub const TARGETS: &[Target] = &[
         crate::tls_unbuffered::seeds,
     ),
     ("tls_ech", crate::tls_ech::run, crate::tls_ech::seeds),
+    (
+        "tls_kernel",
+        crate::tls_kernel::run,
+        crate::tls_kernel::seeds,
+    ),
     ("tls_psk", crate::tls_psk::run, crate::tls_psk::seeds),
     ("tls_quic", crate::tls_quic::run, crate::tls_quic::seeds),
     ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),

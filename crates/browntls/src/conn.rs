@@ -2,6 +2,8 @@
 //! the buffered I/O API around it.
 
 mod buffered;
+#[cfg(all(test, feature = "std", feature = "native"))]
+mod control_backlog_tests;
 
 use alloc::boxed::Box;
 use core::fmt::Debug;

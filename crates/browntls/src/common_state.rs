@@ -344,11 +344,30 @@ impl CommonState {
     }
 
     /// Whether the connection wants to read more TLS bytes: not when buffered
-    /// plaintext is waiting for the application, not after the peer closed.
+    /// plaintext is waiting for the application, not after the peer closed,
+    /// and not while too many control records wait to be written (see
+    /// [`Self::control_backlog_full`]).
     pub fn wants_read(&self) -> bool {
         self.received_plaintext.is_empty()
             && !self.has_received_close_notify
             && (self.may_send_application_data || self.sendable_tls.is_empty())
+            && !self.control_backlog_full()
+    }
+
+    /// Whether more control records (anything but application data) wait to
+    /// be written than the send buffer limit, capped at
+    /// [`DEFAULT_BUFFER_LIMIT`], allows. They are queued whatever the limit,
+    /// and the peer's requests call for some (KeyUpdate answers,
+    /// post-handshake authentication responses): past this backlog the
+    /// connection stops reading until the transport takes them.
+    pub(crate) fn control_backlog_full(&self) -> bool {
+        let bound = self
+            .sendable_tls
+            .limit()
+            .map_or(DEFAULT_BUFFER_LIMIT, |limit| {
+                limit.min(DEFAULT_BUFFER_LIMIT)
+            });
+        self.sendable_tls.control_len() > bound
     }
 
     /// Sets the limit on buffered outgoing data.
@@ -534,7 +553,11 @@ impl CommonState {
     }
 
     fn send_single_fragment(&mut self, m: OutboundPlainMessage<'_>) {
+        let application_data = m.typ == ContentType::ApplicationData;
         match self.record_layer.encrypt_outgoing(m) {
+            Ok(em) if application_data => {
+                self.sendable_tls.append(em.encode());
+            }
             Ok(em) => self.queue_tls_message(em),
             Err(err) => {
                 debug!("record encryption failed: {:?}", err);
@@ -543,8 +566,11 @@ impl CommonState {
         }
     }
 
+    /// Queues a control record (anything but application data). It is
+    /// queued whatever the send buffer limit, and counts towards
+    /// [`Self::control_backlog_full`] until it is written.
     pub(crate) fn queue_tls_message(&mut self, m: crate::msgs::message::OutboundOpaqueMessage) {
-        self.sendable_tls.append(m.encode());
+        self.sendable_tls.append_control(m.encode());
     }
 
     /// Sends a fatal alert (once) and returns `err` for the caller to surface.

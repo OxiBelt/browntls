@@ -144,9 +144,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   the handshake is answered with `no_renegotiation`, RFC 5746 §4.2).
 - Known deviations from RFC 9846 in the TLS 1.3 implementation, deliberate:
   a peer that sends more than eight `update_requested` KeyUpdates without
-  application data in between is cut off with `unexpected_message` (a local
-  resource bound); `user_canceled` counts towards the same bound as TLS 1.2
-  warning alerts; the RFC 6066 `max_fragment_length` extension is not
+  non-empty application data in between is cut off with `unexpected_message`
+  (a local resource bound); `user_canceled` counts towards the same bound as
+  TLS 1.2 warning alerts; the RFC 6066 `max_fragment_length` extension is not
   offered or accepted; a server keeps at most one post-handshake
   CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
   answer may be a CompressedCertificate with an algorithm the request

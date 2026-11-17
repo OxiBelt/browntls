@@ -310,7 +310,11 @@ impl State<ServerConnectionData> for ExpectTraffic {
         }
         match m.payload {
             MessagePayload::ApplicationData(payload) => {
-                cx.common.received_key_update_requests = 0;
+                // Only data counts as progress: an empty record must not
+                // let the peer keep requesting KeyUpdates.
+                if !payload.bytes().is_empty() {
+                    cx.common.received_key_update_requests = 0;
+                }
                 cx.common.take_received_plaintext(payload);
             }
             // RFC 9001 §6: QUIC has its own key update; a TLS KeyUpdate is

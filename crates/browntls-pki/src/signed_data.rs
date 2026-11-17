@@ -1,14 +1,32 @@
 //! Signed structures (`tbs || signatureAlgorithm || signature`) and
 //! signature verification through [`SignatureVerificationAlgorithm`].
 
-use crate::der::{self, Reader, tag};
+use core::fmt;
+
+use crate::der::{self, CRL_LEN_LIMIT, HexDebug, Reader, tag};
 use crate::error::Error;
 use crate::path::Budget;
 use crate::types::SignatureVerificationAlgorithm;
 
-/// The signed part of a certificate or CRL.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SignedData<'a> {
+/// Signed data: a message, the `AlgorithmIdentifier` of its signature, and
+/// the signature. Verify it with [`Self::verify_signature`].
+///
+/// [`Self::from_der`] reads the X.509 signed structure shared by
+/// certificates, CRLs and PKCS #10 certification requests:
+///
+/// ```text
+/// SEQUENCE { tbs SEQUENCE, signatureAlgorithm AlgorithmIdentifier,
+///            signature BIT STRING }
+/// ```
+///
+/// [`Self::from_parts`] takes the three parts of any other signature. Only
+/// the outer structure is read: the `tbs` contents are not interpreted (in
+/// particular, a certificate's `tbsCertificate.signature` is not compared
+/// with `signatureAlgorithm`; [`Cert`](crate::Cert) parsing does that), and
+/// verification checks the signature only, not validity periods, names or
+/// trust.
+#[derive(Clone, Copy)]
+pub struct SignedData<'a> {
     /// The complete DER encoding of the signed structure (`tbsCertificate`
     /// or `tbsCertList`), including its tag and length.
     pub(crate) data: &'a [u8],
@@ -19,6 +37,100 @@ pub(crate) struct SignedData<'a> {
 }
 
 impl<'a> SignedData<'a> {
+    /// Reads the signed structure of a DER certificate, CRL or certification
+    /// request (see above). The `tbs` element may be up to 4 GiB (as a CRL),
+    /// the algorithm and signature up to 65535 octets; the signature `BIT
+    /// STRING` must have no unused bits.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadDer`] for malformed or non-DER input, a `tbs` that is not
+    /// a `SEQUENCE` or a signature with unused bits; [`Error::TrailingData`]
+    /// for bytes after the structure or after its three elements.
+    pub fn from_der(der: &'a [u8]) -> Result<Self, Error> {
+        der::read_all(der, |r| {
+            let outer = r.expect_limited(tag::SEQUENCE, CRL_LEN_LIMIT)?;
+            der::read_all(outer, |signed| Self::read(signed, CRL_LEN_LIMIT))
+        })
+        .map(|(_, signed)| signed)
+    }
+
+    /// Wraps a message, the contents of its signature algorithm's
+    /// `AlgorithmIdentifier` (without the outer `SEQUENCE` tag and length,
+    /// as the [`alg_id`](crate::alg_id) constants hold them) and the
+    /// signature, for example from a protocol that signs with X.509
+    /// algorithm identifiers. Nothing is checked until verification.
+    #[must_use]
+    pub fn from_parts(message: &'a [u8], algorithm: &'a [u8], signature: &'a [u8]) -> Self {
+        Self {
+            data: message,
+            algorithm,
+            signature,
+        }
+    }
+
+    /// The signed message: the complete DER encoding of the `tbs` element
+    /// (with its tag and length) for [`Self::from_der`].
+    #[must_use]
+    pub fn message(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// The contents of the signature `AlgorithmIdentifier` (without the
+    /// outer `SEQUENCE` tag and length).
+    #[must_use]
+    pub fn algorithm(&self) -> &'a [u8] {
+        self.algorithm
+    }
+
+    /// The signature octets (the `BIT STRING` contents without the
+    /// unused-bit count for [`Self::from_der`]).
+    #[must_use]
+    pub fn signature(&self) -> &'a [u8] {
+        self.signature
+    }
+
+    /// Verifies the signature with the key in `spki`, given either as a
+    /// complete `SubjectPublicKeyInfo` `SEQUENCE` (such as a
+    /// [`SubjectPublicKeyInfoDer`](crate::SubjectPublicKeyInfoDer), which
+    /// dereferences to `[u8]`) or as its contents (such as
+    /// [`TrustAnchor::subject_public_key_info`](crate::TrustAnchor::subject_public_key_info)),
+    /// like path validation and [`CertRevocationList::verify_signature`].
+    /// The two forms cannot be confused: the complete form is one element,
+    /// the contents are two (an `AlgorithmIdentifier` and a `BIT STRING`).
+    /// The signature is checked by the first algorithm of
+    /// `supported_sig_algs` whose signature and public key
+    /// `AlgorithmIdentifier`s both match ([`AlgorithmIdentifier::matches_signature`],
+    /// [`AlgorithmIdentifier::matches_public_key`]: byte for byte, or by the
+    /// canonical form of `id-RSASSA-PSS` parameters), exactly as path
+    /// validation verifies certificate signatures.
+    ///
+    /// The cryptographic check, including its timing, is the chosen
+    /// algorithm's; the work here is linear in the input lengths.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::BadDer`] or [`Error::TrailingData`] if `spki` is neither
+    ///   form;
+    /// * [`Error::UnsupportedSignatureAlgorithm`] if no algorithm matches
+    ///   the signature algorithm;
+    /// * [`Error::UnsupportedSignatureAlgorithmForPublicKey`] if some do,
+    ///   but none for the key's type;
+    /// * [`Error::InvalidSignatureForPublicKey`] if the matching algorithm
+    ///   rejects the signature.
+    ///
+    /// [`AlgorithmIdentifier::matches_signature`]: crate::AlgorithmIdentifier::matches_signature
+    /// [`AlgorithmIdentifier::matches_public_key`]: crate::AlgorithmIdentifier::matches_public_key
+    /// [`CertRevocationList::verify_signature`]: crate::CertRevocationList::verify_signature
+    pub fn verify_signature(
+        &self,
+        supported_sig_algs: &[&dyn SignatureVerificationAlgorithm],
+        spki: &[u8],
+    ) -> Result<(), Error> {
+        let spki = Spki::from_der_or_contents(spki)?;
+        verify_signed_data(supported_sig_algs, &spki, self, &mut Budget::default())
+    }
+
     /// Reads `tbs, signatureAlgorithm, signature` from the contents of the
     /// outer `SEQUENCE`, with `limit` bounding the `tbs` length. Returns the
     /// `tbs` contents and the signed data.
@@ -40,6 +152,16 @@ impl<'a> SignedData<'a> {
                 signature,
             },
         ))
+    }
+}
+
+impl fmt::Debug for SignedData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignedData")
+            .field("message_len", &self.data.len())
+            .field("algorithm", &HexDebug(self.algorithm))
+            .field("signature", &HexDebug(self.signature))
+            .finish()
     }
 }
 

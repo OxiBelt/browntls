@@ -55,6 +55,13 @@ pub(crate) fn verify_dns_name(reference: &DnsName<'_>, san: Option<&[u8]>) -> Re
     Err(Error::CertNotValidForName)
 }
 
+/// Whether `name` is a valid presented `dNSName` (a relative name in the
+/// preferred syntax, optionally with a leading `*.` wildcard label followed
+/// by at least two labels): the names [`verify_dns_name`] can match.
+pub(crate) fn is_valid_presented_dns_id(name: &[u8]) -> bool {
+    is_valid_dns_id(name, IdRole::Presented, true)
+}
+
 /// Whether `presented` matches `reference`, interpreted according to `role`.
 pub(crate) fn presented_matches(
     presented: &[u8],

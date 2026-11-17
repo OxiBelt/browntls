@@ -253,14 +253,53 @@ fn post_handshake_auth_needs_the_client_offer() {
 /// its traffic keys are extracted so the test can send what a browntls
 /// server never would.
 struct ForgedServer {
+    suite: &'static browntls::Tls13CipherSuite,
+    /// The current `server_application_traffic_secret_N`.
+    secret: Vec<u8>,
     encrypter: Box<dyn MessageEncrypter>,
     seq: u64,
 }
 
+/// Keeps the server's first application traffic secret.
+#[derive(Debug, Default)]
+struct ServerTrafficSecret(std::sync::Mutex<Option<Vec<u8>>>);
+
+impl browntls::KeyLog for ServerTrafficSecret {
+    fn log(&self, label: &str, _client_random: &[u8], secret: &[u8]) {
+        if label == "SERVER_TRAFFIC_SECRET_0" {
+            *self.0.lock().unwrap() = Some(secret.to_vec());
+        }
+    }
+}
+
+/// HKDF-Expand-Label (RFC 9846 §7.1) with an empty context.
+fn expand_label(
+    suite: &browntls::Tls13CipherSuite,
+    secret: &[u8],
+    label: &[u8],
+    len: usize,
+) -> Vec<u8> {
+    let expander = suite
+        .hkdf_provider
+        .expander_for_okm(&browntls::crypto::tls13::OkmBlock::new(secret));
+    let out_len = u16::try_from(len).unwrap().to_be_bytes();
+    let label_len = [u8::try_from(6 + label.len()).unwrap()];
+    let mut out = vec![0u8; len];
+    expander
+        .expand_slice(
+            &[&out_len, &label_len, b"tls13 ", label, &[0]],
+            &mut out,
+        )
+        .unwrap();
+    out
+}
+
 impl ForgedServer {
     fn connect(client: ClientConfig, server_chain: &Chain) -> (ClientConnection, Self) {
+        let key_log = Arc::new(ServerTrafficSecret::default());
         let mut server_config = server_config(server_chain);
         server_config.enable_secret_extraction = true;
+        server_config.key_log = key_log.clone();
         let mut client = ClientConnection::new(Arc::new(client), server_name()).unwrap();
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
         handshake(&mut client, &mut server);
@@ -273,7 +312,33 @@ impl ForgedServer {
             _ => panic!("unexpected suite"),
         };
         let encrypter = suite.aead_alg.encrypter(key, iv);
-        (client, Self { encrypter, seq })
+        let secret = key_log.0.lock().unwrap().clone().unwrap();
+        let forged = Self {
+            suite,
+            secret,
+            encrypter,
+            seq,
+        };
+        (client, forged)
+    }
+
+    /// A KeyUpdate (RFC 9846 §4.7.3) with `update_requested`; later records
+    /// use the next traffic secret.
+    fn key_update_requested(&mut self) -> Vec<u8> {
+        let wire = self.record(ContentType::Handshake, &[24, 0, 0, 1, 1]);
+        let suite = self.suite;
+        let hash_len = suite.common.hash_provider.output_len();
+        self.secret = expand_label(suite, &self.secret, b"traffic upd", hash_len);
+        let key = expand_label(suite, &self.secret, b"key", suite.aead_alg.key_len());
+        let iv: [u8; 12] = expand_label(suite, &self.secret, b"iv", 12)
+            .try_into()
+            .unwrap();
+        self.encrypter = suite.aead_alg.encrypter(
+            browntls::crypto::cipher::AeadKey::new(&key),
+            browntls::crypto::cipher::Iv::new(iv),
+        );
+        self.seq = 0;
+        wire
     }
 
     fn record(&mut self, typ: ContentType, payload: &[u8]) -> Vec<u8> {
@@ -411,4 +476,62 @@ fn post_handshake_auth_is_tls13_only() {
     // TLS 1.2 authenticated the client in the handshake.
     assert!(server.peer_certificates().is_some());
     assert!(server.request_client_auth().is_err());
+}
+
+// ------------------------------------------- post-handshake request budgets
+
+#[test]
+fn empty_application_data_does_not_renew_the_certificate_request_budget() {
+    init_logging();
+    let (config, chain) = forged_pha_client();
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    for i in 0..8u8 {
+        feed(&mut client, &server.certificate_request(&[i; 8]));
+        // RFC 9846 §5.1 allows zero-length application data records.
+        feed(&mut client, &server.record(ContentType::ApplicationData, b""));
+        client.process_new_packets().unwrap();
+        take_tls(&mut client);
+    }
+    assert_eq!(client.post_handshake_auth_responses(), 8);
+    assert!(client.wants_read());
+
+    feed(&mut client, &server.certificate_request(&[8; 8]));
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::TooManyPostHandshakeCertificateRequests)
+    );
+    assert_eq!(client.post_handshake_auth_responses(), 8);
+}
+
+#[test]
+fn empty_application_data_does_not_renew_the_key_update_budget() {
+    init_logging();
+    let (config, chain) = forged_pha_client();
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    for _ in 0..8 {
+        feed(&mut client, &server.key_update_requested());
+        feed(&mut client, &server.record(ContentType::ApplicationData, b""));
+        client.process_new_packets().unwrap();
+        take_tls(&mut client);
+    }
+    feed(&mut client, &server.key_update_requested());
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::TooManyKeyUpdateRequests)
+    );
+}
+
+#[test]
+fn application_data_renews_the_key_update_budget() {
+    init_logging();
+    let (config, chain) = forged_pha_client();
+    let (mut client, mut server) = ForgedServer::connect(config, &chain);
+    for _ in 0..16 {
+        feed(&mut client, &server.key_update_requested());
+        feed(&mut client, &server.record(ContentType::ApplicationData, b"x"));
+        client.process_new_packets().unwrap();
+        let mut byte = [0u8; 1];
+        client.reader().read_exact(&mut byte).unwrap();
+        take_tls(&mut client);
+    }
 }

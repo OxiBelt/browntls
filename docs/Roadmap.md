@@ -151,11 +151,12 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   CertificateRequest outstanding (RFC 9846 §4.7.2 allows several), and its
   answer may be a CompressedCertificate with an algorithm the request
   offered, as in the handshake (RFC 8879 §4); a client answers at most
-  eight post-handshake CertificateRequests without application data from
-  the server in between and then aborts with `unexpected_message` (a local
-  resource bound: each answer costs a signature); a HelloRetryRequest cookie
-  expires after 60 seconds, is not bound to the client's address, and none
-  is sent when the first ClientHello offered 0-RTT.
+  eight post-handshake CertificateRequests without (non-empty) application
+  data from the server in between and then aborts with `unexpected_message`
+  (a local resource bound: each answer costs a signature); a
+  HelloRetryRequest cookie expires after 60 seconds, is not bound to the
+  client's address, and none is sent when the first ClientHello offered
+  0-RTT.
 - Post-handshake client authentication, stateless HelloRetryRequest
   cookies, the early exporter and the RFC 9266 channel binding have had one
   code review (its findings are addressed) and no security audit. The

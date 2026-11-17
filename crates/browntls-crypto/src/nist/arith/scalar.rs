@@ -273,7 +273,8 @@ macro_rules! scalar_type {
 
             /// The multiplicative inverse, computed in constant time; `None`
             /// for zero. Whether the value was zero is public through the
-            /// result.
+            /// result. The inversion's working state (the safegcd variables
+            /// and the intermediate `a^-1 R^-1`) is wiped.
             #[must_use]
             pub fn invert(&self) -> Option<Self> {
                 crate::nist::arith::scalar::invert::<$arith, $n>(&self.0).map(Self)

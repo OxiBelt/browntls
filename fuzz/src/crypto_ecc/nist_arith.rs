@@ -155,6 +155,9 @@ macro_rules! arith_ops {
                     Some(r) => {
                         assert_ne!(euler, &p - 1u8, "root of a non-square");
                         assert_eq!(r.square(), a, "sqrt");
+                        // The documented choice: the root that is itself a
+                        // square.
+                        assert!(r.sqrt().is_some(), "root choice");
                         out.push(r.to_bytes().to_vec());
                     }
                 }

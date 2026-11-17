@@ -13,6 +13,13 @@
 //!
 //! Numbers are five signed limbs `v[0] + v[1] 2^62 + ... + v[4] 2^248`; limbs
 //! 0..3 are in `[0, 2^62)` in normalised form and the top limb carries the sign.
+//!
+//! [`invert`] wipes its working state (`d`, `e`, `f`, `g`, which hold the
+//! input, its inverse and the gcd steps in signed form) before returning;
+//! the caller owns the result. The per-batch transition matrix and `zeta`
+//! are loop temporaries, left like other register and stack copies.
+
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use super::mont::barrier;
 
@@ -216,7 +223,20 @@ fn normalize(r: &mut [i64; 5], sign: i64, m: &Modulus) {
     propagate(r);
 }
 
-/// `x^-1 mod m` for `x < m` in constant time; `0` maps to `0`.
+/// Overwrites signed-62 state with zeros. `crate::zeroize` has no `i64`
+/// variant, and its volatile writes need `unsafe`, which this module does
+/// not use: the stores are plain, and passing the array to
+/// [`core::hint::black_box`], which the optimiser must assume reads it, keeps
+/// them from being removed as dead (best effort, like `crate::zeroize`).
+#[inline(never)]
+fn wipe_signed62(v: &mut [i64; 5]) {
+    *v = [0; 5];
+    core::hint::black_box(v);
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// `x^-1 mod m` for `x < m` in constant time; `0` maps to `0`. The working
+/// state is wiped before returning.
 pub(crate) fn invert(x: &[u64; 4], m: &Modulus) -> [u64; 4] {
     let mut d = [0i64; 5];
     let mut e = [1i64, 0, 0, 0, 0];
@@ -233,7 +253,11 @@ pub(crate) fn invert(x: &[u64; 4], m: &Modulus) -> [u64; 4] {
     debug_assert_eq!(g, [0; 5]);
     // f = +-1 (or +-m for x = 0, where d = 0); d holds +-x^-1.
     normalize(&mut d, f[4], m);
-    from_signed62(&d)
+    let out = from_signed62(&d);
+    for v in [&mut d, &mut e, &mut f, &mut g] {
+        wipe_signed62(v);
+    }
+    out
 }
 
 #[cfg(test)]

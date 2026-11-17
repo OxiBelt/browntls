@@ -215,6 +215,26 @@ macro_rules! arith_module {
         limbs = $n:literal,
         field_len = $field_len:literal
     ) => {
+        #[cfg(test)]
+        mod arith_backend_tests {
+            use crate::accel::Backends as _;
+            use crate::nist::arith::Arith as _;
+
+            /// The arithmetic types use the accelerated backend exactly when
+            /// the policy selects it: under the default policy (which no
+            /// library test changes), whenever the CPU has it.
+            #[test]
+            fn fast_follows_the_policy() {
+                let available = crate::nist::$backend::BmiAdx.available();
+                assert_eq!(super::ArithBackends::fast(), available);
+                assert_eq!(
+                    crate::accel::select::<crate::nist::$backend>()
+                        == crate::nist::$backend::BmiAdx,
+                    available
+                );
+            }
+        }
+
         /// The curve's field backends for the arithmetic types.
         #[derive(Clone, Copy, Debug)]
         struct ArithBackends;

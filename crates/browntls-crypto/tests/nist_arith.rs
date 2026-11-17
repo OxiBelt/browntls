@@ -14,7 +14,8 @@
 //! The acceleration policy is process-wide, so each curve runs every check
 //! in one test function, first under the default policy (the BMI2/ADX
 //! kernels where the CPU has them) and then under `Policy::NONE` (portable
-//! code); the curves have separate policies and run in parallel.
+//! code), and finally a chain that switches between them at every step;
+//! the curves have separate policies and run in parallel.
 
 use browntls_crypto::Error;
 use browntls_crypto::accel::{self, Algorithm, Policy};
@@ -283,6 +284,76 @@ macro_rules! curve_arith {
                 );
             }
 
+            /// Values cross backends: a long chain of field operations in
+            /// which every step runs under a policy drawn at random, so the
+            /// output of one backend is the input of the other, against
+            /// num-bigint. Scalars, whose arithmetic is the same on every
+            /// backend, ride along.
+            fn chain(rng: &mut XorShift) {
+                let (p, n) = (p(), n());
+                let mut x = big(&rng.bytes($fl)) % &p;
+                let mut a = fe(&x);
+                let mut k = big(&rng.bytes($fl)) % &n;
+                let mut s = sc(&k);
+                let mut switches = 0;
+                let mut last = Policy::PREFERRED;
+                for step in 0..3000 {
+                    let policy = if rng.next() & 1 == 0 {
+                        Policy::PREFERRED
+                    } else {
+                        Policy::NONE
+                    };
+                    switches += usize::from(policy != last);
+                    last = policy;
+                    accel::set_policy(Algorithm::$alg, policy).unwrap();
+                    let y = big(&rng.bytes($fl)) % &p;
+                    let b = fe(&y);
+                    match rng.next() % 7 {
+                        0 => {
+                            a += b;
+                            x = (&x + &y) % &p;
+                        }
+                        1 => {
+                            a -= &b;
+                            x = (&x + &p - &y) % &p;
+                        }
+                        2 => {
+                            a *= b;
+                            x = (&x * &y) % &p;
+                        }
+                        3 => {
+                            a = a.square();
+                            x = (&x * &x) % &p;
+                        }
+                        4 => {
+                            a = -a;
+                            x = (&p - &x) % &p;
+                        }
+                        5 => match a.invert() {
+                            Some(inv) => {
+                                a = inv;
+                                x = x.modpow(&(&p - 2u8), &p);
+                            }
+                            None => assert_eq!(x, BigUint::from(0u8)),
+                        },
+                        _ => {
+                            // A root of the square is the value or its negation.
+                            let r = a.square().sqrt().unwrap();
+                            assert!(r == a || r == -a, "step {step}: sqrt");
+                            a = r;
+                            x = big(&a.to_bytes());
+                        }
+                    }
+                    assert_eq!(big(&a.to_bytes()), x, "step {step}: field");
+                    let t = big(&rng.bytes($fl)) % &n;
+                    s = &s * &sc(&t) + Scalar::ONE;
+                    k = (&k * &t + 1u8) % &n;
+                    assert_eq!(big(&s.to_bytes()[..]), k, "step {step}: scalar");
+                }
+                assert!(switches > 1000, "{switches} backend switches");
+                accel::set_policy(Algorithm::$alg, Policy::PREFERRED).unwrap();
+            }
+
             #[test]
             fn field_and_scalar_on_every_backend() {
                 let mut rng = XorShift(0x5851_f42d_4c95_7f2d ^ $fl);
@@ -290,12 +361,18 @@ macro_rules! curve_arith {
                     accel::set_policy(Algorithm::$alg, policy).unwrap();
                     let status = accel::status(Algorithm::$alg);
                     println!("{status}");
-                    if policy == Policy::NONE {
+                    // A miswired backend choice must not pass silently: the
+                    // default policy runs the BMI2/ADX kernels where the CPU
+                    // has them.
+                    if policy == Policy::NONE || !status.available.dedicated {
                         assert_eq!(status.backend, "portable");
+                    } else {
+                        assert_eq!(status.backend, "BMI2/ADX");
                     }
                     field(&mut rng);
                     scalar(&mut rng);
                 }
+                chain(&mut rng);
                 accel::set_policy(Algorithm::$alg, Policy::PREFERRED).unwrap();
             }
         }

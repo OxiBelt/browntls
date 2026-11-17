@@ -3,6 +3,7 @@
 mod accept;
 #[cfg(feature = "std")]
 mod buffered;
+mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -12,6 +13,9 @@ use browntls_pki::{DnsName, UnixTime};
 
 #[cfg(feature = "std")]
 pub use buffered::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
+pub use unbuffered_acceptor::{
+    UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
+};
 
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
@@ -730,11 +734,7 @@ pub struct UnbufferedServerConnection {
 impl UnbufferedServerConnection {
     /// Prepares to accept a connection with `config`.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        let mut core = ConnectionCore::for_server(config)?;
-        core.data.early_data.set_in_place();
-        Ok(Self {
-            inner: crate::unbuffered::UnbufferedConnectionCommon::new(core),
-        })
+        Ok(Self::from_core(ConnectionCore::for_server(config)?))
     }
 
     /// The server name the client indicated, once its ClientHello was processed.

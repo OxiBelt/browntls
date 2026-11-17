@@ -58,6 +58,7 @@ use crate::msgs::deframer::DeframerSliceBuffer;
 use crate::msgs::message::HEADER_SIZE;
 use crate::record_layer::PreEncryptAction;
 use crate::suites::ExtractedSecrets;
+use crate::vecbuf::ChunkVecBuffer;
 
 /// The plaintext length of a KeyUpdate message (RFC 9846 §4.7.3): the
 /// handshake header and the one-byte request.
@@ -642,27 +643,38 @@ impl<Data> EncodeTlsData<'_, Data> {
     /// error carries that record's length. May be called again to copy
     /// more, into the rest of the same buffer or another one.
     pub fn encode(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncodeError> {
-        let queue = &mut self.conn.core.common_state.sendable_tls;
-        let mut written = 0;
-        while let Some(record) = queue.chunk() {
-            let len = record.len();
-            let Some(out) = outgoing_tls.get_mut(written..written + len) else {
-                if written == 0 {
-                    return Err(EncodeError::InsufficientSize(InsufficientSizeError {
-                        required_size: len,
-                    }));
-                }
-                break;
-            };
-            out.copy_from_slice(record);
-            queue.consume(len);
-            written += len;
-        }
+        let written = encode_queued(&mut self.conn.core.common_state.sendable_tls, outgoing_tls)?;
         if written > 0 {
             self.conn.wants_write = true;
         }
         Ok(written)
     }
+}
+
+/// Moves as many whole records from the front of `queue` as fit into
+/// `outgoing_tls`; fails, moving nothing, when not even the first one fits.
+/// Shared by [`EncodeTlsData::encode`] and
+/// [`UnbufferedAcceptedAlert::encode`](crate::server::UnbufferedAcceptedAlert::encode).
+pub(crate) fn encode_queued(
+    queue: &mut ChunkVecBuffer,
+    outgoing_tls: &mut [u8],
+) -> Result<usize, EncodeError> {
+    let mut written = 0;
+    while let Some(record) = queue.chunk() {
+        let len = record.len();
+        let Some(out) = outgoing_tls.get_mut(written..written + len) else {
+            if written == 0 {
+                return Err(EncodeError::InsufficientSize(InsufficientSizeError {
+                    required_size: len,
+                }));
+            }
+            break;
+        };
+        out.copy_from_slice(record);
+        queue.consume(len);
+        written += len;
+    }
+    Ok(written)
 }
 
 impl<Data> fmt::Debug for EncodeTlsData<'_, Data> {

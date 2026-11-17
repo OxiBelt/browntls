@@ -13,8 +13,8 @@
 //! delivery of a fuzzed amount of the transmitted bytes, optionally
 //! damaged, replayed or with bytes inserted; raw bytes; exporters,
 //! accessors, resumption data, early data refusal, post-handshake client
-//! authentication requests, reconnection (resumption and 0-RTT) and secret
-//! extraction.
+//! authentication requests, reconnection (resumption and 0-RTT), secret
+//! extraction, and the `UnbufferedAcceptor` (see `acceptor`).
 //!
 //! Checked properties:
 //! * application and 0-RTT data a side reads is a prefix of what the peer
@@ -28,6 +28,9 @@
 //!   authenticated was answered by the client, with its certificate;
 //! * nothing panics.
 
+mod acceptor;
+mod seeds;
+
 use std::sync::Arc;
 
 use browntls::client::{ClientConnectionData, UnbufferedClientConnection};
@@ -40,9 +43,8 @@ use browntls::unbuffered::{
 use browntls::{ClientConfig, CommonState, ServerConfig, SideData};
 
 use crate::input::{Input, put_short_field};
-
-mod seeds;
 use crate::tls_conn::setup::{Knobs, Pki, assert_prefix, assert_same_secrets, server_name};
+use seeds::Seed;
 pub use seeds::seeds;
 
 const MAX_OPS: usize = 64;
@@ -83,9 +85,11 @@ enum Op {
     RejectEarlyData,
     /// `request_client_auth` on the server (RFC 9846 §4.7.2).
     PostHandshakeAuth,
+    /// `chunk, flags`: the server's input through an `UnbufferedAcceptor`.
+    Accept,
 }
 
-const OPS: usize = Op::PostHandshakeAuth as usize + 1;
+const OPS: usize = Op::Accept as usize + 1;
 
 const ALL_OPS: [Op; OPS] = [
     Op::Step,
@@ -101,6 +105,7 @@ const ALL_OPS: [Op; OPS] = [
     Op::ResumptionData,
     Op::RejectEarlyData,
     Op::PostHandshakeAuth,
+    Op::Accept,
 ];
 
 /// What one step does with the state it gets.
@@ -843,6 +848,7 @@ pub fn run(data: &[u8]) {
                 }
             }
             Op::PostHandshakeAuth => world.post_handshake_auth(),
+            Op::Accept => world.accept(&mut input),
         }
     }
     world.accessors();

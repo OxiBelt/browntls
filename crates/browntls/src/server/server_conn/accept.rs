@@ -1,6 +1,6 @@
-//! Reading a ClientHello before a [`ServerConfig`] is chosen: the part of
-//! the buffered [`Acceptor`](super::Acceptor) (`std`) that needs no `std`,
-//! so that an unbuffered acceptor can share it.
+//! Reading a ClientHello before a [`ServerConfig`] is chosen: the part the
+//! buffered [`Acceptor`](super::Acceptor) (`std`) and the
+//! [`UnbufferedAcceptor`](super::UnbufferedAcceptor) share.
 //!
 //! Both drive a [`ConnectionCore`] parked in [`Accepting`]: the first
 //! ClientHello is read with [`ConnectionCore::first_handshake_message`] and

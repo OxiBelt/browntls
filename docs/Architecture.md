@@ -308,8 +308,8 @@ When it is set, a HelloRetryRequest carries a cookie that seals
 The connection that sent the HelloRetryRequest keeps its state and requires
 the second ClientHello to echo the cookie byte for byte
 (`missing_extension` if absent, `illegal_parameter` if different). A fresh
-`ServerConnection` or `Acceptor` whose first ClientHello carries a cookie
-opens it instead: it must authenticate under the sealer's current or
+server connection, or an acceptor (`Acceptor`, `UnbufferedAcceptor`), whose
+first ClientHello carries a cookie opens it instead: it must authenticate under the sealer's current or
 previous key, carry the label, parse exactly and be at most 60 seconds old
 (in either direction, for servers sharing a key); the suite and group must
 still be configured, the hash length must match the suite's, and the
@@ -575,6 +575,26 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   types are there too: `ech_status` on both sides, the server's
   post-handshake authentication methods, and the client's
   `delegated_credential` and `post_handshake_auth_responses`.
+- Acceptors read the first ClientHello before a `ServerConfig` is chosen:
+  `Acceptor` (buffered, `std`) and `UnbufferedAcceptor` (no `std`; the
+  caller's buffer and `discard`, as `process_tls_records`). Both drive one
+  `ConnectionCore` parked in a state that handles nothing
+  (`server/server_conn/accept.rs`): `first_handshake_message` reads
+  plaintext records (only `change_cipher_spec` may come first, for a
+  stateless retry), then the ClientHello checks that need no configuration
+  run (`hs::process_client_hello`). `into_connection(config)` applies the
+  checks and settings of a connection created with `config`
+  (`ServerConfig::apply_to`), lets `config`'s ECH keys replace the
+  ClientHello with the inner one, and hands it to
+  `ExpectClientHello::with_certified_key`. The same core (deframer, joiner,
+  common state) goes on, so the connection behaves as one created with
+  `config` that read the same bytes; an unbuffered one reports 0-RTT data in
+  place, from the bytes the acceptor did not discard. Every refusal fails the
+  core (`ConnectionCore::fail`, which forgets a TLS 1.2 session it resumed)
+  and queues a fatal alert, `internal_error` for a refused configuration;
+  `AcceptedAlert::write` or `UnbufferedAcceptedAlert::encode` (the
+  `EncodeTlsData` size contract) copies it out. A call after completion
+  fails with an empty alert.
 
 ### Asynchronous streams (`browntls-tokio`)
 
@@ -812,8 +832,8 @@ back-end server that terminates it.
   missing, repeated, out-of-order or ECH references, and non-zero padding,
   are `illegal_parameter`), must carry an `inner` ECH extension and offer
   nothing below TLS 1.3, and replaces the outer ClientHello for the rest of
-  the handshake (also through `Acceptor`, using the configuration passed to
-  `Accepted::into_connection`). The ServerHello random and, after a
+  the handshake (also through either acceptor, using the configuration
+  passed to `into_connection`). The ServerHello random and, after a
   HelloRetryRequest, its ECH extension carry the acceptance confirmations.
   The second ClientHello must repeat the `config_id` and cipher suite with an
   empty `enc` and decrypt with the same HPKE context (`missing_extension`,
@@ -867,8 +887,8 @@ back-end server that terminates it.
   HelloRetryRequest the second ClientHello must carry `inner` again
   (`missing_extension` otherwise), and one that adds it is
   `illegal_parameter`. A ClientHello without ECH is served as usual.
-  `ech_backend` and `ech` exclude each other (`ServerConnection::new` and
-  `Accepted::into_connection` fail).
+  `ech_backend` and `ech` exclude each other (connection creation and the
+  acceptors' `into_connection` fail).
 - Client with a random identifier (`EchConfig::with_random_config_id`,
   §10.4): one random `config_id`, repeated after a HelloRetryRequest, for
   servers known to use trial decryption.

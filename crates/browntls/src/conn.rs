@@ -69,6 +69,13 @@ pub(crate) trait State<Data>: Send + Sync {
 
     /// Hook called when a record failed to decrypt.
     fn handle_decrypt_error(&self) {}
+
+    /// Kernel offload: the kernel delivered non-empty application data,
+    /// which renews the budgets of requests the peer may make without
+    /// sending data (the state machine sees no application data records).
+    fn received_application_data(&mut self, common: &mut CommonState) {
+        common.received_key_update_requests = 0;
+    }
 }
 
 /// What a state handler sees besides the message.
@@ -94,6 +101,12 @@ pub trait SideData: Debug + Send + Sync {
     /// server left in place (clears the flag).
     #[doc(hidden)]
     fn take_early_data_in_place(&mut self) -> bool {
+        false
+    }
+
+    /// Whether accepted 0-RTT data is buffered unread (server only).
+    #[doc(hidden)]
+    fn has_unread_early_data(&self) -> bool {
         false
     }
 }
@@ -415,7 +428,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         err
     }
 
-    fn process_msg(
+    pub(crate) fn process_msg(
         common: &mut CommonState,
         data: &mut Data,
         state: Box<dyn State<Data>>,
@@ -577,10 +590,19 @@ impl<Data: SideData> ConnectionCore<Data> {
     }
 
     pub(crate) fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
+        self.extracted_secrets()
+    }
+
+    /// The current secrets in the form the kernel takes, with the next
+    /// sequence numbers.
+    pub(crate) fn extracted_secrets(&self) -> Result<ExtractedSecrets, Error> {
         if !self.common_state.enable_secret_extraction {
             return Err(Error::general("Secret extraction is disabled"));
         }
-        let st = self.state?;
+        let st = match &self.state {
+            Ok(st) => st,
+            Err(err) => return Err(err.clone()),
+        };
         let record_layer = &self.common_state.record_layer;
         let PartiallyExtractedSecrets { tx, rx } = st.extract_secrets()?;
         let (tx_seq, rx_seq) = (record_layer.write_seq(), record_layer.read_seq());

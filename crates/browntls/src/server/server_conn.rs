@@ -607,6 +607,26 @@ impl SideData for ServerConnectionData {
     fn take_early_data_in_place(&mut self) -> bool {
         core::mem::take(&mut self.early_data.in_place_pending)
     }
+
+    fn has_unread_early_data(&self) -> bool {
+        matches!(&self.early_data.kind, EarlyDataKind::Accepted { received, .. } if !received.is_empty())
+    }
+}
+
+impl crate::kernel::KernelConnection<ServerConnectionData> {
+    /// Asks the client for a certificate after the handshake (RFC 9846
+    /// §4.7.2), as `ServerConnection::request_client_auth` does: the
+    /// CertificateRequest is queued for the kernel, and the client's answer
+    /// arrives through [`Self::handle_record`].
+    pub fn request_client_auth(&mut self) -> Result<(), Error> {
+        self.core.request_client_auth()
+    }
+
+    /// The state of the most recent post-handshake authentication, before
+    /// or after the handover, or `None` if none was requested.
+    pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
+        self.core.data.post_handshake_auth
+    }
 }
 
 impl ServerConnectionData {
@@ -821,6 +841,19 @@ impl UnbufferedServerConnection {
     /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()
+    }
+
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
+    pub fn dangerous_into_kernel_connection(
+        self,
+    ) -> Result<
+        (
+            crate::suites::ExtractedSecrets,
+            crate::kernel::KernelConnection<ServerConnectionData>,
+        ),
+        Error,
+    > {
+        self.inner.dangerous_into_kernel_connection()
     }
 }
 

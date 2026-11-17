@@ -728,6 +728,58 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
 
+### Kernel TLS offload (`browntls::kernel`)
+
+Linux can protect the records of a TCP connection itself (kernel TLS):
+`setsockopt(TCP_ULP, "tls")`, then the traffic keys with `TLS_TX` and
+`TLS_RX`. The handshake stays in browntls. Afterwards a buffered or unbuffered
+connection, client or server, is turned into a `KernelConnection` with
+`dangerous_into_kernel_connection`, which returns the `ExtractedSecrets` to
+install. The core does no system calls; `browntls-ktls` drives the socket.
+
+The kernel decrypts application data for the application and hands every
+other record over, decrypted, with its content type. Those records go to
+`KernelConnection::handle_record`, which runs them through the same state
+machine as in userspace: handshake messages are joined across records and a
+KeyUpdate must end its record (RFC 8446 §5.1), TLS 1.3 KeyUpdate and
+NewSessionTicket (stored in the client's session store), post-handshake client
+authentication in both roles, alerts and `close_notify`, and the TLS 1.2
+HelloRequest. Every record the connection would send (a KeyUpdate, an alert, a
+post-handshake authentication message) is queued as plaintext instead of being
+encrypted, one fragment per record within the negotiated fragment length.
+`pop_output` returns, in order, `Record`s to send with the kernel's
+`TLS_SET_RECORD_TYPE`, `TxKeys` to install after the KeyUpdate that announced
+them and `RxKeys` to install before the next record is read (Linux stops
+reading after a TLS 1.3 KeyUpdate until it has them).
+
+The handover refuses, without losing anything, while something is in flight
+that the kernel could not continue: unread received data or accepted 0-RTT
+data, received bytes not yet processed or part of a record (the kernel must
+start at a record boundary), queued records or plaintext, or a KeyUpdate still
+owed. `kernel_handoff_blocker` reports which, so a driver can drain it first;
+`dangerous_extract_secrets` applies the same checks. Secret extraction must be
+enabled, QUIC connections and suites without a kernel form (TLS 1.2 AES-CBC,
+AES-128-CCM-8) are refused. A partly received handshake message is carried
+over and completed from the kernel's records.
+
+The library's limits stay in force. The driver reports the application data
+records the kernel sent (`records_sent`); at the suite's confidentiality limit
+(RFC 9846 §5.5) a TLS 1.3 connection queues a key refresh and a TLS 1.2
+connection `close_notify`. The peer's KeyUpdate and post-handshake
+authentication requests are bounded per application data received, which the
+driver reports (`application_data_received`). `max_tx_payload_len` gives the
+fragment length the peer's `record_size_limit` or the configured
+`max_fragment_size` asks for, which the kernel must be told
+(`TLS_TX_MAX_PAYLOAD_LEN`, Linux 6.18). The kernel does not pad TLS 1.3
+records or enforce the record size limit we announced on what it receives.
+
+Tests drive a `KernelConnection` against a userspace stand-in for the kernel
+that protects records with the extracted secrets as Linux does
+(`crates/browntls/tests/cases/kernel.rs`): data in both directions, KeyUpdate
+from either side, tickets after the handover, post-handshake authentication,
+closure, the blockers, the limits and malformed records, for every suite with a
+kernel form on both providers.
+
 ### Delegated credentials (RFC 9345)
 
 `browntls::delegated_credential` holds the `DelegatedCredential` codec,

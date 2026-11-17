@@ -285,6 +285,12 @@ impl RecordLayer {
         self.has_decrypted
     }
 
+    /// Kernel offload: the kernel sent `records` records under the current
+    /// write key, which used up their sequence numbers.
+    pub(crate) fn note_kernel_records(&mut self, records: u64) {
+        self.write_seq = self.write_seq.saturating_add(records);
+    }
+
     pub(crate) fn write_seq(&self) -> u64 {
         self.write_seq
     }

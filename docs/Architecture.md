@@ -20,6 +20,7 @@ browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
        ^
        |
 browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls
+browntls-ktls       Linux kernel TLS offload of browntls connections
 ```
 
 | Crate | Role | `unsafe` |
@@ -28,6 +29,7 @@ browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API | Forbidden |
+| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -795,6 +797,72 @@ that protects records with the extracted secrets as Linux does
 from either side, tickets after the handover, post-handshake authentication,
 closure, the blockers, the limits and malformed records, for every suite with a
 kernel form on both providers.
+
+### Linux kernel TLS (`browntls-ktls`)
+
+`KtlsStream::new` takes a buffered `ClientConnection` or `ServerConnection`
+(the sealed `Offload` trait) and a connected TCP socket. It refuses a
+connection that cannot be offloaded before touching the socket, then attaches
+the `tls` upper layer protocol, which fails without kernel support and
+otherwise leaves the bytes alone until keys are installed. It then clears the
+transient blockers: it completes the handshake with `complete_io`, writes the
+queued records, moves received plaintext and accepted 0-RTT data into its own
+buffer (read before anything from the kernel), and reads exactly
+`bytes_to_record_boundary` bytes while a record is incomplete, so the kernel
+starts at a record boundary. Until here every failure is
+`HandoffError::Refused`, which returns the connection, the socket and any
+plaintext already taken; the connection can go on in userspace. Then it
+installs `TLS_TX`, `TLS_TX_MAX_PAYLOAD_LEN` when the peer asked for smaller
+records (after `TLS_TX`, so the kernel applies the TLS 1.3 bound) and
+`TLS_RX`; a failure from here on is `HandoffError::Failed`.
+
+`CryptoInfo` builds the `tls12_crypto_info_*` option values (AES-GCM-128/256,
+AES-CCM-128, ChaCha20-Poly1305) byte by byte in the kernel's layout and wipes
+them on drop. Reads use `recvmsg` with room for `TLS_GET_RECORD_TYPE`:
+application data goes to the caller and is reported with
+`application_data_received`; any other record is collected until `MSG_EOR`
+(the kernel continues a partly read record on the next call, never mixing
+types) and given to `handle_record`. Each output is then carried out in order:
+records with `sendmsg` and `TLS_SET_RECORD_TYPE`, new keys with `TLS_TX` or
+`TLS_RX` from sequence number zero. The kernel takes a control record within
+the payload limit whole or, on a full non-blocking socket, not at all
+(`EAGAIN`); the stream then keeps it and the outputs after it in a backlog
+that is carried out before anything else is sent, so no application data or
+transmit key change overtakes it. New receive keys in the backlog are
+installed at once, so reading never waits for room to send: `read` sends what
+it can and goes on, a `write` that sent bytes reports them even if the
+outputs it triggered must wait, and `flush` sends what is left (including a
+fatal alert after a failure). The descriptor's flags are
+never changed. Writes are one plain `send` each, which closes its last record,
+so `n` bytes make at most `n.div_ceil(max)` records (unless the kernel closes
+records early under memory pressure); that bound is reported with
+`records_sent`, and a write takes at most 64 records so the confidentiality
+limit is met in steps (it can be passed by fewer than 64 records). Bytes sent
+on the socket directly (`sendfile`) must be reported with
+`KtlsStream::records_sent`. TCP closing without `close_notify` is
+`UnexpectedEof`, as is every later call. A refused handover can be retried on
+the same socket (an attached `tls` ULP is accepted), and a peer
+`record_size_limit` the kernel cannot honour (before Linux 6.18) is refused
+before any key is installed. Linux pauses reception whenever a handshake record
+starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
+then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
+hanging. A close_notify followed by more data before the handover is refused.
+
+`src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
+`unsafe_code = "deny"`: `setsockopt`, `fcntl`, and `sendmsg`/`recvmsg` with one
+control message. Its invariants are listed at its top: borrowed descriptors,
+pointers only into live values with their lengths, control messages built and
+read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
+sized with `CMSG_SPACE`, and no value created from kernel output but plain
+integers. The tests (`crates/browntls-ktls/tests/offload.rs`) run over
+loopback TCP against the running kernel: both ends offloaded for every suite
+with KeyUpdates from both sides, an offloaded end against a userspace peer in
+each role (tickets, a KeyUpdate from the userspace end, data that arrived with
+the Finished, closure, and the recorded TLS 1.2 explicit nonces, which must
+never repeat), a peer's smaller `record_size_limit`, truncation, and a refused
+handover. They are skipped without the `tls` module unless
+`BROWNTLS_KTLS_REQUIRED=1`, which the x86-64 and aarch64 CI jobs set after
+`modprobe tls`.
 
 ### Delegated credentials (RFC 9345)
 

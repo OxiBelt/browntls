@@ -3,8 +3,9 @@
 browntls is an independent Rust TLS library project with intended kernel
 integration. Its architecture is described in [Architecture](docs/Architecture.md)
 and its status in [Roadmap](docs/Roadmap.md). browntls does not depend on rustls
-at run time (rustls is only an interoperability test oracle), and no kernel
-mechanism has been designed yet.
+at run time (rustls is only an interoperability test oracle). Linux kernel TLS
+offload exists (`browntls::kernel`, `browntls-ktls`); no other kernel mechanism
+has been designed yet.
 
 ## Source of truth
 
@@ -17,12 +18,15 @@ and disclosure.
 Current layout:
 
 - Root Markdown files: project and contributor guidance.
-- `crates/browntls-crypto/`: primitives and architecture backends (the only
-  crate permitted to contain `unsafe`, confined to backend modules).
+- `crates/browntls-crypto/`: primitives and architecture backends (`unsafe`
+  confined to backend modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
 - `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls`
   (`TlsConnector`, `TlsAcceptor`).
+- `crates/browntls-ktls/`: Linux kernel TLS offload of `browntls` connections
+  (`KtlsStream`); its `src/sys.rs` is the only other place `unsafe` is
+  permitted (kernel TLS system calls).
 - `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
   (test tooling, not published).
 - `crates/browntls-entropy/`: statistical entropy checks of generated keys,

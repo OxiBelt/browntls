@@ -5,6 +5,7 @@ members = [
   "crates/browntls-pki",
   "crates/browntls",
   "crates/browntls-tokio",
+  "crates/browntls-ktls",
   "crates/browntls-e2e",
   "crates/browntls-entropy",
 ]

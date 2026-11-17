@@ -193,6 +193,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// record boundary, and sets the received plaintext (accepted 0-RTT
     /// data first) aside.
     ///
+    /// 0-RTT data the server accepted and has not read with `early_data()`
+    /// comes first in that plaintext, and can be replayed by an attacker:
+    /// [`KernelHandoff::early_data_len`](crate::kernel::KernelHandoff::early_data_len)
+    /// tells where it ends. The transport must not read ahead (see
+    /// [`crate::kernel`]).
+    ///
     /// The configuration must have `enable_secret_extraction` set. On
     /// failure the stream comes back in the
     /// [`KernelHandoffError`](crate::kernel::KernelHandoffError), with the

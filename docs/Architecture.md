@@ -742,8 +742,14 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `bytes_to_record_boundary` bytes while a record is incomplete and
   processes them (answering a KeyUpdate received on the way), and moves the
   received plaintext, accepted 0-RTT data first, into a buffer of its own.
-  Every round clears the blocker it met, moves bytes or returns, so it
-  cannot spin. It resolves to a `KernelHandoff` (the transport, the
+  That 0-RTT data can be replayed and is never returned by reads of the
+  stream, so `early_data_len` tells where it ends. Every round clears the
+  blocker it met, moves bytes or returns, so it cannot spin; bytes after
+  the peer's `close_notify`, a whole record or part of one, fail it at once
+  (the connection would never process them), as does a connection that has
+  failed before, with its own error. The transport must not read ahead of
+  what it is asked for: bytes it held back would never reach the kernel.
+  It resolves to a `KernelHandoff` (the transport, the
   connection without a blocker, the plaintext to read first), which can
   also go on in userspace when the kernel declines. A blocker that driving
   the stream cannot clear is `Unsupported`; every failure returns the
@@ -754,7 +760,9 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   extracted secrets, over a transport that cuts records short and holds
   writes back: no byte is lost or read twice in either direction with
   unread plaintext, a partial record, records not yet written, a KeyUpdate
-  in flight and declined or accepted 0-RTT data.
+  in flight and declined or accepted 0-RTT data; a read error kept for the
+  next read, data after `close_notify` and a failed connection fail the
+  handoff.
 
 ### Kernel TLS offload (`browntls::kernel`)
 

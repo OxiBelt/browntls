@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use browntls::kernel::KernelHandoffBlocker;
 use browntls::server::{ServerSessionMemoryCache, StoresServerSessions};
 use browntls::{ClientConfig, ServerConfig, SideData, SupportedProtocolVersion};
 use browntls_tokio::client::EarlyDataNotResent;
@@ -41,6 +42,8 @@ const TLS13_OVERHEAD: usize = 5 + 1 + 16;
 struct GateState {
     /// Bytes the reader may still take; `None` is no limit.
     read_budget: Option<usize>,
+    /// Reads fail with `ConnectionReset` once the budget is spent.
+    reset_when_spent: bool,
     /// Reads report end of file, whatever is still on the way.
     cut: bool,
     /// Whether writes go through.
@@ -57,6 +60,7 @@ impl Gate {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(GateState {
             read_budget: None,
+            reset_when_spent: false,
             cut: false,
             write_open: true,
             read_waker: None,
@@ -71,6 +75,11 @@ impl Gate {
         if let Some(waker) = state.read_waker.take() {
             waker.wake();
         }
+    }
+
+    /// Makes reads fail once the byte budget is spent, instead of waiting.
+    fn reset_when_spent(&self) {
+        self.0.lock().unwrap().reset_when_spent = true;
     }
 
     /// Ends the reader's side of the transport here.
@@ -111,6 +120,9 @@ impl AsyncRead for Gated {
             return Poll::Ready(Ok(()));
         }
         let take = match state.read_budget {
+            Some(0) if state.reset_when_spent => {
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+            }
             Some(0) => {
                 state.read_waker = Some(cx.waker().clone());
                 return Poll::Pending;
@@ -473,6 +485,7 @@ async fn a_stream_that_cannot_be_offloaded_comes_back_whole() {
             stream: mut client,
             received,
             error,
+            ..
         } = client.into_kernel_handoff().await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
         assert!(received.is_empty());
@@ -583,6 +596,87 @@ async fn a_transport_that_ends_inside_a_record_fails_the_handoff() {
     assert_eq!(err.received, &down[1..4000]);
 }
 
+/// The connection stops at the peer's `close_notify`. Bytes that follow
+/// it, a whole record or the start of one, would stay unprocessed for
+/// good: the handoff fails at once instead of waiting for the rest.
+#[tokio::test]
+async fn data_after_close_notify_fails_the_handoff() {
+    for version in versions() {
+        for trailing in [&[0x17u8][..], &[0x17, 3, 3, 0, 1, 0]] {
+            let Ends {
+                mut client,
+                mut server,
+                ..
+            } = connect(version, |_, _| ()).await;
+            server.get_mut().1.send_close_notify();
+            server.flush().await.unwrap();
+            server.get_mut().0.write_all(trailing).await.unwrap();
+            // Reads the close_notify and, with it, what follows.
+            assert_eq!(client.read(&mut [0u8; 8]).await.unwrap(), 0);
+            assert_eq!(
+                client.get_ref().1.kernel_handoff_blocker(),
+                Some(KernelHandoffBlocker::UnprocessedInput)
+            );
+
+            let err = timeout(Duration::from_secs(5), client.into_kernel_handoff())
+                .await
+                .expect("the handoff waited for the rest of a record")
+                .unwrap_err();
+            assert_eq!(err.error.kind(), io::ErrorKind::InvalidData, "{err}");
+            assert!(err.received.is_empty());
+        }
+    }
+}
+
+/// An error a read kept for the next read (it had data to return first) is
+/// reported by the handoff, not dropped.
+#[tokio::test]
+async fn a_kept_read_error_fails_the_handoff() {
+    let Ends {
+        mut client,
+        mut server,
+        gate,
+    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    // The transport delivers one record and then fails: the read below
+    // returns the record's plaintext and keeps the error.
+    gate.allow_read(Some(TLS13_OVERHEAD + 2));
+    gate.reset_when_spent();
+    server.write_all(b"ok").await.unwrap();
+    server.flush().await.unwrap();
+    let mut buf = [0u8; 64];
+    assert_eq!(client.read(&mut buf).await.unwrap(), 2);
+    assert_eq!(&buf[..2], b"ok");
+
+    let err = timeout(LIMIT, client.into_kernel_handoff())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.error.kind(), io::ErrorKind::ConnectionReset, "{err}");
+    assert!(err.received.is_empty());
+}
+
+/// A connection that has failed reports its error again, not a blocker
+/// that would pass for a connection merely unfit for the kernel.
+#[tokio::test]
+async fn a_failed_connection_fails_the_handoff() {
+    let Ends {
+        mut client,
+        mut server,
+        ..
+    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    // A record that does not open.
+    let (transport, _) = server.get_mut();
+    transport.write_all(&[0x17, 3, 3, 0, 1, 0]).await.unwrap();
+    let err = client.read(&mut [0u8; 8]).await.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    let err = timeout(LIMIT, client.into_kernel_handoff())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.error.kind(), io::ErrorKind::InvalidData, "{err}");
+}
+
 struct EarlySetup {
     pki: Pki,
     cache: Arc<dyn StoresServerSessions>,
@@ -682,6 +776,7 @@ async fn early_data_that_is_not_resent_is_reported_by_the_handoff() {
             stream: mut client,
             received,
             error,
+            ..
         } = client.into_kernel_handoff().await.unwrap_err();
         let not_resent = error
             .get_ref()
@@ -712,7 +807,7 @@ async fn early_data_that_is_not_resent_is_reported_by_the_handoff() {
 }
 
 /// 0-RTT data a server accepted and did not read comes first in
-/// `received`.
+/// `received`, and `early_data_len` tells where it ends.
 #[tokio::test]
 async fn accepted_early_data_is_returned_first() {
     let setup = EarlySetup::new(&[]);
@@ -734,9 +829,12 @@ async fn accepted_early_data_is_returned_first() {
         let mut first = [0u8; 1];
         server.read_exact(&mut first).await.unwrap();
         let handoff = server.into_kernel_handoff().await.unwrap();
+        // The 0-RTT data can be told from the rest: it can be replayed.
+        let early = handoff.early_data_len();
         let (_, _, received) = handoff.into_parts();
         assert_eq!(first, *b" ");
-        assert_eq!(received, b"early requestand the rest");
+        assert_eq!(&received[..early], b"early request");
+        assert_eq!(&received[early..], b"and the rest");
     };
     timeout(LIMIT, async { tokio::join!(client_side, server_side) })
         .await

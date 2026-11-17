@@ -1105,6 +1105,22 @@ NIST public keys must be uncompressed points on the curve, X25519/X448
 all-zero shared secrets are rejected, and a failed `open` leaves the sequence
 number unchanged. The PSK and authenticated modes are not implemented.
 
+`browntls_crypto::nist::{p256, p384, p521}` expose, besides keys, ECDH and
+ECDSA, the curves' arithmetic for other protocols, named after the RustCrypto
+`primeorder` / `elliptic-curve` 0.14 types without implementing their
+traits: `FieldElement` (integers modulo `p`) and `Scalar` (integers modulo
+the group order `n`). Both stay in the Montgomery form of the curve code,
+always fully reduced; decoders reject values at or above the modulus
+(`Scalar::from_bytes_reduced` reduces up to twice the scalar length on
+request). Arithmetic, inversion (safegcd), square roots (`p = 3 mod 4`) and
+comparisons are constant time; an `Option` or `Result` reveals only whether
+a value was zero, a root exists or an encoding was canonical. Field
+operations run on the backend the curve's policy selects at each call
+(BMI2/ADX or portable) and are not routed by `accel::load`; scalar
+arithmetic is the portable Montgomery code on every backend. `Scalar` is
+zeroised on drop; `FieldElement` is `Copy` and implements `Zeroize` for
+callers that hold secret ones; `Debug` prints neither value.
+
 The table states the design target; [Status](#status) records what has been
 implemented and executed.
 
@@ -1313,8 +1329,8 @@ check, of 2048-, 3072- and 4096-bit keys (one stream per size; keys of
 other sizes are not routed). That includes their uses by the native TLS
 provider once an application calls `load::enable`; for AES-GCM that means
 keys created after the call. AES-CCM, AES-CBC, the AES block types, RSA
-verification, FFDHE, X448, Ed25519, Ed448 and the hash functions are not
-routed.
+verification, FFDHE, X448, Ed25519, Ed448, the hash functions and the
+public NIST arithmetic types (`FieldElement`, `Scalar`) are not routed.
 
 ### Operating-system interface
 

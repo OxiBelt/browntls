@@ -219,12 +219,18 @@ pub(crate) fn fe_invert<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
 /// Left-to-right fixed 4-bit windows over the public exponent `p - 2`; the
 /// operation sequence is independent of `a`.
 pub(crate) fn fe_invert_fermat<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
+    fe_pow_pubexp::<C, N>(a, &C::P_MINUS_2)
+}
+
+/// `a^exp` in the field with the curve's multiplication, for a **public**
+/// exponent: left-to-right fixed 4-bit windows, so the operation sequence
+/// depends only on `exp`, never on `a`.
+pub(crate) fn fe_pow_pubexp<C: Curve<N>, const N: usize>(a: &Fe<N>, exp: &[u64; N]) -> Fe<N> {
     let mut table = [[0u64; N]; 16];
     table[0] = C::ONE;
     for i in 1..16 {
         table[i] = C::mul(&table[i - 1], a);
     }
-    let exp = &C::P_MINUS_2;
     let mut w = 16 * N;
     while w > 0 && mont::bits(exp, 4 * (w - 1), 4) == 0 {
         w -= 1;

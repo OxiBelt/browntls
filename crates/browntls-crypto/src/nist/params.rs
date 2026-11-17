@@ -13,6 +13,7 @@ use super::p521_field;
 use super::safegcd;
 use super::tables;
 use super::wide;
+use crate::zeroize::zeroize_u64;
 
 /// DER contents of `id-ecPublicKey` (1.2.840.10045.2.1).
 pub(crate) const ID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
@@ -111,21 +112,24 @@ const P256_N_R3: [u64; 4] = mont::mont_mul_const(
 );
 
 /// P-256 field inversion in the Montgomery domain of backend `C`:
-/// `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form.
+/// `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form. The
+/// intermediate `a^-1 R^-1` is wiped.
 #[inline]
 pub(crate) fn p256_invert<C: Curve<4>>(a: &Fe<4>) -> Fe<4> {
-    C::mul(&safegcd::invert(a, &P256_P_MODULUS), &P256_P_R3)
+    let mut t = safegcd::invert(a, &P256_P_MODULUS);
+    let out = C::mul(&t, &P256_P_R3);
+    zeroize_u64(&mut t);
+    out
 }
 
-/// P-256 scalar inversion in the Montgomery domain of `n`.
+/// P-256 scalar inversion in the Montgomery domain of `n` (the intermediate
+/// is wiped, as for [`p256_invert`]).
 #[inline]
 pub(crate) fn p256_scalar_invert(a: &[u64; 4]) -> [u64; 4] {
-    mont::mont_mul(
-        &safegcd::invert(a, &P256_N_MODULUS),
-        &P256_N_R3,
-        &P256::ORDER,
-        P256::ORDER_INV,
-    )
+    let mut t = safegcd::invert(a, &P256_N_MODULUS);
+    let out = mont::mont_mul(&t, &P256_N_R3, &P256::ORDER, P256::ORDER_INV);
+    zeroize_u64(&mut t);
+    out
 }
 
 define_curve! {
@@ -195,11 +199,15 @@ define_curve! {
 }
 
 /// Field inversion in the Montgomery domain of backend `C` for P-384 and
-/// P-521: `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form.
+/// P-521: `safegcd(a R) = a^-1 R^-1`, times `R^3` in Montgomery form. The
+/// intermediate `a^-1 R^-1` is wiped (`mod_inverse` wipes its own state).
 #[inline]
 pub(crate) fn wide_invert<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
     let r3 = const { mont::mont_mul_const(&C::R2, &C::R2, &C::P, C::P_INV) };
-    C::mul(&wide::invert(a, &C::P), &r3)
+    let mut t = wide::invert(a, &C::P);
+    let out = C::mul(&t, &r3);
+    zeroize_u64(&mut t);
+    out
 }
 
 /// Scalar inversion in the Montgomery domain of the group order for P-384
@@ -207,7 +215,10 @@ pub(crate) fn wide_invert<C: Curve<N>, const N: usize>(a: &Fe<N>) -> Fe<N> {
 #[inline]
 pub(crate) fn wide_scalar_invert<C: Curve<N>, const N: usize>(a: &[u64; N]) -> [u64; N] {
     let r3 = const { mont::mont_mul_const(&C::ORDER_R2, &C::ORDER_R2, &C::ORDER, C::ORDER_INV) };
-    mont::mont_mul(&wide::invert(a, &C::ORDER), &r3, &C::ORDER, C::ORDER_INV)
+    let mut t = wide::invert(a, &C::ORDER);
+    let out = mont::mont_mul(&t, &r3, &C::ORDER, C::ORDER_INV);
+    zeroize_u64(&mut t);
+    out
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! NIST P-384 (secp384r1): ECDH and ECDSA.
+//! NIST P-384 (secp384r1): ECDH, ECDSA, and field and scalar arithmetic.
 //!
 //! Backends: the full-width product followed by a Montgomery reduction
 //! specialised to the shape of `p` everywhere; on x86-64 with BMI2 and ADX
@@ -21,4 +21,13 @@ super::api::curve_module! {
     limbs = 6,
     field_len = 48,
     tls_hash = Sha384
+}
+
+super::arith::arith_module! {
+    name = "P-384",
+    soft = P384,
+    fast = Fast,
+    backend = P384Backend,
+    limbs = 6,
+    field_len = 48
 }

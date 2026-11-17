@@ -49,27 +49,52 @@ impl Routing {
 
     /// The expanded keys for the alternates of `own` under the policies and
     /// the configuration in force now, on `stream`.
+    ///
+    /// Both can change at any moment, from any thread, so they are read
+    /// once: the alternates are listed first and the storage is then made
+    /// for exactly that list. Reading them again to fill the storage could
+    /// find fewer alternates than it was sized for, and the conversion to a
+    /// boxed slice would then move the expanded keys to a smaller block and
+    /// free the first one unwiped, where [`Self::wipe`] cannot reach it.
     fn expand(
         key: &[u8],
         stream: &'static crate::accel::load::Stream,
         own: aes::Backend,
     ) -> alloc::boxed::Box<[Option<Gcm>]> {
-        let alternates = || {
-            crate::accel::load::alternates(stream, own)
-                .filter_map(|ab| Some((ab, GhashBackend::companion(ab)?)))
-        };
-        let mut keys = alloc::vec::Vec::new();
-        if keys.try_reserve_exact(alternates().count()).is_err() {
+        use crate::accel::Backends as _;
+        // Every alternate is in the family's preference list, so this holds
+        // them all.
+        let mut pairs = [(aes::Backend::Soft, GhashBackend::Soft); aes::Backend::PREFERENCE.len()];
+        let mut count = 0;
+        let alternates = crate::accel::load::alternates(stream, own)
+            .filter_map(|ab| Some((ab, GhashBackend::companion(ab)?)));
+        for (pair, alternate) in pairs.iter_mut().zip(alternates) {
+            *pair = alternate;
+            count += 1;
+        }
+        Self::slots(key, &pairs[..count])
+    }
+
+    /// The key expanded for each of `pairs` (`None` where that fails), in
+    /// storage that holds exactly as many slots and is not moved once any
+    /// key material is in it. Empty if the memory could not be had.
+    fn slots(
+        key: &[u8],
+        pairs: &[(aes::Backend, GhashBackend)],
+    ) -> alloc::boxed::Box<[Option<Gcm>]> {
+        let mut slots = alloc::vec::Vec::new();
+        if slots.try_reserve_exact(pairs.len()).is_err() {
             return alloc::boxed::Box::default();
         }
-        // The capacity is exact, so neither the pushes nor the conversion
-        // move key material to another allocation.
-        for (aes_backend, ghash_backend) in alternates() {
-            if keys.len() < keys.capacity() {
-                keys.push(Gcm::new(key, aes_backend, ghash_backend).ok());
-            }
+        slots.resize_with(pairs.len(), || None);
+        // Converted while every slot is still empty: should the conversion
+        // move the slots, it moves no key material. The keys are then
+        // expanded into the storage that `Self::wipe` wipes.
+        let mut slots = slots.into_boxed_slice();
+        for (slot, &(aes_backend, ghash_backend)) in slots.iter_mut().zip(pairs) {
+            *slot = Gcm::new(key, aes_backend, ghash_backend).ok();
         }
-        keys.into_boxed_slice()
+        slots
     }
 
     /// The expanded key for the alternate AES backend `backend`, expanding
@@ -304,28 +329,56 @@ mod tests {
         assert!(Routing::expand(&[1; 32], &aes::LOAD[1], own).is_empty());
     }
 
+    /// Every available pair of an AES backend other than the selected one
+    /// and its GHASH companion.
+    fn routes() -> std::vec::Vec<(aes::Backend, GhashBackend)> {
+        let own = aes::Backend::select();
+        aes::Backend::ALL
+            .into_iter()
+            .filter(|ab| *ab != own && ab.is_available())
+            .filter_map(|ab| Some((ab, GhashBackend::companion(ab)?)))
+            .collect()
+    }
+
+    /// The storage for the alternates has exactly one slot per listed
+    /// pair, each holding the key expanded for that pair: nothing is left
+    /// over for a conversion to trim (and move) after the keys are in.
+    #[test]
+    fn slots_hold_exactly_the_listed_alternates() {
+        let key: [u8; 32] = core::array::from_fn(|i| (i * 5 + 3) as u8);
+        assert!(Routing::slots(&key, &[]).is_empty());
+        let routes = routes();
+        for n in 0..=routes.len() {
+            let slots = Routing::slots(&key, &routes[..n]);
+            assert_eq!(slots.len(), n);
+            for (slot, (ab, gb)) in slots.iter().zip(&routes) {
+                let gcm = slot.as_ref().unwrap();
+                assert_eq!((gcm.aes.backend(), gcm.ghash.backend()), (*ab, *gb));
+                check_record(gcm.instance(), &key, &std::format!("{ab:?}/{gb:?}"));
+            }
+            crate::zeroize::wipe_boxed(slots);
+        }
+    }
+
     /// A routable key expands its alternates when one is first asked for,
     /// finds each by its AES backend, and each computes the same function.
     /// (With routing disabled there are none to expand, so the slots are
-    /// filled by hand here.)
+    /// filled here.)
     #[test]
     fn alternates_are_found_by_backend() {
         let key: [u8; 32] = core::array::from_fn(|i| (i * 9 + 2) as u8);
         let own = aes::Backend::select();
-        let routes: std::vec::Vec<_> = aes::Backend::ALL
-            .into_iter()
-            .filter(|ab| *ab != own && ab.is_available())
-            .filter_map(|ab| Some((ab, GhashBackend::companion(ab)?)))
-            .collect();
-        let slots: std::vec::Vec<_> = routes
-            .iter()
-            .map(|(ab, gb)| Gcm::new(&key, *ab, *gb).ok())
-            .collect();
+        let routes = routes();
         let mut routing = Routing {
             key,
             alternates: std::sync::OnceLock::new(),
         };
-        assert!(routing.alternates.set(slots.into_boxed_slice()).is_ok());
+        assert!(
+            routing
+                .alternates
+                .set(Routing::slots(&key, &routes))
+                .is_ok()
+        );
         assert!(routing.alternate::<1>(own, own).is_none());
         for (ab, gb) in &routes {
             let gcm = routing.alternate::<1>(own, *ab).unwrap();

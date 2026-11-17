@@ -552,11 +552,13 @@ macro_rules! gcm_variant {
 
 gcm_variant!(
     /// AES-128-GCM.
-    Aes128Gcm, 16
+    Aes128Gcm,
+    16
 );
 gcm_variant!(
     /// AES-256-GCM.
-    Aes256Gcm, 32
+    Aes256Gcm,
+    32
 );
 
 #[cfg(test)]

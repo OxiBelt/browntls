@@ -10,7 +10,7 @@ intent.
 
 | Area | Status | Notes |
 |---|---|---|
-| Workspace, toolchain pin (1.99.1), lockfile, CI matrix | done | Native x86-64, aarch64 and riscv64 jobs plus QEMU profiles |
+| Workspace, toolchain pin (1.100.0), lockfile, CI matrix | done | Native x86-64, aarch64 and riscv64 jobs plus QEMU profiles |
 | CPU feature detection (x86-64, aarch64, riscv64) | done | `riscv_hwprobe` via the libc-free system-call trampoline |
 | OS entropy without libc (Linux) | done | `getrandom(2)` |
 | Portable SHA-2, SHA-3/SHAKE, HMAC, HKDF, TLS 1.2 PRF | done | Known-answer tests |

@@ -116,39 +116,75 @@ macro_rules! ecdsa_alg {
 
 ecdsa_alg!(
     /// ECDSA on P-256 with SHA-256.
-    ECDSA_P256_SHA256, P256, Sha256, ECDSA_P256, ECDSA_SHA256
+    ECDSA_P256_SHA256,
+    P256,
+    Sha256,
+    ECDSA_P256,
+    ECDSA_SHA256
 );
 ecdsa_alg!(
     /// ECDSA on P-256 with SHA-384.
-    ECDSA_P256_SHA384, P256, Sha384, ECDSA_P256, ECDSA_SHA384
+    ECDSA_P256_SHA384,
+    P256,
+    Sha384,
+    ECDSA_P256,
+    ECDSA_SHA384
 );
 ecdsa_alg!(
     /// ECDSA on P-256 with SHA-512.
-    ECDSA_P256_SHA512, P256, Sha512, ECDSA_P256, ECDSA_SHA512
+    ECDSA_P256_SHA512,
+    P256,
+    Sha512,
+    ECDSA_P256,
+    ECDSA_SHA512
 );
 ecdsa_alg!(
     /// ECDSA on P-384 with SHA-256.
-    ECDSA_P384_SHA256, P384, Sha256, ECDSA_P384, ECDSA_SHA256
+    ECDSA_P384_SHA256,
+    P384,
+    Sha256,
+    ECDSA_P384,
+    ECDSA_SHA256
 );
 ecdsa_alg!(
     /// ECDSA on P-384 with SHA-384.
-    ECDSA_P384_SHA384, P384, Sha384, ECDSA_P384, ECDSA_SHA384
+    ECDSA_P384_SHA384,
+    P384,
+    Sha384,
+    ECDSA_P384,
+    ECDSA_SHA384
 );
 ecdsa_alg!(
     /// ECDSA on P-384 with SHA-512.
-    ECDSA_P384_SHA512, P384, Sha512, ECDSA_P384, ECDSA_SHA512
+    ECDSA_P384_SHA512,
+    P384,
+    Sha512,
+    ECDSA_P384,
+    ECDSA_SHA512
 );
 ecdsa_alg!(
     /// ECDSA on P-521 with SHA-256.
-    ECDSA_P521_SHA256, P521, Sha256, ECDSA_P521, ECDSA_SHA256
+    ECDSA_P521_SHA256,
+    P521,
+    Sha256,
+    ECDSA_P521,
+    ECDSA_SHA256
 );
 ecdsa_alg!(
     /// ECDSA on P-521 with SHA-384.
-    ECDSA_P521_SHA384, P521, Sha384, ECDSA_P521, ECDSA_SHA384
+    ECDSA_P521_SHA384,
+    P521,
+    Sha384,
+    ECDSA_P521,
+    ECDSA_SHA384
 );
 ecdsa_alg!(
     /// ECDSA on P-521 with SHA-512.
-    ECDSA_P521_SHA512, P521, Sha512, ECDSA_P521, ECDSA_SHA512
+    ECDSA_P521_SHA512,
+    P521,
+    Sha512,
+    ECDSA_P521,
+    ECDSA_SHA512
 );
 
 /// Ed25519 (RFC 8032, RFC 8410).
@@ -291,63 +327,105 @@ macro_rules! rsa_alg {
 
 rsa_alg!(
     /// RSASSA-PKCS1-v1_5 with SHA-256 (2048 to 8192 bits).
-    RSA_PKCS1_2048_8192_SHA256, Pkcs1v15, Sha256, RSA_PKCS1_SHA256
+    RSA_PKCS1_2048_8192_SHA256,
+    Pkcs1v15,
+    Sha256,
+    RSA_PKCS1_SHA256
 );
 rsa_alg!(
     /// RSASSA-PKCS1-v1_5 with SHA-384 (2048 to 8192 bits).
-    RSA_PKCS1_2048_8192_SHA384, Pkcs1v15, Sha384, RSA_PKCS1_SHA384
+    RSA_PKCS1_2048_8192_SHA384,
+    Pkcs1v15,
+    Sha384,
+    RSA_PKCS1_SHA384
 );
 rsa_alg!(
     /// RSASSA-PKCS1-v1_5 with SHA-512 (2048 to 8192 bits).
-    RSA_PKCS1_2048_8192_SHA512, Pkcs1v15, Sha512, RSA_PKCS1_SHA512
+    RSA_PKCS1_2048_8192_SHA512,
+    Pkcs1v15,
+    Sha512,
+    RSA_PKCS1_SHA512
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `rsaEncryption`).
-    RSA_PSS_2048_8192_SHA256_LEGACY_KEY, Pss, Sha256, RSA_PSS_SHA256
+    RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
+    Pss,
+    Sha256,
+    RSA_PSS_SHA256
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `rsaEncryption`).
-    RSA_PSS_2048_8192_SHA384_LEGACY_KEY, Pss, Sha384, RSA_PSS_SHA384
+    RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
+    Pss,
+    Sha384,
+    RSA_PSS_SHA384
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `rsaEncryption`).
-    RSA_PSS_2048_8192_SHA512_LEGACY_KEY, Pss, Sha512, RSA_PSS_SHA512
+    RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
+    Pss,
+    Sha512,
+    RSA_PSS_SHA512
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
-    RSA_PSS_PSS_2048_8192_SHA256, Pss, Sha256, RSA_PSS_SHA256, RSASSA_PSS
+    RSA_PSS_PSS_2048_8192_SHA256,
+    Pss,
+    Sha256,
+    RSA_PSS_SHA256,
+    RSASSA_PSS
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
-    RSA_PSS_PSS_2048_8192_SHA384, Pss, Sha384, RSA_PSS_SHA384, RSASSA_PSS
+    RSA_PSS_PSS_2048_8192_SHA384,
+    Pss,
+    Sha384,
+    RSA_PSS_SHA384,
+    RSASSA_PSS
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` without parameters).
-    RSA_PSS_PSS_2048_8192_SHA512, Pss, Sha512, RSA_PSS_SHA512, RSASSA_PSS
+    RSA_PSS_PSS_2048_8192_SHA512,
+    Pss,
+    Sha512,
+    RSA_PSS_SHA512,
+    RSASSA_PSS
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-256, MGF1-SHA-256 and a 32-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-256,
     /// in any encoding that canonicalises to `RSASSA_PSS_SHA256_KEY`).
-    RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED, Pss, Sha256, RSA_PSS_SHA256, RSASSA_PSS_SHA256_KEY
+    RSA_PSS_PSS_2048_8192_SHA256_RESTRICTED,
+    Pss,
+    Sha256,
+    RSA_PSS_SHA256,
+    RSASSA_PSS_SHA256_KEY
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-384, MGF1-SHA-384 and a 48-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-384,
     /// in any encoding that canonicalises to `RSASSA_PSS_SHA384_KEY`).
-    RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED, Pss, Sha384, RSA_PSS_SHA384, RSASSA_PSS_SHA384_KEY
+    RSA_PSS_PSS_2048_8192_SHA384_RESTRICTED,
+    Pss,
+    Sha384,
+    RSA_PSS_SHA384,
+    RSASSA_PSS_SHA384_KEY
 );
 rsa_alg!(
     /// RSASSA-PSS with SHA-512, MGF1-SHA-512 and a 64-byte salt (2048 to
     /// 8192 bits; the key's SPKI is `id-RSASSA-PSS` restricted to SHA-512,
     /// in any encoding that canonicalises to `RSASSA_PSS_SHA512_KEY`).
-    RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED, Pss, Sha512, RSA_PSS_SHA512, RSASSA_PSS_SHA512_KEY
+    RSA_PSS_PSS_2048_8192_SHA512_RESTRICTED,
+    Pss,
+    Sha512,
+    RSA_PSS_SHA512,
+    RSASSA_PSS_SHA512_KEY
 );
 
 #[cfg(test)]

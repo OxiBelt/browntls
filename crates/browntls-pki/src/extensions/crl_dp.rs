@@ -4,7 +4,9 @@ use core::fmt;
 
 use crate::der::{self, HexDebug, Reader, tag};
 use crate::error::Error;
-use crate::name::{self, GeneralNames, RelativeDistinguishedName, validate_general_names};
+use crate::name::{
+    self, GeneralNames, RelativeDistinguishedName, validate_non_empty_general_names,
+};
 
 /// An iterator over the `DistributionPoint`s of a `cRLDistributionPoints`
 /// extension.
@@ -93,7 +95,7 @@ impl<'a> CrlDistributionPoint<'a> {
             };
             let crl_issuer = r.optional(tag::context_constructed(2))?;
             if let Some(names) = crl_issuer {
-                non_empty_general_names(names)?;
+                validate_non_empty_general_names(names)?;
             }
             if name.is_none() && crl_issuer.is_none() {
                 return Err(Error::BadDer);
@@ -156,7 +158,7 @@ fn read_name(contents: &[u8]) -> Result<NameForm<'_>, Error> {
         let tlv = r.tlv()?;
         match tlv.tag {
             t if t == tag::context_constructed(0) => {
-                non_empty_general_names(tlv.value)?;
+                validate_non_empty_general_names(tlv.value)?;
                 Ok(NameForm::Full(tlv.value))
             }
             t if t == tag::context_constructed(1) => {
@@ -166,14 +168,6 @@ fn read_name(contents: &[u8]) -> Result<NameForm<'_>, Error> {
             _ => Err(Error::BadDer),
         }
     })
-}
-
-/// `GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName`.
-fn non_empty_general_names(contents: &[u8]) -> Result<(), Error> {
-    if contents.is_empty() {
-        return Err(Error::BadDer);
-    }
-    validate_general_names(contents)
 }
 
 /// `DistributionPointName` (RFC 5280 §4.2.1.13).

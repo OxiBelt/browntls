@@ -1,8 +1,10 @@
 //! X.501 names (`Name`, `RelativeDistinguishedName`,
 //! `AttributeTypeAndValue`): names encoded from the input by a model DER
 //! encoder, and the issuers and subjects of the inspected certificates,
-//! mutated. A name is accepted exactly when the model says it is strict
-//! DER, and an accepted name re-encodes to its input.
+//! mutated. A name is accepted exactly when the model of `Name`'s rules
+//! accepts it (DER structure and minimal lengths, sets in strictly
+//! ascending DER order, value tags in their X.690 form; value contents are
+//! not parsed), and an accepted name re-encodes to its input.
 
 use std::cmp::Ordering;
 
@@ -109,8 +111,10 @@ fn model_str(tag: u8, value: &[u8]) -> Option<&str> {
 }
 
 /// Name contents from anywhere: parsing agrees with and without the outer
-/// `SEQUENCE`, and an accepted name is strict DER (it re-encodes to its
-/// input), keeps its sets in DER order and decodes strings like the model.
+/// `SEQUENCE`, and an accepted name re-encodes to its input (minimal
+/// lengths, nothing left over; attribute values are compared as elements,
+/// their contents are not parsed), keeps its sets in strictly ascending DER
+/// order (no repeated attribute) and decodes strings like the model.
 pub(super) fn check_contents(contents: &[u8]) {
     let parsed = Name::from_contents(contents);
     if contents.len() <= 0xffff {
@@ -127,7 +131,7 @@ pub(super) fn check_contents(contents: &[u8]) {
         assert!(!attrs.is_empty());
         for pair in attrs.windows(2) {
             let (a, b) = (encode_attr(&parts(&pair[0])), encode_attr(&parts(&pair[1])));
-            assert!(der_order(&a, &b).is_le());
+            assert!(der_order(&a, &b).is_lt(), "ordered, no repeat");
         }
         for a in &attrs {
             assert!(oid_ok(a.oid()) && tag_ok(a.value_tag()));
@@ -196,10 +200,11 @@ pub(super) fn dn_op(input: &mut Input<'_>) {
         if reverse {
             encodings.reverse();
             order.reverse();
-            valid &= encodings
-                .windows(2)
-                .all(|w| der_order(&w[0], &w[1]).is_le());
         }
+        // Strictly ascending: in DER order, and no attribute repeated.
+        valid &= encodings
+            .windows(2)
+            .all(|w| der_order(&w[0], &w[1]).is_lt());
         contents.extend(der(0x31, &encodings.concat()));
         rdns.push(order.into_iter().map(|i| attrs[i].clone()).collect());
     }

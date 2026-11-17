@@ -6,7 +6,7 @@ use core::fmt;
 use crate::der::{self, CRL_LEN_LIMIT, HexDebug, Reader, tag};
 use crate::error::Error;
 use crate::path::Budget;
-use crate::types::{SignatureVerificationAlgorithm, SubjectPublicKeyInfoDer};
+use crate::types::SignatureVerificationAlgorithm;
 
 /// Signed data: a message, the `AlgorithmIdentifier` of its signature, and
 /// the signature. Verify it with [`Self::verify_signature`].
@@ -90,8 +90,15 @@ impl<'a> SignedData<'a> {
         self.signature
     }
 
-    /// Verifies the signature with the key in `spki` (a complete
-    /// `SubjectPublicKeyInfo` `SEQUENCE`), using the first algorithm of
+    /// Verifies the signature with the key in `spki`, given either as a
+    /// complete `SubjectPublicKeyInfo` `SEQUENCE` (such as a
+    /// [`SubjectPublicKeyInfoDer`](crate::SubjectPublicKeyInfoDer), which
+    /// dereferences to `[u8]`) or as its contents (such as
+    /// [`TrustAnchor::subject_public_key_info`](crate::TrustAnchor::subject_public_key_info)),
+    /// like path validation and [`CertRevocationList::verify_signature`].
+    /// The two forms cannot be confused: the complete form is one element,
+    /// the contents are two (an `AlgorithmIdentifier` and a `BIT STRING`).
+    /// The signature is checked by the first algorithm of
     /// `supported_sig_algs` whose signature and public key
     /// `AlgorithmIdentifier`s both match ([`AlgorithmIdentifier::matches_signature`],
     /// [`AlgorithmIdentifier::matches_public_key`]: byte for byte, or by the
@@ -103,8 +110,8 @@ impl<'a> SignedData<'a> {
     ///
     /// # Errors
     ///
-    /// * [`Error::BadDer`] or [`Error::TrailingData`] if `spki` is
-    ///   malformed;
+    /// * [`Error::BadDer`] or [`Error::TrailingData`] if `spki` is neither
+    ///   form;
     /// * [`Error::UnsupportedSignatureAlgorithm`] if no algorithm matches
     ///   the signature algorithm;
     /// * [`Error::UnsupportedSignatureAlgorithmForPublicKey`] if some do,
@@ -114,13 +121,13 @@ impl<'a> SignedData<'a> {
     ///
     /// [`AlgorithmIdentifier::matches_signature`]: crate::AlgorithmIdentifier::matches_signature
     /// [`AlgorithmIdentifier::matches_public_key`]: crate::AlgorithmIdentifier::matches_public_key
+    /// [`CertRevocationList::verify_signature`]: crate::CertRevocationList::verify_signature
     pub fn verify_signature(
         &self,
         supported_sig_algs: &[&dyn SignatureVerificationAlgorithm],
-        spki: &SubjectPublicKeyInfoDer<'_>,
+        spki: &[u8],
     ) -> Result<(), Error> {
-        let contents = der::read_all(spki.as_ref(), |r| r.expect(tag::SEQUENCE))?;
-        let spki = Spki::from_contents(contents)?;
+        let spki = Spki::from_der_or_contents(spki)?;
         verify_signed_data(supported_sig_algs, &spki, self, &mut Budget::default())
     }
 

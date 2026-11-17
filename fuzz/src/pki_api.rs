@@ -41,10 +41,14 @@
 //!   `verify_is_valid_for_subject_name` accepts, and IP names match the
 //!   `iPAddress` entries;
 //! * `Name` accepts a name generated from the input exactly when a model of
-//!   strict DER does, and every accepted name (generated, or a mutated
-//!   issuer or subject) re-encodes to its input with its sets in DER order;
+//!   its rules does (DER structure and minimal lengths, value tags in their
+//!   X.690 form, sets strictly ascending so no attribute repeats; value
+//!   contents are not parsed), and every accepted name (generated, or a
+//!   mutated issuer or subject) re-encodes to its input;
 //! * `SignedData` verifies a fixture certificate or CRL exactly when the
-//!   algorithm model says the key and algorithms cover it, never once
+//!   algorithm model says the key and algorithms cover it (the key given
+//!   as a complete `SubjectPublicKeyInfo` or as a trust anchor's contents
+//!   alike), never once
 //!   corrupted or with another key, and path validation never accepts an
 //!   end entity whose signature check fails; raw triples give the verdicts
 //!   of `RawPublicKeyEntity`.
@@ -80,7 +84,7 @@ const OPS: &[Op] = &[
     (chains::crl_op, 12),
     (inspect::cert_inspect_op, 2),
     (x500::dn_op, 1),
-    (signed::structure_op, 8),
+    (signed::structure_op, 12),
     (signed::parts_op, 3),
 ];
 
@@ -412,6 +416,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
     add(op::DN, &[&[0, 1, 1, 0, 0, 10, 0]]);
     add(op::DN, &[&[0, 1, 1, 0, 0, 13, 0]]);
     add(op::DN, &[&[0, 1, 0]]);
+    // The same attribute twice in one RDN.
+    add(op::DN, &[&[0, 1, 2, 0, 0, 0, 0, 0, 0, 0]]);
     for c in 0..inspect::CERT_COUNT as u8 {
         add(op::DN, &[&[1, c, c & 1, 3]]);
     }

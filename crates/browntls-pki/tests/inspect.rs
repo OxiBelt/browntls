@@ -139,7 +139,7 @@ fn ca_certificate_extensions() {
     assert_eq!(ski.len(), 20);
     let aki = cert.authority_key_identifier().unwrap();
     assert_eq!(aki.key_identifier(), Some(ski));
-    assert!(aki.authority_cert_issuer().is_none());
+    assert!(aki.authority_cert_issuer().unwrap().is_none());
     assert!(aki.authority_cert_serial_number().is_none());
     assert!(cert.extended_key_usage().is_none());
     assert!(cert.subject_alt_names().is_none());
@@ -603,10 +603,37 @@ fn lazily_checked_parts_report_errors() {
     let aki = ee.authority_key_identifier().unwrap();
     assert_eq!(aki.key_identifier(), Some(&[1, 2, 3][..]));
     assert_eq!(aki.authority_cert_serial_number(), Some(&[0x01][..]));
-    let mut issuer = aki.authority_cert_issuer().unwrap();
-    assert_eq!(issuer.next().unwrap().err(), Some(Error::BadDer));
-    assert!(issuer.next().is_none());
+    assert_eq!(
+        aki.authority_cert_issuer().err(),
+        Some(Error::ExtensionValueInvalid)
+    );
     // Path validation is unaffected.
+    assert_eq!(chain.verify_at(NOW), Ok(()));
+
+    // Empty GeneralNames (SIZE (1..MAX)) are rejected alike in both places:
+    // an empty authorityCertIssuer, and a point whose fullName and
+    // cRLIssuer are empty.
+    let mut aki = tlv(0x80, &[1, 2, 3]);
+    aki.extend(tlv(0xa1, &[]));
+    let dp = tlv(0x30, &tlv(0x30, &[0xa0, 0x02, 0xa0, 0x00, 0xa2, 0x00]));
+    let (chain, der) = ee_with(|p| {
+        p.custom_extensions = vec![
+            CustomExtension::from_oid_content(&[2, 5, 29, 31], dp),
+            CustomExtension::from_oid_content(&[2, 5, 29, 35], tlv(0x30, &aki)),
+        ];
+    });
+    let ee = EndEntityCert::try_from(der).unwrap();
+    assert_eq!(
+        ee.authority_key_identifier()
+            .unwrap()
+            .authority_cert_issuer()
+            .err(),
+        Some(Error::ExtensionValueInvalid)
+    );
+    assert_eq!(
+        ee.crl_distribution_points().unwrap().next().unwrap().err(),
+        Some(Error::ExtensionValueInvalid)
+    );
     assert_eq!(chain.verify_at(NOW), Ok(()));
 }
 

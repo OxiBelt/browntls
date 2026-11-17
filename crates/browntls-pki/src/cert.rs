@@ -314,8 +314,8 @@ impl<'a> Cert<'a> {
     }
 
     /// The certificate's `SubjectPublicKeyInfo` (DER, with outer SEQUENCE),
-    /// checked to be an `AlgorithmIdentifier` and a `BIT STRING` without
-    /// unused bits.
+    /// checked to be a `SEQUENCE` (the algorithm identifier, whose contents
+    /// are not interpreted) followed by a `BIT STRING` without unused bits.
     #[must_use]
     pub fn subject_public_key_info(&self) -> SubjectPublicKeyInfoDer<'a> {
         SubjectPublicKeyInfoDer::from_slice(self.spki_der)

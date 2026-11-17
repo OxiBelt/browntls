@@ -46,15 +46,19 @@ const SET: u8 = 0x31;
 /// issuer or subject of a certificate or CRL, a trust anchor's subject, a
 /// `directoryName`, or a TLS `certificate_authorities` entry.
 ///
-/// Parsing is eager and strict DER: every `RelativeDistinguishedName` must
-/// be a non-empty `SET OF` in DER order (X.690 §11.6), every
+/// Parsing is eager and checks the structure down to each attribute
+/// value's outer encoding, with DER's definite minimal lengths throughout:
+/// every `RelativeDistinguishedName` must be a non-empty `SET OF` in DER
+/// order (X.690 §11.6) without repeated attributes, every
 /// `AttributeTypeAndValue` a `SEQUENCE` of a well-formed `OBJECT
-/// IDENTIFIER` and exactly one DER element (any tag but the reserved
-/// universal tag 0, in the primitive or constructed form X.690 prescribes
-/// for universal tags), with definite minimal lengths. The attribute value
-/// itself is not interpreted. Names longer than 65535 octets are rejected,
-/// so parsing and every iteration are linear in at most that many octets.
-/// Iterating a parsed `Name` cannot fail; everything borrows from the input.
+/// IDENTIFIER` and exactly one element as the value. The value element may
+/// have any tag but the reserved universal tag 0, in the primitive or
+/// constructed form X.690 prescribes for universal tags; its contents are
+/// not parsed (so a value need not be valid DER of its type), except for
+/// what [`AttributeTypeAndValue::as_str`] checks. Names longer than 65535
+/// octets are rejected, so parsing and every iteration are linear in at
+/// most that many octets. Iterating a parsed `Name` cannot fail; everything
+/// borrows from the input.
 ///
 /// An empty `RDNSequence` is a valid `Name`.
 #[derive(Clone, Copy)]
@@ -135,7 +139,10 @@ impl<'a> IntoIterator for &Name<'a> {
 }
 
 /// Checks the contents of a `RelativeDistinguishedName` `SET OF`: non-empty,
-/// in DER order, of well-formed attributes.
+/// in DER order, of well-formed attributes, none repeated. X.501 does not
+/// intend an RDN to hold the same value twice (`x509-cert` rejects it too);
+/// two different complete encodings never compare equal in DER order, so
+/// strictly ascending order rules out exactly the repeats.
 pub(crate) fn validate_rdn(contents: &[u8]) -> Result<(), Error> {
     if contents.is_empty() {
         return Err(Error::BadDer);
@@ -145,7 +152,7 @@ pub(crate) fn validate_rdn(contents: &[u8]) -> Result<(), Error> {
         while !r.at_end() {
             let atv = r.expect_tlv(tag::SEQUENCE)?;
             read_attribute(atv.value)?;
-            if previous.is_some_and(|p| !der::set_of_ordered(p, atv.raw)) {
+            if previous.is_some_and(|p| p == atv.raw || !der::set_of_ordered(p, atv.raw)) {
                 return Err(Error::BadDer);
             }
             previous = Some(atv.raw);
@@ -420,10 +427,18 @@ mod tests {
             Name::from_contents(&tlv(0x31, &unordered)).err(),
             Some(Error::BadDer)
         );
-        // Equal encodings may repeat.
+        // DER allows equal encodings in a SET OF, but an RDN must not repeat
+        // an attribute.
         let mut twice = cn.clone();
         twice.extend(&cn);
-        assert!(Name::from_contents(&tlv(0x31, &twice)).is_ok());
+        assert_eq!(
+            Name::from_contents(&tlv(0x31, &twice)).err(),
+            Some(Error::BadDer)
+        );
+        // The same type with different values is fine.
+        let mut same_type = cn.clone();
+        same_type.extend(atv(attribute_type::COMMON_NAME, UTF8_STRING, b"y"));
+        assert!(Name::from_contents(&tlv(0x31, &same_type)).is_ok());
     }
 
     #[test]

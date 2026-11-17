@@ -374,8 +374,14 @@ pub(super) fn cert_inspect_op(input: &mut Input<'_>) {
         assert_eq!(aki.key_identifier(), field(0x80));
         assert_eq!(aki.authority_cert_serial_number(), field(0x82));
         match (aki.authority_cert_issuer(), field(0xa1)) {
-            (Some(names), Some(contents)) => check_general_names(names, contents),
-            (None, None) => {}
+            (Ok(Some(names)), Some(contents)) => {
+                // Checked on access: non-empty and well formed.
+                assert!(general_names_model(contents));
+                assert!(names.clone().all(|n| n.is_ok()));
+                check_general_names(names, contents);
+            }
+            (Err(e), Some(_)) => assert_eq!(e, browntls_pki::Error::ExtensionValueInvalid),
+            (Ok(None), None) => {}
             other => panic!("authorityCertIssuer {other:?}"),
         }
         let _ = format!("{aki:?}");
@@ -527,6 +533,28 @@ fn check_name_constraints(nc: &NameConstraints<'_>, contents: &[u8]) {
         assert!(model_bases.as_ref().is_none_or(|b| !b.is_empty()));
         assert_eq!(bases, model_bases);
     }
+}
+
+/// Whether `contents` could be accepted as `GeneralNames SIZE (1..MAX)`:
+/// non-empty, read completely as elements, each with a `GeneralName` tag.
+/// (Minimal lengths are not checked, so this accepts a superset.)
+fn general_names_model(contents: &[u8]) -> bool {
+    const TAGS: [u8; 9] = [0xa0, 0x81, 0x82, 0xa3, 0xa4, 0xa5, 0x86, 0x87, 0x88];
+    let entries = elements(contents);
+    !entries.is_empty()
+        && entries.iter().all(|(t, _)| TAGS.contains(t))
+        && tlv_chain_complete(contents)
+}
+
+/// Whether `contents` is read completely as a chain of elements.
+fn tlv_chain_complete(mut contents: &[u8]) -> bool {
+    while !contents.is_empty() {
+        match tlv(contents) {
+            Some((_, _, rest)) => contents = rest,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// The entries of a `GeneralNames` iterator against the contents it reads.

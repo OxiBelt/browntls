@@ -4,7 +4,8 @@
 use core::fmt;
 
 use crate::der::{BitFlags, HexDebug, OidDebug, Reader};
-use crate::name::GeneralNames;
+use crate::error::Error;
+use crate::name::{GeneralNames, validate_non_empty_general_names};
 
 /// `BasicConstraints` (RFC 5280 §4.2.1.9), decoded when the certificate is
 /// parsed.
@@ -159,7 +160,11 @@ impl fmt::Debug for KeyPurposeIdIter<'_> {
 ///
 /// When the certificate is parsed, the fields are checked to appear in
 /// order, each at most once, with their tags; their contents are not
-/// interpreted there. Path building uses only `keyIdentifier`, as a hint.
+/// interpreted there (path building uses only `keyIdentifier`, as a hint,
+/// and rejecting more would change which certificates validate).
+/// [`Self::authority_cert_issuer`] checks its field when called, as
+/// [`CrlDistributionPoints`](super::CrlDistributionPoints) checks each
+/// point, with the same error.
 #[derive(Clone, Copy)]
 pub struct AuthorityKeyIdentifier<'a> {
     pub(crate) key_identifier: Option<&'a [u8]>,
@@ -175,12 +180,21 @@ impl<'a> AuthorityKeyIdentifier<'a> {
         self.key_identifier
     }
 
-    /// `authorityCertIssuer [1] GeneralNames`, read lazily: an entry that
-    /// is not a well-formed `GeneralName` is returned as an error.
-    #[must_use]
-    pub fn authority_cert_issuer(&self) -> Option<GeneralNames<'a>> {
-        self.authority_cert_issuer
-            .map(|names| GeneralNames::new(Some(names)))
+    /// `authorityCertIssuer [1] GeneralNames`: `Ok(None)` when absent, and
+    /// otherwise checked on this call to be non-empty (`SIZE (1..MAX)`)
+    /// with every entry a well-formed `GeneralName`, so iterating the
+    /// result yields no error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ExtensionValueInvalid`] when the field is present but empty
+    /// or malformed.
+    pub fn authority_cert_issuer(&self) -> Result<Option<GeneralNames<'a>>, Error> {
+        let Some(names) = self.authority_cert_issuer else {
+            return Ok(None);
+        };
+        validate_non_empty_general_names(names).map_err(|_| Error::ExtensionValueInvalid)?;
+        Ok(Some(GeneralNames::new(Some(names))))
     }
 
     /// `authorityCertSerialNumber [2]`: the contents octets of the issuer
@@ -233,6 +247,30 @@ mod tests {
         );
         let none = KeyUsageFlags(bit_string_flags(&[0]).unwrap());
         assert!(KeyUsageBit::ALL.iter().all(|b| !none.contains(*b)));
+    }
+
+    #[test]
+    fn authority_cert_issuer_is_checked_on_access() {
+        let aki = |issuer| AuthorityKeyIdentifier {
+            key_identifier: None,
+            authority_cert_issuer: issuer,
+            authority_cert_serial_number: None,
+        };
+        assert!(aki(None).authority_cert_issuer().unwrap().is_none());
+        let names = aki(Some(b"\x82\x01a"))
+            .authority_cert_issuer()
+            .unwrap()
+            .unwrap();
+        assert_eq!(names.count(), 1);
+        // Empty (GeneralNames is SIZE (1..MAX)), an unknown choice,
+        // truncated: the same error as a malformed CRL distribution point.
+        for bad in [&b""[..], b"\x89\x00", b"\x82\x02a"] {
+            assert_eq!(
+                aki(Some(bad)).authority_cert_issuer().err(),
+                Some(Error::ExtensionValueInvalid)
+            );
+        }
+        assert!(format!("{:?}", aki(Some(b""))).contains("Err(ExtensionValueInvalid)"));
     }
 
     #[test]

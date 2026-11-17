@@ -77,6 +77,17 @@ pub(super) fn structure_op(input: &mut Input<'_>) {
     };
     let result = signed.verify_signature(&algs, &spki);
     let _ = format!("{signed:?}");
+    // The key as `SubjectPublicKeyInfo` contents (as a trust anchor holds
+    // the issuer's) gives the same verdict.
+    let contents_result = match key_choice {
+        0 => {
+            let anchor = anchor_from_trusted_cert(issuer).expect("issuer anchor");
+            signed.verify_signature(&algs, &anchor.subject_public_key_info)
+        }
+        1 => signed.verify_signature(&algs, tlv(&spki).unwrap().1),
+        _ => result.clone(),
+    };
+    assert_eq!(contents_result, result);
 
     // The parts are the structure's three elements.
     let (_, outer, _) = tlv(&bytes).unwrap();

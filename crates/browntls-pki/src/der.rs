@@ -317,7 +317,8 @@ pub(crate) fn check_oid(v: &[u8]) -> Result<(), Error> {
 
 /// Whether `a` may precede `b` in a DER `SET OF` (X.690 §11.6): the
 /// encodings compare as octet strings, the shorter padded at its end with
-/// zero octets. Equal encodings may follow each other.
+/// zero octets. Equal encodings may follow each other here; `Name` parsing
+/// additionally rejects them within a `RelativeDistinguishedName`.
 pub(crate) fn set_of_ordered(a: &[u8], b: &[u8]) -> bool {
     for i in 0..a.len().max(b.len()) {
         let x = a.get(i).copied().unwrap_or(0);

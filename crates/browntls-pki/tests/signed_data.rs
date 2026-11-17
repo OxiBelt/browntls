@@ -9,7 +9,7 @@ mod common;
 
 use browntls_pki::{
     Cert, CertificateDer, Error, SignatureVerificationAlgorithm, SignedData,
-    SubjectPublicKeyInfoDer, alg_id,
+    SubjectPublicKeyInfoDer, alg_id, anchor_from_trusted_cert,
 };
 use common::*;
 use rcgen::{
@@ -29,6 +29,15 @@ fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(value);
     out
+}
+
+/// The contents of a complete `SubjectPublicKeyInfo` `SEQUENCE`.
+fn spki_contents(spki: &[u8]) -> &[u8] {
+    match spki[1] {
+        n if n < 0x80 => &spki[2..],
+        0x81 => &spki[3..],
+        _ => &spki[4..],
+    }
 }
 
 fn spki_of(cert: &CertificateDer<'_>) -> SubjectPublicKeyInfoDer<'static> {
@@ -139,6 +148,19 @@ fn certificates_crls_and_requests() {
         assert_eq!(chain.verify_at(NOW), Ok(()), "{alg:?}");
         check_signed(&ee, &int_spki, distinct(&ee_spki), &other_type);
         check_signed(&int, &root_spki, distinct(&int_spki), &other_type);
+        // A trust anchor holds the root's key as SubjectPublicKeyInfo
+        // contents, which verify the same way.
+        let anchor = anchor_from_trusted_cert(&root).unwrap();
+        assert_eq!(
+            SignedData::from_der(&int)
+                .unwrap()
+                .verify_signature(ALGS, &anchor.subject_public_key_info),
+            Ok(())
+        );
+        assert_eq!(
+            spki_contents(&root_spki),
+            anchor.subject_public_key_info.as_ref()
+        );
         // `Cert::signed_data` is the same structure.
         let cert = Cert::try_from(&ee).unwrap();
         let from_cert = cert.signed_data();
@@ -228,9 +250,15 @@ fn raw_triples() {
                 .verify_signature(ALGS, &spki),
             Err(Error::UnsupportedSignatureAlgorithm)
         );
-        // The key must be a complete SubjectPublicKeyInfo.
-        let contents = SubjectPublicKeyInfoDer::from(spki[2..].to_vec());
-        assert!(signed.verify_signature(ALGS, &contents).is_err());
+        // The key may also be given as the SubjectPublicKeyInfo contents,
+        // as path validation accepts; anything else is malformed.
+        let contents = spki_contents(&spki);
+        assert_eq!(signed.verify_signature(ALGS, contents), Ok(()));
+        let mut both = spki.to_vec();
+        both.extend_from_slice(contents);
+        for bad in [&both[..], &spki[..spki.len() - 1], &contents[1..], &[]] {
+            assert!(signed.verify_signature(ALGS, bad).is_err());
+        }
     }
 }
 

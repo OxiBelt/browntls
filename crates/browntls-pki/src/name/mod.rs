@@ -55,8 +55,11 @@ pub enum GeneralName<'a> {
     DirectoryName(&'a [u8]),
     /// `uniformResourceIdentifier [6] IA5String`.
     UniformResourceIdentifier(&'a [u8]),
-    /// `iPAddress [7] OCTET STRING`: 4 or 16 octets in a `subjectAltName`,
-    /// an address and a mask (8 or 32 octets) in a name constraint.
+    /// `iPAddress [7] OCTET STRING`, of any length as encoded: RFC 5280
+    /// expects 4 or 16 octets in a `subjectAltName` and an address and a
+    /// mask (8 or 32 octets) in a name constraint, but neither is checked
+    /// here (name matching ignores other lengths, and name constraints
+    /// reject them).
     IpAddress(&'a [u8]),
     /// A choice this crate does not decode: `otherName [0]`,
     /// `x400Address [3]`, `ediPartyName [5]` or `registeredID [8]`.
@@ -159,6 +162,15 @@ impl fmt::Debug for GeneralNames<'_> {
 /// Checks that `contents` is a well-formed (possibly empty) `GeneralNames`.
 pub(crate) fn validate_general_names(contents: &[u8]) -> Result<(), Error> {
     GeneralNames::new(Some(contents)).try_for_each(|name| name.map(|_| ()))
+}
+
+/// Checks `GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName`
+/// contents: non-empty and well formed.
+pub(crate) fn validate_non_empty_general_names(contents: &[u8]) -> Result<(), Error> {
+    if contents.is_empty() {
+        return Err(Error::BadDer);
+    }
+    validate_general_names(contents)
 }
 
 #[cfg(test)]

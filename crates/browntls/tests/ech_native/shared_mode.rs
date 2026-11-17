@@ -1,6 +1,8 @@
 //! Shared mode: one server holds the ECH keys and completes the handshake.
 
 use super::*;
+#[cfg(feature = "tls12")]
+use browntls::ProtocolVersion;
 
 #[test]
 fn accepted() {
@@ -495,4 +497,99 @@ fn accepted_with_grease_padding_and_an_external_psk() {
         server.external_psk_identity(),
         Some(&b"inner psk identity"[..])
     );
+}
+
+/// The legacy_session_id of the first ClientHello or ServerHello in
+/// `records` (a flight of plaintext handshake records).
+#[cfg(feature = "tls12")]
+fn hello_session_id(records: &[u8], msg_type: u8) -> Vec<u8> {
+    let mut at = 0;
+    while at + 5 <= records.len() {
+        let len = usize::from(u16::from_be_bytes([records[at + 3], records[at + 4]]));
+        let body = at + 5;
+        if records[at] == 22 && records[body] == msg_type {
+            // Handshake header, legacy_version, random.
+            let p = body + 4 + 2 + 32;
+            let sid_len = usize::from(records[p]);
+            return records[p + 1..p + 1 + sid_len].to_vec();
+        }
+        at = body + len;
+    }
+    panic!("no hello of type {msg_type}");
+}
+
+/// A TLS 1.2 session cached for the hidden name is not resumed under ECH,
+/// and its session ID never appears in the outer ClientHello: that ID went
+/// over the wire next to the hidden name before, so reusing it in the
+/// clear would link the ECH connection to that name.
+#[cfg(feature = "tls12")]
+#[test]
+fn outer_hello_never_carries_a_cached_tls12_session_id() {
+    init_logging();
+    let certs = Certs::new();
+
+    // A TLS 1.2 handshake with the hidden name, through a client that
+    // offers both versions and keeps sessions in a shared store.
+    let mut plain_client = client_config(&certs, None);
+    plain_client.resumption = Resumption::in_memory_sessions(8);
+    let plain_client = Arc::new(plain_client);
+    let mut tls12_server = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(certs.resolver());
+    tls12_server.alpn_protocols = vec![b"h2".to_vec()];
+    let tls12_server = Arc::new(tls12_server);
+    let (mut client, mut server) = connect_arc(plain_client.clone(), tls12_server.clone());
+    transfer(&mut client, &mut server);
+    server.process_new_packets().unwrap();
+    let mut server_flight = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut server_flight).unwrap();
+    }
+    let cached_id = hello_session_id(&server_flight, 2);
+    assert_eq!(cached_id.len(), 32, "the server issued a session ID");
+    let mut offset = 0;
+    while offset < server_flight.len() {
+        offset += client.read_tls(&mut &server_flight[offset..]).unwrap();
+    }
+    client.process_new_packets().unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+
+    // The same configuration with ECH enabled, sharing that session store.
+    // The server sends no tickets, so the TLS 1.2 session stays the only
+    // one cached for the hidden name.
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(5)]).unwrap());
+    let mut ech_client = (*plain_client).clone();
+    ech_client.ech_mode = enable(ech.ech_config_list());
+    let ech_client = Arc::new(ech_client);
+    let mut ech_server = server_config(&certs, Some(&ech), None);
+    ech_server.send_tls13_tickets = 0;
+    let ech_server = Arc::new(ech_server);
+    for _ in 0..2 {
+        let (mut client, mut server) = connect_arc(ech_client.clone(), ech_server.clone());
+        let mut first_flight = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut first_flight).unwrap();
+        }
+        let outer_id = hello_session_id(&first_flight, 1);
+        assert_eq!(outer_id.len(), 32, "middlebox compatibility mode");
+        assert_ne!(outer_id, cached_id, "the outer hello reuses the cached ID");
+        let mut offset = 0;
+        while offset < first_flight.len() {
+            offset += server.read_tls(&mut &first_flight[offset..]).unwrap();
+        }
+        server.process_new_packets().unwrap();
+        assert_accepted(&mut client, &mut server);
+        assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+    }
+
+    // ECH left the TLS 1.2 session alone: without ECH it still resumes.
+    let (mut client, mut server) = connect_arc(plain_client, tls12_server);
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
+    assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
 }

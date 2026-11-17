@@ -21,7 +21,9 @@
 //! or SVCB record (RFC 9848); the [`svcb`] module extracts them.
 //!
 //! ECH restricts a connection to TLS 1.3: a client offering it sends neither
-//! TLS 1.2 nor 0-RTT data, and resumes only TLS 1.3 sessions.
+//! TLS 1.2 nor 0-RTT data, and resumes only TLS 1.3 sessions. Cached TLS 1.2
+//! sessions are left alone, so the outer ClientHello's session ID is always
+//! fresh and cannot link the connection to an earlier one.
 //!
 //! # Server topologies (§3.1)
 //!

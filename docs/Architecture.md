@@ -722,7 +722,10 @@ back-end server that terminates it.
   mandatory extension, a public name that is an LDH host name not ending in a
   numeric or `0x` label, and a cipher suite the given HPKE suites cover. The
   handshake state machine builds the inner ClientHello (TLS 1.3 only, an
-  `inner` ECH extension, no TLS 1.2 session and no 0-RTT), then
+  `inner` ECH extension, no 0-RTT, and no TLS 1.2 session: TLS 1.2 sessions
+  are not even looked up, so the `legacy_session_id` both hellos share is
+  always fresh random and never one a TLS 1.2 server issued for the hidden
+  name), then
   `ech::client` seals it into the outer one: a fresh random, the public name
   as SNI, no ALPN, a GREASE `pre_shared_key` mirroring the inner PSK, the
   longest run of extensions identical in both replaced by

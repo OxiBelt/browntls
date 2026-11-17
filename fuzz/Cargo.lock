@@ -211,6 +211,7 @@ dependencies = [
  "browntls",
  "browntls-crypto",
  "browntls-pki",
+ "browntls-tokio",
  "cbc",
  "ccm",
  "chacha20poly1305",
@@ -230,6 +231,7 @@ dependencies = [
  "sha2",
  "sha3",
  "shake",
+ "tokio",
  "x25519-dalek",
  "x448",
 ]
@@ -237,6 +239,14 @@ dependencies = [
 [[package]]
 name = "browntls-pki"
 version = "0.1.0-dev"
+
+[[package]]
+name = "browntls-tokio"
+version = "0.1.0-dev"
+dependencies = [
+ "browntls",
+ "tokio",
+]
 
 [[package]]
 name = "cbc"
@@ -926,6 +936,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
 name = "pkcs1"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1342,6 +1358,15 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tokio"
+version = "1.54.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
+dependencies = [
+ "pin-project-lite",
 ]
 
 [[package]]

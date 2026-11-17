@@ -3,7 +3,7 @@
 A [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) project for the
 untrusted-input surfaces of browntls (message codecs, the record deframer,
 certificate decompression, the PKI parsers and path validation, the client and
-server handshake state machines) and for the whole public API of the three
+server handshake state machines) and for the whole public API of the four
 library crates, through API targets grouped by topic.
 
 The project is not a member of the workspace. It has its own `Cargo.toml` and
@@ -53,6 +53,7 @@ and re-encoding stability.
 | `pki_api` | pki | Server names and IP addresses against `std::net`, times, algorithm identifiers, RSASSA-PSS parameters, DER containers, PEM, certificates and path validation against a model, signatures and CRLs with real providers |
 | `tls_config` | tls-config | Client and server configuration builders, providers and cipher suites, signers, verifiers and root stores, ticketers, certificate compression, key logs, session caches and certificate resolvers |
 | `tls_conn` | tls-connection | An in-process client and server driven by API calls: transfers with damaged bytes, reader and writer, early data, close_notify, key updates, exporters, `complete_io`, `Stream`, `Acceptor`, accessors, secret extraction |
+| `tls_tokio` | tls-connection | `browntls-tokio`: connector entry points, acceptor, lazy acceptor (including refusals and `take_io`), fallible futures, client and server streams and their accessors, 0-RTT on resumed connections, over an in-memory transport with fuzzed chunk sizes, `Pending` patterns, damaged, inserted and ended bytes |
 | `tls_unbuffered` | tls-connection | The unbuffered API of both sides with fuzzed buffer sizes, damaged delivery, early data, key updates and exporters |
 | `tls_ech` | tls-extensions | ECH configuration lists, server keys, SVCB records and handshakes (accepted, rejected with retry configurations, GREASE) in shared and split mode (client-facing server fed in fuzz-chosen pieces, back-end server, trial decryption with random identifiers) |
 | `tls_psk` | tls-extensions | External PSKs, the RFC 9258 importer and RFC 8773, with handshakes using matching and differing PSKs |
@@ -134,7 +135,7 @@ cargo test --manifest-path fuzz/Cargo.toml --locked
 ## Public API coverage
 
 Together the targets must reach every `pub fn` of `browntls`,
-`browntls-crypto` and `browntls-pki`. `scripts/fuzz/api_coverage.py` checks
+`browntls-crypto`, `browntls-pki` and `browntls-tokio`. `scripts/fuzz/api_coverage.py` checks
 it: it builds the library tests above with LLVM source-based coverage, runs
 them, and fails for any public function (outside test modules) whose body
 never ran. A function defined in a macro must run in every expansion.

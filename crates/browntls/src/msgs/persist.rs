@@ -476,13 +476,14 @@ impl Codec<'_> for ServerSessionValue {
             None => 0u8.encode(bytes),
             Some(binding) => {
                 match &binding.import_context {
-                    None => 1u8.encode(bytes),
-                    Some(_) => 2u8.encode(bytes),
+                    None => 3u8.encode(bytes),
+                    Some(_) => 4u8.encode(bytes),
                 }
                 PayloadU16::encode_slice(&binding.identity, bytes);
                 if let Some(context) = &binding.import_context {
                     PayloadU16::encode_slice(context, bytes);
                 }
+                PayloadU8::new(binding.key_tag.clone()).encode(bytes);
             }
         }
         match self.delegated_credential_expiry {
@@ -532,15 +533,20 @@ impl Codec<'_> for ServerSessionValue {
         let age_obfuscation_offset = u32::read(r)?;
         let external_psk = match u8::read(r)? {
             0 => None,
-            tag @ (1 | 2) => {
+            tag @ (3 | 4) => {
                 let identity = PayloadU16::read(r)?.0;
                 let import_context = match tag {
-                    2 => Some(PayloadU16::read(r)?.0),
+                    4 => Some(PayloadU16::read(r)?.0),
                     _ => None,
                 };
+                let key_tag = PayloadU8::read(r)?.0;
+                if !matches!(key_tag.len(), 32 | 48) {
+                    return Err(InvalidMessage::IllegalEmptyValue);
+                }
                 Some(ExternalPskBinding {
                     identity,
                     import_context,
+                    key_tag,
                 })
             }
             _ => return Err(InvalidMessage::IllegalEmptyValue),
@@ -649,6 +655,7 @@ mod tests {
             let binding = ExternalPskBinding {
                 identity: b"psk".to_vec(),
                 import_context,
+                key_tag: alloc::vec![0x55; 32],
             };
             v.set_external_psk(Some(binding.clone()));
             let enc = v.get_encoding();
@@ -659,6 +666,36 @@ mod tests {
         let mut enc = sample().get_encoding();
         *enc.last_mut().unwrap() = 3;
         assert!(ServerSessionValue::read_bytes(&enc).is_err());
+
+        // Identity-only records from before key binding are unsafe to resume.
+        for (import_context, current_tag, legacy_tag) in
+            [(None, 3, 1), (Some(b"ctx".to_vec()), 4, 2)]
+        {
+            let mut v = sample();
+            v.set_external_psk(Some(ExternalPskBinding {
+                identity: b"legacy".to_vec(),
+                import_context,
+                key_tag: alloc::vec![0x55; 32],
+            }));
+            let mut enc = v.get_encoding();
+            let marker = [current_tag, 0, 6, b'l', b'e', b'g', b'a', b'c', b'y'];
+            let at = enc
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap();
+            enc[at] = legacy_tag;
+            assert!(ServerSessionValue::read_bytes(&enc).is_err());
+        }
+
+        for len in [31, 49] {
+            let mut v = sample();
+            v.set_external_psk(Some(ExternalPskBinding {
+                identity: b"psk".to_vec(),
+                import_context: None,
+                key_tag: alloc::vec![0x55; len],
+            }));
+            assert!(ServerSessionValue::read_bytes(&v.get_encoding()).is_err());
+        }
     }
 
     #[test]

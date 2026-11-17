@@ -317,6 +317,9 @@ exclusion does not arise.
 External pre-shared keys (RFC 9846 §4.3.11) live in `browntls::psk`. An
 `ExternalPsk` carries its identity, key, hash (SHA-256 or SHA-384) and
 optional restrictions: one cipher suite, one server name, one ALPN protocol.
+A caller may also attach an opaque local key generation with
+`with_key_generation`; each endpoint applies its own value independently, and
+it is not sent in the handshake.
 A client lists its keys in `ClientConfig::external_psks`; a server finds them
 through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
 (`with_external_psks_only` builds a server without a certificate).
@@ -381,14 +384,17 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   tickets from external-PSK sessions and a server passes over other tickets;
   TLS 1.2 is refused.
 - Tickets: a ticket issued on a connection that used an external PSK records
-  the PSK's identity and importer context (in the server's encrypted ticket
-  and in the client's `Tls13ClientSessionValue`). Resuming it reports the
-  same `external_psk_identity` (as `HandshakeKind::Resumed`) and counts for
+  the PSK's identity, importer context and a per-ticket verifier derived from
+  the raw key, optional key generation and that ticket's resumption secret
+  (in the server's encrypted ticket and in the client's
+  `Tls13ClientSessionValue`). Resuming it reports the same
+  `external_psk_identity` (as `HandshakeKind::Resumed`) and counts for
   `require_external_psk`. The client offers such a ticket only while the PSK
-  is configured and usable for the connection; the server resolves the
-  identity again and resumes only while the same key (same importer
-  context) still resolves and its server name, ALPN protocol and suite
-  restrictions hold, so removing a key also ends resumption of its sessions.
+  is configured, usable for the connection and still verifies; the server
+  resolves the identity again and applies the same check. Changing either the
+  key bytes or the optional generation therefore invalidates existing tickets;
+  removing the key does too. Identity-only ticket records from older browntls
+  revisions fail closed rather than resuming without a key binding.
 
 RFC 9257 guidance and what browntls enforces:
 

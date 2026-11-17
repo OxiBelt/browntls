@@ -96,7 +96,7 @@ impl StreamState {
     }
 
     /// Records `cx` when `poll` is `Pending`, and passes it on.
-    fn track<T>(&mut self, cx: &Context<'_>, poll: Poll<T>) -> Poll<T> {
+    pub(crate) fn track<T>(&mut self, cx: &Context<'_>, poll: Poll<T>) -> Poll<T> {
         if poll.is_pending() {
             self.park_writer(cx);
         }

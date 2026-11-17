@@ -13,15 +13,43 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, StreamState};
 
+mod early;
+use early::EarlyData;
+pub use early::EarlyDataNotResent;
+
 /// Starts client handshakes with a shared [`ClientConfig`].
 ///
 /// Cheap to clone; create one per configuration and reuse it.
 #[derive(Clone)]
 pub struct TlsConnector {
     inner: Arc<ClientConfig>,
+    early_data: bool,
 }
 
 impl TlsConnector {
+    /// Whether [`connect`](Self::connect) may return before the handshake,
+    /// to send 0-RTT ("early") data. Off by default.
+    ///
+    /// It does when the configuration enables early data
+    /// ([`ClientConfig::enable_early_data`]) and a resumable TLS 1.3 session
+    /// allows it. Writes then take early data, up to the server's allowance.
+    /// The first read, flush or shutdown, or a write beyond the allowance,
+    /// sends the ClientHello with the early data and completes the handshake.
+    /// Early data the server declined is then sent again as ordinary data
+    /// when the same application protocol is certain to be in use (no ALPN
+    /// offered, or exactly one offered and selected); otherwise that
+    /// operation fails with [`EarlyDataNotResent`] and the stream stays
+    /// usable (RFC 9846 §4.2.10).
+    /// [`ClientConnection::is_early_data_accepted`] tells which happened.
+    ///
+    /// Early data is **replayable** by an attacker and has no forward
+    /// secrecy with respect to the resumption secret: send only requests
+    /// that are safe to repeat.
+    pub fn early_data(mut self, enabled: bool) -> Self {
+        self.early_data = enabled;
+        self
+    }
+
     /// Connects over `stream` to the server named `domain`.
     ///
     /// `domain` is checked against the server's certificate and sent as SNI
@@ -69,6 +97,7 @@ impl TlsConnector {
         F: FnOnce(&mut ClientConnection),
     {
         let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
+        let alpn_offered = alpn.clone();
         let mut session = match ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn) {
             Ok(session) => session,
             Err(error) => {
@@ -80,23 +109,31 @@ impl TlsConnector {
         };
         f(&mut session);
 
+        let early = (self.early_data && session.early_data().is_some())
+            .then(|| EarlyData::new(alpn_offered));
         Connect(MidHandshake::Handshaking(TlsStream {
             io: stream,
             session,
             st: StreamState::new(),
+            early,
         }))
     }
 }
 
 impl From<Arc<ClientConfig>> for TlsConnector {
     fn from(inner: Arc<ClientConfig>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            early_data: false,
+        }
     }
 }
 
 impl fmt::Debug for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsConnector").finish_non_exhaustive()
+        f.debug_struct("TlsConnector")
+            .field("early_data", &self.early_data)
+            .finish_non_exhaustive()
     }
 }
 
@@ -214,6 +251,8 @@ pub struct TlsStream<IO> {
     pub(crate) io: IO,
     pub(crate) session: ClientConnection,
     pub(crate) st: StreamState,
+    /// Set while the handshake is unfinished and early data may be sent.
+    pub(crate) early: Option<EarlyData>,
 }
 
 impl<IO> TlsStream<IO> {
@@ -239,7 +278,7 @@ impl<IO> IoSession for TlsStream<IO> {
     type Session = ClientConnection;
 
     fn skip_handshake(&self) -> bool {
-        false
+        self.early.is_some()
     }
 
     fn parts(&mut self) -> (&mut StreamState, &mut IO, &mut ClientConnection) {
@@ -251,6 +290,63 @@ impl<IO> IoSession for TlsStream<IO> {
     }
 }
 
+impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
+    /// Ends the early-data phase, if any, before ordinary I/O: completes the
+    /// handshake and resends declined early data.
+    fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        early::poll_finish(
+            &mut self.early,
+            &mut self.io,
+            &mut self.session,
+            &mut self.st,
+            cx,
+        )
+    }
+
+    /// The early-data part of a write: `Ready(Ok(n))` with `n > 0` when
+    /// early data took the bytes, `Ready(Ok(0))` when the write should go
+    /// the ordinary way.
+    fn poll_write_early(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let Some(early) = &mut self.early else {
+            return Poll::Ready(Ok(0));
+        };
+        match early::write(early, &mut self.session, bufs) {
+            Ok(0) => {}
+            other => return Poll::Ready(other),
+        }
+        let poll = self.poll_finish_early(cx);
+        self.st.track(cx, poll).map_ok(|()| 0)
+    }
+
+    /// Ends the early-data phase for a read, which may have taken over the
+    /// writer's registration while doing so. A read left waiting is woken
+    /// when another operation ends the phase.
+    fn poll_finish_early_for_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.early.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        // The handshake writes too, and may take a parked writer's
+        // registration: register both tasks, as answering reads do.
+        let joint = common::joint_waker(cx.waker(), self.st.write_waker.as_ref());
+        let poll = self.poll_finish_early(&mut Context::from_waker(&joint));
+        if poll.is_pending()
+            && let Some(early) = &mut self.early
+        {
+            early.park_reader(cx);
+        }
+        if poll.is_ready()
+            && let Some(waker) = self.st.write_waker.take()
+        {
+            waker.wake();
+        }
+        poll
+    }
+}
+
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -258,6 +354,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        ready!(this.poll_finish_early_for_read(cx))?;
         common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
     }
 }
@@ -265,6 +362,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
+        ready!(this.poll_finish_early_for_read(cx))?;
         common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
     }
 
@@ -280,7 +378,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
+            0 => common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf),
+            n => Poll::Ready(Ok(n)),
+        }
     }
 
     fn poll_write_vectored(
@@ -289,7 +393,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Poll::Ready(Ok(0));
+        }
+        match ready!(this.poll_write_early(cx, bufs))? {
+            0 => {
+                common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+            }
+            n => Poll::Ready(Ok(n)),
+        }
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -298,11 +410,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        let poll = this.poll_finish_early(cx);
+        ready!(this.st.track(cx, poll))?;
         common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        let poll = this.poll_finish_early(cx);
+        ready!(this.st.track(cx, poll))?;
         common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
     }
 }

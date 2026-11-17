@@ -516,10 +516,13 @@ fn records_that_would_stall_kernel_tls_are_refused() {
     refused(&[&[]]);
 
     // TLS 1.2 has no KeyUpdate, so such a record always stalls.
-    let (_, mut conn) = pair(prov::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, &chain)
-        .0
-        .dangerous_into_kernel_connection()
-        .unwrap();
+    let (_, mut conn) = pair(
+        prov::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        &chain,
+    )
+    .0
+    .dangerous_into_kernel_connection()
+    .unwrap();
     assert!(conn.handle_record(ContentType::Handshake, &msg).is_err());
 }
 

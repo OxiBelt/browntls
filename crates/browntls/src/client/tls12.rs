@@ -887,6 +887,7 @@ impl ExpectFinished {
             ticket,
             self.secrets.master_secret(),
             Arc::new(cert_chain),
+            &self.config.session_binding(),
             now,
             lifetime,
             self.using_ems,

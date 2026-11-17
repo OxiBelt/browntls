@@ -54,7 +54,7 @@ mod log {
 }
 
 pub(crate) mod sync {
-    pub(crate) use alloc::sync::Arc;
+    pub(crate) use alloc::sync::{Arc, Weak};
 }
 
 #[macro_use]

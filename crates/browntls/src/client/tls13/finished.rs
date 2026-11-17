@@ -361,6 +361,7 @@ impl ExpectTraffic {
             nst.ticket.0.clone(),
             &secret,
             Arc::new(server_cert_chain),
+            &self.config.session_binding(),
             now,
             nst.lifetime,
             nst.age_add,

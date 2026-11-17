@@ -1019,9 +1019,9 @@ GHASH is also available on its own as `browntls_crypto::gcm::Ghash` (SP
 800-38D section 6.4, keyed by the hash subkey `H`, the counterpart of the
 RustCrypto `ghash` crate's `GHash`), in the way `chacha::Poly1305` exposes
 Poly1305. It runs on the GHASH backends of the AES-GCM row, chosen when the
-value is created (the selected one under the GHASH policy, or one named
-explicitly, with the portable backend as the fallback), and does not take part
-in load-aware routing. Input can be streamed, given as whole blocks or
+value is created (the one selected under the GHASH policy; differential tests
+can name one, with the portable backend as the fallback), and does not take
+part in load-aware routing. Input can be streamed, given as whole blocks or
 zero-padded to a block boundary as GCM pads its additional data and
 ciphertext; there is no length limit. The key material, the accumulator and a
 buffered partial block are zeroised on drop. It is not a MAC by itself: its

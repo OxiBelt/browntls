@@ -69,7 +69,8 @@ fn ghash_gcm(mut g: Ghash, a: &[u8], c: &[u8]) -> Block {
 /// ended by an empty `update_padded`; the whole blocks of the ciphertext
 /// as blocks; the last chunk of each field padded by `update_padded`. A
 /// plain stream of both fields equals the reference of their
-/// concatenation.
+/// concatenation, and so does that stream with whole blocks given by
+/// `update_blocks` after a partial first chunk.
 fn check_backend(h: &Block, backend: GhashBackend, a: &[u8], c: &[u8], plan: &[u8], want: &Block) {
     let g = Ghash::with_backend(h, backend);
     // An unavailable backend falls back to the portable code.
@@ -129,6 +130,21 @@ fn check_backend(h: &Block, backend: GhashBackend, a: &[u8], c: &[u8], plan: &[u
         g.finalize(),
         reference(h, &both),
         "GHASH {backend:?}: stream"
+    );
+
+    // Whole blocks given while a partial block is buffered continue it:
+    // the first planned chunk, the whole blocks of the rest, the remainder.
+    let first = chunks(&both, plan).first().map_or(0, |part| part.len());
+    let (head, tail) = both.split_at(first);
+    let (blocks, rest) = tail.as_chunks::<GHASH_BLOCK_LEN>();
+    let mut g = Ghash::with_backend(h, backend);
+    g.update(head);
+    g.update_blocks(blocks);
+    g.update(rest);
+    assert_eq!(
+        g.finalize(),
+        reference(h, &both),
+        "GHASH {backend:?}: blocks after a partial block"
     );
 }
 
@@ -190,6 +206,7 @@ pub(super) fn op_ghash(input: &mut Input<'_>) {
     assert!(GhashBackend::select().is_available());
     let got = across_policies(Algorithm::Ghash, || {
         let g = Ghash::new(&h);
+        assert_eq!(g.backend(), GhashBackend::select());
         assert!(g.backend().is_available());
         ghash_gcm(g, aad, &msg)
     });

@@ -54,13 +54,17 @@ pub const GHASH_BLOCK_LEN: usize = 16;
 /// under which every value is zero. Deriving `H` is the caller's business
 /// (GCM uses `E_K(0^128)`).
 ///
-/// The arithmetic is the AES-GCM code's and runs in time independent of `H`
-/// and of the input bytes on every backend: masked integer multiplications
-/// in the portable one, carry-less multiplication instructions (PCLMULQDQ,
-/// VPCLMULQDQ, PMULL, Zvkg, Zvbc, Zbc/Zbkc), whose timing does not depend
-/// on their operands, in the others; no table is indexed by secret data.
-/// The time taken depends only on the input lengths and on how the input is
-/// split between calls.
+/// The arithmetic is the AES-GCM code's: masked integer multiplications in
+/// the portable backend, carry-less multiplication instructions (PCLMULQDQ,
+/// VPCLMULQDQ, PMULL, Zvkg, Zvbc, Zbc/Zbkc) in the others, with no
+/// secret-dependent branches and no table indexed by secret data. Its time
+/// is independent of `H` and of the input bytes as long as those
+/// instructions run in data-independent time on the CPU, which the
+/// accelerated backends assume: the crate neither enables FEAT_DIT on
+/// aarch64 nor requires Zkt/Zvkt when it detects the RISC-V extensions (the
+/// latter an open item of the project roadmap). Beyond that, the time taken
+/// depends only on the input lengths and on how the input is split between
+/// calls.
 ///
 /// `H` as the backend stores it (with its precomputed powers), the
 /// accumulator and the buffered partial block are zeroised when a `Ghash`
@@ -79,10 +83,10 @@ pub const GHASH_BLOCK_LEN: usize = 16;
 ///
 /// The backend is chosen when the value is created and kept for its
 /// lifetime: [`new`](Self::new) takes the one the dispatcher selects under
-/// the current GHASH policy ([`crate::accel`]), [`with_backend`](Self::with_backend)
-/// the one named. Every backend computes the same function. A `Ghash` does
-/// not take part in load-aware routing ([`crate::accel::load`]): unlike the
-/// AES-GCM keys, it never hands work to another backend.
+/// the current GHASH policy ([`crate::accel`]). Every backend computes the
+/// same function. A `Ghash` does not take part in load-aware routing
+/// ([`crate::accel::load`]): unlike the AES-GCM keys, it never hands work to
+/// another backend.
 ///
 /// # Example
 ///
@@ -145,15 +149,17 @@ impl core::fmt::Debug for Ghash {
 impl Ghash {
     /// Creates a GHASH instance keyed by the hash subkey `h`, on the backend
     /// the dispatcher selects under the current GHASH policy
-    /// ([`GhashBackend::select`]).
+    /// ([`crate::accel`]).
     #[must_use]
     pub fn new(h: &[u8; GHASH_BLOCK_LEN]) -> Self {
         Self::with_backend(h, GhashBackend::select())
     }
 
-    /// Like [`Ghash::new`] with an explicit backend (for tests and
-    /// diagnostics; the GHASH policy does not apply); falls back to
-    /// [`GhashBackend::Soft`] if `backend` is not available on this CPU.
+    /// Like [`Ghash::new`] with an explicit backend (differential testing);
+    /// falls back to the portable backend if `backend` is not available on
+    /// this CPU. The GHASH policy (`crate::accel::set_policy`) does not
+    /// apply.
+    #[doc(hidden)]
     #[must_use]
     pub fn with_backend(h: &[u8; GHASH_BLOCK_LEN], backend: GhashBackend) -> Self {
         // `GhashKey::new` fails only for a backend this CPU cannot run.
@@ -166,7 +172,8 @@ impl Ghash {
         }
     }
 
-    /// The backend in use.
+    /// The backend in use (differential testing).
+    #[doc(hidden)]
     #[must_use]
     pub fn backend(&self) -> GhashBackend {
         self.key.backend()

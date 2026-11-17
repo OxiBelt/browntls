@@ -11,17 +11,17 @@
 //!
 //! | Backend | Where | Notes |
 //! |---|---|---|
-//! | [`GhashBackend::Soft`] | everywhere | masked integer multiplications, constant time |
-//! | [`GhashBackend::Clmul`] | x86-64 with PCLMULQDQ | 8 blocks per reduction, Karatsuba |
-//! | [`GhashBackend::Vpclmul`] | x86-64 with VPCLMULQDQ + AVX2 | 8 blocks per reduction on YMM registers |
-//! | [`GhashBackend::VpclmulAvx512`] | x86-64 with VPCLMULQDQ + AVX-512 | 32 blocks per reduction on ZMM registers |
-//! | [`GhashBackend::Pmull`] | aarch64 with FEAT_PMULL | 8 blocks per reduction, Karatsuba |
-//! | [`GhashBackend::RvZvkg`] | riscv64 with RVV 1.0 + Zvkg | `vghsh.vv` |
-//! | [`GhashBackend::RvZvbc`] | riscv64 with RVV 1.0 + Zvbc | `vclmul`/`vclmulh` |
-//! | [`GhashBackend::RvClmul`] | riscv64 with Zbc or Zbkc | scalar `clmul`/`clmulh` |
+//! | `GhashBackend::Soft` | everywhere | masked integer multiplications, constant time |
+//! | `GhashBackend::Clmul` | x86-64 with PCLMULQDQ | 8 blocks per reduction, Karatsuba |
+//! | `GhashBackend::Vpclmul` | x86-64 with VPCLMULQDQ + AVX2 | 8 blocks per reduction on YMM registers |
+//! | `GhashBackend::VpclmulAvx512` | x86-64 with VPCLMULQDQ + AVX-512 | 32 blocks per reduction on ZMM registers |
+//! | `GhashBackend::Pmull` | aarch64 with FEAT_PMULL | 8 blocks per reduction, Karatsuba |
+//! | `GhashBackend::RvZvkg` | riscv64 with RVV 1.0 + Zvkg | `vghsh.vv` |
+//! | `GhashBackend::RvZvbc` | riscv64 with RVV 1.0 + Zvbc | `vclmul`/`vclmulh` |
+//! | `GhashBackend::RvClmul` | riscv64 with Zbc or Zbkc | scalar `clmul`/`clmulh` |
 //!
-//! When both ZMM backends ([`aes::Backend::VaesAvx512`] and
-//! [`GhashBackend::VpclmulAvx512`]) are selected, sealing and opening run
+//! When both ZMM backends (`aes::Backend::VaesAvx512` and
+//! `GhashBackend::VpclmulAvx512`) are selected, sealing and opening run
 //! through a fused loop that encrypts and hashes 32 blocks per iteration
 //! (see `x86_avx512`); other backend combinations run CTR and GHASH as
 //! separate passes. On the fused path decryption writes plaintext into the
@@ -87,9 +87,9 @@ const P_MAX: u64 = (1 << 36) - 32;
 /// Maximum additional-data length in bytes (2^64 - 1 bits).
 const A_MAX: u64 = (1 << 61) - 1;
 
-/// GHASH implementation backends. Exposed for differential testing and for
-/// [`Ghash::with_backend`]; the dispatcher picks the best available one
-/// automatically.
+/// GHASH implementation backends. Exposed for differential testing (also
+/// through `Ghash::with_backend`); the dispatcher picks the best available
+/// one automatically.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]

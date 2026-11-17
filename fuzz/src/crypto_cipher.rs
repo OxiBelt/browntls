@@ -18,8 +18,9 @@
 //!   `Unsupported` (or, for `Poly1305` and `Ghash`, fall back to the
 //!   portable backend);
 //! - standalone GHASH fed in every documented way (whole padded fields,
-//!   streamed chunks, whole blocks, a padded last chunk, a plain stream)
-//!   gives the same value;
+//!   streamed chunks, whole blocks, a padded last chunk, a plain stream,
+//!   whole blocks after a buffered partial block) gives the same value, and
+//!   `Ghash::new` takes the backend selected under each GHASH policy;
 //! - seal/open round trips; a flipped ciphertext, tag or AAD bit, and any
 //!   fuzzed ciphertext the oracle rejects, fails to open and wipes the
 //!   buffer; fuzzed ciphertexts the oracle accepts open to its plaintext;

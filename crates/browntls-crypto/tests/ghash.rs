@@ -387,8 +387,11 @@ fn keys() -> Vec<Block> {
 }
 
 /// Every backend equals the bit-serial reference for keys at the edges of
-/// the field and lengths across every block-grouping boundary of the
-/// backends (8, 32 blocks and their multiples).
+/// the field and for inputs of 0 to 17 blocks and around 32 and 64 blocks,
+/// each passed in one call. That leaves out tails of 18 to 30 blocks of the
+/// AVX-512 backend (which absorbs 32-block groups and then a tail of up to
+/// 31 blocks); `split_points_do_not_matter` covers them, absorbing every
+/// prefix of 0 to 37 whole blocks in one call.
 #[test]
 fn backends_match_reference() {
     let lens: Vec<usize> = (0..=272).chain([511, 512, 513, 1023, 1024, 1040]).collect();

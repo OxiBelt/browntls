@@ -208,6 +208,43 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
         Ok(output)
     }
 
+    /// Derives keying material from the early exporter (RFC 9846 §7.5,
+    /// `early_exporter_master_secret`), the exporter for use with 0-RTT data.
+    ///
+    /// Available on a client whose ClientHello offers 0-RTT (it is built by
+    /// `UnbufferedClientConnection::new`, before
+    /// [`TransmitTlsData::may_encrypt_early_data`] offers a writer) and on a
+    /// server once it has accepted 0-RTT; the client loses
+    /// it again if the server rejects 0-RTT, since the two sides would no
+    /// longer agree on the value, and neither has it once the connection
+    /// has failed. Like 0-RTT data the output is bound to the
+    /// ClientHello and the resumption PSK only: it is not forward secret and
+    /// an attacker who replays the ClientHello replays it too. Use
+    /// [`Self::export_keying_material`] for anything else; the two never
+    /// return the same value.
+    pub fn export_early_keying_material<T: AsMut<[u8]>>(
+        &self,
+        mut output: T,
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<T, Error> {
+        self.core
+            .export_early_keying_material(output.as_mut(), label, context)?;
+        Ok(output)
+    }
+
+    /// The `tls-exporter` channel binding of RFC 9266: 32 bytes exported
+    /// with the label `EXPORTER-Channel-Binding` and an empty context.
+    ///
+    /// Defined only when the handshake produced a unique master secret
+    /// (RFC 9266 §2): always in TLS 1.3, and in TLS 1.2 only with the
+    /// extended master secret (RFC 7627), which the TLS 1.2 exporter already
+    /// requires. browntls never renegotiates, so the value is fixed for the
+    /// connection (RFC 9266 §4.2). Fails until the handshake is complete.
+    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
+        self.export_keying_material([0u8; 32], b"EXPORTER-Channel-Binding", Some(&[]))
+    }
+
     /// Extracts the traffic secrets for kernel TLS offload.
     ///
     /// Requires `enable_secret_extraction` in the configuration, a completed

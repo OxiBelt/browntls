@@ -521,6 +521,37 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
     }
 
+    /// The early exporter (RFC 9846 §7.5); the body of the buffered and
+    /// unbuffered `export_early_keying_material`.
+    pub(crate) fn export_early_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if output.is_empty() {
+            return Err(Error::general(
+                "export_early_keying_material: output buffer is empty",
+            ));
+        }
+        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
+            return Err(Error::general(
+                "export_early_keying_material: context too long",
+            ));
+        }
+        // Like the regular exporter, nothing is exported once the
+        // connection has failed.
+        if let Err(err) = &self.state {
+            return Err(err.clone());
+        }
+        match &self.common_state.early_exporter {
+            Some(exporter) => exporter.export_keying_material(output, label, context),
+            None => Err(Error::General(
+                "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
+            )),
+        }
+    }
+
     pub(crate) fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
         if !self.common_state.enable_secret_extraction {
             return Err(Error::general("Secret extraction is disabled"));

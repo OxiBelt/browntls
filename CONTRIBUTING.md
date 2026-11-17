@@ -53,10 +53,10 @@ it is not a complete CommonMark parser. External HTTP(S) and mail links are not
 fetched. Each destination is checked once per file, diagnostics quote at most
 200 characters of a Markdown value with backslashes and non-printable
 characters escaped, and the first 1000 diagnostics found are printed, followed
-by the total error count. CI uses
-the same checks and pins the downloaded actionlint archive by SHA-256. Optional
-shellcheck and pyflakes integrations are disabled so the documented actionlint
-result does not depend on host-installed analyzers.
+by the total error count. CI uses the same checks and pins the downloaded
+actionlint archive by SHA-256. Optional shellcheck and pyflakes integrations
+are disabled so the documented actionlint result does not depend on
+host-installed analyzers.
 
 The line count check fails when a Git-tracked `.rs` file has more than 1000
 lines. It counts every line, including comments, blank lines, tests and

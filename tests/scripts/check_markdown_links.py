@@ -75,7 +75,7 @@ class _DiagnosticSink:
 
     def add(self, path: PurePosixPath, line: int, message: str) -> None:
         self.total += 1
-        if len(self.retained) < self.limit:
+        if not self.full:
             self.retained.append(Diagnostic(_excerpt(str(path)), line, message))
 
 

@@ -76,6 +76,7 @@ pub mod exported_authenticator;
 #[doc(hidden)]
 pub mod fuzzing;
 mod hash_hs;
+pub mod kernel;
 mod key_log;
 #[cfg(feature = "std")]
 mod key_log_file;

@@ -36,6 +36,7 @@ pub mod tls_codec;
 pub mod tls_config;
 pub mod tls_conn;
 pub mod tls_ech;
+pub mod tls_kernel;
 pub mod tls_psk;
 pub mod tls_quic;
 pub mod tls_tokio;

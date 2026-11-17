@@ -501,3 +501,4 @@ include!("unbuffered/rustls_interop.rs");
 include!("unbuffered/status_and_auth.rs");
 include!("unbuffered/exporters.rs");
 include!("unbuffered/acceptor.rs");
+include!("unbuffered/kernel.rs");

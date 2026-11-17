@@ -209,6 +209,10 @@ pub struct CommonState {
     /// Whether the peer's Finished has verified, which authenticates the
     /// peer's knowledge of [`Self::external_psk`].
     pub(crate) external_psk_confirmed: bool,
+    /// Present once the connection is handed to the kernel: records go to
+    /// this queue as plaintext for the kernel to protect
+    /// ([`crate::kernel::KernelConnection`]).
+    pub(crate) kernel: Option<alloc::boxed::Box<crate::kernel::KernelQueue>>,
 }
 
 impl CommonState {
@@ -250,6 +254,7 @@ impl CommonState {
             app_data_in_place: false,
             external_psk: None,
             external_psk_confirmed: false,
+            kernel: None,
         }
     }
 
@@ -469,6 +474,10 @@ impl CommonState {
             }
             return;
         }
+        if self.kernel.is_some() {
+            self.send_to_kernel(&PlainMessage::from(m));
+            return;
+        }
         if !must_encrypt {
             let msg = PlainMessage::from(m);
             for fragment in self.message_fragmenter.fragment_message(&msg) {
@@ -482,9 +491,29 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
+        if self.send_to_kernel(&m) {
+            return;
+        }
         for fragment in self.message_fragmenter.fragment_message(&m) {
             self.send_single_fragment(fragment);
         }
+    }
+
+    /// Kernel offload: queues `m` as plaintext records for the kernel, one
+    /// per fragment, each taking a sequence number of the current write
+    /// key. Returns whether the connection is offloaded.
+    pub(crate) fn send_to_kernel(&mut self, m: &PlainMessage) -> bool {
+        let Some(queue) = self.kernel.as_mut() else {
+            return false;
+        };
+        for fragment in self.message_fragmenter.fragment_message(m) {
+            queue.push(crate::kernel::KernelOutput::Record {
+                typ: fragment.typ,
+                payload: fragment.payload.to_vec(),
+            });
+            self.record_layer.note_kernel_records(1);
+        }
+        true
     }
 
     /// Fragments and encrypts application data, honouring the confidentiality
@@ -494,6 +523,11 @@ impl CommonState {
         payload: OutboundChunks<'_>,
         limit: Limit,
     ) -> usize {
+        // The kernel sends the application data of an offloaded connection
+        // (and the handover requires none to be queued).
+        if self.kernel.is_some() {
+            return 0;
+        }
         let len = match limit {
             Limit::Yes => self.sendable_tls.apply_limit(payload.len()),
             Limit::No => payload.len(),
@@ -888,111 +922,4 @@ fn is_always_fatal(desc: AlertDescription) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tls13_state() -> CommonState {
-        let mut common = CommonState::new(Side::Client);
-        common.negotiated_version = Some(ProtocolVersion::TLSv1_3);
-        common
-    }
-
-    fn alert(level: AlertLevel, description: AlertDescription) -> AlertMessagePayload {
-        AlertMessagePayload { level, description }
-    }
-
-    #[test]
-    fn tls13_user_canceled_is_ignored_at_any_level() {
-        // RFC 9846 §6.1: the receiver keeps reading until close_notify; the
-        // level carries no meaning in TLS 1.3 (§6).
-        let mut common = tls13_state();
-        for level in [AlertLevel::Warning, AlertLevel::Fatal] {
-            assert_eq!(
-                common.process_alert(&alert(level, AlertDescription::UserCanceled)),
-                Ok(())
-            );
-        }
-        assert!(!common.has_received_close_notify);
-        assert_eq!(
-            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::CloseNotify)),
-            Ok(())
-        );
-        assert!(common.has_received_close_notify);
-    }
-
-    #[test]
-    fn repeated_user_canceled_is_bounded() {
-        let mut common = tls13_state();
-        let user_canceled = alert(AlertLevel::Warning, AlertDescription::UserCanceled);
-        for _ in 0..MAX_WARNING_ALERTS {
-            assert_eq!(common.process_alert(&user_canceled), Ok(()));
-        }
-        assert_eq!(
-            common.process_alert(&user_canceled),
-            Err(PeerMisbehaved::TooManyWarningAlertsReceived.into())
-        );
-    }
-
-    #[test]
-    fn tls13_error_alerts_are_fatal_at_warning_level() {
-        let mut common = tls13_state();
-        assert_eq!(
-            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::GeneralError)),
-            Err(Error::AlertReceived(AlertDescription::GeneralError))
-        );
-    }
-
-    #[test]
-    fn key_update_request_not_repeated_until_peer_updates() {
-        // RFC 9846 §4.7.3: until a KeyUpdate arrives from the peer, the
-        // sender MUST NOT send another update_requested.
-        let mut common = tls13_state();
-        let requested = KeyUpdateRequest::UpdateRequested;
-        assert_eq!(common.key_update_to_send(requested), Some(requested));
-        common.key_update_request_outstanding = true;
-        assert_eq!(
-            common.key_update_to_send(requested),
-            Some(KeyUpdateRequest::UpdateNotRequested)
-        );
-        common
-            .received_key_update(KeyUpdateRequest::UpdateNotRequested, 8)
-            .unwrap();
-        assert_eq!(common.key_update_to_send(requested), Some(requested));
-    }
-
-    #[test]
-    fn key_updates_stop_at_the_epoch_limit() {
-        // RFC 9846 §4.7.3: no more than 2^48-1 key updates are sent; at the
-        // limit a peer's update_requested is ignored.
-        let mut common = tls13_state();
-        common.sent_key_updates = MAX_KEY_UPDATES - 1;
-        assert!(
-            common
-                .key_update_to_send(KeyUpdateRequest::UpdateNotRequested)
-                .is_some()
-        );
-        common.sent_key_updates = MAX_KEY_UPDATES;
-        assert_eq!(
-            common.key_update_to_send(KeyUpdateRequest::UpdateNotRequested),
-            None
-        );
-        assert_eq!(MAX_KEY_UPDATES, (1u64 << 48) - 1);
-    }
-
-    #[test]
-    fn several_requests_owe_one_response() {
-        let mut common = tls13_state();
-        for _ in 0..3 {
-            common
-                .received_key_update(KeyUpdateRequest::UpdateRequested, 8)
-                .unwrap();
-        }
-        assert!(common.key_update_owed);
-        // Sending any KeyUpdate pays the debt. Without a record encrypter
-        // the message is dropped, but the bookkeeping is what is checked.
-        common.send_key_update(KeyUpdateRequest::UpdateNotRequested);
-        assert!(!common.key_update_owed);
-        assert_eq!(common.sent_key_updates, 1);
-        assert!(!common.key_update_request_outstanding);
-    }
-}
+mod tests;

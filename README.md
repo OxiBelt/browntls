@@ -13,11 +13,14 @@ browntls is in initial development. The workspace contains:
   mount point, and the built-in providers.
 - `crates/browntls-tokio`: asynchronous TLS streams for Tokio
   ([README](crates/browntls-tokio/README.md)).
+- `crates/browntls-ktls`: Linux kernel TLS offload of browntls connections
+  ([README](crates/browntls-ktls/README.md)).
 
 See [Architecture](docs/Architecture.md) for the design and
 [Roadmap](docs/Roadmap.md) for implementation status and gaps. The code has not
 been independently reviewed or audited. There are no published releases or
-production-readiness claims; kernel integration remains to be designed.
+production-readiness claims. Kernel integration starts with Linux kernel TLS
+offload; other kernel mechanisms remain to be designed.
 
 Rust 1.100.0 is required (pinned in `rust-toolchain.toml`).
 

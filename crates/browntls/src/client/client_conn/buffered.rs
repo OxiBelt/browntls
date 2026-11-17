@@ -108,6 +108,19 @@ impl ClientConnection {
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()
     }
+
+    /// See [`crate::ConnectionCommon::dangerous_into_kernel_connection`].
+    pub fn dangerous_into_kernel_connection(
+        self,
+    ) -> Result<
+        (
+            crate::suites::ExtractedSecrets,
+            crate::kernel::KernelConnection<ClientConnectionData>,
+        ),
+        Error,
+    > {
+        self.inner.dangerous_into_kernel_connection()
+    }
 }
 
 /// An [`std::io::Write`] for early data; see [`ClientConnection::early_data`].

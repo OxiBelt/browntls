@@ -77,13 +77,78 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Requires `enable_secret_extraction` in the configuration and a
     /// completed handshake. The connection is consumed because no further
     /// records may be protected by this library afterwards.
+    ///
+    /// Fails when anything is still in flight that the extracted secrets
+    /// could not account for (see [`Self::kernel_handoff_blocker`]), or
+    /// when part of a handshake message is buffered.
     pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
         if self.deframer_buffer.has_pending() || self.core.deframer.has_buffered_handshake() {
             return Err(Error::general(
                 "cannot extract secrets with unprocessed received data",
             ));
         }
+        if let Some(blocker) = self.kernel_handoff_blocker()
+            && blocker.is_in_flight()
+        {
+            return Err(Error::General(alloc::format!(
+                "cannot extract secrets: {blocker}"
+            )));
+        }
         self.core.dangerous_extract_secrets()
+    }
+
+    /// What keeps this connection from being handed to the kernel now, if
+    /// anything (see [`crate::kernel`]).
+    ///
+    /// To clear the transient blockers, write the queued records
+    /// (`write_tls` until `wants_write` is false), read the received
+    /// plaintext (`reader`) and, while [`UnprocessedInput`] remains, read
+    /// more TLS data and process it: the kernel must start at a record
+    /// boundary.
+    ///
+    /// [`UnprocessedInput`]: crate::kernel::KernelHandoffBlocker::UnprocessedInput
+    pub fn kernel_handoff_blocker(&self) -> Option<crate::kernel::KernelHandoffBlocker> {
+        if let Some(blocker) = self.core.kernel_handoff_blocker() {
+            return Some(blocker);
+        }
+        if self.deframer_buffer.has_pending() {
+            return Some(crate::kernel::KernelHandoffBlocker::UnprocessedInput);
+        }
+        None
+    }
+
+    /// How many more bytes of TLS input complete the records received so
+    /// far: zero when the unprocessed input ends at a record boundary.
+    ///
+    /// Before a handover to the kernel, read at most this many bytes at a
+    /// time while [`Self::kernel_handoff_blocker`] reports
+    /// [`UnprocessedInput`]: anything beyond the boundary would be taken
+    /// from the kernel.
+    ///
+    /// [`UnprocessedInput`]: crate::kernel::KernelHandoffBlocker::UnprocessedInput
+    pub fn bytes_to_record_boundary(&self) -> usize {
+        self.deframer_buffer.bytes_to_record_boundary()
+    }
+
+    /// Hands the connection to the kernel: returns the secrets to install
+    /// (`TLS_TX`, `TLS_RX`) and the [`KernelConnection`] that handles the
+    /// records the kernel passes back.
+    ///
+    /// Fails, and drops the connection, when
+    /// [`Self::kernel_handoff_blocker`] reports anything; check that first.
+    /// A handshake message the peer has only partly sent is completed by
+    /// the records the kernel delivers.
+    ///
+    /// [`KernelConnection`]: crate::kernel::KernelConnection
+    pub fn dangerous_into_kernel_connection(
+        self,
+    ) -> Result<(ExtractedSecrets, crate::kernel::KernelConnection<Data>), Error> {
+        if let Some(blocker) = self.kernel_handoff_blocker() {
+            return Err(Error::General(alloc::format!(
+                "cannot hand the connection to the kernel: {blocker}"
+            )));
+        }
+        self.core.into_kernel_connection()
     }
 
     /// Limits the buffered outgoing data (`None` removes the limit).

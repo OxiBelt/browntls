@@ -90,11 +90,17 @@ jobs:
       - name: Report CPU
         run: grep -m1 -E '^(model name|flags)' /proc/cpuinfo || true
 
+      # browntls-ktls hands connections to the runner's kernel.
+      - name: Load the kernel TLS module
+        run: sudo modprobe tls
+
       - name: Test
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           # The runner image ships OpenSSL 3: interop tests must not skip.
           BROWNTLS_OPENSSL_INTEROP: require
+          # Kernel TLS is loaded above: its tests must not skip.
+          BROWNTLS_KTLS_REQUIRED: '1'
         run: cargo test --workspace --all-features --locked
 
       # Inline assembly must not use relocations that position-independent
@@ -136,11 +142,15 @@ jobs:
       - name: Report CPU
         run: grep -m1 -E '^Features' /proc/cpuinfo || true
 
+      - name: Load the kernel TLS module
+        run: sudo modprobe tls
+
       - name: Test
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           # The runner image ships OpenSSL 3: interop tests must not skip.
           BROWNTLS_OPENSSL_INTEROP: require
+          BROWNTLS_KTLS_REQUIRED: '1'
         run: cargo test --workspace --all-features --locked
 
   test-riscv64:

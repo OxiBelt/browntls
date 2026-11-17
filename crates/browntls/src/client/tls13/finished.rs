@@ -584,4 +584,9 @@ impl State<ClientConnectionData> for ExpectTraffic {
         self.key_schedule.update_encrypter_and_notify(common);
         Ok(())
     }
+
+    fn received_application_data(&mut self, common: &mut CommonState) {
+        common.received_key_update_requests = 0;
+        self.post_handshake_requests_since_data = 0;
+    }
 }

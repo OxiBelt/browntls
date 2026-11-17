@@ -21,7 +21,8 @@ browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
 browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12"] }
 # Only the I/O traits the `tls_tokio` harness polls directly (no runtime).
-tokio = { version = "1.47", default-features = false }
+# The same lower bound as the workspace's (`[workspace.dependencies]`).
+tokio = { version = "1.53", default-features = false }
 libfuzzer-sys = "0.4"
 # Independent implementations used only as differential oracles by the
 # crypto targets (the same set as `browntls-crypto`'s dev-dependencies).

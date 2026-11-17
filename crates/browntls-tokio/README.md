@@ -139,9 +139,12 @@ repeat.
 `prefer-post-quantum` (default), `zlib`, `brotli` and `zstd` are passed through
 to `browntls`.
 
-## Minimum supported Rust version
+## Minimum supported Rust and Tokio versions
 
-The workspace's pinned toolchain, Rust 1.99.1.
+Rust: the workspace's pinned toolchain, Rust 1.100.0.
+
+Tokio: 1.53, the newest long-term support line (supported by Tokio until
+September 2027), or any later 1.x release.
 
 ## Acknowledgements
 

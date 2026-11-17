@@ -118,6 +118,9 @@ fn tls12_gcm_extraction_continues_the_explicit_nonce_sequence() {
         assert_eq!(rx_seq, seq);
         assert_eq!(gcm_iv(rx), gcm_iv(tx), "{suite:?}");
         // Both salts are the fixed IV, the same in both views.
-        assert_eq!(gcm_iv(&server_secrets.tx.1)[..4], gcm_iv(&client_secrets.rx.1)[..4]);
+        assert_eq!(
+            gcm_iv(&server_secrets.tx.1)[..4],
+            gcm_iv(&client_secrets.rx.1)[..4]
+        );
     }
 }

@@ -25,6 +25,7 @@ use tokio::net::TcpStream;
 
 use crate::drain::{Drain, Outcome, Room};
 use crate::engine::Engine;
+use crate::quiet_close::QuietClose;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
 
@@ -213,6 +214,14 @@ pub struct AsyncKtlsStream<Data> {
     drain: Drain,
     /// See [`early_data_len`](Self::early_data_len).
     early_data_len: usize,
+    /// Behind `socket`, which must be dropped first: see [`QuietClose`].
+    quiet_close: QuietClose,
+}
+
+impl<Data> Drop for AsyncKtlsStream<Data> {
+    fn drop(&mut self) {
+        self.quiet_close.closing();
+    }
 }
 
 /// Nothing in the stream is pinned: the socket and the connection state
@@ -266,6 +275,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             drained: false,
             drain: Drain::new(),
             early_data_len: 0,
+            quiet_close: QuietClose::default(),
         }
     }
 
@@ -558,10 +568,11 @@ macro_rules! from_stream {
                 }
                 let (socket, conn, received) = handoff.into_parts();
                 match install(conn, socket.as_fd(), received) {
-                    Ok(engine) => Ok(Self {
-                        early_data_len,
-                        ..Self::with_engine(socket, engine)
-                    }),
+                    Ok(engine) => {
+                        let mut stream = Self::with_engine(socket, engine);
+                        stream.early_data_len = early_data_len;
+                        Ok(stream)
+                    }
                     Err(error) => Err(StreamHandoffError::Failed(error)),
                 }
             }

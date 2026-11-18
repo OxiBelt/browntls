@@ -181,6 +181,11 @@ impl<Data: SideData> Engine<Data> {
         fd: BorrowedFd<'_>,
         expect: bool,
     ) -> io::Result<()> {
+        if !expect && !self.rx_no_pad {
+            // Never set: nothing to take back, whatever the kernel and the
+            // protocol version.
+            return Ok(());
+        }
         self.tls13_only()?;
         if expect {
             no_pad_is_safe(&sys::kernel_release()?)?;
@@ -383,12 +388,9 @@ impl<Data: SideData> Engine<Data> {
                 // than it reports: a control record behind the data, a
                 // padded record's padding, or a record that did not
                 // authenticate. None of that stays with the caller.
-                let kept = match &result {
-                    Ok(received) => received.len,
-                    // No record: nothing was decrypted.
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => buf.len(),
-                    Err(_) => 0,
-                };
+                // Before `WouldBlock` too: a padded record without content
+                // is decrypted there and reports nothing.
+                let kept = result.as_ref().map_or(0, |received| received.len);
                 wipe_unreported(buf, kept);
             }
             let received = match result {
@@ -607,9 +609,13 @@ pub(crate) fn option_error(err: io::Error) -> io::Error {
 
 /// Whether a kernel of this release (as `uname` gives it) can be trusted
 /// with `TLS_RX_EXPECT_NO_PAD`: see [`NO_PAD_SINCE`]. A release that
-/// cannot be read is not trusted.
+/// cannot be read is not trusted, and neither is a release candidate of
+/// the first trusted version: the correction came with 7.2-rc7.
 fn no_pad_is_safe(release: &[u8]) -> io::Result<()> {
-    if release_version(release).is_some_and(|version| version >= NO_PAD_SINCE) {
+    let trusted = release_version(release).is_some_and(|version| {
+        version > NO_PAD_SINCE || (version == NO_PAD_SINCE && !is_release_candidate(release))
+    });
+    if trusted {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -631,6 +637,20 @@ fn release_version(release: &[u8]) -> Option<(u32, u32)> {
         number(release.get(..major)?)?,
         number(rest.get(..digits(rest))?)?,
     ))
+}
+
+/// Whether a kernel release names a release candidate: `rc` and a digit,
+/// not inside a word (`7.2.0-rc3`, `7.2.0-070200rc3-generic`; not
+/// `7.2.1-arch1-1`).
+fn is_release_candidate(release: &[u8]) -> bool {
+    release.windows(3).enumerate().any(|(at, window)| {
+        window.starts_with(b"rc")
+            && window[2].is_ascii_digit()
+            && !at
+                .checked_sub(1)
+                .and_then(|before| release.get(before))
+                .is_some_and(u8::is_ascii_alphabetic)
+    })
 }
 
 /// Zeroes what the kernel may have written into `buf` behind the `kept`
@@ -669,11 +689,25 @@ mod tests {
         ] {
             assert_eq!(release_version(release), version, "{release:?}");
         }
-        for release in [&b"7.2.0"[..], b"7.3.5-070305-generic", b"8.0.0", b"10.1"] {
+        for release in [
+            &b"7.2.0"[..],
+            b"7.2.1-arch1-1",
+            b"7.2.0-1-aarch64",
+            b"7.2.4-rc",
+            b"7.3.5-070305-generic",
+            b"7.3.0-rc1",
+            b"8.0.0",
+            b"10.1",
+        ] {
             assert!(no_pad_is_safe(release).is_ok(), "{release:?}");
         }
         for release in [
-            &b"7.1.9"[..],
+            &b"7.2.0-rc6"[..],
+            b"7.2.0-rc7",
+            b"7.2-rc1",
+            b"7.2.0-070200rc3-generic",
+            b"7.2.0rc2",
+            b"7.1.9",
             b"7.0.0-43-generic",
             b"6.18.1",
             b"5.19.0",

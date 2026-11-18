@@ -391,6 +391,11 @@ fn a_refused_handover_returns_the_connection() {
 /// A non-blocking socket refuses with `WouldBlock` mid-handshake; trying
 /// again with what came back (the `tls` ULP already attached) completes
 /// the handover.
+///
+/// The server starts its handshake only after the first refusal: a server
+/// that answered at once could, with the client's thread kept off its
+/// processor in between, have its whole flight waiting for the client's
+/// first read, and nothing would be refused.
 #[test]
 fn a_refused_handover_can_be_retried() {
     if !kernel_tls() {
@@ -399,9 +404,12 @@ fn a_refused_handover_can_be_retried() {
     let pki = Pki::new();
     let suite = offloadable_suites()[0];
     let (client_tcp, server_tcp) = tcp_pair();
+    let (refused_tx, refused_rx) = mpsc::channel::<()>();
+    let pki = &pki;
     thread::scope(|scope| {
-        let server = scope.spawn(|| {
-            let mut tls = server_stream(&pki, suite, server_tcp);
+        let server = scope.spawn(move || {
+            refused_rx.recv().unwrap();
+            let mut tls = server_stream(pki, suite, server_tcp);
             let mut buf = [0u8; 5];
             tls.read_exact(&mut buf).unwrap();
             tls.write_all(&buf).unwrap();
@@ -424,6 +432,9 @@ fn a_refused_handover_can_be_retried() {
                     assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
                     assert!(received.is_empty());
                     (conn, socket) = (c, s);
+                    if retries == 0 {
+                        refused_tx.send(()).unwrap();
+                    }
                     retries += 1;
                     assert!(retries < 10_000, "no progress");
                     thread::sleep(Duration::from_millis(1));

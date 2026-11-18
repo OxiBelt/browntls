@@ -69,22 +69,35 @@ pub fn kernel_tls() -> bool {
 }
 
 /// Whether the running kernel is one the streams promise unpadded records
-/// to (`TLS_RX_EXPECT_NO_PAD`): Linux 7.2 or later, since older kernels
-/// misplace a padded record in the reader's buffer.
+/// to (`TLS_RX_EXPECT_NO_PAD`): Linux 7.2 or later and not a release
+/// candidate of 7.2, since older kernels misplace a padded record in the
+/// reader's buffer. On another kernel the tests of the promise are
+/// skipped, unless `BROWNTLS_KTLS_NO_PAD_REQUIRED=1` makes that a failure.
 pub fn no_pad_kernel() -> bool {
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
+    let release = release.trim();
     let mut numbers = release
         .split(|c: char| !c.is_ascii_digit())
         .map(str::parse::<u32>);
-    let fixed = matches!(
-        (numbers.next(), numbers.next()),
-        (Some(Ok(major)), Some(Ok(minor))) if (major, minor) >= (7, 2)
-    );
+    let bytes = release.as_bytes();
+    // `rc` and a digit, not inside a word such as `arch1`.
+    let candidate = bytes.windows(3).enumerate().any(|(at, window)| {
+        window.starts_with(b"rc")
+            && window[2].is_ascii_digit()
+            && !(at > 0 && bytes[at - 1].is_ascii_alphabetic())
+    });
+    let fixed = match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => {
+            (major, minor) > (7, 2) || ((major, minor) == (7, 2) && !candidate)
+        }
+        _ => false,
+    };
     if !fixed {
-        eprintln!(
-            "Linux {}: unpadded records cannot be promised",
-            release.trim()
+        assert!(
+            std::env::var_os("BROWNTLS_KTLS_NO_PAD_REQUIRED").is_none_or(|v| v != "1"),
+            "BROWNTLS_KTLS_NO_PAD_REQUIRED=1 but Linux {release} cannot be promised unpadded records"
         );
+        eprintln!("Linux {release}: unpadded records cannot be promised");
     }
     fixed
 }

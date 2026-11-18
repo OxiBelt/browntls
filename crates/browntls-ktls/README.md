@@ -62,13 +62,19 @@ then, and they are lost if the stream is dropped first.
 
 The streams never ask the kernel for more than the file holds: finding the
 end of a file before the count it was given, the kernel waits for TCP to
-take the last record even on a non-blocking socket. A file that is cut short
-while it is sent can still cause that wait.
+take the last record even on a non-blocking socket. A file that holds less
+than the size it reports (cut short while it is sent, for one) can still
+cause that wait.
 
 `sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection that is
-closed for sending. The call holds the signal back for its thread and takes
-the one it caused, so the error is all the caller sees, whatever the process
-does with the signal.
+closed for sending, and kernel TLS raises it even for a call that reports
+bytes as sent, and again when the socket is closed with records of a file
+still in the kernel. The call holds the signal back for its thread and takes
+one that became pending meanwhile, and dropping a stream that sent files
+does the same around the close of its socket, so no `SIGPIPE` reaches the
+process whatever it does with the signal. A borrowed or shared socket that
+is closed elsewhere is not covered. On a connection that has failed the
+kernel may go on reporting bytes as sent; `unsent()` and the reads tell.
 
 `AsyncKtlsStream::sendfile` waits for room on the socket; where the kernel
 must read the file from its storage first, the call blocks the thread for
@@ -98,7 +104,8 @@ otherwise). The kernel has had it since 6.0, but before 7.2 it copies the
 second decryption to the wrong place in the reader's buffer, and a peer
 that pads corrupts what the application reads. The kernel is told apart by
 the release `uname` reports, so an older kernel that was given the
-correction is refused as well.
+correction is refused as well, and so is a release candidate of 7.2 (the
+correction came with the last of them).
 
 ## Tokio
 
@@ -134,8 +141,8 @@ match AsyncKtlsStream::from_client(tls).await {
 Tokio's `net` only; the runtime is the application's.
 
 `src/sys.rs` holds the crate's only `unsafe` code, the socket options,
-`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS; see the
-invariants at its top.
+`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS, and the
+thread's signal mask around the latter; see the invariants at its top.
 
 ## Testing
 
@@ -145,3 +152,7 @@ loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
 `tests/tokio_zero_copy.rs`, feature `tokio`). They are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).
+
+The tests of `set_rx_expect_no_pad` with a peer that pads need Linux 7.2;
+on an older kernel they check the refusal only and skip the rest, unless
+`BROWNTLS_KTLS_NO_PAD_REQUIRED=1` is set.

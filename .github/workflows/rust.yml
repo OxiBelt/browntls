@@ -255,6 +255,37 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo build -p browntls-pki --no-default-features --target "${{ matrix.target }}" --locked
 
+  # Cargo.lock holds the newest Tokio release, so the other jobs do not show
+  # that the declared lower bound (the newest Tokio LTS line, see
+  # docs/Maintenance.md) still builds and passes.
+  tokio-floor:
+    name: Tokio lower bound
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Select the first release of the declared lower bound
+        run: |
+          bound="$(sed -n 's/^tokio = { version = "\([0-9]*\.[0-9]*\)".*/\1/p' Cargo.toml)"
+          test -n "${bound}"
+          cargo update --package tokio --precise "${bound}.0"
+          cargo tree --locked --package tokio --depth 0
+
+      - name: Test browntls-tokio
+        run: cargo test -p browntls-tokio --all-features --locked
+
+      - name: Build the end-to-end peer
+        run: cargo build -p browntls-e2e --locked
+
   # The fuzz targets need a nightly toolchain to be instrumented, which CI
   # does not install. This job keeps them building on the pinned toolchain
   # and runs each harness over its generated seeds (fuzz/README.md).

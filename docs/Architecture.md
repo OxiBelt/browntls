@@ -767,6 +767,26 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   registered, since the last read returned or none was made, and nothing
   is left to write; the next poll reads, so the wake does not repeat. The
   task returns to the scheduler and takes nothing from the budget.
+- `into_split` (`split.rs`) gives a `ReadHalf` and a `WriteHalf` for two
+  tasks; `reunite` gives the stream back. The connection state is one, so
+  the halves do not run in parallel: they share the stream behind a lock
+  held for the length of one poll and taken only with `try_lock`. A half
+  that finds the stream taken leaves its waker and looks once more (the
+  other poll may have ended in between), then returns `Pending`; the poll
+  that has the stream unlocks it and then wakes the waiting half, also when
+  it panics, after which the lock is poisoned and every operation of either
+  half fails (`reunite` still returns the stream, as that poll left it).
+  No half waits for the lock inside its poll, so no worker thread is parked
+  behind the other half's record protection, which is what the blocking
+  lock of `tokio::io::split` does; the lock around the two wakers is held
+  for a few instructions. The second look is what rules out a lost wakeup,
+  and it relies on `try_lock` failing only while the lock is held. Turns
+  are not queued: a waiting half is woken at the end of each poll of the
+  other and may find the stream taken again, and a half that is always
+  ready may take it again and again until its task yields, which the
+  `coop` feature makes it do. The read half is not an
+  `AsyncBufRead`, since the stream's buffer cannot be lent out between two
+  polls while the other half uses the stream.
 
 ### Kernel TLS offload (`browntls::kernel`)
 

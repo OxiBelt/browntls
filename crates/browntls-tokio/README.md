@@ -121,7 +121,16 @@ repeat.
   write side; later writes fail with `BrokenPipe` (RFC 9846 §6.1). The peer's
   `close_notify` reads as end of file; a transport that ends without one fails
   the read with `UnexpectedEof` (a truncation).
-- **Splitting.** `tokio::io::split` gives read and write halves for two tasks.
+- **Splitting.** `into_split` on a stream gives a `ReadHalf` and a
+  `WriteHalf` for two tasks, and `reunite` gives the stream back. TLS ties
+  both directions to one connection state, so the halves take turns with the
+  stream, one poll at a time. They never wait for each other's poll: a half
+  that finds the other half's poll in progress returns `Pending` and is
+  woken when that poll ends (turns are not queued, so it may find the stream
+  taken again). If a poll of one half panics, every later operation of
+  either half fails. `tokio::io::split` works too; it takes a blocking
+  lock for every poll (a worker thread waits while the other half's poll
+  runs, record protection included) and needs Tokio's `io-util` feature.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
   `browntls::Error` (`err.get_ref()` then `downcast_ref`).
 - **Handshake state.** The handshake futures (`Connect`, `Accept` and their

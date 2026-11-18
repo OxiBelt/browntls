@@ -232,11 +232,20 @@ async fn declined_early_data_is_not_resent_when_the_protocol_may_differ() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_split_reader_waiting_in_the_early_phase_is_woken_by_the_writer() {
+    split_reader_waiting_in_the_early_phase_is_woken_by_the_writer(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_read_half_waiting_in_the_early_phase_is_woken_by_the_writer() {
+    split_reader_waiting_in_the_early_phase_is_woken_by_the_writer(true).await;
+}
+
+async fn split_reader_waiting_in_the_early_phase_is_woken_by_the_writer(native: bool) {
     let setup = Arc::new(Setup::new());
     setup.first_connection().await;
     let (c, s) = duplex(64 * 1024);
     let client = setup.connector.connect(localhost(), c).await.unwrap();
-    let (mut rd, mut wr) = tokio::io::split(client);
+    let (mut rd, mut wr) = client.split_either(native);
     // The reader starts the handshake and waits on the transport.
     let reader = tokio::spawn(async move {
         let mut reply = [0; 5];

@@ -71,8 +71,20 @@
 //! # Splitting
 //!
 //! The streams are single objects, as TLS ties both directions to one
-//! connection state. [`tokio::io::split`] gives independent read and write
-//! halves for concurrent use from two tasks.
+//! connection state. `into_split` (on [`client::TlsStream`],
+//! [`server::TlsStream`] and [`TlsStream`]) gives a [`ReadHalf`] and a
+//! [`WriteHalf`] for concurrent use from two tasks, and
+//! [`ReadHalf::reunite`] gives the stream back. The halves take turns with
+//! the stream, one poll at a time, and never wait for each other's poll:
+//! a half that finds the other half's poll in progress returns `Pending`
+//! and is woken when that poll ends. Turns are not queued, so a half may
+//! be woken and find the stream taken again. If a poll of one half panics,
+//! every later operation of either half fails.
+//!
+//! [`tokio::io::split`] works too. It takes a blocking lock for every poll,
+//! so a worker thread polling one half waits while the other half's poll
+//! runs, record protection included; its halves panic after a panic in a
+//! poll, and it needs Tokio's `io-util` feature.
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 //!
@@ -154,9 +166,11 @@ macro_rules! ready {
 pub mod client;
 mod common;
 pub mod server;
+mod split;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};
 pub use server::{Accept, FallibleAccept, LazyConfigAcceptor, StartHandshake, TlsAcceptor};
+pub use split::{ReadHalf, ReuniteError, WriteHalf};
 
 /// A client or a server stream, for code that handles both.
 #[derive(Debug)]
@@ -195,6 +209,13 @@ impl<T> TlsStream<T> {
                 (io, session)
             }
         }
+    }
+
+    /// Splits the stream into a read half and a write half that two tasks
+    /// can use at the same time; see
+    /// [`client::TlsStream::into_split`].
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
     }
 }
 

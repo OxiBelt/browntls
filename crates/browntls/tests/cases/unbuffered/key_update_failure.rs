@@ -1,9 +1,9 @@
 // A KeyUpdate goes through the queue, where a failure to encrypt it is only
 // noted (`encrypt_failed`) while the write key has already moved on.
-// `WriteTraffic` encrypts nothing after that: data or an alert under the
-// next key would reach the peer with no KeyUpdate before it. The suites
-// here have a confidentiality limit of a record or two, and an encrypter
-// that fails for a KeyUpdate.
+// `WriteTraffic` takes no data and makes no `close_notify` after that:
+// under the next key they would reach the peer with no KeyUpdate before
+// them. The suites here have a confidentiality limit of a record or two,
+// and an encrypter that fails for a KeyUpdate.
 
 /// A TLS 1.3 AEAD whose encrypter fails for the 5 bytes of a KeyUpdate.
 struct FailsKeyUpdates(&'static dyn browntls::crypto::cipher::Tls13AeadAlgorithm);

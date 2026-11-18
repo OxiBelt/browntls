@@ -625,9 +625,11 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   fails, the buffer is zeroed from that record on and the write fails. A
   KeyUpdate that is due (an answer to the peer, or the RFC 9846 §5.5
   refresh) is written into the same buffer in order. Once a record has
-  failed to encrypt (`encrypt_failed`), `WriteTraffic` encrypts nothing
-  more: the peer could not read it, and after a KeyUpdate that was lost the
-  write key has moved on without the peer. So a KeyUpdate before the data
+  failed to encrypt (`encrypt_failed`), `WriteTraffic` takes no more data
+  and makes no `close_notify`: the peer could not read them, and after a
+  KeyUpdate that was lost the write key has moved on without the peer (a
+  refresh asked for then still queues a KeyUpdate, which the peer rejects,
+  before the failure is reported). So a KeyUpdate before the data
   that fails to encrypt fails the write with no data taken, one after the
   data leaves that write's records good and reported, and no `close_notify`
   follows either. (The buffered connection reports the failure at its next

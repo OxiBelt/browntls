@@ -236,13 +236,32 @@ pub(super) fn early_seed() -> Vec<u8> {
     s
 }
 
+/// One seed of a server handed over in the middle of its handshake:
+/// whether the client's Finished is on its way, the configuration byte
+/// (bit 7: 0.5-RTT data) and the mode byte (bit 7: the accept future
+/// returns early; the acceptor or the lazy acceptor).
+pub(super) type EarlyCase = (bool, u8, u8);
+
+/// The acceptor and the lazy acceptor, with and without 0.5-RTT data, and
+/// a handoff given up while it waits.
+pub(super) const EARLY_CASES: [EarlyCase; 5] = [
+    (true, 0x41, 0xc0),
+    (false, 0x41, 0xc0),
+    (true, 0xc1, 0xc0),
+    (true, 0x41, 0xd0),
+    (true, 0xc1, 0xd8),
+];
+
+/// What a server with 0.5-RTT data writes before it is handed over.
+pub(super) const HALF_RTT: &[u8] = b"reply";
+
 /// A server handed over in the middle of its handshake: its accept future
 /// returned early for the 0-RTT data (mode bit 7), which nobody read. With
 /// `finished`, the client's Finished and more data are on their way and
 /// the handoff completes the handshake; without, the handoff is given up
 /// while it waits and the stream finishes its handshake afterwards. The
 /// stream goes on in userspace either way.
-pub(super) fn returned_early_seed(finished: bool) -> Vec<u8> {
+pub(super) fn returned_early_seed((finished, config, mode): EarlyCase) -> Vec<u8> {
     let op = |out: &mut Vec<u8>, op: Op, side: usize| {
         out.push(op as u8);
         out.push(side as u8);
@@ -252,7 +271,7 @@ pub(super) fn returned_early_seed(finished: bool) -> Vec<u8> {
         out.push(0);
         put_short_field(out, data);
     };
-    let mut s = vec![0x41, 4, 0, 0, 0, 0xc0, 255, 0, 255, 0];
+    let mut s = vec![config, 4, 0, 0, 0, mode, 255, 0, 255, 0];
     op(&mut s, Op::Pump, 0);
     write(&mut s, SERVER, b"ticket");
     op(&mut s, Op::Pump, 0);
@@ -260,10 +279,15 @@ pub(super) fn returned_early_seed(finished: bool) -> Vec<u8> {
     op(&mut s, Op::Poll, CLIENT);
     write(&mut s, CLIENT, EARLY);
     // The ClientHello and the early data go out, and the accept future
-    // returns with the server's flight written.
+    // returns with the server's flight written (the lazy acceptor takes
+    // one poll more than the acceptor).
     op(&mut s, Op::Flush, CLIENT);
     op(&mut s, Op::Poll, SERVER);
     op(&mut s, Op::Poll, SERVER);
+    if config & 0x80 != 0 {
+        // Sent at once, ahead of the client's Finished.
+        write(&mut s, SERVER, HALF_RTT);
+    }
     if finished {
         // The client alone moves on: its Finished, then more data.
         op(&mut s, Op::Flush, CLIENT);
@@ -281,6 +305,8 @@ pub(super) fn returned_early_seed(finished: bool) -> Vec<u8> {
     op(&mut s, Op::EarlyRead, SERVER);
     op(&mut s, Op::Read, SERVER);
     s.extend([0, 32]);
+    op(&mut s, Op::Read, CLIENT);
+    s.extend([0, 32]);
     s
 }
 
@@ -291,8 +317,7 @@ pub(super) const AFTER_EARLY: &[u8] = b", then the rest";
 pub(super) fn seeds() -> Vec<Vec<u8>> {
     let mut seeds: Vec<_> = cases().into_iter().map(seed).collect();
     seeds.push(early_seed());
-    seeds.push(returned_early_seed(true));
-    seeds.push(returned_early_seed(false));
+    seeds.extend(EARLY_CASES.map(returned_early_seed));
     seeds
 }
 
@@ -351,8 +376,9 @@ mod tests {
     /// nothing, and the stream completes its handshake afterwards.
     #[test]
     fn handoff_seeds_hand_over_a_stream_returned_early() {
-        for finished in [true, false] {
-            let seed = returned_early_seed(finished);
+        for case in EARLY_CASES {
+            let (finished, config, _) = case;
+            let seed = returned_early_seed(case);
             let at = seed
                 .windows(2)
                 .position(|w| w == [Op::Handoff as u8, SERVER as u8])
@@ -379,12 +405,15 @@ mod tests {
             }
 
             let world = play(&seed).expect("configurations");
-            assert_eq!(world.early, EARLY, "{finished}");
+            assert_eq!(world.early, EARLY, "{case:?}");
             assert_eq!(
                 world.received[SERVER],
                 [AFTER_EARLY, b"more"].concat(),
-                "{finished}"
+                "{case:?}"
             );
+            // The 0.5-RTT answer written before the handoff arrived.
+            let answer = if config & 0x80 != 0 { HALF_RTT } else { b"" };
+            assert_eq!(world.received[CLIENT], answer, "{case:?}");
         }
     }
 }

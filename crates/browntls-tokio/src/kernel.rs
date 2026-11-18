@@ -74,7 +74,9 @@ impl<S> KernelHandoff<S> {
     /// How many bytes at the start of [`received`](Self::received) are
     /// 0-RTT data a server accepted and had not read (`early_data()` of
     /// the connection). An attacker can replay that data, so a server must
-    /// not act on it as on the rest. Zero for a client.
+    /// not act on it as on the rest. Zero for a client. 0-RTT data the
+    /// application read before the handoff is not counted: zero does not
+    /// say that none was received.
     pub fn early_data_len(&self) -> usize {
         self.early_data_len
     }
@@ -290,9 +292,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for server::TlsStream<I
     ) -> Poll<io::Result<()>> {
         self.st.begin_poll();
         // A stream returned before its handshake completed: the handshake
-        // first, as before any other operation of the stream, so that a
-        // failure is kept for those that follow. The 0-RTT data stays where
-        // the stream's reader finds it until the handshake is complete.
+        // first, as a flush of the stream completes it, so that a failure
+        // is kept for the operations that follow. The 0-RTT data stays
+        // where the stream's reader finds it until the handshake is
+        // complete.
+        if self.early.is_some() {
+            // 0.5-RTT data the transport buffers goes out before the wait
+            // for the client's Finished.
+            self.st.need_flush = true;
+        }
         ready!(self.poll_finish_early(cx))?;
         poll_prepare(
             &mut self.io,
@@ -377,21 +385,6 @@ where
             return Poll::Ready(Ok(()));
         };
         match blocker {
-            KernelHandoffBlocker::HandshakeIncomplete if session.is_handshaking() => {
-                // A stream returned before its handshake completed. Plaintext
-                // left unread (a server's 0-RTT data) would stall it.
-                take_plaintext(session, taken, take_early_data)?;
-                // The reads of this poll so far count for the task's
-                // budget as in any operation of the stream.
-                let mut stream = Stream::new(io, session)
-                    .set_eof(!st.state.readable())
-                    .set_need_flush(st.need_flush)
-                    .set_read_before(st.read_before);
-                let poll = stream.handshake(cx);
-                st.need_flush = stream.need_flush;
-                st.read_before = stream.read_before;
-                ready!(poll)?;
-            }
             KernelHandoffBlocker::UnreadPlaintext => {
                 take_plaintext(session, taken, take_early_data)?;
             }
@@ -411,7 +404,9 @@ where
             other => {
                 // A connection that has failed says so (it reports an
                 // incomplete handshake); any other blocker here is one
-                // that driving the stream does not clear.
+                // that driving the stream does not clear. A handshake
+                // still in progress is the stream's to complete, in its
+                // early phase, before it gets here.
                 let _ = process(io, session, cx)?;
                 return Poll::Ready(Err(unsupported(other)));
             }

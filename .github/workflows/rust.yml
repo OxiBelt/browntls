@@ -57,6 +57,9 @@ jobs:
       - name: Clippy (without tls12)
         run: cargo clippy -p browntls --all-targets --no-default-features --features std,native,rustcrypto,logging --locked -- -D warnings
 
+      - name: Clippy (browntls-tokio without coop)
+        run: cargo clippy -p browntls-tokio --all-targets --no-default-features --features native,tls12,logging,prefer-post-quantum --locked -- -D warnings
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -282,6 +285,11 @@ jobs:
 
       - name: Test browntls-tokio
         run: cargo test -p browntls-tokio --all-features --locked
+
+      - name: Test browntls-tokio without cooperative scheduling
+        # The default features without `coop`, which no other job builds
+        # (the workspace jobs enable every feature).
+        run: cargo test -p browntls-tokio --no-default-features --features native,tls12,logging,prefer-post-quantum --locked
 
       # `AsyncKtlsStream` drives Tokio sockets (`net`) on the runner's kernel.
       - name: Load the kernel TLS module

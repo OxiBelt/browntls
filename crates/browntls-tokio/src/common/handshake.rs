@@ -11,7 +11,7 @@ use browntls::server::AcceptedAlert;
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Stream, StreamState, poll_send_alert};
+use super::{Stream, StreamState, coop, poll_send_alert};
 
 /// A stream whose handshake [`MidHandshake`] can drive.
 pub(crate) trait IoSession {
@@ -20,6 +20,7 @@ pub(crate) trait IoSession {
 
     /// Whether the stream may be returned before its handshake completes.
     fn skip_handshake(&self) -> bool;
+    fn refs(&self) -> (&Self::Io, &Self::Session);
     fn parts(&mut self) -> (&mut StreamState, &mut Self::Io, &mut Self::Session);
     fn into_io(self) -> Self::Io;
 }
@@ -43,6 +44,42 @@ pub(crate) enum MidHandshake<IS: IoSession> {
     End,
 }
 
+impl<IS: IoSession> MidHandshake<IS> {
+    /// The transport, unless the future already returned.
+    pub(crate) fn io(&self) -> Option<&IS::Io> {
+        match self {
+            Self::Handshaking(stream) => Some(stream.refs().0),
+            Self::SendAlert { io, .. } | Self::Error { io, .. } => Some(io),
+            Self::End => None,
+        }
+    }
+
+    /// The transport, unless the future already returned.
+    pub(crate) fn io_mut(&mut self) -> Option<&mut IS::Io> {
+        match self {
+            Self::Handshaking(stream) => Some(stream.parts().1),
+            Self::SendAlert { io, .. } | Self::Error { io, .. } => Some(io),
+            Self::End => None,
+        }
+    }
+
+    /// The connection, while there is one and the future has not returned.
+    pub(crate) fn session(&self) -> Option<&IS::Session> {
+        match self {
+            Self::Handshaking(stream) => Some(stream.refs().1),
+            Self::SendAlert { .. } | Self::Error { .. } | Self::End => None,
+        }
+    }
+
+    /// The connection, while there is one and the future has not returned.
+    pub(crate) fn session_mut(&mut self) -> Option<&mut IS::Session> {
+        match self {
+            Self::Handshaking(stream) => Some(stream.parts().2),
+            Self::SendAlert { .. } | Self::Error { .. } | Self::End => None,
+        }
+    }
+}
+
 impl<IS, SD> Future for MidHandshake<IS>
 where
     IS: IoSession + Unpin,
@@ -54,6 +91,19 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        coop::budgeted(cx, |cx| this.poll_handshake(cx))
+    }
+}
+
+impl<IS, SD> MidHandshake<IS>
+where
+    IS: IoSession + Unpin,
+    IS::Io: AsyncRead + AsyncWrite + Unpin,
+    IS::Session: DerefMut + Deref<Target = ConnectionCommon<SD>> + Unpin,
+    SD: SideData,
+{
+    fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<IS, (io::Error, IS::Io)>> {
+        let this = self;
 
         let mut stream = match mem::replace(this, Self::End) {
             Self::Handshaking(stream) => stream,

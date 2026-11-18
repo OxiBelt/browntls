@@ -53,6 +53,12 @@
 //! done: it waits until every queued record reached the transport, and
 //! flushes the transport.
 //!
+//! Queued records reach a transport with a vectored write
+//! ([`AsyncWrite::is_write_vectored`]) as one vectored write. For any other
+//! transport, whole records are gathered into one write of up to 8 KiB, so
+//! that a handshake flight or a run of small records does not cost a write
+//! for each record; a record that fits with no other is written as it is.
+//!
 //! A read that receives a message calling for an answer (a TLS 1.3
 //! `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`, a
 //! failure alert) writes the answer at once, as far as the transport takes

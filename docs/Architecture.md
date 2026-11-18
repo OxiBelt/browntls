@@ -732,6 +732,17 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 - A write encrypts what the send buffer takes and writes queued records
   until the transport blocks; a write that took nothing returns `Pending`
   only while records wait for the transport, so a retry cannot spin.
+- `write_tls` offers the queued records as slices of one vectored write. A
+  transport that reports one (`AsyncWrite::is_write_vectored`) gets them as
+  they are. Tokio's default `poll_write_vectored` writes only the first
+  slice, a write per record, so for any other transport (the report
+  decides, not whether `poll_write_vectored` is overridden)
+  `common::coalesce` copies whole records into a buffer on the stack (8 KiB,
+  no allocation, nothing kept between polls) and writes them together: a
+  handshake flight or a run of small records is one write. A record that
+  does not fit with those before it starts the next write, and one that
+  fits with no other (every full-size record) is written from the queue
+  without a copy. Record order and contents do not change.
 - `shutdown` queues `close_notify` once and then shuts the transport's write
   side. Writes after it fail with `BrokenPipe` without reaching the
   connection (RFC 9846 §6.1). The peer's `close_notify` is end of file;

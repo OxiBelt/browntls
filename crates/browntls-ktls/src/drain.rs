@@ -10,11 +10,12 @@
 
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::task::Waker;
+use std::task::{Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ledger::Backlog;
+use crate::sys::Room;
 
 /// How long after the socket was found with room the task only yields
 /// between two looks.
@@ -31,6 +32,17 @@ const LONGEST_PAUSE: Duration = Duration::from_millis(8);
 /// the wait is given up. The kernel's own retry, when it finds its
 /// transmit lock taken, comes after 10 ms.
 const STALLED: Duration = Duration::from_secs(5);
+
+/// How the wait before the FIN ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// TCP has every record (or, without the kernel's counters, the socket
+    /// has room): the FIN may follow.
+    Sent,
+    /// The connection ended while the kernel held records, which will not
+    /// be sent.
+    Lost,
+}
 
 /// The state of one such wait.
 #[derive(Debug)]
@@ -55,9 +67,50 @@ impl Drain {
         }
     }
 
+    /// One step of the wait `shutdown` makes between its last record and
+    /// the FIN. `backlog` is what the kernel holds, as just read; `room`
+    /// waits until the kernel reports room on the socket (or its end),
+    /// registering the task; `waker` is the task's.
+    ///
+    /// A FIN ahead of records the kernel holds would cut the stream short,
+    /// so this is `Pending` while there are any: the socket has no room
+    /// (the kernel sends when room appears, and `room` wakes the task), or
+    /// it has and the kernel has yet to use it (the task is woken for
+    /// another look after a pause). Without the kernel's counters, room is
+    /// all there is to wait for.
+    pub(crate) fn step(
+        &mut self,
+        now: Instant,
+        backlog: io::Result<Backlog>,
+        waker: &Waker,
+        room: impl FnOnce() -> Poll<io::Result<Room>>,
+    ) -> Poll<io::Result<Outcome>> {
+        if matches!(backlog, Ok(Backlog { unsent: 0, .. })) {
+            return Poll::Ready(Ok(Outcome::Sent));
+        }
+        let room = match room() {
+            Poll::Ready(Ok(room)) => room,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.reset();
+                return Poll::Pending;
+            }
+        };
+        let Ok(backlog) = backlog else {
+            return Poll::Ready(Ok(Outcome::Sent));
+        };
+        if room == Room::Ended {
+            return Poll::Ready(Ok(Outcome::Lost));
+        }
+        match self.wait(now, backlog, waker) {
+            Ok(()) => Poll::Pending,
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
     /// The socket has no room: the wait is for the socket, and a new
     /// stretch begins when it has room again.
-    pub(crate) fn reset(&mut self) {
+    fn reset(&mut self) {
         self.since = None;
         self.idle = None;
         self.pause = FIRST_PAUSE;
@@ -68,7 +121,7 @@ impl Drain {
     ///
     /// Fails when the kernel has held the same records for [`STALLED`]
     /// although nothing kept it from sending them.
-    pub(crate) fn wait(&mut self, now: Instant, backlog: Backlog, waker: &Waker) -> io::Result<()> {
+    fn wait(&mut self, now: Instant, backlog: Backlog, waker: &Waker) -> io::Result<()> {
         match self.idle {
             _ if backlog.in_flight => self.idle = None,
             Some((since, unsent)) if unsent == backlog.unsent => {
@@ -186,6 +239,57 @@ mod tests {
         unsent: 100,
         in_flight: true,
     };
+
+    /// The decision before the FIN, for each thing the kernel can report.
+    #[test]
+    fn the_fin_waits_while_the_kernel_holds_records() {
+        let (count, waker) = counter();
+        let mut drain = Drain::new();
+        let now = Instant::now();
+        let free = || Poll::Ready(Ok(Room::Free));
+        let no_counters = || Err(io::ErrorKind::Unsupported.into());
+
+        // Everything is with TCP: no need to ask for room.
+        let sent = Backlog {
+            unsent: 0,
+            in_flight: true,
+        };
+        let step = drain.step(now, Ok(sent), &waker, || panic!("asked for room"));
+        assert!(matches!(step, Poll::Ready(Ok(Outcome::Sent))));
+
+        // Records held and no room: the socket's wait, which wakes the
+        // task itself.
+        let step = drain.step(now, Ok(HELD), &waker, || Poll::Pending);
+        assert!(step.is_pending());
+        assert_eq!(woken(&count), 0);
+
+        // Records held although the socket has room: the kernel has yet to
+        // send them, so no FIN, and another look is arranged.
+        let step = drain.step(now, Ok(HELD), &waker, free);
+        assert!(step.is_pending(), "a FIN ahead of the kernel's records");
+        assert_eq!(woken(&count), 1);
+
+        // The connection ended with records held.
+        let step = drain.step(now, Ok(HELD), &waker, || Poll::Ready(Ok(Room::Ended)));
+        assert!(matches!(step, Poll::Ready(Ok(Outcome::Lost))));
+
+        // An error from the socket's wait is passed on.
+        let step = drain.step(now, Ok(HELD), &waker, || {
+            Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+        });
+        assert!(
+            matches!(step, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionReset)
+        );
+
+        // No counters: room is waited for, and is enough.
+        let step = drain.step(now, no_counters(), &waker, || Poll::Pending);
+        assert!(step.is_pending());
+        let step = drain.step(now, no_counters(), &waker, free);
+        assert!(matches!(step, Poll::Ready(Ok(Outcome::Sent))));
+        let step = drain.step(now, no_counters(), &waker, || Poll::Ready(Ok(Room::Ended)));
+        assert!(matches!(step, Poll::Ready(Ok(Outcome::Sent))));
+        assert_eq!(woken(&count), 1);
+    }
 
     #[test]
     fn yields_first_then_sleeps_in_longer_pauses() {

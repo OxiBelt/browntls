@@ -23,9 +23,8 @@ use browntls_tokio::{client, server};
 use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 use tokio::net::TcpStream;
 
-use crate::drain::Drain;
+use crate::drain::{Drain, Outcome};
 use crate::engine::Engine;
-use crate::ledger::Backlog;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys::{self, Room};
 
@@ -655,34 +654,27 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
         if !this.drained {
             // The kernel may still hold records TCP had no room for (see
             // the type's documentation); a FIN now would go out ahead of
-            // them and cut the stream short.
-            let backlog = this.engine.backlog(this.socket.as_fd());
-            if !matches!(backlog, Ok(Backlog { unsent: 0, .. })) {
-                // The kernel sends them when the socket has room. Tokio's
-                // cached readiness cannot tell, so the kernel is asked.
-                let room = match this.poll_writable(cx, |_, fd| room(fd)) {
-                    Poll::Ready(Ok(room)) => room,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Pending => {
-                        this.drain.reset();
-                        return Poll::Pending;
-                    }
-                };
-                // Without the kernel's counters, room is all there is to
-                // wait for.
-                if let Ok(backlog) = backlog {
-                    if room == Room::Ended {
-                        return Poll::Ready(Err(this.unsent_for_good()));
-                    }
-                    // Room that the kernel has yet to use: its work is
-                    // under way, and nothing reports its end.
-                    return match this.drain.wait(Instant::now(), backlog, cx.waker()) {
-                        Ok(()) => Poll::Pending,
-                        Err(err) => Poll::Ready(Err(err)),
-                    };
-                }
+            // them and cut the stream short. Tokio's cached readiness
+            // cannot tell whether the socket has room, so the kernel is
+            // asked.
+            let Self {
+                socket,
+                engine,
+                write_waker,
+                read_waker,
+                drain,
+                ..
+            } = &mut *this;
+            let backlog = engine.backlog(socket.as_fd());
+            let waker = cx.waker().clone();
+            let outcome = ready!(drain.step(Instant::now(), backlog, &waker, || {
+                poll_when_writable(socket, write_waker, read_waker.as_ref(), cx, room)
+            }));
+            match outcome {
+                Ok(Outcome::Sent) => this.drained = true,
+                Ok(Outcome::Lost) => return Poll::Ready(Err(this.unsent_for_good())),
+                Err(err) => return Poll::Ready(Err(err)),
             }
-            this.drained = true;
         }
         match Pin::new(&mut this.socket).poll_shutdown(cx) {
             // A socket that is already gone has nothing left to shut.

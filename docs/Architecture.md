@@ -706,8 +706,45 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `EarlyDataNotResent`. A handshake failure in this phase is kept and fails
   every later operation. Whichever operation ends the phase wakes a read
   waiting in it, whose transport registration it may have replaced.
-  Servers read accepted early data from the connection after `Accept`; the
-  streams never mix it into ordinary reads.
+- Servers read accepted early data through `server::TlsStream::early_data`
+  (`EarlyDataReader`, an `AsyncRead` over `ServerConnection::early_data`);
+  ordinary reads never return it. By default `Accept` resolves after the
+  client's Finished, so the data was sent by a client that completed this
+  handshake. With `TlsAcceptor::early_data(true)` or
+  `StartHandshake::early_data(true)`, `Accept` resolves while the handshake
+  is in progress, once the connection accepted early data and the server's
+  flight is written and flushed (`IoSession::returns_early`,
+  `early_phase_reached`); other connections are accepted as before. The
+  stream then carries an `EarlyPhase`: the reader returns buffered early
+  data, else drives the handshake until more arrives, and reaches end of
+  file when the handshake is complete (the core does not report
+  EndOfEarlyData by itself; a client sends it with its Finished). An
+  ordinary read, a flush or a shutdown completes the handshake first, and
+  flushes the tickets. A write does too, since the connection would only
+  hold the plaintext, unless `ServerConfig::send_half_rtt_data` lets the
+  connection encrypt it at once (0.5-RTT data); a flush writes and flushes
+  such data before it waits for the client. A handshake failure in this
+  phase is kept and fails every later operation; the reader returns the
+  early data received before it first. Every operation that drives the
+  handshake in this phase registers a waker for the other direction's
+  parked task as well (reads for a parked writer, as answering reads do;
+  writes, flushes and shutdowns for a read waiting in the phase), and so
+  does a write that goes out as 0.5-RTT data without ending the phase, so a task
+  whose transport registration was taken over is still woken when the
+  operation that took it is dropped; whichever operation moves the
+  handshake on also wakes a read waiting in the phase. The option adds no
+  acceptance rule of its own: the core accepts early data only for a
+  session taken out of the session storage (single-use tickets, RFC 9846
+  §8.1) or an external PSK that allows it, and bounds it by
+  `max_early_data_size`. What the option gives up is the implicit wait for
+  the client's Finished, which a replayed first flight cannot produce; the
+  documentation of `TlsAcceptor::early_data` says so.
+- `StartHandshake::into_stream_with` processes the records the acceptor read
+  past the ClientHello (early data in the same flight) before it returns:
+  the handshake only processes input after reading from the transport, so
+  they would otherwise wait for the client's next flight. A failure there
+  is answered like a refused configuration, with what the connection queued
+  (`AcceptedAlert::from(ServerConnection)`: its flight, then the alert).
 - Reads return plaintext through `Reader::into_first_chunk`, which lends the
   first buffered chunk for the connection's lifetime so `poll_fill_buf` can
   return it. A read whose records queue an answer (an alert, a KeyUpdate
@@ -751,9 +788,9 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 - TLS errors surface as `io::Error` of kind `InvalidData` wrapping
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
-- With the `coop` feature the streams, the handshake futures and
-  `LazyConfigAcceptor` take part in Tokio's cooperative scheduling
-  (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
+- With the `coop` feature the streams, the server's `EarlyDataReader`, the
+  handshake futures and `LazyConfigAcceptor` take part in Tokio's
+  cooperative scheduling (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
   task's budget per completed operation and return `Pending`, rescheduling
   the task, once it is spent. A TLS stream completes operations the
   transport never sees (reads of buffered plaintext, writes the connection
@@ -769,8 +806,9 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   would otherwise work through. A poll of a stream pairs the connection
   with the transport more than once (a read copies chunk after chunk into
   the caller's buffer; a client finishes an early-data handshake and then
-  reads), so the stream's state carries "this poll has read" from one
-  pairing to the next (`StreamState::read_before`, cleared when a poll
+  reads, and so does a server stream returned early; a server's early data
+  reader drives the handshake step after step), so the stream's state
+  carries "this poll has read" from one pairing to the next (`StreamState::read_before`, cleared when a poll
   begins). Writes need no such bound: one poll writes only what the caller
   handed it and what was queued. A read wakes its own task and returns
   `Pending` in two places, both after the control records the connection

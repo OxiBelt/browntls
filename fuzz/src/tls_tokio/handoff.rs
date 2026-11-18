@@ -39,7 +39,7 @@ impl World {
         // 0-RTT data is tracked apart from the server's ordinary data:
         // read first, or left to the handoff, which counts it.
         if side == SERVER && flags & KEEP_EARLY == 0 {
-            self.early_read();
+            self.early_read(false);
         }
         let stream = match side {
             CLIENT => match std::mem::replace(&mut self.client, Client::Gone) {
@@ -248,11 +248,50 @@ pub(super) fn seeds() -> Vec<Vec<u8>> {
 
 /// Whether a stream handed over with `flags` is gone afterwards.
 #[cfg(test)]
-pub(super) fn ends_the_stream(extraction: bool, flags: u8) -> bool {
+fn ends_the_stream(extraction: bool, flags: u8) -> bool {
     flags >> 4 != 0
         && if extraction {
             flags & BACK_TO_USERSPACE == 0
         } else {
             flags & DROP_REFUSED != 0
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls_tokio::play;
+
+    /// The handoff seeds do what they are meant to: with secret extraction
+    /// a polled stream becomes ready with the unread plaintext set aside,
+    /// without it the stream is refused untouched, and every stream that
+    /// comes back carries on.
+    #[test]
+    fn handoff_seeds_hand_streams_over() {
+        for case in cases() {
+            let (_, extraction, side, flags) = case;
+            let world = play(&seed(case)).expect("configurations");
+            let gone = match side {
+                CLIENT => matches!(world.client, Client::Gone),
+                _ => matches!(world.server, Server::Gone),
+            };
+            let got = &world.received[side];
+            if ends_the_stream(extraction, flags) {
+                assert!(gone, "{case:?}");
+                // A refusal up front takes nothing out of the stream.
+                let expected = if extraction { BEFORE } else { &BEFORE[..7] };
+                assert_eq!(got, expected, "{case:?}");
+            } else {
+                assert!(!gone, "{case:?}");
+                assert_eq!(*got, [BEFORE, b"more"].concat(), "{case:?}");
+                assert_eq!(world.received[1 - side], AFTER, "{case:?}");
+            }
+        }
+
+        // 0-RTT data left unread is set aside by the handoff and counted.
+        let world = play(&early_seed()).expect("configurations");
+        assert!(world.early_attempted);
+        assert_eq!(world.early, EARLY);
+        assert_eq!(world.received[SERVER], [AFTER_EARLY, b"more"].concat());
+    }
 }

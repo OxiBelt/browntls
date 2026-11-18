@@ -14,7 +14,10 @@ use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
 use crate::kernel::IntoKernelHandoff;
 use crate::split::{self, ReadHalf, WriteHalf};
 
+mod early;
 mod lazy;
+pub use early::EarlyDataReader;
+use early::EarlyPhase;
 pub use lazy::{LazyConfigAcceptor, StartHandshake};
 
 /// Accepts server handshakes with a shared [`ServerConfig`].
@@ -23,11 +26,70 @@ pub use lazy::{LazyConfigAcceptor, StartHandshake};
 #[derive(Clone)]
 pub struct TlsAcceptor {
     inner: Arc<ServerConfig>,
+    early_data: bool,
 }
 
 impl TlsAcceptor {
+    /// Whether [`accept`](Self::accept) may return before the handshake
+    /// completes, so the server can read the client's 0-RTT ("early") data
+    /// without waiting for the client's Finished. Off by default.
+    ///
+    /// It does when the connection accepted early data, which `browntls`
+    /// does in two cases: for a TLS 1.3 session resumed from the server's
+    /// [session storage](ServerConfig::session_storage) (never from a
+    /// stateless ticket) with a non-zero
+    /// [`ServerConfig::max_early_data_size`], and for an external PSK
+    /// configured to allow early data. `accept` then resolves once the
+    /// server's flight is written, and on the returned stream:
+    ///
+    /// - [`TlsStream::early_data`] reads the early data as it arrives;
+    /// - an ordinary read, a flush or a shutdown completes the handshake
+    ///   first, and ordinary reads never return early data;
+    /// - a write waits for the handshake too, unless
+    ///   [`ServerConfig::send_half_rtt_data`] is set: it is then sent at
+    ///   once, ahead of the client's Finished (0.5-RTT data).
+    ///
+    /// A handshake that fails in this phase fails every later operation
+    /// with its error. Every other connection is accepted as without this
+    /// option, after its handshake.
+    ///
+    /// A timeout around `accept` no longer bounds the handshake of such a
+    /// stream: the rest of it runs inside the operations above, which a
+    /// client that stops sending holds for as long as the transport stays
+    /// open. Bound them too.
+    ///
+    /// # Replay
+    ///
+    /// Early data is **replayable**: until the handshake completes
+    /// ([`is_handshaking`](browntls::CommonState::is_handshaking) on the
+    /// connection is `false`), nothing shows that the client is taking part
+    /// in this connection now, rather than an attacker sending again a
+    /// ClientHello and early data it recorded. The same holds for what the
+    /// connection reports from the resumed session in this phase (the
+    /// client's certificates, the resumption data).
+    ///
+    /// What `browntls` does against replay is limited to resumed sessions:
+    /// the session is taken out of the session storage, which makes each
+    /// ticket good for one attempt (RFC 9846 §8.1) as long as every server
+    /// that honours the ticket shares that storage and its `take` is
+    /// atomic. Early data under an external PSK has no protection at all,
+    /// and the library records no ClientHellos and keeps no other
+    /// anti-replay store. Without this option, `accept` hands the early
+    /// data over only after the client's Finished, which a replay cannot
+    /// produce. With it, act before the handshake completes only on
+    /// requests that are safe to repeat (RFC 9846 §2.3 and §8; for HTTP,
+    /// RFC 8470), and remember that a 0.5-RTT answer goes to a client that
+    /// has not proved it holds the session's keys now. Early data also
+    /// lacks forward secrecy with respect to the resumption secret or the
+    /// external PSK.
+    pub fn early_data(mut self, enabled: bool) -> Self {
+        self.early_data = enabled;
+        self
+    }
+
     /// Accepts a TLS connection over `stream`. The returned future resolves
-    /// once the handshake completes.
+    /// once the handshake completes, or sooner for a connection with early
+    /// data when [`early_data`](Self::early_data) is on.
     ///
     /// Bound the handshake's duration (with [`tokio::time::timeout`], say):
     /// a client that stops sending holds the future, and the transport, for
@@ -63,6 +125,9 @@ impl TlsAcceptor {
             io: stream,
             session,
             st: StreamState::new(),
+            early: self
+                .early_data
+                .then(|| EarlyPhase::new(self.inner.send_half_rtt_data)),
         }))
     }
 
@@ -74,17 +139,25 @@ impl TlsAcceptor {
 
 impl From<Arc<ServerConfig>> for TlsAcceptor {
     fn from(inner: Arc<ServerConfig>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            early_data: false,
+        }
     }
 }
 
 impl fmt::Debug for TlsAcceptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsAcceptor").finish_non_exhaustive()
+        f.debug_struct("TlsAcceptor")
+            .field("early_data", &self.early_data)
+            .finish_non_exhaustive()
     }
 }
 
 /// A server handshake in progress; resolves to the accepted [`TlsStream`].
+/// With [`TlsAcceptor::early_data`] or [`StartHandshake::early_data`] on,
+/// it resolves before the handshake completes for a connection that has
+/// early data to read.
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData` and wraps
 /// the [`browntls::Error`], which `get_ref` and `downcast_ref` recover.
@@ -135,7 +208,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for Accept<IO> {
     type Output = io::Result<TlsStream<IO>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx).map_err(|(err, _)| err)
+        Pin::new(&mut self.0)
+            .poll(cx)
+            .map(|result| result.map(TlsStream::accepted).map_err(|(err, _)| err))
     }
 }
 
@@ -177,7 +252,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleAccept<IO> {
     type Output = Result<TlsStream<IO>, (io::Error, IO)>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx)
+        Pin::new(&mut self.0)
+            .poll(cx)
+            .map(|result| result.map(TlsStream::accepted))
     }
 }
 
@@ -201,16 +278,52 @@ pub struct TlsStream<IO> {
     pub(crate) io: IO,
     pub(crate) session: ServerConnection,
     pub(crate) st: StreamState,
+    /// Set while the stream was handed out before its handshake completed,
+    /// to read early data.
+    pub(crate) early: Option<EarlyPhase>,
 }
 
 impl<IO> TlsStream<IO> {
+    /// A reader for the client's 0-RTT ("early") data, or `None` when this
+    /// connection accepted none.
+    ///
+    /// On a stream returned before its handshake completed (see
+    /// [`TlsAcceptor::early_data`]) the reader waits for early data that is
+    /// still to arrive, and reaches end of file when the handshake is
+    /// complete. Otherwise all of it is already buffered. Ordinary reads
+    /// never return early data, and what is not read here stays readable
+    /// after the handshake.
+    ///
+    /// A client sends the end of its early data only after the server's
+    /// flight reached it: read a request by its own framing rather than to
+    /// the end to answer without that round trip. The reader borrows the
+    /// whole stream, so read the early data before splitting the stream
+    /// into halves.
+    ///
+    /// Early data is **replayable**; see [`TlsAcceptor::early_data`].
+    pub fn early_data(&mut self) -> Option<EarlyDataReader<'_, IO>> {
+        self.session.early_data()?;
+        Some(EarlyDataReader { stream: self })
+    }
+
+    /// The stream as the accept futures return it: one whose handshake
+    /// completed is not in the early phase.
+    fn accepted(mut self) -> Self {
+        if !self.session.is_handshaking() {
+            self.early = None;
+        }
+        self
+    }
+
     /// The transport and the connection.
     pub fn get_ref(&self) -> (&IO, &ServerConnection) {
         (&self.io, &self.session)
     }
 
     /// The transport and the connection. Reading from or writing to the
-    /// transport directly corrupts the TLS stream.
+    /// transport directly corrupts the TLS stream, and so does driving the
+    /// connection's own I/O while the stream's handshake is in progress
+    /// (see [`TlsAcceptor::early_data`]).
     pub fn get_mut(&mut self) -> (&mut IO, &mut ServerConnection) {
         (&mut self.io, &mut self.session)
     }
@@ -267,6 +380,14 @@ impl<IO> IoSession for TlsStream<IO> {
         false
     }
 
+    fn returns_early(&self) -> bool {
+        self.early.is_some()
+    }
+
+    fn early_phase_reached(session: &mut ServerConnection) -> bool {
+        session.early_data().is_some()
+    }
+
     fn refs(&self) -> (&IO, &ServerConnection) {
         (&self.io, &self.session)
     }
@@ -280,6 +401,85 @@ impl<IO> IoSession for TlsStream<IO> {
     }
 }
 
+impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
+    /// Ends the early phase, if any, before ordinary I/O: completes the
+    /// handshake.
+    fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        early::poll_finish(
+            &mut self.early,
+            &mut self.io,
+            &mut self.session,
+            &mut self.st,
+            cx,
+        )
+    }
+
+    /// Ends the early phase for a read, which may take over the writer's
+    /// registration while doing so. A read left waiting is woken when
+    /// another operation moves the handshake on.
+    fn poll_finish_early_for_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.early.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        // The handshake writes too, and may take a parked writer's
+        // registration: register both tasks, as answering reads do.
+        let joint = common::joint_waker(cx.waker(), self.st.write_waker.as_ref());
+        let poll = self.poll_finish_early(&mut Context::from_waker(&joint));
+        if poll.is_pending()
+            && let Some(early) = &mut self.early
+        {
+            early.park_reader(cx);
+        }
+        if poll.is_ready()
+            && let Some(waker) = self.st.write_waker.take()
+        {
+            waker.wake();
+        }
+        poll
+    }
+
+    /// Ends the early phase for a write-side operation, which may take over
+    /// the transport registration of a read waiting in the phase while it
+    /// drives the handshake. It registers both tasks, so that the read is
+    /// woken even if this operation is dropped before it ends the phase.
+    fn poll_finish_early_for_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(early) = &self.early else {
+            return Poll::Ready(Ok(()));
+        };
+        let joint = common::joint_waker(cx.waker(), early.read_waker());
+        let poll = self.poll_finish_early(&mut Context::from_waker(&joint));
+        self.st.track(cx, poll)
+    }
+
+    /// Runs the write `f` so that, in the early phase, a read waiting in the
+    /// phase is registered with it: a write that goes out as 0.5-RTT data
+    /// does not end the phase, and may take over the transport registration
+    /// of a read that waits to flush what the handshake queued.
+    fn write_with_early_reader<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        f: impl FnOnce(&mut Self, &mut Context<'_>) -> Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        let Some(early) = &self.early else {
+            return f(self, cx);
+        };
+        let joint = common::joint_waker(cx.waker(), early.read_waker());
+        let poll = f(self, &mut Context::from_waker(&joint));
+        // The writer is parked under its own waker, not the joint one.
+        self.st.track(cx, poll)
+    }
+
+    /// The early-phase part of a write: `Ready(Ok(()))` once the connection
+    /// may take the bytes. With 0.5-RTT data that is at once; otherwise the
+    /// handshake completes first, as the connection would only hold them.
+    fn poll_write_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &self.early {
+            Some(early) if early.half_rtt() => Poll::Ready(early.check()),
+            _ => self.poll_finish_early_for_write(cx),
+        }
+    }
+}
+
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -289,6 +489,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
+            ready!(this.poll_finish_early_for_read(cx))?;
             common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
         })
     }
@@ -299,7 +500,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         ready!(coop::poll_budget(cx));
-        let poll = common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx);
+        let poll = match this.poll_finish_early_for_read(cx) {
+            Poll::Ready(Ok(())) => {
+                common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        };
         coop::spend_if_ready(cx, poll)
     }
 
@@ -317,7 +524,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
-            common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+            if !buf.is_empty() {
+                ready!(this.poll_write_early(cx))?;
+            }
+            this.write_with_early_reader(cx, |this, cx| {
+                common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+            })
         })
     }
 
@@ -329,7 +541,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
-            common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+            if !bufs.iter().all(|buf| buf.is_empty()) {
+                ready!(this.poll_write_early(cx))?;
+            }
+            this.write_with_early_reader(cx, |this, cx| {
+                common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+            })
         })
     }
 
@@ -341,6 +558,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
+            if this.early.is_some() {
+                // What was written as 0.5-RTT data reaches the peer before
+                // the wait for the client's Finished: the handshake writes
+                // what is queued and, told so here, flushes the transport
+                // before it reads.
+                this.st.need_flush = true;
+                ready!(this.poll_finish_early_for_write(cx))?;
+            }
             common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
         })
     }
@@ -349,6 +574,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
+            ready!(this.poll_finish_early_for_write(cx))?;
             common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
         })
     }

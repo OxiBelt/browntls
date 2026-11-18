@@ -587,7 +587,11 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 - Buffered (`std`): `ClientConnection`/`ServerConnection` own a receive
   buffer (`DeframerVecBuffer`, at most one maximum-size record),
   queue received plaintext and outgoing records, and offer `read_tls`,
-  `write_tls`, `reader()` and `writer()`. The send buffer limit
+  `write_tls`, `reader()` and `writer()`. `write_tls` offers the transport
+  up to 64 queued records in one vectored write, and a vectored write to
+  `writer()` hands the record layer up to 64 buffers at a time (more are
+  taken as consecutive writes); both gather their slices on the stack, so
+  neither allocates for the call. The send buffer limit
   (`set_buffer_limit`, 64 KiB by default) caps the application data a
   write takes; control records (handshake messages, alerts, KeyUpdates)
   are queued whatever the limit, but the outgoing queue counts them apart

@@ -54,26 +54,30 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
         sys::tx_zerocopy_ro(self.socket.as_fd()).map_err(option_error)
     }
 
-    /// Sends up to `count` bytes of `file`, starting at `offset`, as
-    /// application data with `sendfile(2)`: the kernel makes the records
-    /// from the file's pages, and the bytes never pass through userspace.
-    /// Returns how many bytes were sent, which is zero only at the end of
-    /// the file (or for a `count` of zero) and may be less than `count`:
-    /// call again with the offset moved on. One call sends at most 64
-    /// records' worth. The file's own position is neither used nor moved.
+    /// Sends up to `count` bytes of the regular file `file`, starting at
+    /// `offset`, as application data with `sendfile(2)`: the kernel makes
+    /// the records from the file's pages, and the bytes never pass through
+    /// userspace. Returns how many bytes were sent, which is zero only at
+    /// or behind the end of the file (or for a `count` of zero) and may be
+    /// less than `count`: call again with the offset moved on. One call
+    /// sends at most 64 records' worth. The file's own position is neither
+    /// used nor moved.
     ///
     /// Like a write, the call waits for room on the socket, first sends
     /// what the stream holds, counts the records against the cipher
     /// suite's confidentiality limit, and keeps [`unsent`](Self::unsent)
-    /// and with it `shutdown` exact, which `sendfile` on
+    /// and with it `shutdown` right, which `sendfile` on
     /// [`get_ref`](Self::get_ref) would not. A call that sent less than
     /// `count` may leave its last bytes in a record the kernel has not
     /// closed: they go out with what is sent next (more of the file, a
-    /// write, `shutdown`).
+    /// write, `shutdown`) and are lost if the stream is dropped first.
     ///
     /// Only the socket is waited for. Where the kernel has to read the
     /// file from its storage first, the call blocks the thread for that
-    /// long, as reading the file there would.
+    /// long, as reading the file there would. It never asks the kernel
+    /// for more than the file holds, whatever `count` is, because the
+    /// kernel would then wait for TCP to take the last record; a file
+    /// that is cut short while it is sent can still cause that wait.
     ///
     /// ```no_run
     /// # async fn send<D: browntls::SideData>(
@@ -93,8 +97,11 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// # }
     /// ```
     ///
-    /// See [`KtlsStream::sendfile`](crate::KtlsStream::sendfile) on
-    /// `SIGPIPE`.
+    /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
+    /// not a regular file. No `SIGPIPE` reaches the process: see
+    /// [`KtlsStream::sendfile`](crate::KtlsStream::sendfile). The halves
+    /// of `tokio::io::split` cannot call this; send files before
+    /// splitting, or keep the stream whole.
     pub async fn sendfile(
         &mut self,
         file: &impl AsFd,
@@ -114,11 +121,11 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
         offset: u64,
         count: usize,
     ) -> Poll<io::Result<usize>> {
-        if let Err(err) = self.engine.check() {
-            return Poll::Ready(Err(err));
-        }
         if count == 0 {
             return Poll::Ready(Ok(0));
+        }
+        if let Err(err) = self.engine.check() {
+            return Poll::Ready(Err(err));
         }
         let file = file.as_fd();
         self.poll_writable(cx, |engine, fd| engine.sendfile(fd, file, offset, count))

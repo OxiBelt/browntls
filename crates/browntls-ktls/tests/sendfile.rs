@@ -1,8 +1,9 @@
 //! `KtlsStream::sendfile` against the running kernel over loopback TCP: a
 //! file sent between writes and key updates to a userspace peer that
 //! checks every record, in the small records a peer asked for, its ends
-//! (the end of the file, a closed connection, a descriptor `sendfile`
-//! cannot read), and through a full non-blocking socket.
+//! (the end of the file, a closed connection, a descriptor that is no
+//! regular file), counted against the confidentiality limit, and through a
+//! full non-blocking socket.
 //!
 //! The tests that need kernel TLS are skipped without the `tls` module
 //! unless `BROWNTLS_KTLS_REQUIRED=1`.
@@ -15,7 +16,7 @@ mod common;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::fd::AsFd;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -130,11 +131,11 @@ fn a_file_is_sent_for_every_suite() {
     }
 }
 
-/// The records a file makes on the wire, seen by a relay: at least as many
-/// as its bytes need, and possibly more, since the kernel may close a
-/// record wherever it stops reading the file for a moment. (That is why
-/// the stream counts them by the kernel's own number; how many there are
-/// is logged, not required.)
+/// The records a file makes on the wire, seen by a relay: on a blocking
+/// socket every call sends all it was asked for in full records and
+/// closes the last one, so the records are those the bytes of each call
+/// need, with the default record size and with the small one a peer asked
+/// for.
 #[test]
 fn the_records_of_a_file_are_seen_on_the_wire() {
     if !kernel_tls() {
@@ -146,13 +147,26 @@ fn the_records_of_a_file_are_seen_on_the_wire() {
         suites.iter().copied().find(|s| tls13(*s)),
         suites.iter().copied().find(|s| !tls13(*s)),
     ];
-    for suite in chosen.into_iter().flatten() {
+    let cases = chosen
+        .into_iter()
+        .flatten()
+        .flat_map(|suite| [(suite, None), (suite, Some(1000))]);
+    for (suite, limit) in cases {
+        // The most plaintext in a record: TLS 1.3 counts the content type
+        // byte in the peer's limit.
+        let max = match limit {
+            Some(limit) => usize::from(limit) - usize::from(tls13(suite)),
+            None => 16384,
+        };
         let (client_tcp, server_tcp, wire, relay) = relay();
         let contents = pattern(2_000_003, 34);
         let file = temp_file(&contents);
+        let mut needed = 0;
         thread::scope(|scope| {
             let server = scope.spawn(|| {
-                let conn = ServerConnection::new(Arc::new(pki.server_config(suite))).unwrap();
+                let mut config = pki.server_config(suite);
+                config.record_size_limit = limit;
+                let conn = ServerConnection::new(Arc::new(config)).unwrap();
                 let mut tls = StreamOwned::new(conn, server_tcp);
                 let mut got = Vec::new();
                 tls.read_to_end(&mut got).unwrap();
@@ -162,7 +176,15 @@ fn the_records_of_a_file_are_seen_on_the_wire() {
                 tls.sock.shutdown(Shutdown::Both).unwrap();
             });
             let mut tls = client_stream(&pki, suite, client_tcp);
-            sendfile_all(&mut tls, &file, 1, contents.len());
+            let mut offset = 1;
+            while offset < contents.len() {
+                let rest = contents.len() - offset;
+                let sent = tls.sendfile(&file, offset as u64, rest).unwrap();
+                assert!(sent != 0 && sent <= rest, "{suite:?}: {sent}");
+                assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
+                needed += sent.div_ceil(max);
+                offset += sent;
+            }
             tls.send_close_notify().unwrap();
             let mut rest = Vec::new();
             tls.read_to_end(&mut rest).unwrap();
@@ -170,28 +192,95 @@ fn the_records_of_a_file_are_seen_on_the_wire() {
             server.join().unwrap();
         });
         relay.join();
-        // Records of more than a kilobyte are the file's (the handshake
-        // and the alert are shorter), but for a last one that may be small.
+        // Application data records of more than 200 bytes are the file's
+        // (the handshake's and the alert are shorter), but for a last one
+        // that may be small.
         let wire = wire.lock().unwrap();
         let mut rest = &wire.client_to_server[..];
         let (mut records, mut short) = (0, 0);
         while rest.len() >= 5 {
             let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
-            if rest[0] == 23 && len > 1024 {
+            if rest[0] == 23 && len > 200 {
                 records += 1;
-                short += usize::from(len < 16384);
+                short += usize::from(len < max);
             }
             rest = rest.get(5 + len..).unwrap_or_default();
         }
-        let needed = (contents.len() - 1).div_ceil(16384);
         eprintln!(
-            "{:?}: {} bytes of a file went out in {records} records ({short} not full); \
-             the bytes alone need {needed}",
+            "{:?}, record limit {limit:?}: {} bytes of a file went out in {records} records \
+             ({short} not full)",
             suite.suite(),
             contents.len() - 1,
         );
-        assert!(records + 1 >= needed, "{suite:?}: {records} records");
+        assert!(
+            records == needed || records + 1 == needed,
+            "{suite:?}, record limit {limit:?}: {records} records where the calls need {needed}"
+        );
     }
+}
+
+/// The records of a file count against the cipher suite's confidentiality
+/// limit: with keys that last for 100 records, a file of 450 makes the
+/// stream send a KeyUpdate on the way, again and again, and the userspace
+/// peer reads the whole file under the keys that follow.
+#[test]
+fn the_records_of_a_file_count_against_the_confidentiality_limit() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let Some(suite) = offloadable_suites().into_iter().find(|s| tls13(*s)) else {
+        return;
+    };
+    let (client_tcp, server_tcp, wire, relay) = relay();
+    let contents = pattern(450 * 16384, 35);
+    let file = temp_file(&contents);
+    let mut calls = 0;
+    thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let conn = ServerConnection::new(Arc::new(pki.server_config(suite))).unwrap();
+            let mut tls = StreamOwned::new(conn, server_tcp);
+            let mut got = Vec::new();
+            tls.read_to_end(&mut got).unwrap();
+            assert!(got == contents, "{} bytes", got.len());
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+            tls.sock.shutdown(Shutdown::Both).unwrap();
+        });
+        let config = pki.client_config(limited_suite(suite, 100));
+        let conn = ClientConnection::new(Arc::new(config), localhost()).unwrap();
+        let mut tls = KtlsStream::new(conn, client_tcp).unwrap();
+        let mut offset = 0;
+        while offset < contents.len() {
+            let rest = contents.len() - offset;
+            offset += tls.sendfile(&file, offset as u64, rest).unwrap();
+            calls += 1;
+        }
+        tls.send_close_notify().unwrap();
+        let mut rest = Vec::new();
+        tls.read_to_end(&mut rest).unwrap();
+        drop(tls);
+        server.join().unwrap();
+    });
+    relay.join();
+    // A KeyUpdate is a record of 22 bytes: five of the message, the
+    // content type and the tag. Nothing else the client sends is.
+    let wire = wire.lock().unwrap();
+    let mut rest = &wire.client_to_server[..];
+    let mut key_updates = 0;
+    while rest.len() >= 5 {
+        let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
+        key_updates += usize::from(rest[0] == 23 && len == 22);
+        rest = rest.get(5 + len..).unwrap_or_default();
+    }
+    eprintln!("450 records in {calls} calls: {key_updates} KeyUpdates");
+    // One call sends 64 records and counts 65: every second call passes
+    // the limit.
+    assert!(calls >= 7, "{calls} calls");
+    assert!(
+        (3..=calls).contains(&key_updates),
+        "{key_updates} KeyUpdates in {calls} calls"
+    );
 }
 
 /// A file goes out in the small records a peer asked for (Linux 6.18):
@@ -236,8 +325,9 @@ fn a_file_is_sent_in_the_records_the_peer_asked_for() {
     }
 }
 
-/// What `sendfile` cannot read is an error that leaves the stream as it
-/// was, and nothing is sent once the stream has said goodbye.
+/// What is no regular file is refused before the kernel is asked, an
+/// error leaves the stream as it was, and nothing is sent once the stream
+/// has said goodbye.
 #[test]
 fn errors_leave_the_stream_usable_and_a_closed_stream_sends_nothing() {
     if !kernel_tls() {
@@ -256,13 +346,16 @@ fn errors_leave_the_stream_usable_and_a_closed_stream_sends_nothing() {
             tls.send_close_notify().unwrap();
         });
         let mut tls = client_stream(&pki, suite, client_tcp);
-        // A socket is nothing `sendfile` reads from.
-        let (not_a_file, _peer) = tcp_pair();
-        let err = tls.sendfile(&not_a_file, 0, 100).unwrap_err();
-        assert_ne!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
-        // An offset the kernel's signed type cannot hold.
-        let err = tls.sendfile(&file, u64::MAX, 100).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        // Only a regular file has a length to stay within.
+        let (socket, _peer) = tcp_pair();
+        let err = tls.sendfile(&socket, 0, 100).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        let directory = std::fs::File::open(std::env::temp_dir()).unwrap();
+        let err = tls.sendfile(&directory, 0, 100).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        // Behind the end of the file there is nothing, however far.
+        assert_eq!(tls.sendfile(&file, 9, 100).unwrap(), 0);
+        assert_eq!(tls.sendfile(&file, u64::MAX, 100).unwrap(), 0);
         assert_eq!(tls.unsent().unwrap(), 0);
 
         assert_eq!(tls.sendfile(&file, 0, 100).unwrap(), 8);
@@ -280,7 +373,10 @@ fn errors_leave_the_stream_usable_and_a_closed_stream_sends_nothing() {
 /// A non-blocking socket whose peer does not read takes part of a file
 /// and then reports no room. Whatever the kernel holds of it then (records
 /// TCP had no room for, bytes in a record not yet closed) arrives once the
-/// rest is sent, and the count of it comes down to zero.
+/// rest is sent, and the count of it comes down to zero. With the small
+/// records a peer asked for, the pieces the kernel takes the file in do
+/// not end where records do. How much of the first part arrives before
+/// more is sent is logged, not required.
 #[test]
 fn a_full_socket_takes_part_of_a_file() {
     if !kernel_tls() {
@@ -292,43 +388,55 @@ fn a_full_socket_takes_part_of_a_file() {
         suites.iter().copied().find(|s| tls13(*s)),
         suites.iter().copied().find(|s| !tls13(*s)),
     ];
-    for suite in chosen.into_iter().flatten() {
+    let cases = chosen
+        .into_iter()
+        .flatten()
+        .flat_map(|suite| [(suite, None), (suite, Some(1000))]);
+    for (suite, limit) in cases {
         let (client_tcp, server_tcp) = tcp_pair();
-        let contents = pattern(48 << 20, 33);
+        let contents = pattern(16 << 20, 33);
         let file = temp_file(&contents);
-        let (sent_first, tell_first) = std::sync::mpsc::channel::<usize>();
+        let (sent_first, first_sent) = mpsc::channel::<usize>();
+        let (arrived_first, first_arrived) = mpsc::channel::<usize>();
         thread::scope(|scope| {
             let (pki, contents) = (&pki, &contents);
             let server = scope.spawn(move || {
-                let mut tls = server_stream(pki, suite, server_tcp);
+                let mut config = pki.server_config(suite);
+                config.record_size_limit = limit;
+                let conn = ServerConnection::new(Arc::new(config)).unwrap();
+                let mut tls = StreamOwned::new(conn, server_tcp);
+                while tls.conn.is_handshaking() || tls.conn.wants_write() {
+                    tls.conn.complete_io(&mut tls.sock).unwrap();
+                }
                 // What the client got rid of before it found no room: read
-                // until nothing comes for a while.
-                let first = tell_first.recv().unwrap();
-                tls.get_ref()
-                    .set_read_timeout(Some(Duration::from_millis(500)))
-                    .unwrap();
-                let mut got = Vec::new();
-                let mut buf = vec![0; 1 << 16];
-                loop {
-                    match tls.read(&mut buf) {
+                // it, and no more, until nothing comes for a while.
+                let first = first_sent.recv().unwrap();
+                let pause = Some(Duration::from_millis(500));
+                tls.sock.set_read_timeout(pause).unwrap();
+                let mut got = vec![0; first];
+                let mut arrived = 0;
+                while arrived < first {
+                    match tls.read(&mut got[arrived..]) {
                         Ok(0) => panic!("closed early"),
-                        Ok(n) => got.extend_from_slice(&buf[..n]),
-                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                        Ok(n) => arrived += n,
+                        Err(err)
+                            if matches!(
+                                err.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            break;
+                        }
                         Err(err) => panic!("{err}"),
                     }
-                    if got.len() >= first {
-                        break;
-                    }
                 }
-                eprintln!(
-                    "{:?}: {} of the first {first} bytes arrived before more was sent",
-                    suite.suite(),
-                    got.len()
-                );
-                tls.get_ref().set_read_timeout(Some(LIMIT)).unwrap();
+                got.truncate(arrived);
+                arrived_first.send(arrived).unwrap();
+                tls.sock.set_read_timeout(Some(LIMIT)).unwrap();
                 tls.read_to_end(&mut got).unwrap();
                 assert!(got == contents[1..], "{suite:?}: {} bytes", got.len());
-                tls.send_close_notify().unwrap();
+                tls.conn.send_close_notify();
+                tls.flush().unwrap();
             });
             let mut tls = client_stream(pki, suite, client_tcp);
             tls.get_ref().set_nonblocking(true).unwrap();
@@ -344,14 +452,17 @@ fn a_full_socket_takes_part_of_a_file() {
                 }
             };
             assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{suite:?}");
+            let first = offset - 1;
+            let held = tls.unsent().unwrap();
+            sent_first.send(first).unwrap();
+            let arrived = first_arrived.recv().unwrap();
             eprintln!(
-                "{:?}: no room after {} bytes, the kernel holds {} bytes of records",
+                "{:?}, record limit {limit:?}: no room after {first} bytes, of which the \
+                 kernel held {held} bytes of records; {arrived} arrived before more was \
+                 sent, {} bytes of records still held",
                 suite.suite(),
-                offset - 1,
                 tls.unsent().unwrap()
             );
-            sent_first.send(offset - 1).unwrap();
-            // The reader has gone on when it reads the rest.
             let start = Instant::now();
             while offset < contents.len() {
                 match tls.sendfile(&file, offset as u64, contents.len() - offset) {

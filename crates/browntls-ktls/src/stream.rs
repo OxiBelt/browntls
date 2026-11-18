@@ -248,20 +248,19 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
         &self.socket
     }
 
-    /// Sends up to `count` bytes of `file`, starting at `offset`, as
-    /// application data with `sendfile(2)`: the kernel makes the records
-    /// from the file's pages, and the bytes never pass through userspace.
-    /// Returns how many bytes were sent, which is zero only at the end of
-    /// the file (or for a `count` of zero) and may be less than `count`:
-    /// call again with the offset moved on, as with [`Write::write`]. One
-    /// call sends at most 64 records' worth (a mebibyte, unless the peer
-    /// asked for smaller records). The file's own position is neither
-    /// used nor moved.
+    /// Sends up to `count` bytes of the regular file `file`, starting at
+    /// `offset`, as application data with `sendfile(2)`: the kernel makes
+    /// the records from the file's pages, and the bytes never pass through
+    /// userspace. Returns how many bytes were sent, which is zero only at
+    /// or behind the end of the file (or for a `count` of zero) and may be
+    /// less than `count`: call again with the offset moved on, as with
+    /// [`Write::write`]. One call sends at most 64 records' worth (a
+    /// mebibyte, unless the peer asked for smaller records). The file's
+    /// own position is neither used nor moved.
     ///
-    /// `file` is whatever `sendfile` reads from, a regular file as a rule.
     /// Like a write, the call first sends what the stream holds, counts
     /// the records against the cipher suite's confidentiality limit and
-    /// refreshes the keys at it, and keeps [`Self::unsent`] exact, which
+    /// refreshes the keys at it, and keeps [`Self::unsent`] right, which
     /// `sendfile` on [`Self::get_ref`] would not.
     ///
     /// ```no_run
@@ -283,15 +282,27 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// ```
     ///
     /// On a non-blocking socket `WouldBlock` means no room, as for a
-    /// write, and a call that sent less than `count` may leave its last
-    /// bytes in a record the kernel has not closed: they go out with what
-    /// is sent next (more of the file, a write, `close_notify`), and
-    /// [`Self::unsent`] counts them until then.
+    /// write. A call that was cut short (no room on a non-blocking socket,
+    /// a signal on a blocking one) may leave its last bytes in a record
+    /// the kernel has not closed: they go out with what is sent next (more
+    /// of the file, a write, `close_notify`), [`Self::unsent`] counts them
+    /// until then, and they are lost if the stream is dropped first.
     ///
-    /// `sendfile` cannot ask the kernel not to raise `SIGPIPE` when the
-    /// connection has been reset, as this stream's writes do. Rust
-    /// programs ignore that signal unless they changed its handling; in
-    /// other processes ignore or handle it.
+    /// The call never asks the kernel for more than the file holds behind
+    /// `offset`, whatever `count` is: finding the end of a file before the
+    /// count it was given, the kernel waits for TCP to take the last
+    /// record even on a non-blocking socket. A file that is cut short
+    /// while it is sent can still cause that wait.
+    ///
+    /// `sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection
+    /// that is closed for sending, as this stream's writes are. The call
+    /// holds the signal back for its thread and takes the one it caused,
+    /// so that the error is all the caller sees whatever the process does
+    /// with the signal; a `SIGPIPE` that was pending for the thread before
+    /// stays pending.
+    ///
+    /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
+    /// not a regular file.
     pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
         self.engine
             .sendfile(self.socket.as_fd(), file.as_fd(), offset, count)

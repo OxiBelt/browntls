@@ -1126,22 +1126,44 @@ the handover, or bytes were sent on the socket directly
 (`Unsupported`). A FIN takes a sequence number, so the count no longer fits
 once the write side is shut.
 
-`sendfile` on either stream sends part of a file as application data with
-`sendfile(2)`, the kernel making the records from the file's pages. It goes
-through the engine like a write (the outputs that wait first, at most 64
-records' worth a call, the plaintext entered in the ledger), with one
-difference in the count of records. The kernel takes a file in parts, one
-`sendmsg` each, and closes a record at the end of a part when it believes the
-part to be the last, which a short read of the file makes it believe early; so
-the bytes sent do not bound the records made. The engine reads the kernel's
-record sequence number on both sides of the call instead and reports the
-difference plus one, for a record that a call cut short by a full
-non-blocking socket can leave open: its bytes go out with whatever is sent
-next and are in `unsent()` until then. Without the kernel's counters it
-reports a record for every 4096 bytes on top of those the bytes alone make.
+`sendfile` on either stream sends part of a regular file as application data
+with `sendfile(2)`, the kernel making the records from the file's pages. It
+goes through the engine like a write (the outputs that wait first, at most 64
+records' worth a call, the plaintext entered in the ledger), with three
+differences.
+
+The engine never asks for more than the file holds behind the offset
+(`fstat`; anything but a regular file is refused). Asked for what is there or
+less, the kernel closes the last record like a write. When it finds the end of
+the file before the count, having sent something, it sends what it holds
+without `MSG_DONTWAIT` (`tls_sw_splice_eof`), and the call waits for TCP to
+take all of it, on a non-blocking socket too. A file cut short between the two
+calls can still bring that about.
+
+The records are counted by the kernel's record sequence number, read on both
+sides of the call, plus one. A call cut short (no room on a non-blocking
+socket, a signal on a blocking one) leaves its last bytes in a record that a
+later call closes, and the kernel may close a record early (too many pieces of
+pages in it, or memory pressure), so the bytes sent do not bound the records
+made. The bytes of an open record go out with whatever is sent next, are in
+`unsent()` until then, and are lost if the stream is dropped first. Without the
+kernel's counters the engine reports a record for every 4096 bytes on top of
+those the bytes alone make.
+
+`sendfile(2)` has no flag against `SIGPIPE`, which a peer could otherwise
+bring upon a process that does not ignore the signal by resetting the
+connection. `sys::sendfile` blocks the signal for the calling thread for the
+length of the call and takes the one the call raised (`sigtimedwait`) before
+it gives the thread its mask back; a `SIGPIPE` that was pending before is left
+alone.
+
 `AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
-writable; only the socket is waited for, not the file's storage. `sendfile(2)`
-has no flag against `SIGPIPE`.
+writable; only the socket is waited for, not the file's storage. The tests
+(`tests/sendfile.rs`, `tests/tokio_zero_copy.rs`, and unit tests in
+`src/sys.rs`) count the records on the wire, drive KeyUpdates with a suite
+whose keys last for 100 records, fill a non-blocking socket, and show that a
+count past the end of the file does not wait for a peer that is not reading
+and that no `SIGPIPE` reaches a process that would die of it.
 
 `set_tx_zerocopy_sendfile` on either stream sets `TLS_TX_ZEROCOPY_RO` (Linux
 5.19; off after the handover), which lets a network device that encrypts the
@@ -1243,10 +1265,12 @@ stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, `ioctl(SIOCOUTQ)`, `sendfile` (whose only pointer is to the
-offset), and `sendmsg`/`recvmsg` with one control message. Its
+without waiting, `ioctl(SIOCOUTQ)`, `uname`, `sendfile` (whose only pointer is to the
+offset) with `fstat` and the calling thread's signal mask around it, and
+`sendmsg`/`recvmsg` with one control message. Its
 invariants are listed at its top: borrowed descriptors,
-pointers only into live values with their lengths, control messages built and
+pointers only into live values with their lengths, the thread's signal mask
+left as it was, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
 sized with `CMSG_SPACE`, and no value created from kernel output but plain
 integers. The tests (`crates/browntls-ktls/tests/offload.rs`) run over

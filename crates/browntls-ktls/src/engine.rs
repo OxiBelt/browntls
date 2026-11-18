@@ -7,8 +7,8 @@
 //! Every call that reaches the socket may return `WouldBlock` on a
 //! non-blocking one. [`Engine::read`] does so only when the kernel has no
 //! record to give (it tolerates a full socket for what it has to send);
-//! [`Engine::write`], [`Engine::flush`] and [`Engine::flush_outputs`] only
-//! when the socket has no room.
+//! [`Engine::write`], [`Engine::sendfile`], [`Engine::flush`] and
+//! [`Engine::flush_outputs`] only when the socket has no room.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -35,7 +35,7 @@ const MAX_PAYLOAD: usize = 16384;
 const RECORDS_PER_WRITE: usize = 64;
 
 /// The smallest page of the architectures Linux runs on: `sendfile` takes
-/// a file in parts of at least one page (but for its ends).
+/// a file in pieces of at least one page (but for its ends).
 const SMALLEST_PAGE: usize = 4096;
 
 /// `ContentType::ApplicationData`.
@@ -458,7 +458,8 @@ impl<Data: SideData> Engine<Data> {
 
     /// See [`KtlsStream::sendfile`](crate::KtlsStream::sendfile): first the
     /// outputs that wait, then one `sendfile` of at most
-    /// [`RECORDS_PER_WRITE`] records' worth of the file.
+    /// [`RECORDS_PER_WRITE`] records' worth of the file, and of no more
+    /// than the file holds.
     pub(crate) fn sendfile(
         &mut self,
         fd: BorrowedFd<'_>,
@@ -469,21 +470,38 @@ impl<Data: SideData> Engine<Data> {
         let Some(max) = self.before_application_data(fd, count)? else {
             return Ok(0);
         };
-        let take = count.min(max * RECORDS_PER_WRITE);
+        let Some(len) = sys::regular_file_len(file)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "`sendfile` takes a regular file",
+            ));
+        };
+        // Never past the end of the file: having found it, the kernel
+        // sends what it holds and waits for room to do so, on a
+        // non-blocking socket too. Asked for no more than there is, it
+        // closes the last record like a write.
+        let rest = usize::try_from(len.saturating_sub(offset)).unwrap_or(usize::MAX);
+        let take = count.min(max * RECORDS_PER_WRITE).min(rest);
+        if take == 0 {
+            return Ok(0);
+        }
         let made_before = self.records_made(fd);
         let sent = sys::sendfile(fd, file, offset, take)?;
         if sent == 0 {
-            // The end of the file.
+            // The file was cut short meanwhile.
             return Ok(0);
         }
-        // The kernel takes the file in parts and may close a record at the
-        // end of each, so the bytes alone do not bound the records. Its
-        // own count does; one more for a record a shortened call left
-        // open, which a later call closes without counting it.
+        // The bytes alone do not bound the records: a call cut short (no
+        // room, a signal) leaves a record open that a later call closes,
+        // and the kernel closes a record early when it has collected too
+        // many pieces of pages or is short of memory. The kernel's own
+        // count is exact; one more for the record left open, which is
+        // counted here and not by the call that closes it.
         let records = match (made_before, self.records_made(fd)) {
             (Some(before), Some(after)) if after >= before => after - before + 1,
-            // Without the kernel's count: a record closed after every page
-            // of the file, the smallest part the kernel takes it in.
+            // Without the kernel's count: as if every page of the file, the
+            // smallest piece the kernel takes it in but for its ends,
+            // closed a record.
             _ => u64::try_from(sent.div_ceil(max) + sent.div_ceil(SMALLEST_PAGE) + 1)
                 .unwrap_or(u64::MAX),
         };

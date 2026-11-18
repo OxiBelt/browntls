@@ -108,25 +108,42 @@ pub const MAX_PADDING: usize = 300;
 /// §5.4): two records of three get 1 to [`MAX_PADDING`] zero bytes behind
 /// their content type, where the record has room. browntls itself never
 /// pads.
+pub fn padding_suite(suite: SupportedCipherSuite) -> SupportedCipherSuite {
+    let inner = tls13_suite(suite);
+    let aead_alg = Box::leak(Box::new(PaddingAead(inner.aead_alg)));
+    tls13_variant(inner, aead_alg, inner.common.confidentiality_limit)
+}
+
+/// The TLS 1.3 `suite` with keys that last for `limit` records only.
+pub fn limited_suite(suite: SupportedCipherSuite, limit: u64) -> SupportedCipherSuite {
+    let inner = tls13_suite(suite);
+    tls13_variant(inner, inner.aead_alg, limit)
+}
+
 // Without `tls12` the suite can only be a TLS 1.3 one.
 #[allow(clippy::infallible_destructuring_match)]
-pub fn padding_suite(suite: SupportedCipherSuite) -> SupportedCipherSuite {
-    let inner = match suite {
+fn tls13_suite(suite: SupportedCipherSuite) -> &'static Tls13CipherSuite {
+    match suite {
         SupportedCipherSuite::Tls13(inner) => inner,
         #[cfg(feature = "tls12")]
-        SupportedCipherSuite::Tls12(_) => panic!("TLS 1.2 records have no padding"),
-    };
-    let aead_alg: &'static dyn Tls13AeadAlgorithm =
-        Box::leak(Box::new(PaddingAead(inner.aead_alg)));
+        SupportedCipherSuite::Tls12(_) => panic!("not a TLS 1.3 suite"),
+    }
+}
+
+fn tls13_variant(
+    suite: &'static Tls13CipherSuite,
+    aead_alg: &'static dyn Tls13AeadAlgorithm,
+    confidentiality_limit: u64,
+) -> SupportedCipherSuite {
     SupportedCipherSuite::Tls13(Box::leak(Box::new(Tls13CipherSuite {
         common: browntls::CipherSuiteCommon {
-            suite: inner.common.suite,
-            hash_provider: inner.common.hash_provider,
-            confidentiality_limit: inner.common.confidentiality_limit,
+            suite: suite.common.suite,
+            hash_provider: suite.common.hash_provider,
+            confidentiality_limit,
         },
-        hkdf_provider: inner.hkdf_provider,
+        hkdf_provider: suite.hkdf_provider,
         aead_alg,
-        quic: inner.quic,
+        quic: suite.quic,
     })))
 }
 

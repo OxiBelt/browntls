@@ -78,16 +78,17 @@ async fn kernel_pair(
     kernel_pair_over(pki, suite, (to_tokio(client_tcp), to_tokio(server_tcp))).await
 }
 
-/// A loopback pair with a 4096-byte send buffer at the client and a
-/// 4096-byte receive buffer at the server, so that a record of full size
-/// never fits into what TCP takes at once: (client, server).
-async fn narrow_pair() -> (TcpStream, TcpStream) {
+/// A loopback pair with a send buffer of `size` bytes at the client and a
+/// receive buffer of `size` bytes at the server (the kernel doubles them,
+/// and has a least size), so that a record of full size never fits into
+/// what TCP takes at once: (client, server).
+async fn narrow_pair(size: u32) -> (TcpStream, TcpStream) {
     let listener = TcpSocket::new_v4().unwrap();
-    listener.set_recv_buffer_size(4096).unwrap();
+    listener.set_recv_buffer_size(size).unwrap();
     listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = listener.listen(1).unwrap();
     let connecting = TcpSocket::new_v4().unwrap();
-    connecting.set_send_buffer_size(4096).unwrap();
+    connecting.set_send_buffer_size(size).unwrap();
     let (client, server) = tokio::join!(
         connecting.connect(listener.local_addr().unwrap()),
         listener.accept(),
@@ -252,7 +253,7 @@ async fn a_file_is_sent_through_small_socket_buffers() {
         suites.iter().copied().find(|s| !tls13(*s)),
     ];
     for suite in chosen.into_iter().flatten() {
-        let (mut client, mut server) = kernel_pair_over(&pki, suite, narrow_pair().await).await;
+        let (mut client, mut server) = kernel_pair_over(&pki, suite, narrow_pair(4096).await).await;
         let contents = pattern((2 << 20) + 5, 24);
         let file = temp_file(&contents);
         let expected = contents.clone();
@@ -275,5 +276,90 @@ async fn a_file_is_sent_through_small_socket_buffers() {
             .await
             .expect("the reader timed out")
             .unwrap();
+    }
+}
+
+/// A count that reaches past the end of the file does not make the call
+/// wait for the peer. Left to find the end of the file itself, the kernel
+/// would send the last record without regard for the non-blocking socket
+/// and keep the thread until TCP has room for all of it; the stream asks
+/// for no more than the file holds. The peer reads nothing until the call
+/// is back: its kernel holds one record that came before, which is all it
+/// takes in unread, and the narrowest sockets the kernel allows have no
+/// room for the record the file makes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_count_past_the_end_of_the_file_does_not_wait_for_the_peer() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suites = offloadable_suites();
+    let chosen = [
+        suites.iter().copied().find(|s| tls13(*s)),
+        suites.iter().copied().find(|s| !tls13(*s)),
+    ];
+    for suite in chosen.into_iter().flatten() {
+        let (mut client, mut server) = kernel_pair_over(&pki, suite, narrow_pair(1).await).await;
+        let before = pattern(16384, 26);
+        let contents = pattern(16_000, 25);
+        let file = temp_file(&contents);
+        // One record for the peer's kernel to hold, all of it out of TCP's
+        // hands at this end.
+        timeout(LIMIT, async {
+            client.write_all(&before).await.unwrap();
+            while client.unsent().unwrap() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+        .await
+        .expect("the first record was not sent");
+        // Spawned: the future is `Send`, and a call that waits in the
+        // kernel after all keeps one thread only.
+        let mut sender = tokio::spawn(async move {
+            let sent = client.sendfile(&file, 0, 1 << 20).await;
+            let unsent = client.unsent().unwrap();
+            (client, sent, unsent)
+        });
+        let in_time = timeout(Duration::from_secs(5), &mut sender).await;
+        // The peer reads now, which also frees a call that did wait.
+        let mut got = vec![0; before.len() + contents.len()];
+        timeout(LIMIT, server.read_exact(&mut got))
+            .await
+            .expect("the file did not arrive")
+            .unwrap();
+        assert!(got[..before.len()] == before, "{suite:?}");
+        assert!(got[before.len()..] == contents, "{suite:?}");
+        let (mut client, sent, unsent) = match in_time {
+            Ok(joined) => joined.unwrap(),
+            Err(_) => {
+                let _ = timeout(LIMIT, sender).await;
+                panic!("{suite:?}: `sendfile` waited for the peer to read");
+            }
+        };
+        assert_eq!(sent.unwrap(), contents.len(), "{suite:?}");
+        // The call came back with part of the record still in the kernel's
+        // hands: it had not waited for room.
+        eprintln!(
+            "{:?}: the kernel held {unsent} bytes of the file's record",
+            suite.suite()
+        );
+        assert_ne!(unsent, 0, "{suite:?}: TCP had room for the whole record");
+        let both = async {
+            tokio::join!(
+                async {
+                    client.shutdown().await.unwrap();
+                    let mut rest = Vec::new();
+                    client.read_to_end(&mut rest).await.unwrap();
+                },
+                async {
+                    let mut rest = Vec::new();
+                    server.read_to_end(&mut rest).await.unwrap();
+                    assert!(rest.is_empty(), "{suite:?}");
+                    server.shutdown().await.unwrap();
+                },
+            )
+        };
+        timeout(LIMIT, both).await.expect("the closure timed out");
     }
 }

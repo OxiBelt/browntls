@@ -34,14 +34,13 @@ before closing. Blocking sockets without a send timeout are not affected.
 
 ## Zero copy
 
-`sendfile` on either stream sends part of a file as application data with
-`sendfile(2)`: the kernel makes the records from the file's pages, and the
-bytes never pass through userspace. Like a write it first sends what the
-stream holds, counts the records against the confidentiality limit (by the
-kernel's own record count, since the kernel may close a record after any
-part of the file) and keeps `unsent()` exact; `sendfile` on the socket
-itself (`get_ref`) does none of that. One call sends at most 64 records'
-worth, so call it until the file is sent:
+`sendfile` on either stream sends part of a regular file as application
+data with `sendfile(2)`: the kernel makes the records from the file's pages,
+and the bytes never pass through userspace. Like a write it first sends what
+the stream holds, counts the records against the confidentiality limit (by
+the kernel's own record count) and keeps `unsent()` right; `sendfile` on the
+socket itself (`get_ref`) does none of that. One call sends at most 64
+records' worth, so call it until the file is sent:
 
 ```rust
 let file = std::fs::File::open("index.html")?;
@@ -56,11 +55,24 @@ while offset < len {
 }
 ```
 
+A call that was cut short (no room on a non-blocking socket, a signal on a
+blocking one) may leave its last bytes in a record the kernel has not
+closed. They go out with what is sent next, `unsent()` counts them until
+then, and they are lost if the stream is dropped first.
+
+The streams never ask the kernel for more than the file holds: finding the
+end of a file before the count it was given, the kernel waits for TCP to
+take the last record even on a non-blocking socket. A file that is cut short
+while it is sent can still cause that wait.
+
+`sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection that is
+closed for sending. The call holds the signal back for its thread and takes
+the one it caused, so the error is all the caller sees, whatever the process
+does with the signal.
+
 `AsyncKtlsStream::sendfile` waits for room on the socket; where the kernel
 must read the file from its storage first, the call blocks the thread for
-that long. `sendfile(2)` cannot ask the kernel not to raise `SIGPIPE` on a
-reset connection: Rust programs ignore that signal unless they changed its
-handling.
+that long.
 
 `set_tx_zerocopy_sendfile` on either stream sets the kernel's
 `TLS_TX_ZEROCOPY_RO` option (Linux 5.19; off after the handover): a network

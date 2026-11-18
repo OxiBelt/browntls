@@ -6,13 +6,16 @@
 //! library, nor has asking the kernel whether a socket has room to send
 //! (`poll`), how many bytes TCP holds unacknowledged (`ioctl`), which
 //! release it is (`uname`), or sending a file's pages without reading them
-//! into userspace (`sendfile`). Every function here keeps these invariants:
+//! into userspace (`sendfile`, with `fstat` for the file's length and the
+//! thread's signal mask to hold `SIGPIPE` back). Every function here keeps
+//! these invariants:
 //!
-//! * the descriptor is a [`BorrowedFd`], open for the whole call;
-//! * every pointer passed to the kernel points into a live Rust value
-//!   (slice, `iovec`, `msghdr`, control buffer, `utsname`) that outlives the call, with
-//!   the length given next to it, and the kernel writes only into buffers
-//!   borrowed mutably here;
+//! * every descriptor is a [`BorrowedFd`], open for the whole call;
+//! * every pointer passed to the kernel or to libc points into a live Rust
+//!   value (slice, `iovec`, `msghdr`, control buffer, `utsname`, `stat`,
+//!   signal set, `timespec`, or one integer such as `sendfile`'s offset)
+//!   that outlives the call, with its length given next to it where the
+//!   call takes one, and only values borrowed mutably here are written;
 //! * control messages are built and read only through the libc `CMSG_*`
 //!   functions, within a buffer aligned for `cmsghdr` and sized with
 //!   `CMSG_SPACE`, and a received control message is read only when its
@@ -22,13 +25,18 @@
 //!   reported;
 //! * a buffer the kernel wrote key material into (`TLS_TX` read back) is
 //!   wiped before the function returns;
-//! * the descriptor's flags are never changed.
+//! * the descriptors' flags are never changed;
+//! * the calling thread's signal mask is after a function what it was
+//!   before, and no signal's disposition is changed: `sendfile` holds
+//!   `SIGPIPE` back for the length of the call and takes only the one the
+//!   call itself raised.
 
 #![allow(unsafe_code)]
 
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::ptr;
 
 use libc::{c_int, c_void};
 
@@ -440,14 +448,40 @@ pub(crate) fn send(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// The length of `file` if it is a regular file; `None` for anything else
+/// (a directory, a device, a pipe, a socket).
+pub(crate) fn regular_file_len(file: BorrowedFd<'_>) -> io::Result<Option<u64>> {
+    // SAFETY: `stat` is a struct of integers, for which all zero bytes are
+    // a valid value.
+    let mut stat: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: `stat` is a live `stat`, which the kernel writes within
+    // during the call only; `file` is open for the call.
+    let rc = unsafe { libc::fstat(file.as_raw_fd(), &mut stat) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(None);
+    }
+    Ok(Some(u64::try_from(stat.st_size).unwrap_or(0)))
+}
+
 /// One `sendfile` of at most `count` bytes of `file`, from `offset`, to
 /// the socket: the kernel makes records of the file's pages without the
 /// bytes passing through userspace. Returns the bytes sent, zero at the
 /// end of the file. The file's own position is neither used nor moved.
 ///
-/// The kernel closes the last record when it has sent all of `count` or
-/// reached the end of the file (Linux 6.5; no `MSG_MORE` on the last
-/// part). Unlike `send`, `sendfile` cannot ask for no `SIGPIPE`.
+/// The kernel closes the last record when it has sent all of `count`. When
+/// it finds the end of the file first, having sent something, it sends
+/// what it holds without `MSG_DONTWAIT` (`tls_sw_splice_eof`): `count`
+/// must not reach past the end of the file on a non-blocking socket.
+///
+/// Unlike `send`, `sendfile` cannot ask for no `SIGPIPE` on a connection
+/// that is closed for sending. The signal is held back for the calling
+/// thread while the call runs, and the one the kernel raised for it is
+/// taken before the thread's mask is restored, so that the error
+/// (`EPIPE`) is all the caller sees whatever the process does with the
+/// signal. A `SIGPIPE` that was pending before the call stays pending.
 pub(crate) fn sendfile(
     fd: BorrowedFd<'_>,
     file: BorrowedFd<'_>,
@@ -456,7 +490,8 @@ pub(crate) fn sendfile(
 ) -> io::Result<usize> {
     let offset =
         libc::off_t::try_from(offset).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    loop {
+    let held = HeldSigpipe::hold()?;
+    let result = loop {
         // The kernel writes back where it stopped: each attempt starts
         // from the caller's offset.
         let mut position = offset;
@@ -467,13 +502,102 @@ pub(crate) fn sendfile(
         let sent =
             unsafe { libc::sendfile(fd.as_raw_fd(), file.as_raw_fd(), &mut position, count) };
         if sent >= 0 {
-            return Ok(sent as usize);
+            break Ok(sent as usize);
         }
         let err = io::Error::last_os_error();
         if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
+            break Err(err);
+        }
+    };
+    let raised = matches!(&result, Err(err) if err.raw_os_error() == Some(libc::EPIPE));
+    held.release(raised);
+    result
+}
+
+/// `SIGPIPE` held back for the calling thread.
+struct HeldSigpipe {
+    /// The set holding `SIGPIPE` alone.
+    sigpipe: libc::sigset_t,
+    /// The thread's mask before.
+    before: libc::sigset_t,
+    /// The caller had blocked the signal itself: the mask stays as it is.
+    was_blocked: bool,
+    /// A `SIGPIPE` was pending already: it is not this call's to take.
+    was_pending: bool,
+}
+
+impl HeldSigpipe {
+    fn hold() -> io::Result<Self> {
+        let (mut sigpipe, mut before) = (empty_sigset(), empty_sigset());
+        // SAFETY: `sigpipe` is a live signal set, written during the call
+        // only; `SIGPIPE` is a valid signal number.
+        unsafe { libc::sigaddset(&mut sigpipe, libc::SIGPIPE) };
+        // SAFETY: both sets are live for the call, which reads the first
+        // and writes the second; only the calling thread's mask changes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &sigpipe, &mut before) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        let was_blocked = has_sigpipe(&before);
+        // Only a blocked signal can have been left pending.
+        let was_pending = was_blocked && sigpipe_pending();
+        Ok(Self {
+            sigpipe,
+            before,
+            was_blocked,
+            was_pending,
+        })
+    }
+
+    /// Takes the signal if the call `raised` one, and gives the thread its
+    /// mask back.
+    fn release(self, raised: bool) {
+        if raised && !self.was_pending {
+            // SAFETY: all zero bytes are a valid `timespec`: no waiting.
+            let no_wait: libc::timespec = unsafe { mem::zeroed() };
+            loop {
+                // SAFETY: the set and the time are live for the call, which
+                // reads them; a null `siginfo_t` pointer asks for none.
+                let rc = unsafe { libc::sigtimedwait(&self.sigpipe, ptr::null_mut(), &no_wait) };
+                let interrupted =
+                    rc < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+                if !interrupted {
+                    break;
+                }
+            }
+        }
+        if !self.was_blocked {
+            // SAFETY: `before` is a live signal set that the call reads;
+            // only the calling thread's mask changes, back to what it was.
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.before, ptr::null_mut()) };
         }
     }
+}
+
+/// Whether a `SIGPIPE` is pending for the calling thread or the process.
+fn sigpipe_pending() -> bool {
+    let mut pending = empty_sigset();
+    // SAFETY: `pending` is a live signal set, written during the call only.
+    let rc = unsafe { libc::sigpending(&mut pending) };
+    rc == 0 && has_sigpipe(&pending)
+}
+
+/// A signal set holding no signal.
+fn empty_sigset() -> libc::sigset_t {
+    // SAFETY: a signal set is plain data, for which all zero bytes are a
+    // valid value.
+    let mut set: libc::sigset_t = unsafe { mem::zeroed() };
+    // SAFETY: `set` is a live signal set, written during the call only.
+    unsafe { libc::sigemptyset(&mut set) };
+    set
+}
+
+/// Whether `set` holds `SIGPIPE`.
+fn has_sigpipe(set: &libc::sigset_t) -> bool {
+    // SAFETY: `set` is a live signal set that the call reads; `SIGPIPE` is
+    // a valid signal number.
+    let member = unsafe { libc::sigismember(set, libc::SIGPIPE) };
+    member == 1
 }
 
 /// What one `recvmsg` returned.
@@ -610,5 +734,76 @@ mod tests {
             assert!(sent < 1 << 30, "the socket never filled");
         };
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// Only a regular file has a length.
+    #[test]
+    fn only_a_regular_file_has_a_length() {
+        let file = temp_file(&[1; 12_345]);
+        assert_eq!(regular_file_len(file.as_fd()).unwrap(), Some(12_345));
+        assert_eq!(regular_file_len(temp_file(&[]).as_fd()).unwrap(), Some(0));
+        let directory = File::open(std::env::temp_dir()).unwrap();
+        assert_eq!(regular_file_len(directory.as_fd()).unwrap(), None);
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert_eq!(regular_file_len(socket.as_fd()).unwrap(), None);
+        let device = File::open("/dev/null").unwrap();
+        assert_eq!(regular_file_len(device.as_fd()).unwrap(), None);
+    }
+
+    /// The thread's signal mask.
+    fn signal_mask() -> libc::sigset_t {
+        let mut mask = empty_sigset();
+        // SAFETY: a null set changes nothing; `mask` is a live signal set
+        // the call writes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), &mut mask) };
+        assert_eq!(rc, 0);
+        mask
+    }
+
+    /// `sendfile` on a connection that is closed for sending fails with
+    /// `EPIPE` and no `SIGPIPE` reaches the process, which this test makes
+    /// die of one (the default the test harness replaces); none stays
+    /// pending, and the thread's mask is as before. A caller that had
+    /// blocked the signal keeps it blocked, and one that was pending for
+    /// it stays pending.
+    #[test]
+    fn sendfile_raises_no_sigpipe() {
+        // SAFETY: `SIG_DFL` is a valid disposition. No other test of this
+        // binary depends on the signal being ignored: the standard
+        // library's socket writes ask for none.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_receiver, _) = listener.accept().unwrap();
+        let file = temp_file(&[7; 5000]);
+        sender.shutdown(std::net::Shutdown::Write).unwrap();
+
+        assert!(!has_sigpipe(&signal_mask()));
+        for _ in 0..3 {
+            let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+            assert!(!sigpipe_pending());
+            assert!(!has_sigpipe(&signal_mask()));
+        }
+
+        // Blocked by the caller: its signal stays its own.
+        let held = HeldSigpipe::hold().unwrap();
+        assert!(has_sigpipe(&signal_mask()));
+        let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+        assert!(has_sigpipe(&signal_mask()));
+        assert!(!sigpipe_pending());
+        // One raised by something else and left pending is not taken.
+        // SAFETY: raises a signal this thread has blocked.
+        unsafe { libc::raise(libc::SIGPIPE) };
+        assert!(sigpipe_pending());
+        let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+        assert!(sigpipe_pending());
+        held.release(true);
+        assert!(!sigpipe_pending());
+        assert!(!has_sigpipe(&signal_mask()));
+        // SAFETY: `SIG_IGN` is a valid disposition: as the harness had it.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     }
 }

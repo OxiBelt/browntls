@@ -1170,8 +1170,9 @@ the socket, so that the socket, and nothing else, is dropped under the hold.
 The kernel sends the held records when the last reference to the socket goes,
 in whichever task drops it. A socket the stream does not own (a borrowed or
 shared one), a duplicate, and a descriptor inherited by a child process (which
-closes it at `exec` at the latest, possibly after the parent dropped the
-stream) are closed elsewhere, and that closer has to see to the signal itself:
+closes it at `exec` if it is close-on-exec, and whenever it does otherwise,
+possibly after the parent dropped the stream) are closed elsewhere, and that
+closer has to see to the signal itself:
 nothing in userspace can discard the records.
 
 `AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket

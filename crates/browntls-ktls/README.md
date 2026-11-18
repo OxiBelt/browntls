@@ -76,8 +76,9 @@ whatever the process does with the signal. That holds for a socket which the
 stream owns and nothing else holds: the kernel sends those records when the
 last holder lets go, so a borrowed, shared or duplicated socket closed
 elsewhere is not covered, nor is a descriptor that a child process inherited
-(a command spawned while the stream lives closes it at `exec`, after the
-parent may have dropped the stream, and receives the signal). A `SIGPIPE`
+(a command spawned while the stream lives closes a close-on-exec socket at
+`exec`, and any other when it pleases, after the parent may have dropped
+the stream, and receives the signal). A `SIGPIPE`
 that something else sends to the process during the hold may be taken along.
 On a connection that has failed the kernel may go on reporting bytes as
 sent; `unsent()` and the reads tell.

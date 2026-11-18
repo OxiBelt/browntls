@@ -72,9 +72,14 @@
 //!   early data ([`ServerConfig::max_early_data_size`]) has it collected
 //!   during the handshake: [`TlsStream::early_data`].
 //!
-//! Flushing, closing, splitting and errors are as described at the
-//! [crate root](crate).
+//! Flushing, closing and errors are as described at the
+//! [crate root](crate). Two things described there are not here yet. The
+//! streams of this module have no `into_split`; [`tokio::io::split`] splits
+//! them. And they take nothing from Tokio's task budget themselves (the
+//! `coop` feature does not cover this module): a task that drives one
+//! yields when its transport does, as Tokio's sockets do.
 //!
+//! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 //! [`process_tls_records`]: browntls::unbuffered::UnbufferedConnectionCommon::process_tls_records
 //! [`ServerConfig::max_early_data_size`]: browntls::ServerConfig::max_early_data_size
 //! [`UnbufferedClientConnection`]: browntls::client::UnbufferedClientConnection

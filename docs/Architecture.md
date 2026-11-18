@@ -587,7 +587,11 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 - Buffered (`std`): `ClientConnection`/`ServerConnection` own a receive
   buffer (`DeframerVecBuffer`, at most one maximum-size record),
   queue received plaintext and outgoing records, and offer `read_tls`,
-  `write_tls`, `reader()` and `writer()`. The send buffer limit
+  `write_tls`, `reader()` and `writer()`. `write_tls` offers the transport
+  up to 64 queued records in one vectored write, and a vectored write to
+  `writer()` hands the record layer up to 64 buffers at a time (more are
+  taken as consecutive writes); both gather their slices on the stack, so
+  neither allocates for the call. The send buffer limit
   (`set_buffer_limit`, 64 KiB by default) caps the application data a
   write takes; control records (handshake messages, alerts, KeyUpdates)
   are queued whatever the limit, but the outgoing queue counts them apart
@@ -668,15 +672,21 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 
 `browntls-tokio` adapts the buffered API to Tokio's `AsyncRead`,
 `AsyncBufRead` and `AsyncWrite`, and the unbuffered API in its `unbuffered`
-module (below); it depends only on Tokio's I/O traits (no Tokio feature, no
-runtime). In the streams at the crate root, each poll pairs the connection with the
+module (below); it depends only on Tokio's I/O traits (no runtime; the
+default `coop` feature adds Tokio's `rt` feature for the task budget, see
+below). In the streams at the crate root, each poll pairs the connection with the
 transport for its duration (`common::Stream`) and drives `read_tls` and
 `write_tls` through adapters that turn the task context's `Pending` into
 `WouldBlock`, the design of tokio-rustls:
 
 - `TlsConnector`/`TlsAcceptor` return futures (`Connect`, `Accept`, and
   `into_fallible` variants that hand the transport back on error) that run
-  the handshake. A handshake that can neither read nor write while still
+  the handshake. While it runs they give the transport (`get_ref`,
+  `get_mut`) and the connection (`connection`, `connection_mut`) to a
+  caller that polls them by hand; a future that has no connection (it
+  could not be created, or a lazily chosen configuration refused the
+  ClientHello and only an alert is left to send) gives only the transport.
+  A handshake that can neither read nor write while still
   in progress (the peer's `close_notify` mid-handshake) ends with
   `UnexpectedEof` instead of polling forever, the asynchronous counterpart
   of the `complete_io` fix.
@@ -730,6 +740,58 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 - TLS errors surface as `io::Error` of kind `InvalidData` wrapping
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
+- With the `coop` feature the streams, the handshake futures and
+  `LazyConfigAcceptor` take part in Tokio's cooperative scheduling
+  (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
+  task's budget per completed operation and return `Pending`, rescheduling
+  the task, once it is spent. A TLS stream completes operations the
+  transport never sees (reads of buffered plaintext, writes the connection
+  buffers) and may run over a transport that does not count, so it counts
+  itself: an operation starts only while budget is left and takes one unit
+  when it completes. The unit is taken after the operation, not held across
+  it as Tokio's `RestoreOnPending` would be, because a restored unit also
+  gives back what the transport took meanwhile. In addition, every read
+  from the transport after the first in one poll takes a unit
+  (`Stream::read_io`, and the acceptor's read loop), and a spent budget
+  looks like a transport that is not ready: the peer decides how many
+  records, with or without plaintext, or pieces of a handshake, one poll
+  would otherwise work through. A poll of a stream pairs the connection
+  with the transport more than once (a read copies chunk after chunk into
+  the caller's buffer; a client finishes an early-data handshake and then
+  reads), so the stream's state carries "this poll has read" from one
+  pairing to the next (`StreamState::read_before`, cleared when a poll
+  begins). Writes need no such bound: one poll writes only what the caller
+  handed it and what was queued. A read wakes its own task and returns
+  `Pending` in two places, both after the control records the connection
+  owed filled their backlog, which stops it reading until they are
+  written, and the poll wrote them all: in `write_before_reading` (the
+  records were queued behind a writer's, and the read wrote everything),
+  and at the end of `Stream::poll_fill_buf` (the backlog was full when the
+  poll began, or the poll's own reads filled it, and the answer the read
+  writes in any case emptied it). In both no transport waker is
+  registered, since the last read returned or none was made, and nothing
+  is left to write; the next poll reads, so the wake does not repeat. The
+  task returns to the scheduler and takes nothing from the budget.
+- `into_split` (`split.rs`) gives a `ReadHalf` and a `WriteHalf` for two
+  tasks; `reunite` gives the stream back. The connection state is one, so
+  the halves do not run in parallel: they share the stream behind a lock
+  held for the length of one poll and taken only with `try_lock`. A half
+  that finds the stream taken leaves its waker and looks once more (the
+  other poll may have ended in between), then returns `Pending`; the poll
+  that has the stream unlocks it and then wakes the waiting half, also when
+  it panics, after which the lock is poisoned and every operation of either
+  half fails (`reunite` still returns the stream, as that poll left it).
+  No half waits for the lock inside its poll, so no worker thread is parked
+  behind the other half's record protection, which is what the blocking
+  lock of `tokio::io::split` does; the lock around the two wakers is held
+  for a few instructions. The second look is what rules out a lost wakeup,
+  and it relies on `try_lock` failing only while the lock is held. Turns
+  are not queued: a waiting half is woken at the end of each poll of the
+  other and may find the stream taken again, and a half that is always
+  ready may take it again and again until its task yields, which the
+  `coop` feature makes it do. The read half is not an
+  `AsyncBufRead`, since the stream's buffer cannot be lent out between two
+  polls while the other half uses the stream.
 
 The `unbuffered` module drives `UnbufferedClientConnection`,
 `UnbufferedServerConnection` and `UnbufferedAcceptor` instead, with its own
@@ -798,6 +860,11 @@ nothing per record and copy plaintext at most once:
 - `TlsStream::into_parts` returns the transport, the connection, the
   unread plaintext and the TLS bytes not processed or not written, to go
   on by hand or to hand the connection to the kernel.
+- The module has no halves of its own (`tokio::io::split` works) and does
+  not count against the task budget (`coop`): a poll reads from the
+  transport until a record gives plaintext or the transport waits, so over
+  a transport that never waits and does not count, the peer decides how
+  long one poll runs. Both are open.
 
 ### Kernel TLS offload (`browntls::kernel`)
 

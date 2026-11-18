@@ -10,7 +10,7 @@ use browntls::ServerConnection;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::TlsStream;
-use crate::common::{HandshakeFailure, Stream, StreamState, joint_waker};
+use crate::common::{HandshakeFailure, Stream, StreamState, coop, joint_waker};
 
 /// A stream returned while its handshake is in progress, because the
 /// client's early data was accepted.
@@ -95,10 +95,12 @@ where
     early.check()?;
     let mut stream = Stream::new(io, session)
         .set_eof(!st.state.readable())
-        .set_need_flush(st.need_flush);
+        .set_need_flush(st.need_flush)
+        .set_read_before(st.read_before);
     while stream.session.is_handshaking() {
         let poll = stream.handshake(cx);
         st.need_flush = stream.need_flush;
+        st.read_before = stream.read_before;
         match poll {
             // More early data may have arrived for a waiting reader.
             Poll::Ready(Ok(_)) => early.wake_reader(),
@@ -162,9 +164,11 @@ where
         let joint = joint_waker(cx.waker(), st.write_waker.as_ref());
         let mut stream = Stream::new(&mut *io, &mut *session)
             .set_eof(!st.state.readable())
-            .set_need_flush(st.need_flush);
+            .set_need_flush(st.need_flush)
+            .set_read_before(st.read_before);
         let poll = stream.handshake(&mut Context::from_waker(&joint));
         st.need_flush = stream.need_flush;
+        st.read_before = stream.read_before;
         match poll {
             Poll::Pending => {
                 // Another operation may take the registration over: it
@@ -207,14 +211,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for EarlyDataReader<'_, IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let stream = &mut *self.get_mut().stream;
-        poll_read(
-            &mut stream.early,
-            &mut stream.io,
-            &mut stream.session,
-            &mut stream.st,
-            cx,
-            buf,
-        )
+        stream.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            poll_read(
+                &mut stream.early,
+                &mut stream.io,
+                &mut stream.session,
+                &mut stream.st,
+                cx,
+                buf,
+            )
+        })
     }
 }
 

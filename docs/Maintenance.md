@@ -81,9 +81,20 @@ and run under the length limits described in
 
 ### Tokio dependency
 
-`browntls-tokio` depends on `tokio` with no features enabled: it uses only the
-I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), and the
-runtime is the application's. That build of `tokio` pulls in
+The workspace requires `tokio` 1.53 or later (`[workspace.dependencies]` in
+the root manifest; the fuzz project repeats the bound). The lower bound is the
+newest of Tokio's long-term support lines, which receive backported fixes for
+at least a year: 1.53.x is supported until September 2027 (1.51.x until March
+2027; 1.47.x ended in September 2026). Raise the bound when Tokio names a
+newer LTS line, and before the line it names ends. `Cargo.lock` holds the
+newest release, so CI's `Tokio lower bound` job also builds and tests
+`browntls-tokio` against the first release of the bound.
+
+`browntls-tokio` uses `tokio`'s I/O traits (`AsyncRead`, `AsyncWrite`,
+`AsyncBufRead`, `ReadBuf`), which need no `tokio` feature, and the runtime is
+the application's. Its default `coop` feature enables `tokio`'s `rt` feature
+for the task budget (`tokio::task::coop`); `rt` compiles the runtime's code
+but adds no dependency. Either build of `tokio` pulls in
 `pin-project-lite` only (MIT, and Apache-2.0 OR MIT); both are pure Rust, and `tokio`
 contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of

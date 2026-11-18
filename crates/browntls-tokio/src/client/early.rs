@@ -150,10 +150,12 @@ where
     }
     let mut stream = Stream::new(io, session)
         .set_eof(!st.state.readable())
-        .set_need_flush(st.need_flush);
+        .set_need_flush(st.need_flush)
+        .set_read_before(st.read_before);
     while stream.session.is_handshaking() {
         let poll = stream.handshake(cx);
         st.need_flush = stream.need_flush;
+        st.read_before = stream.read_before;
         match poll {
             Poll::Ready(Ok(_)) => {}
             Poll::Ready(Err(err)) => {

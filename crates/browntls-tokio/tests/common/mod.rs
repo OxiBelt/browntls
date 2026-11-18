@@ -55,6 +55,12 @@ pub struct Pki {
 
 impl Pki {
     pub fn new() -> Self {
+        Self::with_client_names(vec!["client.example".to_string()])
+    }
+
+    /// Like [`Self::new`], with a client certificate for `client_names`
+    /// (many of them make a large certificate).
+    pub fn with_client_names(client_names: Vec<String>) -> Self {
         let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -76,7 +82,7 @@ impl Pki {
         let ee_cert = ee_params.signed_by(&ee_key, &issuer).unwrap();
 
         let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+        let mut client_params = CertificateParams::new(client_names).unwrap();
         client_params.is_ca = IsCa::NoCa;
         client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -241,6 +247,42 @@ impl AsyncWrite for Choppy {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
+
+/// The read and write halves of a stream, whichever way it was split.
+pub type Halves = (
+    Pin<Box<dyn AsyncRead + Send>>,
+    Pin<Box<dyn AsyncWrite + Send>>,
+);
+
+/// Splitting a stream either with its own `into_split` or with
+/// `tokio::io::split`, so that a test can run over both kinds of halves.
+pub trait SplitEither {
+    fn split_either(self, native: bool) -> Halves;
+}
+
+macro_rules! impl_split_either {
+    ($($stream:ty),*) => {$(
+        impl<IO> SplitEither for $stream
+        where
+            IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        {
+            fn split_either(self, native: bool) -> Halves {
+                if native {
+                    let (read, write) = self.into_split();
+                    (Box::pin(read), Box::pin(write))
+                } else {
+                    let (read, write) = tokio::io::split(self);
+                    (Box::pin(read), Box::pin(write))
+                }
+            }
+        }
+    )*};
+}
+
+impl_split_either!(
+    browntls_tokio::client::TlsStream<IO>,
+    browntls_tokio::server::TlsStream<IO>
+);
 
 /// Deterministic test data.
 pub fn pattern(len: usize) -> Vec<u8> {

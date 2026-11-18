@@ -15,7 +15,9 @@
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
 //! accessors, early data reads (through the stream's reader, which drives
 //! the handshake, or straight from the connection), the lazy acceptor's
-//! `take_io`, pumping until idle, and reconnection (resumption and 0-RTT).
+//! `take_io`, pumping until idle, reconnection (resumption and 0-RTT), and
+//! a stream split into its read and write halves, used through them and
+//! put back together.
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -26,7 +28,13 @@
 //!   prefix of what the peer wrote, whatever happened to the bytes;
 //! * a write never reports more bytes than it was given, and never `Ok(0)`
 //!   for a non-empty buffer;
+//! * the halves of a stream are a pair and reunite into it, and halves of
+//!   two streams do neither and come back unharmed;
 //! * nothing panics, and no poll loops forever.
+
+mod seeds;
+
+pub use seeds::seeds;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -39,16 +47,19 @@ use std::task::{Context, Poll, Waker};
 use browntls::server::Acceptor;
 use browntls::{ClientConfig, ServerConfig};
 use browntls_tokio::{
-    Accept, Connect, FallibleAccept, FallibleConnect, LazyConfigAcceptor, StartHandshake,
-    TlsAcceptor, TlsConnector, TlsStream,
+    Accept, Connect, FallibleAccept, FallibleConnect, LazyConfigAcceptor, ReadHalf, ReuniteError,
+    StartHandshake, TlsAcceptor, TlsConnector, TlsStream, WriteHalf,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::input::{Input, put_short_field};
+use crate::input::Input;
 use crate::tls_conn::setup::{Knobs, assert_prefix, server_name};
 
 const MAX_OPS: usize = 96;
 const MAX_CONNECTIONS: usize = 3;
+/// What the split seeds write through a write half, and in how many rounds.
+const SPLIT_DATA: &[u8] = b"through a half";
+const SPLIT_ROUNDS: u8 = 8;
 const CLIENT: usize = 0;
 const SERVER: usize = 1;
 /// The most bytes one direction of the transport holds.
@@ -189,9 +200,12 @@ enum Op {
     Pump,
     /// Starts a new connection with the same configurations.
     Reconnect,
+    /// `side, how, data (short field), size`: splits that side's stream,
+    /// writes, flushes and reads once through the halves and reunites them.
+    Split,
 }
 
-const OPS: [Op; 14] = [
+const OPS: [Op; 15] = [
     Op::Poll,
     Op::Write,
     Op::Read,
@@ -206,6 +220,7 @@ const OPS: [Op; 14] = [
     Op::TakeIo,
     Op::Pump,
     Op::Reconnect,
+    Op::Split,
 ];
 
 struct World {
@@ -232,6 +247,28 @@ struct World {
 
 fn cx() -> Context<'static> {
     Context::from_waker(Waker::noop())
+}
+
+/// The stream of its two halves, asked of either half.
+fn rejoin<S>(read: ReadHalf<S>, write: WriteHalf<S>, write_first: bool) -> S {
+    assert!(read.is_pair_of(&write) && write.is_pair_of(&read));
+    let stream = if write_first {
+        write.reunite(read)
+    } else {
+        read.reunite(write)
+    };
+    match stream {
+        Ok(stream) => stream,
+        Err(_) => panic!("the halves of one stream did not reunite"),
+    }
+}
+
+/// What a handshake future's accessors returned: `(get_ref, get_mut)` and
+/// `(connection, connection_mut)`, each as "is some".
+fn check_future_accessors(io: (bool, bool), conn: (bool, bool)) {
+    assert_eq!(io.0, io.1, "get_ref and get_mut disagree");
+    assert_eq!(conn.0, conn.1, "connection and connection_mut disagree");
+    assert!(io.0 || !conn.0, "a connection without a transport");
 }
 
 impl World {
@@ -440,6 +477,106 @@ impl World {
         self.check();
     }
 
+    fn take_stream(&mut self, side: usize) -> Option<TlsStream<End>> {
+        self.stream(side)?;
+        let taken = if side == CLIENT {
+            std::mem::replace(&mut self.client, Client::Gone)
+        } else {
+            match std::mem::replace(&mut self.server, Server::Gone) {
+                Server::Ready(stream) => Client::Ready(stream),
+                _ => Client::Gone,
+            }
+        };
+        match taken {
+            Client::Ready(stream) => Some(stream),
+            _ => None,
+        }
+    }
+
+    fn put_stream(&mut self, side: usize, stream: TlsStream<End>) {
+        if side == CLIENT {
+            self.client = Client::Ready(stream);
+        } else {
+            self.server = Server::Ready(stream);
+        }
+    }
+
+    /// One write, one flush and one read through the halves of `side`'s
+    /// stream.
+    fn use_halves<S>(
+        &mut self,
+        side: usize,
+        (read, write): (&mut ReadHalf<S>, &mut WriteHalf<S>),
+        vectored: bool,
+        data: &[u8],
+        size: usize,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        assert!(read.is_pair_of(write) && write.is_pair_of(read));
+        let mut cx = cx();
+        let poll = if vectored && data.len() > 1 {
+            let (a, b) = data.split_at(data.len() / 2);
+            Pin::new(&mut *write).poll_write_vectored(&mut cx, &[IoSlice::new(a), IoSlice::new(b)])
+        } else {
+            Pin::new(&mut *write).poll_write(&mut cx, data)
+        };
+        if let Poll::Ready(Ok(n)) = poll {
+            assert!(n <= data.len(), "wrote more than given");
+            assert!(n > 0 || data.is_empty(), "Ok(0) for a non-empty write");
+            self.sent[side].extend_from_slice(&data[..n]);
+        }
+        let _ = Pin::new(write).poll_flush(&mut cx);
+        let mut buf = vec![0; size.max(1)];
+        let mut rb = ReadBuf::new(&mut buf);
+        if let Poll::Ready(Ok(())) = Pin::new(read).poll_read(&mut cx, &mut rb) {
+            self.received[side].extend_from_slice(rb.filled());
+        }
+    }
+
+    /// Splits `side`'s stream (the unified stream, or the client or server
+    /// stream in it), uses the halves and puts the stream back together.
+    fn split(&mut self, side: usize, how: u8, data: &[u8], size: usize) {
+        let Some(stream) = self.take_stream(side) else {
+            return;
+        };
+        let (inner, write_first, vectored) = (how & 1 != 0, how & 2 != 0, how & 4 != 0);
+        let stream = match stream {
+            TlsStream::Client(client) if inner => {
+                let (mut read, mut write) = client.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                TlsStream::Client(rejoin(read, write, write_first))
+            }
+            TlsStream::Server(server) if inner => {
+                let (mut read, mut write) = server.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                TlsStream::Server(rejoin(read, write, write_first))
+            }
+            stream => {
+                let (mut read, mut write) = stream.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                // The peer's stream is another stream: its halves pair with
+                // neither of these, and a refused reunion returns both.
+                if let Some(other) = self.take_stream(1 - side) {
+                    let (other_read, other_write) = other.into_split();
+                    assert!(!read.is_pair_of(&other_write) && !other_write.is_pair_of(&read));
+                    let Err(ReuniteError(back, other_write)) = read.reunite(other_write) else {
+                        panic!("halves of two streams reunited");
+                    };
+                    let Err(ReuniteError(other_read, back_write)) = write.reunite(other_read)
+                    else {
+                        panic!("halves of two streams reunited");
+                    };
+                    (read, write) = (back, back_write);
+                    self.put_stream(1 - side, rejoin(other_read, other_write, !write_first));
+                }
+                rejoin(read, write, write_first)
+            }
+        };
+        self.put_stream(side, stream);
+        self.check();
+    }
+
     fn check(&self) {
         assert_prefix(&self.received[CLIENT], &self.sent[SERVER], "client read");
         assert_prefix(&self.early, &self.sent[CLIENT], "0-RTT data");
@@ -462,11 +599,31 @@ impl World {
     fn accessors(&mut self, side: usize) {
         let _ = (self.connector.config(), self.server_config.fips());
         match (side, &mut self.client, &mut self.server) {
+            // A handshake future shows a connection only while it shows its
+            // transport (it may have only an alert left to send, or nothing
+            // at all once it returned), and `&` and `&mut` access agree.
             (CLIENT, Client::Connecting(f), _) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+            }
+            (CLIENT, Client::Fallible(f), _) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (SERVER, _, Server::Accepting(f)) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+                if let Some(conn) = f.connection() {
+                    let _ = (conn.is_handshaking(), conn.server_name());
+                }
+            }
+            (SERVER, _, Server::Fallible(f)) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (CLIENT, Client::Ready(s), _) | (SERVER, _, Server::Ready(s)) => {
                 let _ = s.get_ref().1.is_handshaking();
@@ -631,6 +788,12 @@ fn play(data: &[u8]) -> Option<World> {
                     world.connect();
                 }
             }
+            Op::Split => {
+                let how = input.byte();
+                let data = input.short_field();
+                let size = usize::from(input.byte());
+                world.split(side, how, data, size);
+            }
         }
     }
     Some(world)
@@ -650,214 +813,5 @@ fn read_early(stream: &mut browntls_tokio::server::TlsStream<End>, out: &mut Vec
             Poll::Ready(Ok(())) if !rb.filled().is_empty() => out.extend_from_slice(rb.filled()),
             _ => break,
         }
-    }
-}
-
-/// Seeds: every creation mode with a full exchange, 0-RTT on a resumed
-/// connection (read after the handshake, and before its end by a server
-/// that returns early), a refused plain-text request, and damaged
-/// handshakes.
-pub fn seeds() -> Vec<Vec<u8>> {
-    let op = |out: &mut Vec<u8>, op: Op, side: usize| {
-        out.push(op as u8);
-        out.push(side as u8);
-    };
-    let exchange = |out: &mut Vec<u8>| {
-        op(out, Op::Accessors, CLIENT);
-        op(out, Op::Accessors, SERVER);
-        op(out, Op::Pump, 0);
-        for side in [CLIENT, SERVER] {
-            op(out, Op::Write, side);
-            out.push(u8::from(side == SERVER));
-            put_short_field(out, b"hello through tokio");
-        }
-        op(out, Op::Pump, 0);
-        op(out, Op::KeyUpdate, SERVER);
-        op(out, Op::Write, SERVER);
-        out.push(0);
-        put_short_field(out, b"after a key update");
-        op(out, Op::Pump, 0);
-        op(out, Op::Read, CLIENT);
-        out.extend([1, 7]);
-        op(out, Op::Accessors, CLIENT);
-        op(out, Op::Accessors, SERVER);
-        op(out, Op::Shutdown, CLIENT);
-        op(out, Op::Pump, 0);
-        op(out, Op::Shutdown, SERVER);
-        op(out, Op::Pump, 0);
-    };
-    let mut seeds = Vec::new();
-    // TLS 1.3 then TLS 1.2, every creation mode, plain and choppy transport.
-    for versions in [1u8, 2] {
-        for mode in [0u8, 1, 2, 3, 4, 8, 0x0d, 0x10, 0x18, 0x20, 0x33] {
-            for transport in [[255u8, 0, 255, 0], [16, 0b0101_0101, 3, 0b0011_0011]] {
-                let mut s = vec![versions, 0, 0, 0, 0, mode];
-                s.extend(transport);
-                exchange(&mut s);
-                seeds.push(s);
-            }
-        }
-    }
-    // 0-RTT: a first connection leaves a ticket, the second writes early.
-    let mut s = vec![0x41, 0, 0, 0, 0, 0x40, 255, 0, 255, 0];
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::Write, SERVER);
-    s.push(0);
-    put_short_field(&mut s, b"ticket");
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::Reconnect, 0);
-    // The connect future returns at once, before the handshake.
-    op(&mut s, Op::Poll, CLIENT);
-    op(&mut s, Op::Write, CLIENT);
-    s.push(0);
-    put_short_field(&mut s, b"early request");
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::EarlyRead, SERVER);
-    op(&mut s, Op::Write, CLIENT);
-    s.push(1);
-    put_short_field(&mut s, b"later");
-    op(&mut s, Op::Pump, 0);
-    seeds.push(s);
-    // 0-RTT read before the handshake completes: the server's accept
-    // returns early (mode bit 7), from each way of creating it, with and
-    // without 0.5-RTT data (configuration bit 7).
-    for (flags, mode) in [
-        (0x41u8, 0xc0u8),
-        (0xc1, 0xc0),
-        (0xc1, 0xe8),
-        (0x41, 0xd0),
-        (0xc1, 0xd8),
-    ] {
-        let mut s = vec![flags, 0, 0, 0, 0, mode, 255, 0, 255, 0];
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::Write, SERVER);
-        s.push(0);
-        put_short_field(&mut s, b"ticket");
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::Reconnect, 0);
-        op(&mut s, Op::Poll, CLIENT);
-        op(&mut s, Op::Write, CLIENT);
-        s.push(0);
-        put_short_field(&mut s, b"early request");
-        // The ClientHello and the early data go out; the lazy acceptor
-        // takes one poll more than the acceptor.
-        op(&mut s, Op::Flush, CLIENT);
-        op(&mut s, Op::Poll, SERVER);
-        op(&mut s, Op::Poll, SERVER);
-        op(&mut s, Op::Accessors, SERVER);
-        op(&mut s, Op::EarlyRead, SERVER);
-        // Sent at once as 0.5-RTT data, or waiting for the handshake.
-        op(&mut s, Op::Write, SERVER);
-        s.push(0);
-        put_short_field(&mut s, b"reply");
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::Write, SERVER);
-        s.push(1);
-        put_short_field(&mut s, b"reply");
-        op(&mut s, Op::Write, CLIENT);
-        s.push(1);
-        put_short_field(&mut s, b"later");
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::EarlyRead, SERVER);
-        op(&mut s, Op::EarlyRead, CLIENT);
-        op(&mut s, Op::Shutdown, SERVER);
-        op(&mut s, Op::Pump, 0);
-        seeds.push(s);
-    }
-    // A lazy acceptor refusing a plain-text request, then giving the
-    // transport back.
-    let mut s = vec![1, 0, 0, 0, 0, 0x10, 255, 0, 255, 0];
-    op(&mut s, Op::Inject, CLIENT);
-    put_short_field(&mut s, b"GET / HTTP/1.1\r\n\r\n");
-    op(&mut s, Op::Poll, SERVER);
-    op(&mut s, Op::TakeIo, SERVER);
-    seeds.push(s);
-    // Damaged handshakes, an early end of file, a lazy acceptor's refusal of
-    // the configuration.
-    for (lane, damage) in [
-        (CLIENT, Op::Damage),
-        (SERVER, Op::Damage),
-        (CLIENT, Op::Close),
-    ] {
-        let mut s = vec![1, 0, 0, 0, 0, 0x24, 255, 0, 255, 0];
-        op(&mut s, Op::Poll, CLIENT);
-        op(&mut s, Op::Poll, SERVER);
-        op(&mut s, damage, lane);
-        if matches!(damage, Op::Damage) {
-            s.extend([0, 40, 0x55]);
-        }
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::Read, CLIENT);
-        s.extend([0, 16]);
-        seeds.push(s);
-    }
-    seeds
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The seeds do what they are meant to, so the harness's checks run on
-    /// real traffic: data both ways, 0-RTT accepted, the lazy acceptor's
-    /// refusal.
-    #[test]
-    fn seeds_exchange_data() {
-        let seeds = seeds();
-        let mut exchanged = 0;
-        for seed in &seeds {
-            let Some(world) = play(seed) else { continue };
-            if world.received[CLIENT].ends_with(b"after a key update")
-                && world.received[SERVER] == b"hello through tokio"
-            {
-                exchanged += 1;
-            }
-        }
-        // Every TLS 1.3 and TLS 1.2 creation-mode seed (11 modes, two
-        // transports each).
-        assert_eq!(exchanged, 44);
-
-        let early = seeds.iter().find(|s| s[5] == 0x40).expect("0-RTT seed");
-        let world = play(early).expect("configurations");
-        assert!(world.early_attempted);
-        assert_eq!(world.early, b"early request");
-        assert_eq!(world.received[SERVER], b"later");
-        assert_eq!(world.server_returned_early, 0);
-
-        // The server that returns early reads the 0-RTT data before its
-        // handshake completes, and answers at once with 0.5-RTT data.
-        let mut returned_early = 0;
-        for seed in seeds.iter().filter(|s| s[5] & 0x80 != 0) {
-            let half_rtt = seed[0] & 0x80 != 0;
-            let cut = seed
-                .windows(8)
-                .position(|w| w == [Op::Write as u8, SERVER as u8, 0, 5, b'r', b'e', b'p', b'l'])
-                .expect("the first answer");
-            // Up to the early read, then up to the answer.
-            let world = play(&seed[..cut]).expect("configurations");
-            assert_eq!(world.server_returned_early, 1, "{seed:02x?}");
-            assert_eq!(world.early, b"early request");
-            let world = play(&seed[..cut + 9]).expect("configurations");
-            let Server::Ready(server) = &world.server else {
-                panic!("no server stream");
-            };
-            assert!(server.get_ref().1.is_handshaking());
-            assert_eq!(world.sent[SERVER].len(), if half_rtt { 5 } else { 0 });
-
-            let world = play(seed).expect("configurations");
-            assert_eq!(world.early, b"early request");
-            assert_eq!(world.received[SERVER], b"later");
-            assert!(world.received[CLIENT].ends_with(b"reply"));
-            returned_early += world.server_returned_early;
-        }
-        assert_eq!(returned_early, 5);
-
-        let refused = seeds
-            .iter()
-            .find(|s| s[5] == 0x10 && s.len() < 40)
-            .expect("lazy seed");
-        let world = play(refused).expect("configurations");
-        assert!(matches!(world.server, Server::Gone));
-        assert!(!world.lanes.borrow()[SERVER].bytes.is_empty(), "no alert");
     }
 }

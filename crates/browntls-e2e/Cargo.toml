@@ -14,9 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 browntls = { path = "../browntls", default-features = false, features = ["std", "native", "tls12", "prefer-post-quantum"] }
-browntls-tokio = { path = "../browntls-tokio", default-features = false, features = ["native", "tls12", "prefer-post-quantum"] }
+browntls-tokio = { path = "../browntls-tokio", default-features = false, features = ["native", "tls12", "prefer-post-quantum", "coop"] }
 # `--async`: a single-threaded runtime with TCP and timers.
-tokio = { version = "1.47", default-features = false, features = ["rt", "net", "time", "io-util"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util"] }
 
 [lints]
 workspace = true

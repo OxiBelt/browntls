@@ -779,8 +779,7 @@ impl CommonState {
 
     /// Buffers application data for after the handshake.
     pub(crate) fn buffer_plaintext(&mut self, payload: OutboundChunks<'_>) -> usize {
-        self.sendable_plaintext
-            .append_limited_copy(&payload.to_vec())
+        self.sendable_plaintext.append_limited_copy(payload)
     }
 
     /// Sends application data now, or buffers it until the handshake finishes.

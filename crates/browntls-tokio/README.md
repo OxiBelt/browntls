@@ -132,12 +132,35 @@ repeat.
   read takes no more input and waits for the transport to take them (a
   write on another task that sends them wakes it), so a peer that keeps
   asking and reads nothing cannot make them pile up.
+- **Cooperative scheduling.** With the `coop` feature the streams and
+  handshake futures take part in Tokio's
+  [cooperative scheduling](https://docs.rs/tokio/1/tokio/task/coop/index.html),
+  as Tokio's sockets and channels do: an operation that completes takes one
+  unit of the task's budget, and so does every read from the transport after
+  the first in one poll. Once the budget is spent, an operation returns
+  `Pending` and the task runs again after the others had their turn. A task
+  that is always ready (a peer that sends faster than it is read, a transport
+  that never waits) therefore cannot keep a worker thread to itself, whether
+  or not the transport counts against the budget. Over a transport that
+  counts too (Tokio's sockets), an operation that reaches it takes the
+  transport's unit as well, so the task yields that much sooner. Wrap a
+  future in `tokio::task::coop::unconstrained` to opt out for that future.
+  As with Tokio's own resources, do not drive a stream from another executor
+  blocked inside a Tokio task: a spent budget waits for Tokio's scheduler,
+  which does not run meanwhile.
 
 ## Features
 
 `native` (default), `rustcrypto`, `tls12` (default), `logging` (default),
 `prefer-post-quantum` (default), `zlib`, `brotli` and `zstd` are passed through
 to `browntls`.
+
+`coop` (default) makes the streams take part in Tokio's cooperative
+scheduling (see above). It enables Tokio's `rt` feature, which is where Tokio
+keeps the task budget; `rt` adds no dependency, and an application that runs
+a Tokio runtime has it enabled already. Without `coop` the crate uses Tokio's
+I/O traits only and takes nothing from the budget itself (a transport that
+counts still does).
 
 ## Minimum supported Rust and Tokio versions
 

@@ -76,6 +76,31 @@
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 //!
+//! # Cooperative scheduling
+//!
+//! With the `coop` feature (on by default) the streams and the handshake
+//! futures take part in Tokio's [cooperative scheduling], as Tokio's own
+//! sockets and channels do. An operation that completes takes one unit of
+//! the task's budget, and so does every read from the transport after the
+//! first in one poll (a peer decides how many records without plaintext, or
+//! how many pieces of a handshake, a read works through). Once the budget is
+//! spent, an operation returns `Pending` without doing anything and the
+//! task runs again after the others had their turn. So a task that is
+//! always ready cannot keep a worker thread to itself, even over a
+//! transport that takes no part in the budget. Over a transport that counts
+//! too, such as Tokio's sockets, an operation that reaches the transport
+//! takes the transport's unit as well, and the task yields that much
+//! sooner. [`unconstrained`] opts a future out.
+//!
+//! Outside a Tokio runtime the budget is unlimited. As with Tokio's own
+//! resources, do not drive a stream from another executor blocked inside a
+//! Tokio task (`futures::executor::block_on` in one, say): the budget is
+//! the Tokio task's, and once it is spent the stream waits for Tokio's
+//! scheduler, which does not run while its thread is blocked there.
+//!
+//! [cooperative scheduling]: https://docs.rs/tokio/1/tokio/task/coop/index.html
+//! [`unconstrained`]: https://docs.rs/tokio/1/tokio/task/coop/fn.unconstrained.html
+//!
 //! # Errors
 //!
 //! Errors are `io::Error`s. A TLS failure (a bad record, an alert from the
@@ -93,7 +118,12 @@
 //! The crypto provider, protocol and compression features (`native`,
 //! `rustcrypto`, `tls12`, `logging`, `prefer-post-quantum`, `zlib`,
 //! `brotli`, `zstd`) are passed through to `browntls`. The default set
-//! matches `browntls`'s.
+//! matches `browntls`'s, plus `coop`.
+//!
+//! `coop` (default) enables the cooperative scheduling described above. It
+//! turns on Tokio's `rt` feature, where Tokio keeps the task budget; that
+//! adds no dependency, and an application that runs a Tokio runtime has it
+//! enabled already. Without `coop` the crate needs Tokio's I/O traits only.
 //!
 //! [`flush`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.flush
 //! [`shutdown`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.shutdown

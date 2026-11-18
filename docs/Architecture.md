@@ -910,8 +910,9 @@ go on in userspace. 0-RTT data a server had accepted and not read is the
 front of the plaintext the stream returns first; the stream and the refusal
 carry its length (`early_data_len`), because it can be replayed and a
 `browntls-tokio` stream would have returned it through `early_data()` only.
-`AsyncKtlsStream::new` takes a connection already at rest and its socket. A read that owes the peer something (a KeyUpdate answer) and
-finds the socket full registers for writability as well as readability.
+`AsyncKtlsStream::new` takes a connection already at rest and its socket. A
+read that owes the peer something (a KeyUpdate answer) and finds the socket
+full registers for writability as well as readability.
 Tokio keeps one waker per direction, and the stream may be split into halves
 on two tasks, so the reader and a parked writer register a waker that wakes
 both: neither can lose its wakeup to the other's registration. `poll_shutdown`
@@ -933,22 +934,24 @@ wait in place: the kernel end's read after its shutdown failed with
 log, is the kernel's late send meeting the FIN (`EPIPE`, which the kernel
 then leaves on the socket as its error). The wait itself (ask the
 kernel, stay pending without room, be woken when room appears) is tested on
-plain TCP in `src/tokio_stream.rs`, on any kernel. The other tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
-running kernel like those of `KtlsStream`: both ends offloaded for every
+plain TCP in `src/tokio_stream.rs`, on any kernel. The other tests
+(`crates/browntls-ktls/tests/tokio_offload.rs`) run on the running kernel
+like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
 offloaded server against a userspace client (tickets, KeyUpdate, closure), a
 KeyUpdate answered by a read while the socket is full (the answer seen on the
 wire by a relay), split halves across key updates, a client still in its
-0-RTT phase, truncation, a megabyte written through small socket buffers
-and confirmed by the peer before the shutdown, a peer that closed TCP before
-the handover (the
-kernel attaches the upper layer protocol to an established connection only,
+0-RTT phase (with the server's count of accepted 0-RTT data), truncation, a
+megabyte written through small socket buffers and confirmed by the peer
+before the shutdown, a peer that closed TCP before the handover (the kernel
+attaches the upper layer protocol to an established connection only,
 `ENOTCONN`; the stream goes on in userspace), and refusals that return the
 stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, and `sendmsg`/`recvmsg` with one control message. Its invariants are listed at its top: borrowed descriptors,
+without waiting, and `sendmsg`/`recvmsg` with one control message. Its
+invariants are listed at its top: borrowed descriptors,
 pointers only into live values with their lengths, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
 sized with `CMSG_SPACE`, and no value created from kernel output but plain

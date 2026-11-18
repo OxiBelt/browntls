@@ -59,7 +59,10 @@ second decryption to the wrong place in the reader's buffer, and a peer
 that pads corrupts what the application reads. The kernel is told apart by
 the release `uname` reports, so an older kernel that was given the
 correction is refused as well, and so is a release candidate of 7.2 (the
-correction came with the last of them).
+correction came with the last of them). The release is all there is to go
+by: a kernel built from a 7.2 pre-release source under a release that does
+not say so (no `rc` in it) is taken for 7.2, and is for whoever sets the
+option to rule out.
 
 ## Tokio
 

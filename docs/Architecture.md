@@ -1142,9 +1142,12 @@ application's to set. Before Linux 7.2 `tls_decrypt_sw` does not take back the
 reader's position the first attempt advanced: the copy lands behind the first
 attempt's output, and a peer that pads corrupts what the application reads.
 The engine therefore sets the option only when `uname` reports release 7.2 or
-later, and refuses it (`Unsupported`) on anything older or unreadable,
-including older kernels that carry the correction and the release candidates
-of 7.2 (the correction came with 7.2-rc7). While the option is set,
+later, and refuses it (`Unsupported`) on anything older or that it cannot
+parse, including older kernels that carry the correction and the release
+candidates of 7.2 (the correction came with 7.2-rc7); when `uname` itself
+fails, its error is returned and the option stays off. The release is the
+only evidence: a kernel built from a 7.2 pre-release source whose release
+does not name a release candidate is taken for 7.2. While the option is set,
 every read zeroes its buffer for up to a record's length behind the bytes it
 reports (and all of that length after an error, `WouldBlock` included, before
 which a padded record without content may have been decrypted there): the

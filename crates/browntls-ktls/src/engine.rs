@@ -178,8 +178,9 @@ impl<Data: SideData> Engine<Data> {
         expect: bool,
     ) -> io::Result<()> {
         if !expect && !self.rx_no_pad {
-            // Never set: nothing to take back, whatever the kernel and the
-            // protocol version.
+            // Never set here: nothing to take back, whatever the kernel
+            // and the protocol version. (An option set on the descriptor
+            // behind the engine's back is not the engine's to know.)
             return Ok(());
         }
         self.tls13_only()?;

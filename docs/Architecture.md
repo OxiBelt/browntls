@@ -1132,14 +1132,25 @@ then not change until its bytes are acknowledged, or a retransmission carries
 a record that does not authenticate. With software encryption in the kernel
 the option changes nothing. The tests (`tests/zero_copy.rs`,
 `tests/tokio_zero_copy.rs`) read it back on the running kernel.
-`TLS_RX_EXPECT_NO_PAD` (TLS 1.3 records decrypted straight into the reader's
-buffer on the promise that the peer does not pad) is deliberately not offered.
-A record that is padded after all, or is not application data, is decrypted a
-second time into a buffer of the kernel's and copied out, and before Linux 7.2
-`tls_decrypt_sw` does not take back the reader's position the first attempt
-advanced: the copy lands behind the first attempt's output. A peer that pads
-would so corrupt what the application reads, and a control record needs twice
-its length in the reader's buffer.
+
+`set_rx_expect_no_pad` sets `TLS_RX_EXPECT_NO_PAD`: TLS 1.3 records are
+decrypted straight into the reader's buffer on the promise that the peer does
+not pad. A record that is padded after all, or is not application data, is
+decrypted a second time into a buffer of the kernel's and copied out, so the
+peer decides how often the work is done twice, and the option is the
+application's to set. Before Linux 7.2 `tls_decrypt_sw` does not take back the
+reader's position the first attempt advanced: the copy lands behind the first
+attempt's output, and a peer that pads corrupts what the application reads.
+The engine therefore sets the option only when `uname` reports release 7.2 or
+later, and refuses it (`Unsupported`) on anything older or unreadable,
+including older kernels that carry the correction. While the option is set,
+every read zeroes its buffer for up to a record's length behind the bytes it
+reports (and all of that length after an error other than `WouldBlock`): the
+first attempt writes there the plaintext of a control record that follows the
+data, a padded record's padding, or the output for a record that then fails to
+authenticate. `tests/zero_copy.rs` reads against a userspace peer that pads two
+records of three (a wrapper around the suite's encrypter) and checks every
+read's buffer; on an older kernel the tests check the refusal instead.
 
 `AsyncKtlsStream` (feature `tokio`) is the engine with a
 `tokio::net::TcpStream`, implementing `AsyncRead` and `AsyncWrite`. Each

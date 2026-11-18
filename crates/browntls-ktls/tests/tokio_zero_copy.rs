@@ -1,5 +1,5 @@
-//! The kernel's zero-copy option for `sendfile` on `AsyncKtlsStream`,
-//! against the running kernel over loopback TCP.
+//! The kernel's zero-copy options on `AsyncKtlsStream`, against the
+//! running kernel over loopback TCP.
 //!
 //! The tests that need kernel TLS are skipped without the `tls` module
 //! unless `BROWNTLS_KTLS_REQUIRED=1`.
@@ -13,6 +13,7 @@
 
 mod common;
 
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,13 +65,15 @@ async fn kernel_pair(
     (client.unwrap(), server.unwrap())
 }
 
-/// The option is read back as set, and data, a key refresh and the closure
-/// pass with it set.
+/// The options are read back as set, TLS 1.2 and a kernel before Linux
+/// 7.2 refuse the promise about padding, and data, a key refresh and the
+/// closure pass with what could be set.
 #[tokio::test]
-async fn the_option_is_read_back_and_the_stream_goes_on() {
+async fn the_options_are_read_back_and_the_stream_goes_on() {
     if !kernel_tls() {
         return;
     }
+    let promised = no_pad_kernel();
     let pki = Pki::new();
     for suite in offloadable_suites() {
         let (mut client, mut server) = kernel_pair(&pki, suite).await;
@@ -79,6 +82,21 @@ async fn the_option_is_read_back_and_the_stream_goes_on() {
         assert!(!client.tx_zerocopy_sendfile().unwrap(), "{suite:?}");
         client.set_tx_zerocopy_sendfile(true).unwrap();
         assert!(client.tx_zerocopy_sendfile().unwrap(), "{suite:?}");
+        if tls13(suite) && promised {
+            for expect in [true, false, true] {
+                client.set_rx_expect_no_pad(expect).unwrap();
+                assert_eq!(client.rx_expect_no_pad().unwrap(), expect, "{suite:?}");
+            }
+        } else {
+            let err = client.set_rx_expect_no_pad(true).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{suite:?}");
+            if tls13(suite) {
+                assert!(!client.rx_expect_no_pad().unwrap(), "{suite:?}");
+            } else {
+                let err = client.rx_expect_no_pad().unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{suite:?}");
+            }
+        }
 
         let server_side = async {
             let mut got = vec![0; LEN];
@@ -100,6 +118,10 @@ async fn the_option_is_read_back_and_the_stream_goes_on() {
             client.read_exact(&mut got).await.unwrap();
             assert_eq!(got, down, "{suite:?}");
             assert!(client.tx_zerocopy_sendfile().unwrap(), "{suite:?}");
+            if tls13(suite) {
+                // New receive keys came with the server's KeyUpdate.
+                assert_eq!(client.rx_expect_no_pad().unwrap(), promised, "{suite:?}");
+            }
             client.shutdown().await.unwrap();
             let mut rest = Vec::new();
             client.read_to_end(&mut rest).await.unwrap();

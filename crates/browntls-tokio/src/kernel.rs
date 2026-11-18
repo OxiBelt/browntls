@@ -266,6 +266,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for client::TlsStream<I
         cx: &mut Context<'_>,
         taken: &mut sealed::Taken,
     ) -> Poll<io::Result<()>> {
+        self.st.begin_poll();
         // The 0-RTT phase first: only the stream knows what to send again
         // when the server declined the early data.
         ready!(self.poll_finish_early(cx))?;
@@ -286,6 +287,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for server::TlsStream<I
         cx: &mut Context<'_>,
         taken: &mut sealed::Taken,
     ) -> Poll<io::Result<()>> {
+        self.st.begin_poll();
         poll_prepare(
             &mut self.io,
             &mut self.session,
@@ -373,11 +375,15 @@ where
                 // A stream returned before its handshake completed. Plaintext
                 // left unread (a server's 0-RTT data) would stall it.
                 take_plaintext(session, taken, take_early_data)?;
+                // The reads of this poll so far count for the task's
+                // budget as in any operation of the stream.
                 let mut stream = Stream::new(io, session)
                     .set_eof(!st.state.readable())
-                    .set_need_flush(st.need_flush);
+                    .set_need_flush(st.need_flush)
+                    .set_read_before(st.read_before);
                 let poll = stream.handshake(cx);
                 st.need_flush = stream.need_flush;
+                st.read_before = stream.read_before;
                 ready!(poll)?;
             }
             KernelHandoffBlocker::UnreadPlaintext => {

@@ -829,9 +829,10 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   the stream cannot clear is `Unsupported`; every failure returns the
   stream and the plaintext already taken (`KernelHandoffError`), and a
   future given up hands both back (`IntoKernelHandoff::into_stream`). The
-  future takes nothing from the task's budget itself (`coop`): it resolves
-  once and reads no further than one record boundary; a handshake it
-  completes counts its reads as a handshake future does. The
+  future takes no unit of the task's budget for resolving (`coop`): it
+  resolves once, and its read towards a record boundary ends with that
+  record. A 0-RTT phase or handshake it completes counts its reads as the
+  stream's own operations do, every read after the first in one poll. The
   tests (`crates/browntls-tokio/tests/kernel_handoff.rs`) hand streams to
   the kernel stand-in of the `browntls` kernel tests, keyed with the
   extracted secrets, over a transport that cuts records short and holds

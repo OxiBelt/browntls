@@ -6,15 +6,19 @@
 //! (`tls_conn::setup::Knobs`), a mode byte (how each side is created: the
 //! `TlsConnector` entry point, `TlsAcceptor` or `LazyConfigAcceptor` with
 //! `into_stream`, `into_stream_with` or `from_parts`, the fallible futures,
-//! early data), two bytes per direction for the transport (largest chunk
+//! early data, and in bit 7 a server that returns from its accept future
+//! before the handshake for early data), two bytes per direction for the
+//! transport (largest chunk
 //! per call, and a mask of calls that return `Pending`), then up to 96
 //! operations: polls of the handshake futures, writes (plain or vectored),
 //! reads (`poll_read` or `poll_fill_buf` and `consume`), flushes,
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
-//! accessors, early data reads, the lazy acceptor's `take_io`, pumping
-//! until idle, reconnection (resumption and 0-RTT), a stream split into its
-//! read and write halves, used through them and put back together, and the
-//! kernel handoff of a stream (`handoff`).
+//! accessors, early data reads (through the stream's reader, which drives
+//! the handshake, or straight from the connection), the lazy acceptor's
+//! `take_io`, pumping until idle, reconnection (resumption and 0-RTT), a
+//! stream split into its read and write halves, used through them and put
+//! back together, and the kernel handoff of a stream (`handoff`), also of
+//! a server's stream returned before its handshake completed.
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -28,6 +32,9 @@
 //! * the halves of a stream are a pair and reunite into it, and halves of
 //!   two streams do neither and come back unharmed;
 //! * nothing panics, and no poll loops forever.
+
+mod handoff;
+mod seeds;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -45,10 +52,15 @@ use browntls_tokio::{
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::input::{Input, put_short_field};
+use crate::input::Input;
 use crate::tls_conn::setup::{Knobs, assert_prefix, server_name};
 
-mod handoff;
+/// Seeds: the exchanges of `seeds`, and the kernel handoff's own.
+pub fn seeds() -> Vec<Vec<u8>> {
+    let mut seeds = seeds::seeds();
+    seeds.extend(handoff::seeds());
+    seeds
+}
 
 const MAX_OPS: usize = 96;
 const MAX_CONNECTIONS: usize = 3;
@@ -186,7 +198,8 @@ enum Op {
     KeyUpdate,
     /// `side`: every accessor of that side's future or stream.
     Accessors,
-    /// The server reads accepted 0-RTT data.
+    /// The server reads accepted 0-RTT data: `side` 1 through the stream's
+    /// early data reader, 0 from the connection.
     EarlyRead,
     /// The lazy acceptor gives its transport back.
     TakeIo,
@@ -237,6 +250,9 @@ struct World {
     /// The client's connect returned before its handshake (0-RTT): the
     /// server's ordinary data then starts after the accepted early data.
     early_attempted: bool,
+    /// How many server streams were returned before their handshake
+    /// completed.
+    server_returned_early: usize,
 }
 
 fn cx() -> Context<'static> {
@@ -280,6 +296,7 @@ impl World {
             received: [Vec::new(), Vec::new()],
             early: Vec::new(),
             early_attempted: false,
+            server_returned_early: 0,
         };
         world.connect();
         world
@@ -332,12 +349,27 @@ impl World {
         };
         self.early_attempted = false;
 
-        let acceptor = TlsAcceptor::from(self.server_config.clone());
+        let acceptor =
+            TlsAcceptor::from(self.server_config.clone()).early_data(self.server_early());
         self.server = match (self.mode >> 3) & 3 {
             0 => self.accept(acceptor.accept(end(SERVER))),
             1 => self.accept(acceptor.accept_with(end(SERVER), |s| s.set_buffer_limit(Some(4096)))),
             _ => Server::Lazy(LazyConfigAcceptor::new(Acceptor::default(), end(SERVER))),
         };
+    }
+
+    /// Whether the server's accept future may return before the handshake.
+    fn server_early(&self) -> bool {
+        self.mode & 0x80 != 0
+    }
+
+    /// The server's stream, as its accept future returned it.
+    fn accepted(&mut self, stream: browntls_tokio::server::TlsStream<End>) {
+        if stream.get_ref().1.is_handshaking() {
+            assert!(self.server_early(), "a handshaking stream nobody asked for");
+            self.server_returned_early += 1;
+        }
+        self.server = Server::Ready(stream.into());
     }
 
     fn accept(&self, accept: Accept<End>) -> Server {
@@ -378,11 +410,13 @@ impl World {
                 Poll::Ready(Ok(start)) => {
                     let _ = start.client_hello().server_name();
                     let config = self.server_config.clone();
+                    let early = self.server_early();
                     let accept = match (self.mode >> 3) & 3 {
-                        2 => start.into_stream(config),
+                        2 => start.early_data(early).into_stream(config),
                         _ => {
                             let (accepted, io) = start.into_inner();
                             StartHandshake::from_parts(accepted, io)
+                                .early_data(early)
                                 .into_stream_with(config, |s| s.set_buffer_limit(Some(4096)))
                         }
                     };
@@ -392,12 +426,12 @@ impl World {
                 Poll::Pending => {}
             },
             Server::Accepting(f) => match Pin::new(f).poll(&mut cx) {
-                Poll::Ready(Ok(s)) => self.server = Server::Ready(s.into()),
+                Poll::Ready(Ok(s)) => self.accepted(s),
                 Poll::Ready(Err(_)) => self.server = Server::Gone,
                 Poll::Pending => {}
             },
             Server::Fallible(f) => match Pin::new(f).poll(&mut cx) {
-                Poll::Ready(Ok(s)) => self.server = Server::Ready(s.into()),
+                Poll::Ready(Ok(s)) => self.accepted(s),
                 Poll::Ready(Err((_, _io))) => self.server = Server::Gone,
                 Poll::Pending => {}
             },
@@ -450,16 +484,6 @@ impl World {
             }
         }
         self.received[side].extend_from_slice(&got);
-        self.check();
-    }
-
-    /// The server reads the 0-RTT data it accepted.
-    fn early_read(&mut self) {
-        if let Server::Ready(TlsStream::Server(s)) = &mut self.server
-            && let Some(mut early) = s.get_mut().1.early_data()
-        {
-            let _ = early.read_to_end(&mut self.early);
-        }
         self.check();
     }
 
@@ -580,6 +604,20 @@ impl World {
                 Pin::new(stream).poll_flush(&mut cx)
             };
         }
+    }
+
+    /// The server reads the 0-RTT data it accepted: through the stream's
+    /// early data reader, which drives the handshake, or what the
+    /// connection holds.
+    fn early_read(&mut self, through_reader: bool) {
+        if let Server::Ready(TlsStream::Server(s)) = &mut self.server {
+            if through_reader {
+                read_early(s, &mut self.early);
+            } else if let Some(mut early) = s.get_mut().1.early_data() {
+                let _ = early.read_to_end(&mut self.early);
+            }
+        }
+        self.check();
     }
 
     fn accessors(&mut self, side: usize) {
@@ -745,7 +783,7 @@ fn play(data: &[u8]) -> Option<World> {
                 None => {}
             },
             Op::Accessors => world.accessors(side),
-            Op::EarlyRead => world.early_read(),
+            Op::EarlyRead => world.early_read(side == SERVER),
             Op::TakeIo => {
                 if let Server::Lazy(lazy) = &mut world.server {
                     if let Some(io) = lazy.take_io() {
@@ -780,204 +818,19 @@ fn play(data: &[u8]) -> Option<World> {
     Some(world)
 }
 
-/// Seeds: every creation mode with a full exchange, 0-RTT on a resumed
-/// connection, a refused plain-text request, damaged handshakes, and an
-/// exchange through split halves.
-pub fn seeds() -> Vec<Vec<u8>> {
-    let op = |out: &mut Vec<u8>, op: Op, side: usize| {
-        out.push(op as u8);
-        out.push(side as u8);
+/// Reads what the stream's early data reader has, with as many polls as
+/// bring bytes (bounded): each also drives the handshake.
+fn read_early(stream: &mut browntls_tokio::server::TlsStream<End>, out: &mut Vec<u8>) {
+    let Some(mut reader) = stream.early_data() else {
+        return;
     };
-    let exchange = |out: &mut Vec<u8>| {
-        op(out, Op::Accessors, CLIENT);
-        op(out, Op::Accessors, SERVER);
-        op(out, Op::Pump, 0);
-        for side in [CLIENT, SERVER] {
-            op(out, Op::Write, side);
-            out.push(u8::from(side == SERVER));
-            put_short_field(out, b"hello through tokio");
+    let mut cx = cx();
+    for _ in 0..64 {
+        let mut buf = [0; 512];
+        let mut rb = ReadBuf::new(&mut buf);
+        match Pin::new(&mut reader).poll_read(&mut cx, &mut rb) {
+            Poll::Ready(Ok(())) if !rb.filled().is_empty() => out.extend_from_slice(rb.filled()),
+            _ => break,
         }
-        op(out, Op::Pump, 0);
-        op(out, Op::KeyUpdate, SERVER);
-        op(out, Op::Write, SERVER);
-        out.push(0);
-        put_short_field(out, b"after a key update");
-        op(out, Op::Pump, 0);
-        op(out, Op::Read, CLIENT);
-        out.extend([1, 7]);
-        op(out, Op::Accessors, CLIENT);
-        op(out, Op::Accessors, SERVER);
-        op(out, Op::Shutdown, CLIENT);
-        op(out, Op::Pump, 0);
-        op(out, Op::Shutdown, SERVER);
-        op(out, Op::Pump, 0);
-    };
-    let mut seeds = Vec::new();
-    // TLS 1.3 then TLS 1.2, every creation mode, plain and choppy transport.
-    for versions in [1u8, 2] {
-        for mode in [0u8, 1, 2, 3, 4, 8, 0x0d, 0x10, 0x18, 0x20, 0x33] {
-            for transport in [[255u8, 0, 255, 0], [16, 0b0101_0101, 3, 0b0011_0011]] {
-                let mut s = vec![versions, 0, 0, 0, 0, mode];
-                s.extend(transport);
-                exchange(&mut s);
-                seeds.push(s);
-            }
-        }
-    }
-    // 0-RTT: a first connection leaves a ticket, the second writes early.
-    let mut s = vec![0x41, 0, 0, 0, 0, 0x40, 255, 0, 255, 0];
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::Write, SERVER);
-    s.push(0);
-    put_short_field(&mut s, b"ticket");
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::Reconnect, 0);
-    // The connect future returns at once, before the handshake.
-    op(&mut s, Op::Poll, CLIENT);
-    op(&mut s, Op::Write, CLIENT);
-    s.push(0);
-    put_short_field(&mut s, b"early request");
-    op(&mut s, Op::Pump, 0);
-    op(&mut s, Op::EarlyRead, SERVER);
-    op(&mut s, Op::Write, CLIENT);
-    s.push(1);
-    put_short_field(&mut s, b"later");
-    op(&mut s, Op::Pump, 0);
-    seeds.push(s);
-    // Split halves, of the unified stream and of each side's own, in every
-    // way to write and to reunite; each side reads what the peer's halves
-    // wrote in the round before.
-    for versions in [1u8, 2] {
-        let mut s = vec![versions, 0, 0, 0, 0, 0, 255, 0, 255, 0];
-        op(&mut s, Op::Pump, 0);
-        for how in 0..SPLIT_ROUNDS {
-            for side in [CLIENT, SERVER] {
-                op(&mut s, Op::Split, side);
-                s.push(how);
-                put_short_field(&mut s, SPLIT_DATA);
-                s.push(64);
-            }
-        }
-        op(&mut s, Op::Pump, 0);
-        seeds.push(s);
-    }
-    // A lazy acceptor refusing a plain-text request, then giving the
-    // transport back.
-    let mut s = vec![1, 0, 0, 0, 0, 0x10, 255, 0, 255, 0];
-    op(&mut s, Op::Inject, CLIENT);
-    put_short_field(&mut s, b"GET / HTTP/1.1\r\n\r\n");
-    op(&mut s, Op::Poll, SERVER);
-    op(&mut s, Op::TakeIo, SERVER);
-    seeds.push(s);
-    // Damaged handshakes, an early end of file, a lazy acceptor's refusal of
-    // the configuration.
-    for (lane, damage) in [
-        (CLIENT, Op::Damage),
-        (SERVER, Op::Damage),
-        (CLIENT, Op::Close),
-    ] {
-        let mut s = vec![1, 0, 0, 0, 0, 0x24, 255, 0, 255, 0];
-        op(&mut s, Op::Poll, CLIENT);
-        op(&mut s, Op::Poll, SERVER);
-        op(&mut s, damage, lane);
-        if matches!(damage, Op::Damage) {
-            s.extend([0, 40, 0x55]);
-        }
-        op(&mut s, Op::Pump, 0);
-        op(&mut s, Op::Read, CLIENT);
-        s.extend([0, 16]);
-        seeds.push(s);
-    }
-    seeds.extend(handoff::seeds());
-    seeds
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The seeds do what they are meant to, so the harness's checks run on
-    /// real traffic: data both ways, 0-RTT accepted, the lazy acceptor's
-    /// refusal.
-    #[test]
-    fn seeds_exchange_data() {
-        let seeds = seeds();
-        let mut exchanged = 0;
-        for seed in &seeds {
-            let Some(world) = play(seed) else { continue };
-            if world.received[CLIENT].ends_with(b"after a key update")
-                && world.received[SERVER] == b"hello through tokio"
-            {
-                exchanged += 1;
-            }
-        }
-        // Every TLS 1.3 and TLS 1.2 creation-mode seed (11 modes, two
-        // transports each).
-        assert_eq!(exchanged, 44);
-
-        let early = seeds.iter().find(|s| s[5] == 0x40).expect("0-RTT seed");
-        let world = play(early).expect("configurations");
-        assert!(world.early_attempted);
-        assert_eq!(world.early, b"early request");
-        assert_eq!(world.received[SERVER], b"later");
-
-        let split: Vec<_> = seeds
-            .iter()
-            .filter(|s| s.get(12) == Some(&(Op::Split as u8)))
-            .collect();
-        assert_eq!(split.len(), 2);
-        for seed in split {
-            let world = play(seed).expect("configurations");
-            let all = SPLIT_DATA.repeat(usize::from(SPLIT_ROUNDS));
-            assert_eq!(world.received[CLIENT], all);
-            assert_eq!(world.received[SERVER], all);
-            assert!(matches!(world.client, Client::Ready(_)));
-            assert!(matches!(world.server, Server::Ready(_)));
-        }
-
-        let refused = seeds
-            .iter()
-            .find(|s| s[5] == 0x10 && s.len() < 40)
-            .expect("lazy seed");
-        let world = play(refused).expect("configurations");
-        assert!(matches!(world.server, Server::Gone));
-        assert!(!world.lanes.borrow()[SERVER].bytes.is_empty(), "no alert");
-    }
-
-    /// The handoff seeds do what they are meant to: with secret extraction
-    /// a polled stream becomes ready with the unread plaintext set aside,
-    /// without it the stream is refused untouched, and every stream that
-    /// comes back carries on.
-    #[test]
-    fn handoff_seeds_hand_streams_over() {
-        use handoff::{AFTER, BEFORE};
-        for case in handoff::cases() {
-            let (_, extraction, side, flags) = case;
-            let world = play(&handoff::seed(case)).expect("configurations");
-            let gone = match side {
-                CLIENT => matches!(world.client, Client::Gone),
-                _ => matches!(world.server, Server::Gone),
-            };
-            let got = &world.received[side];
-            if handoff::ends_the_stream(extraction, flags) {
-                assert!(gone, "{case:?}");
-                // A refusal up front takes nothing out of the stream.
-                let expected = if extraction { BEFORE } else { &BEFORE[..7] };
-                assert_eq!(got, expected, "{case:?}");
-            } else {
-                assert!(!gone, "{case:?}");
-                assert_eq!(*got, [BEFORE, b"more"].concat(), "{case:?}");
-                assert_eq!(world.received[1 - side], AFTER, "{case:?}");
-            }
-        }
-
-        // 0-RTT data left unread is set aside by the handoff and counted.
-        let world = play(&handoff::early_seed()).expect("configurations");
-        assert!(world.early_attempted);
-        assert_eq!(world.early, handoff::EARLY);
-        assert_eq!(
-            world.received[SERVER],
-            [handoff::AFTER_EARLY, b"more"].concat()
-        );
     }
 }

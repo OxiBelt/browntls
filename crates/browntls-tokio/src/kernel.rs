@@ -10,7 +10,8 @@
 //! hand, loses data.
 //!
 //! [`TlsStream::into_kernel_handoff`] drives the stream to that point
-//! instead: it finishes a client's 0-RTT phase, writes and flushes every
+//! instead: it finishes a client's 0-RTT phase and the handshake of a
+//! server's stream returned before its end, writes and flushes every
 //! queued record, reads exactly up to the next record boundary (the kernel
 //! must start at one), answers what the records read on the way call for,
 //! and takes the plaintext received so far out of the connection. The
@@ -288,6 +289,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for server::TlsStream<I
         taken: &mut sealed::Taken,
     ) -> Poll<io::Result<()>> {
         self.st.begin_poll();
+        // A stream returned before its handshake completed: the handshake
+        // first, as before any other operation of the stream, so that a
+        // failure is kept for those that follow. The 0-RTT data stays where
+        // the stream's reader finds it until the handshake is complete.
+        ready!(self.poll_finish_early(cx))?;
         poll_prepare(
             &mut self.io,
             &mut self.session,

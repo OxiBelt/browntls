@@ -259,7 +259,8 @@ impl fmt::Debug for Acceptor {
     }
 }
 
-/// The alert an [`Acceptor`] or [`Accepted`] wants to send after a failure.
+/// The alert an [`Acceptor`] or [`Accepted`] wants to send after a failure,
+/// or a [`ServerConnection`] that failed.
 #[cfg(feature = "std")]
 pub struct AcceptedAlert(ChunkVecBuffer);
 
@@ -285,6 +286,17 @@ impl AcceptedAlert {
 impl From<crate::conn::ConnectionCommon<ServerConnectionData>> for AcceptedAlert {
     fn from(conn: crate::conn::ConnectionCommon<ServerConnectionData>) -> Self {
         Self(conn.core.common_state.sendable_tls)
+    }
+}
+
+/// Everything the connection has queued to send. Meant for a connection
+/// that failed right after an [`Accepted`] became it, when that is its
+/// alert, behind what was left of its flight; a connection that had
+/// application data queued would have that written too.
+#[cfg(feature = "std")]
+impl From<ServerConnection> for AcceptedAlert {
+    fn from(conn: ServerConnection) -> Self {
+        Self::from(conn.inner)
     }
 }
 
@@ -326,6 +338,11 @@ impl Accepted {
     /// ECH is processed with its keys; the ClientHello is then handled with
     /// it. On error the alert to send is returned too: the handshake's own,
     /// or `internal_error` when `config` itself is refused.
+    ///
+    /// Records the [`Acceptor`] read after the ClientHello (0-RTT data, say)
+    /// stay unprocessed until the connection's next
+    /// [`process_new_packets`](crate::ConnectionCommon::process_new_packets):
+    /// call it before waiting for more input.
     pub fn into_connection(
         mut self,
         config: Arc<ServerConfig>,

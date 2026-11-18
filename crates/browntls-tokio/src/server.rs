@@ -365,9 +365,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     ///
     /// A stream returned before its handshake completed (see
     /// [`TlsAcceptor::early_data`]) has the handshake completed first, as
-    /// by a flush: the future waits for the client's Finished, and a
-    /// handshake that fails fails it, and every later operation of the
-    /// stream that comes back, with its error.
+    /// by a flush: what was written as 0.5-RTT data goes out, the future
+    /// waits for the client's Finished, and a handshake that fails fails
+    /// it, and every later operation of the stream that comes back, with
+    /// its error. A connection that cannot be offloaded at all is refused
+    /// only after that wait, too.
     ///
     /// The configuration must have `enable_secret_extraction` set. On
     /// failure the stream comes back in the

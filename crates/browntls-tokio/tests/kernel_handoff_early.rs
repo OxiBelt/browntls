@@ -1,8 +1,8 @@
 //! `into_kernel_handoff` of a server stream returned before its handshake
 //! completed (`TlsAcceptor::early_data`): the handoff completes the
-//! handshake first, sets the unread 0-RTT data aside in front, and a
-//! handshake that fails is reported by the handoff and by every later
-//! operation of the stream that comes back.
+//! handshake first (0.5-RTT data sent before the wait), sets the unread
+//! 0-RTT data aside in front, and a handshake that fails is reported by
+//! the handoff and by every later operation of the stream that comes back.
 
 #![cfg(any(feature = "native", feature = "rustcrypto"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -17,7 +17,7 @@ use browntls::ClientConnection;
 use browntls_tokio::{TlsAcceptor, server};
 use common::server_early::*;
 use common::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter, DuplexStream, duplex};
 use tokio::time::timeout;
 
 /// How long a handoff that has to wait is watched before it is taken to be
@@ -69,6 +69,17 @@ async fn finish(client: &mut ClientConnection, c: &mut DuplexStream) {
     assert!(client.is_early_data_accepted());
     client.writer().write_all(REST).unwrap();
     send(client, c).await;
+}
+
+/// Has `client` take what the server sends until it has read `len` bytes
+/// of plaintext.
+async fn read_until(client: &mut ClientConnection, c: &mut DuplexStream, len: usize) -> Vec<u8> {
+    let mut got = Vec::new();
+    while got.len() < len {
+        receive(client, c).await;
+        let _ = io::Read::read_to_end(&mut client.reader(), &mut got);
+    }
+    got
 }
 
 /// Reads from `server` until `got` holds [`REST`].
@@ -132,16 +143,46 @@ async fn a_stream_returned_early_completes_its_handshake_in_the_handoff() {
         assert!(none.is_empty());
         server.write_all(b"after").await.unwrap();
         server.shutdown().await.unwrap();
-        let mut got = Vec::new();
-        while !got.ends_with(b"after") {
-            receive(&mut client, &mut c).await;
-            let mut chunk = Vec::new();
-            let _ = io::Read::read_to_end(&mut client.reader(), &mut chunk);
-            got.extend(chunk);
-        }
         let expected: &[u8] = if half_rtt { b"replyafter" } else { b"after" };
+        let got = timeout(LIMIT, read_until(&mut client, &mut c, expected.len()))
+            .await
+            .expect("timed out");
         assert_eq!(got, expected);
     }
+}
+
+/// 0.5-RTT data a write-buffering transport still holds goes out before
+/// the handoff waits for the client's Finished, as in a flush of the
+/// stream: the client has its answer while the handoff is still waiting.
+#[tokio::test]
+async fn half_rtt_data_is_flushed_before_the_handoff_waits() {
+    let setup = Setup::new();
+    setup.first_connection().await;
+    let (mut c, s) = duplex(64 * 1024);
+    let mut client = setup.manual_client(EARLY);
+    send(&mut client, &mut c).await;
+    let mut server = timeout(LIMIT, acceptor(&setup, true).accept(BufWriter::new(s)))
+        .await
+        .expect("timed out")
+        .unwrap();
+    assert!(server.get_ref().1.is_handshaking());
+    // Encrypted at once, and left in the transport's buffer.
+    server.write_all(b"reply").await.unwrap();
+
+    let mut handoff = server.into_kernel_handoff();
+    let waited = timeout(WAITING, &mut handoff).await;
+    assert!(waited.is_err(), "handed over in the middle of a handshake");
+    let reply = timeout(LIMIT, read_until(&mut client, &mut c, 5))
+        .await
+        .expect("the 0.5-RTT data is held back until the client's Finished");
+    assert_eq!(reply, b"reply");
+
+    client.writer().write_all(REST).unwrap();
+    send(&mut client, &mut c).await;
+    let handoff = timeout(LIMIT, handoff).await.expect("timed out").unwrap();
+    let early = handoff.early_data_len();
+    assert_eq!(&handoff.received()[..early], EARLY);
+    assert_eq!(handoff.get_ref().1.kernel_handoff_blocker(), None);
 }
 
 /// A handoff given up in the middle of the handshake returns the stream
@@ -159,16 +200,12 @@ async fn a_handoff_given_up_leaves_the_early_phase_in_place() {
     let (mut server, received) = handoff.into_stream().unwrap();
     assert!(server.get_ref().1.is_handshaking());
 
-    // The 0-RTT data is either still the reader's or was set aside as
-    // 0-RTT data; none of it is lost and none is counted as ordinary data.
-    assert_eq!(early, received.len());
-    let mut all = received;
-    let missing = EARLY.len() - all.len();
-    all.extend(
-        timeout(LIMIT, read_early(&mut server, missing))
-            .await
-            .expect("timed out"),
-    );
+    // Nothing was taken out of the stream: the 0-RTT data is still its
+    // reader's.
+    assert_eq!((early, received.len()), (0, 0));
+    let all = timeout(LIMIT, read_early(&mut server, EARLY.len()))
+        .await
+        .expect("timed out");
     assert_eq!(all, EARLY);
 
     finish(&mut client, &mut c).await;
@@ -198,7 +235,7 @@ async fn a_handshake_that_failed_before_the_handoff_fails_it() {
             .unwrap_err();
         assert_eq!(err.error.kind(), first.kind(), "{err}");
         assert_eq!(tls_error(&err.error), tls_error(&first), "{err}");
-        assert_eq!(err.early_data_len, err.received.len());
+        assert_eq!((err.early_data_len, err.received.len()), (0, 0));
 
         let mut server = err.stream;
         let again = timeout(LIMIT, server.flush()).await.unwrap().unwrap_err();
@@ -242,18 +279,16 @@ async fn a_handshake_that_fails_in_the_handoff_fails_the_stream() {
             .expect("timed out")
             .unwrap_err();
         expect(&err.error);
-        assert_eq!(err.early_data_len, err.received.len());
+        assert_eq!((err.early_data_len, err.received.len()), (0, 0));
         let mut server = err.stream;
 
-        // The early data that arrived: set aside, or still the reader's.
-        let mut early = err.received;
-        let mut rest = Vec::new();
-        let failed = timeout(LIMIT, server.early_data().unwrap().read_to_end(&mut rest))
+        // The early data that arrived is still the reader's.
+        let mut early = Vec::new();
+        let failed = timeout(LIMIT, server.early_data().unwrap().read_to_end(&mut early))
             .await
             .expect("timed out")
             .unwrap_err();
         expect(&failed);
-        early.extend(rest);
         assert_eq!(early, EARLY);
 
         for _ in 0..2 {

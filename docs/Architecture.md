@@ -953,15 +953,18 @@ Tokio's cached readiness does not, so the stream asks the kernel. Once there
 is room and the ledger still shows records held, the work item is under way
 and nothing reports its end, so the stream looks again after a pause
 (`src/drain.rs`): for the first millisecond it only yields to the runtime,
-then a thread wakes it after pauses of one to eight milliseconds (at most one
-thread per stream at a time, and a yield where none can be started). The
-pauses use no timer of the runtime, which may have none. The wait ends with
-an error when the socket reports an error or a hang-up while records are
-held (they will not be sent), and with `TimedOut` when the same records have
+then a clock thread wakes it after pauses of one to eight milliseconds. That
+thread is one for the whole process, started with the first alarm and gone
+five seconds after the last; where it cannot be started the task goes on
+yielding. The pauses use no timer of the runtime, which may have none. The
+wait ends with an error when the socket hangs up or has an error pending
+while records are held (they will not be sent; `POLLERR` alone is not taken
+for that, since the socket's error queue raises it too), when the counters
+cannot be read or do not fit, and with `TimedOut` when the same records have
 been held for five seconds although the socket had room and TCP had nothing
-in flight whose acknowledgement would make the kernel send. Without a ledger
-the stream waits for room only, as it did before the ledger existed: that
-narrows the window without closing it. A test of that earlier wait, which
+in flight whose acknowledgement would make the kernel send. Only where there
+is no ledger (`Unsupported`) does the stream wait for room alone, as it did
+before the ledger existed: that narrows the window without closing it. A test of that earlier wait, which
 shut down straight after writing a megabyte into 4096-byte socket buffers,
 failed in one of six kernel CI jobs: the kernel end's read after its shutdown
 failed with `BrokenPipe`. The likely cause, from reading the kernel and not

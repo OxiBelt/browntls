@@ -589,10 +589,14 @@ async fn a_megabyte_shut_down_at_once_arrives_whole() {
 }
 
 /// What the kernel accepted and TCP had no room for is counted, and
-/// `shutdown` does not send the FIN ahead of it: with a peer that does not
-/// read, a write of four records is reported done while most of it is
-/// still with the kernel, and the shutdown stays pending. Once the peer
-/// reads, it gets every byte and `close_notify`, and the shutdown ends.
+/// `shutdown` does not end ahead of it: with a peer that does not read, a
+/// write of four records is reported done while most of it is still with
+/// the kernel, and the shutdown stays pending (on a socket this full, in
+/// sending `close_notify` or in the wait for room that follows). Once the
+/// peer reads, it gets every byte and `close_notify`, and the shutdown
+/// ends. The moment this cannot hold still, records held while the socket
+/// has room, is covered by the megabyte test above (now and then) and by
+/// the unit test of the decision (always).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_waits_for_what_the_kernel_holds() {
     if !kernel_tls() {

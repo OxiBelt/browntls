@@ -239,7 +239,9 @@ impl<Data: SideData> Engine<Data> {
     /// connection's: nothing more can be sent safely.
     fn output_failed(&mut self, err: io::Error) -> io::Error {
         // What was queued behind it (records, keys) would now go out of
-        // step with the kernel: drop it.
+        // step with the kernel: drop it. So is the count of what the
+        // kernel was given (it may have taken part of a record).
+        self.ledger = None;
         self.backlog.clear();
         while self.conn.pop_output().is_some() {}
         self.fail_with(err.kind(), Error::General(format!("kernel TLS: {err}")))

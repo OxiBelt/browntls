@@ -225,20 +225,21 @@ pub(crate) fn send_record(fd: BorrowedFd<'_>, typ: u8, payload: &[u8]) -> io::Re
 /// What the kernel reports about sending on a socket right now.
 #[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Room {
-    /// No room: a send would wait.
-    Full,
-    /// Room to send.
-    Free,
-    /// An error or a hang-up is pending on the socket: nothing more will
-    /// be sent, and the next call reports why.
-    Ended,
+pub(crate) struct Sendable {
+    /// Room to send (`POLLOUT`).
+    pub(crate) room: bool,
+    /// `POLLERR`: an error is pending on the socket, or its error queue
+    /// holds something (timestamps, zero-copy notices), which says
+    /// nothing about the connection.
+    pub(crate) error: bool,
+    /// `POLLHUP`: both directions of the connection are over.
+    pub(crate) hung_up: bool,
 }
 
 /// Whether the socket has room to send right now, as the kernel reports it
 /// (`poll` with no timeout, so it never waits).
 #[cfg(feature = "tokio")]
-pub(crate) fn room(fd: BorrowedFd<'_>) -> io::Result<Room> {
+pub(crate) fn sendable(fd: BorrowedFd<'_>) -> io::Result<Sendable> {
     let mut entry = libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLOUT,
@@ -249,12 +250,10 @@ pub(crate) fn room(fd: BorrowedFd<'_>) -> io::Result<Room> {
         // the kernel writes only its `revents`. `fd` is open for the call.
         let rc = unsafe { libc::poll(&mut entry, 1, 0) };
         if rc >= 0 {
-            return Ok(if entry.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
-                Room::Ended
-            } else if entry.revents & libc::POLLOUT != 0 {
-                Room::Free
-            } else {
-                Room::Full
+            return Ok(Sendable {
+                room: entry.revents & libc::POLLOUT != 0,
+                error: entry.revents & libc::POLLERR != 0,
+                hung_up: entry.revents & libc::POLLHUP != 0,
             });
         }
         let err = io::Error::last_os_error();

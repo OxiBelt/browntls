@@ -5,17 +5,19 @@
 //! once the socket has room, `shutdown` looks at the kernel's counters
 //! again after a pause: at first it only yields, since the work was
 //! scheduled before the task was woken and runs within microseconds on an
-//! idle processor; later it has a thread wake it after a few milliseconds.
+//! idle processor; later it is woken after a few milliseconds by a clock
+//! thread, one for the whole process, which lives only while streams wait.
 //! The pauses do not use a timer of the runtime, which may have none.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::io;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ledger::Backlog;
-use crate::sys::Room;
 
 /// How long after the socket was found with room the task only yields
 /// between two looks.
@@ -32,6 +34,20 @@ const LONGEST_PAUSE: Duration = Duration::from_millis(8);
 /// the wait is given up. The kernel's own retry, when it finds its
 /// transmit lock taken, comes after 10 ms.
 const STALLED: Duration = Duration::from_secs(5);
+
+/// How long a wait may go unobserved (its future dropped, or its task not
+/// run) before what it saw earlier no longer counts towards [`STALLED`].
+const UNWATCHED: Duration = Duration::from_secs(1);
+
+/// What the kernel reports about sending on the socket, once it no longer
+/// reports it full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Room {
+    /// Room to send.
+    Free,
+    /// The connection is over: nothing more will be sent.
+    Ended,
+}
 
 /// How the wait before the FIN ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +68,8 @@ pub(crate) struct Drain {
     /// Since when the kernel has held this many bytes with nothing in
     /// flight.
     idle: Option<(Instant, u64)>,
+    /// When the kernel was last found holding records with room to send.
+    looked: Option<Instant>,
     /// The next pause.
     pause: Duration,
     sleeper: Arc<Sleeper>,
@@ -62,6 +80,7 @@ impl Drain {
         Self {
             since: None,
             idle: None,
+            looked: None,
             pause: FIRST_PAUSE,
             sleeper: Arc::default(),
         }
@@ -76,8 +95,10 @@ impl Drain {
     /// so this is `Pending` while there are any: the socket has no room
     /// (the kernel sends when room appears, and `room` wakes the task), or
     /// it has and the kernel has yet to use it (the task is woken for
-    /// another look after a pause). Without the kernel's counters, room is
-    /// all there is to wait for.
+    /// another look after a pause). Where the stream has no count
+    /// (`backlog` fails with `Unsupported`), room is all there is to wait
+    /// for; any other failure to read the counters is passed on, since the
+    /// wait for room alone is known to let a FIN through too early.
     pub(crate) fn step(
         &mut self,
         now: Instant,
@@ -96,8 +117,12 @@ impl Drain {
                 return Poll::Pending;
             }
         };
-        let Ok(backlog) = backlog else {
-            return Poll::Ready(Ok(Outcome::Sent));
+        let backlog = match backlog {
+            Ok(backlog) => backlog,
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                return Poll::Ready(Ok(Outcome::Sent));
+            }
+            Err(err) => return Poll::Ready(Err(err)),
         };
         if room == Room::Ended {
             return Poll::Ready(Ok(Outcome::Lost));
@@ -113,6 +138,7 @@ impl Drain {
     fn reset(&mut self) {
         self.since = None;
         self.idle = None;
+        self.looked = None;
         self.pause = FIRST_PAUSE;
     }
 
@@ -122,6 +148,15 @@ impl Drain {
     /// Fails when the kernel has held the same records for [`STALLED`]
     /// although nothing kept it from sending them.
     fn wait(&mut self, now: Instant, backlog: Backlog, waker: &Waker) -> io::Result<()> {
+        // A wait nobody watched for a while starts over: the time in
+        // between says nothing about the kernel.
+        if self
+            .looked
+            .is_some_and(|looked| now.saturating_duration_since(looked) >= UNWATCHED)
+        {
+            self.reset();
+        }
+        self.looked = Some(now);
         match self.idle {
             _ if backlog.in_flight => self.idle = None,
             Some((since, unsent)) if unsent == backlog.unsent => {
@@ -136,19 +171,21 @@ impl Drain {
         }
         let since = *self.since.get_or_insert(now);
         if now.saturating_duration_since(since) >= YIELDING
-            && self.sleeper.wake_after(self.pause, waker)
+            && self.sleeper.wake_after(&CLOCK, self.pause, waker)
         {
             self.pause = (self.pause * 2).min(LONGEST_PAUSE);
         } else {
             // Yield: the task runs again after the others that are ready.
+            // Also when the clock has no thread (none could be started):
+            // the wait then costs processor time instead of failing.
             waker.wake_by_ref();
         }
         Ok(())
     }
 }
 
-/// Wakes a task from a thread that sleeps first: at most one thread at a
-/// time, which wakes the last waker it was given.
+/// One task's place with the [`Clock`]: the waker to wake, and whether a
+/// wake is already due.
 #[derive(Debug, Default)]
 struct Sleeper {
     state: Mutex<Sleep>,
@@ -157,7 +194,7 @@ struct Sleeper {
 #[derive(Debug, Default)]
 struct Sleep {
     waker: Option<Waker>,
-    /// A thread is asleep and will take `waker`.
+    /// The clock holds an alarm that will take `waker`.
     asleep: bool,
 }
 
@@ -167,36 +204,151 @@ impl Sleeper {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Has `waker` woken after `pause`, or when the thread already asleep
-    /// wakes. `false` when no thread could be started.
-    fn wake_after(self: &Arc<Self>, pause: Duration, waker: &Waker) -> bool {
+    /// Has `waker` woken after `pause`, or when the alarm already set goes
+    /// off. `false` when the clock's thread could not be started.
+    fn wake_after(self: &Arc<Self>, clock: &'static Clock, pause: Duration, waker: &Waker) -> bool {
         let mut sleep = self.lock();
-        match &mut sleep.waker {
-            Some(current) => current.clone_from(waker),
-            slot => *slot = Some(waker.clone()),
-        }
         if sleep.asleep {
+            match &mut sleep.waker {
+                Some(current) => current.clone_from(waker),
+                slot => *slot = Some(waker.clone()),
+            }
             return true;
         }
-        let sleeper = Arc::clone(self);
-        let started = thread::Builder::new()
-            .name("browntls-ktls-drain".into())
-            .spawn(move || {
-                thread::sleep(pause);
-                let waker = {
-                    let mut sleep = sleeper.lock();
-                    sleep.asleep = false;
-                    sleep.waker.take()
-                };
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
-            });
-        sleep.asleep = started.is_ok();
-        if !sleep.asleep {
-            sleep.waker = None;
+        if !clock.set(Instant::now() + pause, Arc::clone(self)) {
+            return false;
         }
-        sleep.asleep
+        sleep.waker = Some(waker.clone());
+        sleep.asleep = true;
+        true
+    }
+
+    /// The alarm went off.
+    fn wake(&self) {
+        let waker = {
+            let mut sleep = self.lock();
+            sleep.asleep = false;
+            sleep.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// How long the clock's thread stays when it has no alarm left.
+const LINGER: Duration = Duration::from_secs(5);
+
+/// The alarms of every stream in the process, kept by one thread, which
+/// is started with the first alarm and ends [`LINGER`] after the last.
+#[derive(Debug)]
+struct Clock {
+    state: Mutex<Alarms>,
+    changed: Condvar,
+}
+
+static CLOCK: Clock = Clock {
+    state: Mutex::new(Alarms {
+        due: BinaryHeap::new(),
+        set: 0,
+        running: false,
+    }),
+    changed: Condvar::new(),
+};
+
+#[derive(Debug)]
+struct Alarms {
+    /// Earliest first.
+    due: BinaryHeap<Alarm>,
+    /// How many alarms were ever set: tells alarms of one instant apart.
+    set: u64,
+    /// The thread is alive and will see what is pushed.
+    running: bool,
+}
+
+#[derive(Debug)]
+struct Alarm {
+    at: Instant,
+    order: u64,
+    sleeper: Arc<Sleeper>,
+}
+
+impl PartialEq for Alarm {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Alarm {}
+
+impl PartialOrd for Alarm {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Alarm {
+    /// Reversed, so that the heap's greatest is the earliest.
+    fn cmp(&self, other: &Self) -> Ordering {
+        (other.at, other.order).cmp(&(self.at, self.order))
+    }
+}
+
+impl Clock {
+    fn lock(&self) -> MutexGuard<'_, Alarms> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sets an alarm that wakes `sleeper` at `at`. `false` when there is
+    /// no thread to keep it and none could be started.
+    fn set(&'static self, at: Instant, sleeper: Arc<Sleeper>) -> bool {
+        let mut alarms = self.lock();
+        if !alarms.running {
+            let started = thread::Builder::new()
+                .name("browntls-ktls-clock".into())
+                .spawn(move || self.run());
+            if started.is_err() {
+                return false;
+            }
+            alarms.running = true;
+        }
+        alarms.set += 1;
+        let order = alarms.set;
+        alarms.due.push(Alarm { at, order, sleeper });
+        drop(alarms);
+        self.changed.notify_one();
+        true
+    }
+
+    /// The thread: wakes each sleeper when its alarm is due.
+    fn run(&self) {
+        let mut alarms = self.lock();
+        loop {
+            let now = Instant::now();
+            let wait = match alarms.due.peek() {
+                Some(next) if next.at <= now => {
+                    let alarm = alarms.due.pop();
+                    drop(alarms);
+                    if let Some(alarm) = alarm {
+                        alarm.sleeper.wake();
+                    }
+                    alarms = self.lock();
+                    continue;
+                }
+                Some(next) => next.at - now,
+                None => LINGER,
+            };
+            let (guard, result) = self
+                .changed
+                .wait_timeout(alarms, wait)
+                .unwrap_or_else(PoisonError::into_inner);
+            alarms = guard;
+            if result.timed_out() && alarms.due.is_empty() {
+                // Under the lock: an alarm set from now on starts a thread.
+                alarms.running = false;
+                return;
+            }
+        }
     }
 }
 
@@ -289,6 +441,11 @@ mod tests {
         let step = drain.step(now, no_counters(), &waker, || Poll::Ready(Ok(Room::Ended)));
         assert!(matches!(step, Poll::Ready(Ok(Outcome::Sent))));
         assert_eq!(woken(&count), 1);
+
+        // Counters that fail or do not fit are not taken for none: room
+        // alone would let the FIN through.
+        let step = drain.step(now, Err(io::Error::other("mismatch")), &waker, free);
+        assert!(matches!(step, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Other));
     }
 
     #[test]
@@ -305,7 +462,7 @@ mod tests {
             .unwrap();
         assert_eq!(woken(&count), 2);
 
-        // Afterwards a thread wakes it, later, and the pauses grow.
+        // Afterwards the clock wakes it, later, and the pauses grow.
         drain.wait(start + YIELDING, HELD, &waker).unwrap();
         assert_eq!(drain.pause, FIRST_PAUSE * 2);
         wait_for(&count, 3);
@@ -325,54 +482,106 @@ mod tests {
     }
 
     #[test]
-    fn one_thread_sleeps_and_wakes_the_last_waker() {
-        let sleeper = Arc::new(Sleeper::default());
+    fn the_clock_wakes_the_last_waker_of_each_sleeper() {
         let (first, first_waker) = counter();
         let (second, second_waker) = counter();
-        assert!(sleeper.wake_after(Duration::from_millis(300), &first_waker));
-        // The task moved on to another waker while the thread sleeps: no
-        // second thread, and the new waker is the one woken.
-        assert!(sleeper.wake_after(Duration::from_secs(3600), &second_waker));
+        let (other, other_waker) = counter();
+        let sleeper = Arc::new(Sleeper::default());
+        let late = Arc::new(Sleeper::default());
+        let pause = Duration::from_millis(50);
+
+        // A later alarm set first does not hold up an earlier one.
+        let start = Instant::now();
+        assert!(late.wake_after(&CLOCK, pause * 20, &other_waker));
+        assert!(sleeper.wake_after(&CLOCK, pause, &first_waker));
+        // The task moved on to another waker before the alarm: the alarm
+        // stays as it is, and the new waker is the one woken.
+        assert!(sleeper.wake_after(&CLOCK, pause, &second_waker));
+        // Unless this thread was held up past the first alarm, which then
+        // woke the first waker as it should.
+        let in_time = start.elapsed() < pause;
         wait_for(&second, 1);
-        assert_eq!(woken(&first), 0);
+        if in_time {
+            assert_eq!(woken(&first), 0);
+        }
         assert!(!sleeper.lock().asleep);
         assert!(sleeper.lock().waker.is_none());
-        // And it can sleep again.
-        assert!(sleeper.wake_after(Duration::from_millis(1), &first_waker));
+        if start.elapsed() < pause * 20 {
+            assert_eq!(woken(&other), 0, "the later alarm went off early");
+        }
+
+        // It can sleep again, and the later alarm goes off in its turn.
+        assert!(sleeper.wake_after(&CLOCK, Duration::from_millis(1), &first_waker));
         wait_for(&first, 1);
+        wait_for(&other, 1);
+        assert_eq!(woken(&second), 1);
+        assert_eq!(woken(&other), 1);
+    }
+
+    #[test]
+    fn alarms_come_out_earliest_first() {
+        let now = Instant::now();
+        let alarm = |after: u64, order| Alarm {
+            at: now + Duration::from_millis(after),
+            order,
+            sleeper: Arc::default(),
+        };
+        let mut due = BinaryHeap::new();
+        due.extend([alarm(30, 1), alarm(10, 2), alarm(20, 3), alarm(10, 4)]);
+        let order: Vec<u64> = std::iter::from_fn(|| due.pop()).map(|a| a.order).collect();
+        assert_eq!(order, [2, 4, 3, 1]);
     }
 
     #[test]
     fn records_held_with_nothing_in_the_way_end_the_wait() {
         let (_count, waker) = counter();
         let mut drain = Drain::new();
-        let start = Instant::now();
         let idle = Backlog {
             unsent: 100,
             in_flight: false,
         };
-        let short = STALLED - Duration::from_millis(1);
-
-        drain.wait(start, idle, &waker).unwrap();
-        drain.wait(start + short, idle, &waker).unwrap();
-        // Progress starts the clock again.
         let less = Backlog { unsent: 60, ..idle };
-        drain.wait(start + STALLED, less, &waker).unwrap();
-        drain.wait(start + STALLED + short, less, &waker).unwrap();
-        // So do bytes in flight: their acknowledgement makes the kernel
-        // send.
         let flying = Backlog {
             in_flight: true,
             ..less
         };
-        drain.wait(start + STALLED * 2, flying, &waker).unwrap();
-        drain.wait(start + STALLED * 4, flying, &waker).unwrap();
-        drain.wait(start + STALLED * 4, less, &waker).unwrap();
-        drain
-            .wait(start + STALLED * 4 + short, less, &waker)
-            .unwrap();
-        let err = drain.wait(start + STALLED * 5, less, &waker).unwrap_err();
+        // Looks every 100 ms, as a watched wait makes them (more often).
+        let step = Duration::from_millis(100);
+        let looks = (STALLED.as_millis() / step.as_millis()) as u32;
+        let mut now = Instant::now();
+        let mut look = |drain: &mut Drain, backlog| {
+            now += step;
+            drain.wait(now, backlog, &waker)
+        };
+
+        // The same records for almost the whole time, then progress, which
+        // starts the clock again.
+        for _ in 0..looks {
+            look(&mut drain, idle).unwrap();
+        }
+        for _ in 0..looks {
+            look(&mut drain, less).unwrap();
+        }
+        // So do bytes in flight: their acknowledgement makes the kernel
+        // send. However long that takes, it is not the kernel's stall.
+        for _ in 0..looks * 3 {
+            look(&mut drain, flying).unwrap();
+        }
+        for _ in 0..looks {
+            look(&mut drain, less).unwrap();
+        }
+        let err = look(&mut drain, less).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("60 bytes"), "{err}");
+
+        // A wait nobody watched (the future dropped, the task not run)
+        // does not count the time in between.
+        let mut drain = Drain::new();
+        let start = Instant::now();
+        drain.wait(start, idle, &waker).unwrap();
+        drain.wait(start + STALLED * 3, idle, &waker).unwrap();
+        drain
+            .wait(start + STALLED * 3 + step, idle, &waker)
+            .unwrap();
     }
 }

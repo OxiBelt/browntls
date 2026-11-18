@@ -138,8 +138,8 @@ fn tcp_output(fd: BorrowedFd<'_>) -> io::Result<sys::TcpOutput> {
 ///
 /// TLS 1.3: the five-byte header, the content type byte and the 16-byte
 /// tag (the kernel adds no padding). TLS 1.2: the header and the tag, and
-/// for AES-GCM the eight-byte explicit nonce (RFC 5288); ChaCha20-Poly1305
-/// has none (RFC 7905).
+/// for AES-GCM and AES-CCM the eight-byte explicit nonce (RFC 5288, RFC
+/// 6655); ChaCha20-Poly1305 has none (RFC 7905).
 fn record_overhead(info: &CryptoInfo) -> u64 {
     let bytes = info.as_bytes();
     let tls13 = bytes.get(..2) == Some(&0x0304u16.to_ne_bytes()[..]);
@@ -195,6 +195,7 @@ mod tests {
         }
         assert_eq!(overhead(ProtocolVersion::TLSv1_2, &gcm), 29);
         assert_eq!(overhead(ProtocolVersion::TLSv1_2, &gcm256), 29);
+        assert_eq!(overhead(ProtocolVersion::TLSv1_2, &ccm), 29);
         assert_eq!(overhead(ProtocolVersion::TLSv1_2, &chacha), 21);
     }
 

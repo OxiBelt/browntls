@@ -158,9 +158,13 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// and sends the rest when room appears. Shutting the socket's write side
 /// or closing it before then drops what is left, and the peer sees a
 /// truncated stream. [`unsent`](Self::unsent) tells how much the kernel
-/// still holds: before closing such a socket, wait until it is zero,
-/// asking again when the socket is writable. A blocking socket without a
-/// send timeout waits inside the write and needs no such care.
+/// still holds: before closing such a socket, send what the stream itself
+/// still holds ([`Write::flush`] until it succeeds) and wait until
+/// `unsent` is zero. While it is not, wait for the socket to be writable;
+/// if it is writable already, the kernel is about to send, usually within
+/// microseconds, so ask again after a short pause and not in a tight loop.
+/// A blocking socket without a send timeout waits inside the write and
+/// needs no such care.
 ///
 /// Known kernel limitation: Linux pauses reception when a handshake record
 /// merely starts with the KeyUpdate type byte, or holds only the start of a
@@ -269,13 +273,16 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// How many bytes of TLS records the kernel has accepted from this
     /// stream and not yet given to TCP.
     ///
-    /// Zero means that everything written so far, control records
-    /// included, is in TCP's hands, which delivers it or reports a failure
-    /// as for any socket: the write side can then be shut, or the socket
-    /// closed, without cutting the stream short. On a blocking socket
-    /// without a send timeout this is zero after every call. On other
-    /// sockets the kernel sends what is left when TCP has room, so wait
-    /// until the socket is writable and ask again. The number may be
+    /// Zero means that everything the kernel accepted so far, control
+    /// records included, is in TCP's hands, which delivers it or reports a
+    /// failure as for any socket: the write side can then be shut, or the
+    /// socket closed, without cutting the stream short. A control record
+    /// the socket had no room for at all (`WouldBlock` from
+    /// [`Self::send_close_notify`] or [`Write::flush`]) is still with the
+    /// stream and not counted here. On a blocking socket without a send
+    /// timeout this is zero after every call. On other sockets the kernel
+    /// sends what is left when TCP has room (see the type's
+    /// documentation for how to wait). The number may be
     /// reported higher than it is when acknowledgements kept arriving
     /// while it was read, never lower.
     ///

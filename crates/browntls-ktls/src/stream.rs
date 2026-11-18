@@ -282,9 +282,9 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// stream and not counted here. On a blocking socket without a send
     /// timeout this is zero after every call. On other sockets the kernel
     /// sends what is left when TCP has room (see the type's
-    /// documentation for how to wait). The number may be
-    /// reported higher than it is when acknowledgements kept arriving
-    /// while it was read, never lower.
+    /// documentation for how to wait). The number may be reported higher
+    /// than it is when acknowledgements kept arriving while it was read,
+    /// never lower.
     ///
     /// It is worked out from two counters the kernel keeps (the records it
     /// has made and the bytes TCP has taken) and the plaintext this stream

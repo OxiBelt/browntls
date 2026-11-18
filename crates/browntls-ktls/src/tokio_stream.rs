@@ -325,8 +325,9 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// records included, is in TCP's hands, which delivers it or reports a
     /// failure as for any socket. Otherwise the kernel sends what is left
     /// when TCP has room. A control record the socket had no room for at
-    /// all is still with the stream (a flush sends it) and not counted. The number may be reported higher than it is when
-    /// acknowledgements kept arriving while it was read, never lower.
+    /// all is still with the stream (a flush sends it) and not counted.
+    /// The number may be reported higher than it is when acknowledgements
+    /// kept arriving while it was read, never lower.
     ///
     /// It is worked out from two counters the kernel keeps (the records it
     /// has made and the bytes TCP has taken) and the plaintext this stream
@@ -459,17 +460,21 @@ fn poll_when_writable<R>(
 /// A connection that is over ends the wait too: after a hang-up as
 /// [`Room::Ended`], with an error pending on the socket as that error
 /// (taken from the socket). The kernel raises the same flag when only the
-/// socket's error queue holds something, which is not an end and is
-/// passed over.
+/// socket's error queue holds something (transmit timestamps, zero-copy
+/// notices), which is not an end. Tokio reports such a socket as ready
+/// from then on, whatever this function returns, so `WouldBlock` would
+/// make the caller ask in a loop without ever waiting: that socket is
+/// reported as [`Room::Free`], and the caller looks again after a pause.
 fn room(socket: &TcpStream) -> io::Result<Room> {
     let sendable = sys::sendable(socket.as_fd())?;
     if sendable.hung_up {
         return Ok(Room::Ended);
     }
-    if sendable.error
-        && let Some(err) = socket.take_error()?
-    {
-        return Err(err);
+    if sendable.error {
+        return match socket.take_error()? {
+            Some(err) => Err(err),
+            None => Ok(Room::Free),
+        };
     }
     if sendable.room {
         Ok(Room::Free)

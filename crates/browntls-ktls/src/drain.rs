@@ -12,6 +12,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, Waker};
 use std::thread;
@@ -43,7 +44,9 @@ const UNWATCHED: Duration = Duration::from_secs(1);
 /// reports it full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Room {
-    /// Room to send.
+    /// Room to send, or a socket on which the wait for room cannot be
+    /// left to the runtime: either way the kernel's counters are looked
+    /// at again after a pause.
     Free,
     /// The connection is over: nothing more will be sent.
     Ended,
@@ -330,7 +333,12 @@ impl Clock {
                     let alarm = alarms.due.pop();
                     drop(alarms);
                     if let Some(alarm) = alarm {
-                        alarm.sleeper.wake();
+                        // A waker is the executor's code. Should one
+                        // panic, the clock must go on for the others: the
+                        // panic (already reported by the panic hook) ends
+                        // here and not the thread.
+                        let wake = AssertUnwindSafe(|| alarm.sleeper.wake());
+                        let _ = panic::catch_unwind(wake);
                     }
                     alarms = self.lock();
                     continue;
@@ -516,6 +524,31 @@ mod tests {
         wait_for(&other, 1);
         assert_eq!(woken(&second), 1);
         assert_eq!(woken(&other), 1);
+    }
+
+    /// A waker that panics does not stop the clock for everyone else.
+    #[test]
+    fn a_panicking_waker_leaves_the_clock_running() {
+        struct Panics;
+        impl Wake for Panics {
+            fn wake(self: Arc<Self>) {
+                panic!("a waker that panics (expected in this test)");
+            }
+        }
+        let panics = Arc::new(Sleeper::default());
+        assert!(panics.wake_after(
+            &CLOCK,
+            Duration::from_millis(1),
+            &Waker::from(Arc::new(Panics))
+        ));
+        let (count, waker) = counter();
+        let sleeper = Arc::new(Sleeper::default());
+        assert!(sleeper.wake_after(&CLOCK, Duration::from_millis(20), &waker));
+        wait_for(&count, 1);
+        assert!(!panics.lock().asleep);
+        // And for the same sleeper again.
+        assert!(panics.wake_after(&CLOCK, Duration::from_millis(1), &waker));
+        wait_for(&count, 2);
     }
 
     #[test]

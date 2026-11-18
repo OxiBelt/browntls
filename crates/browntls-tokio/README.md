@@ -106,12 +106,56 @@ allowance) completes the handshake. Early data the server declined is sent again
 as ordinary data only when the same application protocol is certain (no ALPN
 offered, or exactly one offered and selected, as RFC 9846 §4.2.10 requires);
 otherwise that operation fails with `client::EarlyDataNotResent` and the
-application decides what to send. A server that set `max_early_data_size` (with stateful
-session storage) reads accepted early data through
-`stream.get_mut().1.early_data()` after `accept`.
+application decides what to send.
+
+A server that set `max_early_data_size` (with stateful session storage) reads
+accepted early data through `server::TlsStream::early_data`, an `AsyncRead`
+of its own: ordinary reads never return early data. By default `accept`
+resolves after the handshake, when all of it is buffered. With
+`TlsAcceptor::early_data(true)` (or `StartHandshake::early_data(true)` after a
+`LazyConfigAcceptor`), `accept` resolves as soon as the server's flight is
+written when the connection accepted early data, and the reader returns the
+data as it arrives, without waiting for the client's Finished:
+
+```rust,no_run
+use browntls_tokio::TlsAcceptor;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+async fn serve(acceptor: TlsAcceptor, tcp: TcpStream) -> std::io::Result<()> {
+    let mut tls = acceptor.early_data(true).accept(tcp).await?;
+    if let Some(mut early) = tls.early_data() {
+        // Not yet known to come from a client taking part now: see below.
+        let mut request = [0; 16];
+        early.read_exact(&mut request).await?;
+    }
+    // Sent at once with `ServerConfig::send_half_rtt_data`; otherwise the
+    // write waits for the handshake.
+    tls.write_all(b"response").await?;
+    tls.flush().await?; // completes the handshake
+    Ok(())
+}
+```
+
+On such a stream an ordinary read, a flush or a shutdown completes the
+handshake first; so does a write, unless `ServerConfig::send_half_rtt_data`
+lets it go out ahead of the client's Finished (0.5-RTT data). The reader's end
+of file comes with the end of the handshake, which the client only reaches
+after the server's flight: read a request by its own framing to answer sooner.
+A handshake that fails then fails every later operation. The reader borrows
+the stream: read the early data before `into_split`.
 
 Early data can be replayed by an attacker: send only requests that are safe to
-repeat.
+repeat. On the server, a replay cannot complete a handshake, so early data read
+after the handshake comes from a client that took part in it. Read before, it
+may be a recorded ClientHello and early data sent again. For a resumed
+session, browntls takes the session out of the server's session storage, which
+makes a ticket good for one attempt as long as every server honouring it shares
+that storage; early data under an external PSK that allows it has no such
+protection, and the library keeps no other anti-replay store. Act before the
+handshake completes only on requests that are safe to repeat (RFC 9846 §8, RFC
+8470 for HTTP), and bound the operations that complete the handshake with
+timeouts of their own: the one around `accept` no longer covers them.
 
 ## Unbuffered streams
 
@@ -153,7 +197,8 @@ async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> 
 reader, writer or I/O methods), and `into_parts` the connection with the
 stream's buffers. The unbuffered connector does not send 0-RTT early data; a
 server's accepted early data is collected during the handshake
-(`TlsStream::early_data`). While more than 16 KiB of answers to the peer are
+(`TlsStream::early_data`), and the unbuffered acceptors have no
+`early_data` option to return a stream before the handshake completes. While more than 16 KiB of answers to the peer are
 unwritten, reads take no more input.
 
 Two things under Behaviour below are not there for these streams yet: they

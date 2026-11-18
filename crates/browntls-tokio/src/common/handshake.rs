@@ -1,4 +1,5 @@
-//! The future that drives a handshake to completion.
+//! The future that drives a handshake to completion, and how a handshake
+//! that failed after its stream was handed out keeps reporting that.
 
 use std::future::Future;
 use std::io;
@@ -18,8 +19,22 @@ pub(crate) trait IoSession {
     type Io;
     type Session;
 
-    /// Whether the stream may be returned before its handshake completes.
+    /// Whether the stream may be returned before its handshake starts.
     fn skip_handshake(&self) -> bool;
+
+    /// Whether the stream may be returned while its handshake is still in
+    /// progress, once [`early_phase_reached`](Self::early_phase_reached)
+    /// says so and everything queued so far has been written and flushed.
+    fn returns_early(&self) -> bool {
+        false
+    }
+
+    /// Whether `session`, still handshaking, got to where a stream that
+    /// [`returns_early`](Self::returns_early) is handed out.
+    fn early_phase_reached(_session: &mut Self::Session) -> bool {
+        false
+    }
+
     fn refs(&self) -> (&Self::Io, &Self::Session);
     fn parts(&mut self) -> (&mut StreamState, &mut Self::Io, &mut Self::Session);
     fn into_io(self) -> Self::Io;
@@ -126,6 +141,7 @@ where
         };
 
         if !stream.skip_handshake() {
+            let returns_early = stream.returns_early();
             let (st, io, session) = stream.parts();
             let mut tls_stream = Stream::new(io, session)
                 .set_eof(!st.state.readable())
@@ -147,12 +163,56 @@ where
                 };
             }
 
+            let mut returned_early = false;
             while tls_stream.session.is_handshaking() {
+                // Our flight is out before the stream is: nothing is left
+                // for the caller's first operation to write.
+                if returns_early
+                    && !tls_stream.session.wants_write()
+                    && !tls_stream.need_flush
+                    && IS::early_phase_reached(tls_stream.session)
+                {
+                    returned_early = true;
+                    break;
+                }
                 try_poll!(tls_stream.handshake(cx));
             }
-            try_poll!(Pin::new(&mut tls_stream).poll_flush(cx));
+            if returned_early {
+                st.need_flush = false;
+            } else {
+                try_poll!(Pin::new(&mut tls_stream).poll_flush(cx));
+            }
         }
 
         Poll::Ready(Ok(stream))
+    }
+}
+
+/// A handshake failure met after the stream was handed out, kept to report
+/// again: every later operation on the stream fails with it.
+#[derive(Debug)]
+pub(crate) struct HandshakeFailure {
+    kind: io::ErrorKind,
+    tls: Option<browntls::Error>,
+    message: String,
+}
+
+impl HandshakeFailure {
+    pub(crate) fn new(err: &io::Error) -> Self {
+        Self {
+            kind: err.kind(),
+            tls: err
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<browntls::Error>())
+                .cloned(),
+            message: err.to_string(),
+        }
+    }
+
+    pub(crate) fn error(&self) -> io::Error {
+        match &self.tls {
+            Some(tls) => io::Error::new(self.kind, tls.clone()),
+            None => io::Error::new(self.kind, self.message.clone()),
+        }
     }
 }

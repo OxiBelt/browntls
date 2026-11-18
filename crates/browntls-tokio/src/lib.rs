@@ -41,16 +41,21 @@
 //!
 //! [`TlsConnector::early_data`] lets [`TlsConnector::connect`] return
 //! before the handshake on a resumed TLS 1.3 session, so the first writes go
-//! out as 0-RTT data; a server reads accepted early data through
-//! [`ServerConnection::early_data`](browntls::ServerConnection::early_data)
-//! (`stream.get_mut().1.early_data()`) once the handshake is done.
+//! out as 0-RTT data. A server reads accepted early data through
+//! [`server::TlsStream::early_data`], apart from ordinary reads: after the
+//! handshake, or, with [`TlsAcceptor::early_data`], as it arrives, from a
+//! stream that [`TlsAcceptor::accept`] returns before the client's Finished.
+//! Early data can be replayed; [`TlsAcceptor::early_data`] says what that
+//! means for a server that acts on it before the handshake completes.
 //!
 //! The [`unbuffered`] module has the same connector, acceptor and lazy
 //! acceptor over `browntls`'s unbuffered connection API: its streams decrypt
 //! each record in place in one receive buffer, so [`AsyncBufRead`] lends
 //! the plaintext without a copy and [`AsyncRead`] copies it once. Its
 //! streams have no `into_split` and the `coop` feature does not cover them
-//! yet.
+//! yet. Its client sends no early data, and its acceptors have no
+//! `early_data` option: a server has the early data it accepted only as
+//! collected during the handshake.
 //!
 //! # Flushing
 //!

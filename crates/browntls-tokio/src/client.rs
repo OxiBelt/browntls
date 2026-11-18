@@ -188,20 +188,31 @@ impl<IO> Connect<IO> {
 
     /// The transport, unless the future already returned.
     pub fn get_ref(&self) -> Option<&IO> {
-        match &self.0 {
-            MidHandshake::Handshaking(stream) => Some(&stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io()
     }
 
     /// The transport, unless the future already returned.
     pub fn get_mut(&mut self) -> Option<&mut IO> {
-        match &mut self.0 {
-            MidHandshake::Handshaking(stream) => Some(&mut stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs, for a caller that polls
+    /// this future itself and looks at the handshake between polls (which
+    /// messages arrived, what was negotiated so far). Until the handshake
+    /// completes, what it shows is not authenticated.
+    ///
+    /// `None` once the future returned, and when the connection could not
+    /// be created, which the future's first poll reports.
+    pub fn connection(&self) -> Option<&ClientConnection> {
+        self.0.session()
+    }
+
+    /// Like [`connection`](Self::connection), for calls that need `&mut`.
+    ///
+    /// The future drives the connection's I/O: reading or writing TLS
+    /// records or plaintext through this reference disturbs the handshake.
+    pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
+        self.0.session_mut()
     }
 }
 
@@ -222,6 +233,30 @@ impl<IO> fmt::Debug for Connect<IO> {
 /// Like [`Connect`], but an error comes with the transport.
 #[must_use = "futures do nothing unless polled"]
 pub struct FallibleConnect<IO>(MidHandshake<TlsStream<IO>>);
+
+impl<IO> FallibleConnect<IO> {
+    /// The transport, unless the future already returned.
+    pub fn get_ref(&self) -> Option<&IO> {
+        self.0.io()
+    }
+
+    /// The transport, unless the future already returned.
+    pub fn get_mut(&mut self) -> Option<&mut IO> {
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Connect::connection`].
+    pub fn connection(&self) -> Option<&ClientConnection> {
+        self.0.session()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Connect::connection_mut`].
+    pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
+        self.0.session_mut()
+    }
+}
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleConnect<IO> {
     type Output = Result<TlsStream<IO>, (io::Error, IO)>;
@@ -279,6 +314,10 @@ impl<IO> IoSession for TlsStream<IO> {
 
     fn skip_handshake(&self) -> bool {
         self.early.is_some()
+    }
+
+    fn refs(&self) -> (&IO, &ClientConnection) {
+        (&self.io, &self.session)
     }
 
     fn parts(&mut self) -> (&mut StreamState, &mut IO, &mut ClientConnection) {

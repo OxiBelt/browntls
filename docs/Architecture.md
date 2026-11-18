@@ -676,7 +676,12 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 
 - `TlsConnector`/`TlsAcceptor` return futures (`Connect`, `Accept`, and
   `into_fallible` variants that hand the transport back on error) that run
-  the handshake. A handshake that can neither read nor write while still
+  the handshake. While it runs they give the transport (`get_ref`,
+  `get_mut`) and the connection (`connection`, `connection_mut`) to a
+  caller that polls them by hand; a future that has no connection (it
+  could not be created, or a lazily chosen configuration refused the
+  ClientHello and only an alert is left to send) gives only the transport.
+  A handshake that can neither read nor write while still
   in progress (the peer's `close_notify` mid-handshake) ends with
   `UnexpectedEof` instead of polling forever, the asynchronous counterpart
   of the `complete_io` fix.

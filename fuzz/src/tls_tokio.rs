@@ -227,6 +227,14 @@ fn cx() -> Context<'static> {
     Context::from_waker(Waker::noop())
 }
 
+/// What a handshake future's accessors returned: `(get_ref, get_mut)` and
+/// `(connection, connection_mut)`, each as "is some".
+fn check_future_accessors(io: (bool, bool), conn: (bool, bool)) {
+    assert_eq!(io.0, io.1, "get_ref and get_mut disagree");
+    assert_eq!(conn.0, conn.1, "connection and connection_mut disagree");
+    assert!(io.0 || !conn.0, "a connection without a transport");
+}
+
 impl World {
     fn new(client_config: ClientConfig, server_config: ServerConfig, mode: u8, t: [u8; 4]) -> Self {
         let connector = TlsConnector::from(Arc::new(client_config)).early_data(mode & 0x40 != 0);
@@ -437,11 +445,31 @@ impl World {
     fn accessors(&mut self, side: usize) {
         let _ = (self.connector.config(), self.server_config.fips());
         match (side, &mut self.client, &mut self.server) {
+            // A handshake future shows a connection only while it shows its
+            // transport (it may have only an alert left to send, or nothing
+            // at all once it returned), and `&` and `&mut` access agree.
             (CLIENT, Client::Connecting(f), _) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+            }
+            (CLIENT, Client::Fallible(f), _) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (SERVER, _, Server::Accepting(f)) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+                if let Some(conn) = f.connection() {
+                    let _ = (conn.is_handshaking(), conn.server_name());
+                }
+            }
+            (SERVER, _, Server::Fallible(f)) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (CLIENT, Client::Ready(s), _) | (SERVER, _, Server::Ready(s)) => {
                 let _ = s.get_ref().1.is_handshaking();

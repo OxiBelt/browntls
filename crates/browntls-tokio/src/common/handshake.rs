@@ -11,7 +11,7 @@ use browntls::server::AcceptedAlert;
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Stream, StreamState, poll_send_alert};
+use super::{Stream, StreamState, coop, poll_send_alert};
 
 /// A stream whose handshake [`MidHandshake`] can drive.
 pub(crate) trait IoSession {
@@ -54,6 +54,19 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        coop::budgeted(cx, |cx| this.poll_handshake(cx))
+    }
+}
+
+impl<IS, SD> MidHandshake<IS>
+where
+    IS: IoSession + Unpin,
+    IS::Io: AsyncRead + AsyncWrite + Unpin,
+    IS::Session: DerefMut + Deref<Target = ConnectionCommon<SD>> + Unpin,
+    SD: SideData,
+{
+    fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<IS, (io::Error, IS::Io)>> {
+        let this = self;
 
         let mut stream = match mem::replace(this, Self::End) {
             Self::Handshaking(stream) => stream,

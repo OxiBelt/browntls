@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState};
+use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
 
 mod lazy;
 pub use lazy::{LazyConfigAcceptor, StartHandshake};
@@ -204,14 +204,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
-        common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        ready!(coop::poll_budget(cx));
+        let poll = common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx);
+        coop::spend_if_ready(cx, poll)
     }
 
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
@@ -226,7 +232,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 
     fn poll_write_vectored(
@@ -235,7 +244,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+        })
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -244,11 +256,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 }

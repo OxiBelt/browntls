@@ -668,7 +668,8 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 
 `browntls-tokio` adapts the buffered API to Tokio's `AsyncRead`,
 `AsyncBufRead` and `AsyncWrite`; it depends only on Tokio's I/O traits (no
-Tokio feature, no runtime). Each poll pairs the connection with the
+runtime; the default `coop` feature adds Tokio's `rt` feature for the task
+budget, see below). Each poll pairs the connection with the
 transport for its duration (`common::Stream`) and drives `read_tls` and
 `write_tls` through adapters that turn the task context's `Pending` into
 `WouldBlock`, the design of tokio-rustls:
@@ -729,6 +730,38 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 - TLS errors surface as `io::Error` of kind `InvalidData` wrapping
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
+- With the `coop` feature the streams, the handshake futures and
+  `LazyConfigAcceptor` take part in Tokio's cooperative scheduling
+  (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
+  task's budget per completed operation and return `Pending`, rescheduling
+  the task, once it is spent. A TLS stream completes operations the
+  transport never sees (reads of buffered plaintext, writes the connection
+  buffers) and may run over a transport that does not count, so it counts
+  itself: an operation starts only while budget is left and takes one unit
+  when it completes. The unit is taken after the operation, not held across
+  it as Tokio's `RestoreOnPending` would be, because a restored unit also
+  gives back what the transport took meanwhile. In addition, every read
+  from the transport after the first in one poll takes a unit
+  (`Stream::read_io`, and the acceptor's read loop), and a spent budget
+  looks like a transport that is not ready: the peer decides how many
+  records, with or without plaintext, or pieces of a handshake, one poll
+  would otherwise work through. A poll of a stream pairs the connection
+  with the transport more than once (a read copies chunk after chunk into
+  the caller's buffer; a client finishes an early-data handshake and then
+  reads), so the stream's state carries "this poll has read" from one
+  pairing to the next (`StreamState::read_before`, cleared when a poll
+  begins). Writes need no such bound: one poll writes only what the caller
+  handed it and what was queued. A read wakes its own task and returns
+  `Pending` in two places, both after the control records the connection
+  owed filled their backlog, which stops it reading until they are
+  written, and the poll wrote them all: in `write_before_reading` (the
+  records were queued behind a writer's, and the read wrote everything),
+  and at the end of `Stream::poll_fill_buf` (the backlog was full when the
+  poll began, or the poll's own reads filled it, and the answer the read
+  writes in any case emptied it). In both no transport waker is
+  registered, since the last read returned or none was made, and nothing
+  is left to write; the next poll reads, so the wake does not repeat. The
+  task returns to the scheduler and takes nothing from the budget.
 
 ### Kernel TLS offload (`browntls::kernel`)
 

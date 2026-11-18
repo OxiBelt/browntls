@@ -11,7 +11,7 @@ use browntls::pki_types::ServerName;
 use browntls::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState};
+use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
 
 mod early;
 use early::EarlyData;
@@ -354,16 +354,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_finish_early_for_read(cx))?;
-        common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            ready!(this.poll_finish_early_for_read(cx))?;
+            common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
-        ready!(this.poll_finish_early_for_read(cx))?;
-        common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        ready!(coop::poll_budget(cx));
+        let poll = match this.poll_finish_early_for_read(cx) {
+            Poll::Ready(Ok(())) => {
+                common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        };
+        coop::spend_if_ready(cx, poll)
     }
 
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
@@ -378,13 +389,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.st.begin_poll();
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
-            0 => common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf),
-            n => Poll::Ready(Ok(n)),
-        }
+        coop::budgeted(cx, |cx| {
+            match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
+                0 => common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf),
+                n => Poll::Ready(Ok(n)),
+            }
+        })
     }
 
     fn poll_write_vectored(
@@ -393,15 +407,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.st.begin_poll();
         if bufs.iter().all(|buf| buf.is_empty()) {
             return Poll::Ready(Ok(0));
         }
-        match ready!(this.poll_write_early(cx, bufs))? {
+        coop::budgeted(cx, |cx| match ready!(this.poll_write_early(cx, bufs))? {
             0 => {
                 common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
             }
             n => Poll::Ready(Ok(n)),
-        }
+        })
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -410,15 +425,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let poll = this.poll_finish_early(cx);
-        ready!(this.st.track(cx, poll))?;
-        common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            let poll = this.poll_finish_early(cx);
+            ready!(this.st.track(cx, poll))?;
+            common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let poll = this.poll_finish_early(cx);
-        ready!(this.st.track(cx, poll))?;
-        common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            let poll = this.poll_finish_early(cx);
+            ready!(this.st.track(cx, poll))?;
+            common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 }

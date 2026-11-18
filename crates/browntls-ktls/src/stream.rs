@@ -326,9 +326,9 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     ///
     /// While it is set, a read zeroes its buffer for up to a record's
     /// length behind the bytes it returns, and from the buffer's start
-    /// when it returns an error (`WouldBlock` included): the kernel's
-    /// first attempt may have left plaintext there that is not
-    /// application data.
+    /// when the kernel was asked and the read returns an error
+    /// (`WouldBlock` included): the kernel's first attempt may have left
+    /// plaintext there that is not application data.
     ///
     /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
     /// before 7.2 (a release candidate of 7.2 counts as one: the

@@ -16,7 +16,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// off after the handover). The peer then decides how often a record
     /// is decrypted twice, and a read zeroes its buffer for up to a
     /// record's length behind the bytes it returns (from the buffer's
-    /// start when it returns no bytes): see
+    /// start when the kernel was asked and gave none): see
     /// [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
     ///
     /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel

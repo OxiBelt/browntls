@@ -417,17 +417,24 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// buffer, so that a peer that pads corrupts what the application
     /// reads. The stream therefore refuses to set it on a kernel whose
     /// release (as `uname` gives it) is older, including an older kernel
-    /// that was given the correction.
+    /// that was given the correction. The release is all it can go by: a
+    /// kernel built from a 7.2 pre-release source under a release that
+    /// does not say so is taken for 7.2.
     ///
     /// While it is set, a read zeroes its buffer for up to a record's
-    /// length behind the bytes it returns: the kernel's first attempt may
-    /// have left plaintext there that is not application data.
+    /// length behind the bytes it returns, and from the buffer's start
+    /// when it returns an error (`WouldBlock` included): the kernel's
+    /// first attempt may have left plaintext there that is not
+    /// application data.
     ///
     /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
     /// before 7.2 (a release candidate of 7.2 counts as one: the
     /// correction came with the last of them), and for TLS 1.2, whose
     /// records have no padding and are decrypted into the reader's buffer
-    /// as they are. Taking it back where it was not set is no error.
+    /// as they are. Taking it back where this stream did not set it is no
+    /// error and does nothing: the stream knows only of what it set, not
+    /// of an option set on the descriptor behind its back, after which
+    /// its reads zero nothing.
     pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
         self.engine
             .set_rx_expect_no_pad(self.socket.as_fd(), expect)

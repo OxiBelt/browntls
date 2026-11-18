@@ -18,12 +18,15 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// read that has room for the whole record (`TLS_RX_EXPECT_NO_PAD`;
     /// off after the handover). The peer then decides how often a record
     /// is decrypted twice, and a read zeroes its buffer for up to a
-    /// record's length behind the bytes it returns: see
+    /// record's length behind the bytes it returns (from the buffer's
+    /// start when it returns no bytes): see
     /// [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
     ///
     /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
-    /// before Linux 7.2, which misplaces a padded record in the reader's
-    /// buffer, and for TLS 1.2, whose records have no padding.
+    /// before Linux 7.2 or a release candidate of 7.2, which misplace a
+    /// padded record in the reader's buffer, and for TLS 1.2, whose
+    /// records have no padding. Taking it back where this stream did not
+    /// set it is no error and does nothing.
     pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
         self.engine
             .set_rx_expect_no_pad(self.socket.as_fd(), expect)

@@ -278,6 +278,74 @@ fn a_peer_that_pads_after_all_is_read_right() {
     assert!(tls_stat("TlsRxNoPadViolation") > violations);
 }
 
+/// A padded record without content, and nothing behind it: a read on a
+/// non-blocking socket finds no data, but the kernel has decrypted the
+/// record into the read's buffer on the way. Nothing of it stays there.
+#[test]
+fn a_read_that_finds_no_data_leaves_nothing_of_a_padded_record() {
+    if !kernel_tls() || !no_pad_kernel() {
+        return;
+    }
+    let pki = Pki::new();
+    for suite in offloadable_suites().into_iter().filter(|s| tls13(*s)) {
+        let (client_tcp, server_tcp) = tcp_pair();
+        let (sent, all_sent) = mpsc::channel();
+        let (go_on, gone_on) = mpsc::channel::<()>();
+        thread::scope(|scope| {
+            let pki = &pki;
+            let server = scope.spawn(move || {
+                let config = pki.server_config(padding_suite(suite));
+                let conn = ServerConnection::new(Arc::new(config)).unwrap();
+                let mut tls = StreamOwned::new(conn, server_tcp);
+                assert_eq!(read_n(&mut tls, 5).unwrap(), b"hello", "{suite:?}");
+                tls.write_all(&[CONTENTLESS]).unwrap();
+                tls.flush().unwrap();
+                sent.send(()).unwrap();
+                gone_on.recv().unwrap();
+                tls.write_all(b"world").unwrap();
+                tls.conn.send_close_notify();
+                tls.flush().unwrap();
+                let mut rest = Vec::new();
+                tls.read_to_end(&mut rest).unwrap();
+                assert!(rest.is_empty());
+                // The client may have closed already.
+                let _ = tls.sock.shutdown(Shutdown::Both);
+            });
+            let mut tls = client_stream(pki, suite, client_tcp);
+            tls.set_rx_expect_no_pad(true).unwrap();
+            tls.write_all(b"hello").unwrap();
+            all_sent.recv().unwrap();
+            tls.get_ref().set_nonblocking(true).unwrap();
+            // Until the kernel has seen the record (its count of padded
+            // records has grown; other tests' records count too, which
+            // only ends the wait early), and at every read on the way.
+            let violations = tls_stat("TlsRxNoPadViolation");
+            let mut buf = vec![MARK; 4096];
+            for _ in 0..200 {
+                buf.fill(MARK);
+                let err = tls.read(&mut buf).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{suite:?}");
+                assert!(
+                    buf.iter().all(|byte| *byte == 0),
+                    "{suite:?}: {:02x?}",
+                    &buf[..8]
+                );
+                if tls_stat("TlsRxNoPadViolation") > violations {
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(tls_stat("TlsRxNoPadViolation") > violations, "{suite:?}");
+            tls.get_ref().set_nonblocking(false).unwrap();
+            go_on.send(()).unwrap();
+            assert_eq!(read_n(&mut tls, 5).unwrap(), b"world", "{suite:?}");
+            tls.send_close_notify().unwrap();
+            drop(tls);
+            server.join().unwrap();
+        });
+    }
+}
+
 /// Both ends in the kernel, both expecting unpadded records, each
 /// refreshing its keys: the kernel pads nothing it sends.
 #[test]

@@ -77,10 +77,47 @@
 //! # Splitting
 //!
 //! The streams are single objects, as TLS ties both directions to one
-//! connection state. [`tokio::io::split`] gives independent read and write
-//! halves for concurrent use from two tasks.
+//! connection state. `into_split` (on [`client::TlsStream`],
+//! [`server::TlsStream`] and [`TlsStream`]) gives a [`ReadHalf`] and a
+//! [`WriteHalf`] for concurrent use from two tasks, and
+//! [`ReadHalf::reunite`] gives the stream back. The halves take turns with
+//! the stream, one poll at a time, and never wait for each other's poll:
+//! a half that finds the other half's poll in progress returns `Pending`
+//! and is woken when that poll ends. Turns are not queued, so a half may
+//! be woken and find the stream taken again. If a poll of one half panics,
+//! every later operation of either half fails.
+//!
+//! [`tokio::io::split`] works too. It takes a blocking lock for every poll,
+//! so a worker thread polling one half waits while the other half's poll
+//! runs, record protection included; its halves panic after a panic in a
+//! poll, and it needs Tokio's `io-util` feature.
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
+//!
+//! # Cooperative scheduling
+//!
+//! With the `coop` feature (on by default) the streams and the handshake
+//! futures take part in Tokio's [cooperative scheduling], as Tokio's own
+//! sockets and channels do. An operation that completes takes one unit of
+//! the task's budget, and so does every read from the transport after the
+//! first in one poll (a peer decides how many records without plaintext, or
+//! how many pieces of a handshake, a read works through). Once the budget is
+//! spent, an operation returns `Pending` without doing anything and the
+//! task runs again after the others had their turn. So a task that is
+//! always ready cannot keep a worker thread to itself, even over a
+//! transport that takes no part in the budget. Over a transport that counts
+//! too, such as Tokio's sockets, an operation that reaches the transport
+//! takes the transport's unit as well, and the task yields that much
+//! sooner. [`unconstrained`] opts a future out.
+//!
+//! Outside a Tokio runtime the budget is unlimited. As with Tokio's own
+//! resources, do not drive a stream from another executor blocked inside a
+//! Tokio task (`futures::executor::block_on` in one, say): the budget is
+//! the Tokio task's, and once it is spent the stream waits for Tokio's
+//! scheduler, which does not run while its thread is blocked there.
+//!
+//! [cooperative scheduling]: https://docs.rs/tokio/1/tokio/task/coop/index.html
+//! [`unconstrained`]: https://docs.rs/tokio/1/tokio/task/coop/fn.unconstrained.html
 //!
 //! # Errors
 //!
@@ -99,7 +136,12 @@
 //! The crypto provider, protocol and compression features (`native`,
 //! `rustcrypto`, `tls12`, `logging`, `prefer-post-quantum`, `zlib`,
 //! `brotli`, `zstd`) are passed through to `browntls`. The default set
-//! matches `browntls`'s.
+//! matches `browntls`'s, plus `coop`.
+//!
+//! `coop` (default) enables the cooperative scheduling described above. It
+//! turns on Tokio's `rt` feature, where Tokio keeps the task budget; that
+//! adds no dependency, and an application that runs a Tokio runtime has it
+//! enabled already. Without `coop` the crate needs Tokio's I/O traits only.
 //!
 //! [`flush`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.flush
 //! [`shutdown`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.shutdown
@@ -130,9 +172,11 @@ macro_rules! ready {
 pub mod client;
 mod common;
 pub mod server;
+mod split;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};
 pub use server::{Accept, FallibleAccept, LazyConfigAcceptor, StartHandshake, TlsAcceptor};
+pub use split::{ReadHalf, ReuniteError, WriteHalf};
 
 /// A client or a server stream, for code that handles both.
 #[derive(Debug)]
@@ -171,6 +215,13 @@ impl<T> TlsStream<T> {
                 (io, session)
             }
         }
+    }
+
+    /// Splits the stream into a read half and a write half that two tasks
+    /// can use at the same time; see
+    /// [`client::TlsStream::into_split`].
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
     }
 }
 

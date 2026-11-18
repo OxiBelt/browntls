@@ -113,6 +113,54 @@ session storage) reads accepted early data through
 Early data can be replayed by an attacker: send only requests that are safe to
 repeat.
 
+## Unbuffered streams
+
+`browntls_tokio::unbuffered` has the same connector, acceptor and lazy
+acceptor over browntls's unbuffered connection API. Its streams decrypt each
+record where the transport put it, in one receive buffer of 18 437 bytes:
+`AsyncBufRead` lends that plaintext without a copy, one record per
+`fill_buf`, and `AsyncRead` copies it once (the streams above allocate per
+record and copy the plaintext once for `AsyncBufRead`, twice for
+`AsyncRead`). A write encrypts up to 65 536 bytes straight into the bytes
+the transport is given.
+
+```rust,no_run
+use std::sync::Arc;
+
+use browntls_tokio::browntls::ServerConfig;
+use browntls_tokio::unbuffered::TlsAcceptor;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> {
+    let mut tls = TlsAcceptor::from(config).accept(tcp).await?;
+    loop {
+        // The plaintext of one record, borrowed from the receive buffer.
+        let record = tls.fill_buf().await?.to_vec();
+        if record.is_empty() {
+            break; // the peer's close_notify
+        }
+        tls.consume(record.len());
+        tls.write_all(&record).await?;
+        tls.flush().await?;
+    }
+    tls.shutdown().await
+}
+```
+
+`get_ref` gives an `UnbufferedClientConnection` or
+`UnbufferedServerConnection` (the negotiated parameters and exporters, no
+reader, writer or I/O methods), and `into_parts` the connection with the
+stream's buffers. The unbuffered connector does not send 0-RTT early data; a
+server's accepted early data is collected during the handshake
+(`TlsStream::early_data`). While more than 16 KiB of answers to the peer are
+unwritten, reads take no more input.
+
+Two things under Behaviour below are not there for these streams yet: they
+have no `into_split` (`tokio::io::split` splits them), and the `coop` feature
+does not cover them, so they take nothing from the task budget themselves (a
+transport that counts, such as Tokio's sockets, still does).
+
 ## Behaviour
 
 - **Flushing.** Records the transport does not take at once stay queued: call

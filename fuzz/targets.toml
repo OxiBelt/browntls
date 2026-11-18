@@ -59,6 +59,10 @@ sources = ["crates/browntls/src/kernel.rs", "crates/browntls/src/**"]
 topic = "tls-connection"
 sources = ["crates/browntls-tokio/src/**", "crates/browntls/src/conn/**", "crates/browntls/src/server/server_conn/**", "crates/browntls/src/client/client_conn.rs"]
 
+[targets.tls_tokio_unbuffered]
+topic = "tls-connection"
+sources = ["crates/browntls-tokio/src/**", "crates/browntls/src/unbuffered.rs", "crates/browntls/src/conn.rs", "crates/browntls/src/conn/**", "crates/browntls/src/server/server_conn/**", "crates/browntls/src/client/client_conn.rs"]
+
 [targets.tls_config]
 topic = "tls-config"
 sources = [

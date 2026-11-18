@@ -88,6 +88,11 @@ pub const TARGETS: &[Target] = &[
     ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),
     ("tls_codec", crate::tls_codec::run, crate::tls_codec::seeds),
     ("tls_tokio", crate::tls_tokio::run, crate::tls_tokio::seeds),
+    (
+        "tls_tokio_unbuffered",
+        crate::tls_tokio_unbuffered::run,
+        crate::tls_tokio_unbuffered::seeds,
+    ),
 ];
 
 fn identity() -> Identity {

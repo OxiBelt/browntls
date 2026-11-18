@@ -4,7 +4,8 @@
 //! "Security requirements"): the socket options and the `sendmsg`/`recvmsg`
 //! control messages of kernel TLS have no safe wrapper in the standard
 //! library, nor has asking the kernel whether a socket has room to send
-//! (`poll`). Every function here keeps these invariants:
+//! (`poll`) or how many bytes TCP holds unacknowledged (`ioctl`). Every
+//! function here keeps these invariants:
 //!
 //! * the descriptor is a [`BorrowedFd`], open for the whole call;
 //! * every pointer passed to the kernel points into a live Rust value
@@ -219,11 +220,23 @@ pub(crate) fn send_record(fd: BorrowedFd<'_>, typ: u8, payload: &[u8]) -> io::Re
     }
 }
 
-/// Whether the socket has room to send right now, as the kernel reports it
-/// (`poll` with no timeout, so it never waits). An error or a hang-up
-/// pending on the socket counts as room: the next call reports it.
+/// What the kernel reports about sending on a socket right now.
 #[cfg(feature = "tokio")]
-pub(crate) fn writable(fd: BorrowedFd<'_>) -> io::Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Room {
+    /// No room: a send would wait.
+    Full,
+    /// Room to send.
+    Free,
+    /// An error or a hang-up is pending on the socket: nothing more will
+    /// be sent, and the next call reports why.
+    Ended,
+}
+
+/// Whether the socket has room to send right now, as the kernel reports it
+/// (`poll` with no timeout, so it never waits).
+#[cfg(feature = "tokio")]
+pub(crate) fn room(fd: BorrowedFd<'_>) -> io::Result<Room> {
     let mut entry = libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLOUT,
@@ -234,14 +247,109 @@ pub(crate) fn writable(fd: BorrowedFd<'_>) -> io::Result<bool> {
         // the kernel writes only its `revents`. `fd` is open for the call.
         let rc = unsafe { libc::poll(&mut entry, 1, 0) };
         if rc >= 0 {
-            let ready = libc::POLLOUT | libc::POLLERR | libc::POLLHUP;
-            return Ok(entry.revents & ready != 0);
+            return Ok(if entry.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                Room::Ended
+            } else if entry.revents & libc::POLLOUT != 0 {
+                Room::Free
+            } else {
+                Room::Full
+            });
         }
         let err = io::Error::last_os_error();
         if err.kind() != io::ErrorKind::Interrupted {
             return Err(err);
         }
     }
+}
+
+/// The record sequence number the kernel will give the next record it
+/// makes for transmission: read back with `TLS_TX`, which wants the whole
+/// `tls12_crypto_info_*` structure of the cipher (`info_len` bytes) and
+/// ends it with the number.
+///
+/// The kernel fills in the key as well; the buffer is wiped before this
+/// returns, whatever the outcome.
+pub(crate) fn tx_record_seq(fd: BorrowedFd<'_>, info_len: usize) -> io::Result<u64> {
+    let mut info = [0u8; crate::crypto_info::MAX_LEN];
+    let result = match info.get_mut(..info_len) {
+        Some(value) if info_len >= 12 => {
+            getsockopt(fd, libc::SOL_TLS, TLS_TX, value).and_then(|len| {
+                let seq = value.last_chunk::<8>().filter(|_| len == info_len);
+                seq.map(|seq| u64::from_be_bytes(*seq))
+                    .ok_or_else(|| io::Error::other("kernel TLS returned another structure"))
+            })
+        }
+        _ => Err(io::ErrorKind::InvalidInput.into()),
+    };
+    info.fill(0);
+    // Keeps the wipe from being removed as a dead store.
+    core::hint::black_box(&mut info);
+    result
+}
+
+/// Where `tcpi_bytes_acked` (a native-endian `u64`) lies in `struct
+/// tcp_info` (`include/uapi/linux/tcp.h`, Linux 4.1): after eight bytes of
+/// small fields, twenty-four `u32`s and two `u64`s, on every architecture.
+const TCP_INFO_BYTES_ACKED: usize = 120;
+
+/// `tcpi_bytes_acked`: the bytes of this socket's output the peer has
+/// acknowledged since the connection began.
+fn tcp_bytes_acked(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut info = [0u8; TCP_INFO_BYTES_ACKED + 8];
+    let len = getsockopt(fd, libc::SOL_TCP, libc::TCP_INFO, &mut info)?;
+    match info.last_chunk::<8>() {
+        Some(acked) if len == info.len() => Ok(u64::from_ne_bytes(*acked)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP_INFO does not report the acknowledged bytes",
+        )),
+    }
+}
+
+/// `SIOCOUTQ`: the bytes TCP holds for this socket that the peer has not
+/// acknowledged, sent or not.
+fn tcp_bytes_unacked(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut queued: c_int = 0;
+    // SAFETY: `SIOCOUTQ` (the value of `TIOCOUTQ`) writes one `int` through
+    // the pointer, which points to a live, writable `c_int`, during the
+    // call only; `fd` is open for the call.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCOUTQ, &mut queued as *mut c_int) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    u64::try_from(queued).map_err(|_| io::Error::other("TCP reported a negative queue length"))
+}
+
+/// How far TCP has come with what the socket was given to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TcpOutput {
+    /// Bytes TCP has taken since the connection began (a SYN counts as
+    /// one), acknowledged or not. Never more than it has really taken;
+    /// exactly that when `steady`.
+    pub(crate) taken: u64,
+    /// Whether TCP holds bytes the peer has not acknowledged.
+    pub(crate) in_flight: bool,
+    /// No acknowledgement arrived while the two counters were read, so
+    /// `taken` is exact.
+    pub(crate) steady: bool,
+}
+
+/// Reads how many bytes TCP has taken from the socket's sender: the
+/// acknowledged ones plus the ones it still holds.
+///
+/// The two counters come from two calls. The acknowledged count only
+/// grows, so it is read on both sides of the other: when both readings
+/// agree, no byte moved from one counter to the other in between and the
+/// sum is exact; otherwise the sum with the first reading is a lower bound.
+pub(crate) fn tcp_output(fd: BorrowedFd<'_>) -> io::Result<TcpOutput> {
+    let acked = tcp_bytes_acked(fd)?;
+    let unacked = tcp_bytes_unacked(fd)?;
+    let steady = tcp_bytes_acked(fd)? == acked;
+    Ok(TcpOutput {
+        taken: acked.saturating_add(unacked),
+        in_flight: unacked != 0,
+        steady,
+    })
 }
 
 /// One plain `send` of application data: the kernel closes its last record

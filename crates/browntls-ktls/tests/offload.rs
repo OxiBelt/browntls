@@ -68,21 +68,37 @@ fn both_ends_offloaded_for_every_suite() {
                     tls.refresh_traffic_keys().unwrap();
                 }
                 tls.write_all(&down).unwrap();
+                assert_eq!(read_n(&mut tls, 16).unwrap(), b"after the answer");
+                assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
                 // The client's close_notify, after its KeyUpdate answer.
                 let mut rest = Vec::new();
                 tls.read_to_end(&mut rest).unwrap();
                 assert!(rest.is_empty());
                 assert!(tls.kernel_connection().peer_has_closed());
                 tls.send_close_notify().unwrap();
+                assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             });
             let mut tls = client_stream(&pki, suite, client_tcp);
+            // A blocking socket: the kernel holds nothing back after a
+            // call, and its counters agree with the stream's to the byte,
+            // across records of every kind and new keys.
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             tls.write_all(&up[..LEN / 2]).unwrap();
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             if tls13(suite) {
                 tls.refresh_traffic_keys().unwrap();
+                assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             }
             tls.write_all(&up[LEN / 2..]).unwrap();
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
+            // Reading answers the server's KeyUpdate with one under the
+            // old keys, then installs new ones.
             assert_eq!(read_n(&mut tls, LEN).unwrap(), down, "{suite:?}");
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
+            tls.write_all(b"after the answer").unwrap();
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             tls.send_close_notify().unwrap();
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
             let mut rest = Vec::new();
             tls.read_to_end(&mut rest).unwrap();
             assert!(rest.is_empty());
@@ -234,6 +250,16 @@ fn a_smaller_record_size_limit_reaches_the_kernel() {
                 "{suite:?}"
             );
             tls.write_all(&up).unwrap();
+            // Counted by the records the kernel made, far more than the
+            // protocol's largest would have been.
+            assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
+            // Bytes sent past the stream end its count.
+            tls.records_sent(0).unwrap();
+            assert_eq!(
+                tls.unsent().unwrap_err().kind(),
+                io::ErrorKind::Unsupported,
+                "{suite:?}"
+            );
             let mut rest = Vec::new();
             tls.read_to_end(&mut rest).unwrap();
             assert!(rest.is_empty());

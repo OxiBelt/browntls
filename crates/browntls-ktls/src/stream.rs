@@ -266,6 +266,32 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
         self.engine.refresh_traffic_keys(self.socket.as_fd())
     }
 
+    /// How many bytes of TLS records the kernel has accepted from this
+    /// stream and not yet given to TCP.
+    ///
+    /// Zero means that everything written so far, control records
+    /// included, is in TCP's hands, which delivers it or reports a failure
+    /// as for any socket: the write side can then be shut, or the socket
+    /// closed, without cutting the stream short. On a blocking socket
+    /// without a send timeout this is zero after every call. On other
+    /// sockets the kernel sends what is left when TCP has room, so wait
+    /// until the socket is writable and ask again. The number may be
+    /// reported higher than it is when acknowledgements kept arriving
+    /// while it was read, never lower.
+    ///
+    /// It is worked out from two counters the kernel keeps (the records it
+    /// has made and the bytes TCP has taken) and the plaintext this stream
+    /// handed over. The error is [`io::ErrorKind::Unsupported`] when the
+    /// stream has no such count: the counters could not be read at the
+    /// handover, or bytes were sent on the socket directly
+    /// ([`Self::records_sent`]). Any other error means the counters cannot
+    /// be read or do not fit together, as after the write side was shut
+    /// (TCP counts the FIN).
+    pub fn unsent(&self) -> io::Result<u64> {
+        let backlog = self.engine.backlog(self.socket.as_fd())?;
+        Ok(backlog.unsent)
+    }
+
     /// Sends `close_notify`; nothing can be written afterwards. The socket
     /// stays open for reading the rest of the peer's data. `WouldBlock`
     /// means it waits for room: call [`Write::flush`] until it succeeds.

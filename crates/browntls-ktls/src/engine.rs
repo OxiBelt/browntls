@@ -303,16 +303,41 @@ impl<Data: SideData> Engine<Data> {
     /// what the kernel decrypts. Records of other types are handled on the
     /// way. `Ok(0)` (for a non-empty `buf`) is the peer's `close_notify`.
     pub(crate) fn read(&mut self, fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if let Some(n) = self.read_with_budget(fd, buf, None)? {
+                return Ok(n);
+            }
+        }
+    }
+
+    /// [`Self::read`], stopping before another receive when `budget` is
+    /// exhausted. `None` leaves the record in the socket for a later call.
+    #[cfg(feature = "tokio")]
+    pub(crate) fn read_bounded(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8],
+        budget: &mut usize,
+    ) -> io::Result<Option<usize>> {
+        self.read_with_budget(fd, buf, Some(budget))
+    }
+
+    fn read_with_budget(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8],
+        mut budget: Option<&mut usize>,
+    ) -> io::Result<Option<usize>> {
         if buf.is_empty() {
-            return Ok(0);
+            return Ok(Some(0));
         }
         if let Some(n) = self.read_pending(buf) {
-            return Ok(n);
+            return Ok(Some(n));
         }
         loop {
             self.check()?;
             if self.conn.peer_has_closed() {
-                return Ok(0);
+                return Ok(Some(0));
             }
             // Keys to install come before the next record; answers owed are
             // sent when there is room (or by the next write or flush).
@@ -324,6 +349,9 @@ impl<Data: SideData> Engine<Data> {
             } else {
                 buf
             };
+            if !take_read_budget(&mut budget) {
+                return Ok(None);
+            }
             let received = match sys::recv(fd, into, false) {
                 Ok(received) => received,
                 Err(err) if err.raw_os_error() == Some(libc::EKEYEXPIRED) => {
@@ -354,7 +382,7 @@ impl<Data: SideData> Engine<Data> {
                     continue;
                 }
                 self.conn.application_data_received();
-                return Ok(received.len);
+                return Ok(Some(received.len));
             }
             let (_, bytes) = self.control.get_or_insert_with(|| (typ, Vec::new()));
             if continuing.is_some() {
@@ -424,6 +452,19 @@ impl<Data: SideData> Engine<Data> {
     }
 }
 
+/// Takes the budget for one receive. An absent budget is unlimited for the
+/// synchronous stream, whose `Read` call keeps its blocking semantics.
+fn take_read_budget(budget: &mut Option<&mut usize>) -> bool {
+    let Some(remaining) = budget else {
+        return true;
+    };
+    if **remaining == 0 {
+        return false;
+    }
+    **remaining -= 1;
+    true
+}
+
 impl<Data> fmt::Debug for Engine<Data> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Engine")
@@ -447,4 +488,22 @@ fn install_keys(
 
 pub(crate) fn invalid_data(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_read_budget;
+
+    #[test]
+    fn bounded_reads_stop_at_the_budget() {
+        let mut remaining = 2;
+        let mut budget = Some(&mut remaining);
+        assert!(take_read_budget(&mut budget));
+        assert!(take_read_budget(&mut budget));
+        assert!(!take_read_budget(&mut budget));
+        assert_eq!(remaining, 0);
+
+        let mut unlimited = None;
+        assert!(take_read_budget(&mut unlimited));
+    }
 }

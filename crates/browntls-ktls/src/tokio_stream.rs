@@ -5,7 +5,9 @@
 //! are the ones [`KtlsStream`](crate::KtlsStream) makes, through the same
 //! [`Engine`], each inside `TcpStream::try_io` so that a call that finds
 //! the socket not ready clears Tokio's readiness and the task is woken
-//! when it changes.
+//! when it changes. A read also limits how many receives it performs in one
+//! poll, then wakes itself and yields so control-only records cannot starve
+//! other tasks.
 
 use std::fmt;
 use std::io;
@@ -27,6 +29,10 @@ use crate::drain::{Drain, Outcome, Room};
 use crate::engine::Engine;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
+
+/// The most kernel receives one read poll performs while looking for
+/// application data. Every receive may process one peer-controlled record.
+const READS_PER_POLL: usize = 64;
 
 /// Why a `browntls-tokio` stream was not handed to the kernel
 /// ([`AsyncKtlsStream::from_client`], [`AsyncKtlsStream::from_server`]).
@@ -602,6 +608,7 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
+        let mut budget = READS_PER_POLL;
         loop {
             // Plaintext from before the handover, the peer's closure and a
             // failure are reported without asking the kernel.
@@ -617,24 +624,32 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
             let Self { socket, engine, .. } = &mut *this;
             let fd = socket.as_fd();
             let result = if direct {
-                engine.read(fd, buf.initialize_unfilled())
+                engine.read_bounded(fd, buf.initialize_unfilled(), &mut budget)
             } else {
                 // Fails with `WouldBlock` only when the kernel has no
                 // record to give.
                 socket.try_io(Interest::READABLE, || {
-                    engine.read(fd, buf.initialize_unfilled())
+                    engine.read_bounded(fd, buf.initialize_unfilled(), &mut budget)
                 })
             };
             match result {
-                Ok(n) => {
+                Ok(Some(n)) => {
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
                 }
+                Ok(None) => return yield_read_budget(cx),
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                 Err(err) => return Poll::Ready(Err(err)),
             }
         }
     }
+}
+
+/// Cooperatively yields after bounded peer-controlled work while ensuring
+/// the task is polled again even when socket readiness has not changed.
+fn yield_read_budget(cx: &Context<'_>) -> Poll<io::Result<()>> {
+    cx.waker().wake_by_ref();
+    Poll::Pending
 }
 
 impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
@@ -796,6 +811,16 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn an_exhausted_read_budget_wakes_the_task() {
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let cx = Context::from_waker(&waker);
+
+        assert!(yield_read_budget(&cx).is_pending());
+        assert!(woken.0.load(Ordering::SeqCst));
     }
 
     /// The wait `shutdown` makes before the FIN, on plain TCP: the socket

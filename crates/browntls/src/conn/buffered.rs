@@ -400,10 +400,22 @@ impl Debug for Reader<'_> {
 ///
 /// Before the handshake completes, writes are buffered (subject to the
 /// buffer limit) and sent once it does.
+///
+/// `write_vectored` takes its buffers as one write: they share records and
+/// are not copied together first. A call with more than 64 non-empty
+/// buffers is taken as consecutive writes of 64 buffers each, so the
+/// records of the earlier ones count against the buffer limit for the
+/// later ones.
 #[cfg(feature = "std")]
 pub struct Writer<'a> {
     sink: &'a mut (dyn PlaintextSink + Send + Sync),
 }
+
+/// How many buffers [`Writer`]'s `write_vectored` hands the record layer at
+/// a time: they are gathered on the stack, so the call allocates nothing for
+/// them.
+#[cfg(feature = "std")]
+const MAX_VECTORED_SLICES: usize = 64;
 
 /// Where a [`Writer`] puts plaintext.
 #[cfg(feature = "std")]
@@ -450,9 +462,33 @@ impl std::io::Write for Writer<'_> {
     }
 
     fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        let slices: alloc::vec::Vec<&[u8]> = bufs.iter().map(|s| &**s).collect();
-        let chunks = crate::msgs::message::OutboundChunks::new(&slices);
-        self.sink.write_plain(chunks)
+        let mut bufs = bufs.iter().filter(|buf| !buf.is_empty()).peekable();
+        let mut total = 0;
+        loop {
+            let mut slices: [&[u8]; MAX_VECTORED_SLICES] = [&[]; MAX_VECTORED_SLICES];
+            let mut count = 0;
+            let mut len = 0;
+            for (slot, buf) in slices.iter_mut().zip(&mut bufs) {
+                *slot = buf;
+                count += 1;
+                len += buf.len();
+            }
+            let chunks = crate::msgs::message::OutboundChunks::new(&slices[..count]);
+            // More buffers than one round holds are taken as consecutive
+            // writes, as long as each is taken whole.
+            let taken = match self.sink.write_plain(chunks) {
+                Ok(taken) => taken,
+                // Bytes taken by an earlier round are reported first; the
+                // error is permanent, so the next write returns it.
+                Err(_) if total > 0 => break,
+                Err(err) => return Err(err),
+            };
+            total += taken;
+            if taken < len || bufs.peek().is_none() {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

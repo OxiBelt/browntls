@@ -900,3 +900,5 @@ fn writes_into_a_full_send_buffer_queue_no_records() {
     let mut received = vec![0; taken + 1];
     assert_eq!(server.reader().read(&mut received).unwrap(), taken);
 }
+
+include!("api/vectored_writes.rs");

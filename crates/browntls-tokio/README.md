@@ -155,6 +155,54 @@ Taking a stream apart with `into_inner` instead drops what only the stream
 holds (an unfinished 0-RTT phase, a read error kept for the next read), and
 the connection then refuses the handover while anything is in flight.
 
+## Unbuffered streams
+
+`browntls_tokio::unbuffered` has the same connector, acceptor and lazy
+acceptor over browntls's unbuffered connection API. Its streams decrypt each
+record where the transport put it, in one receive buffer of 18 437 bytes:
+`AsyncBufRead` lends that plaintext without a copy, one record per
+`fill_buf`, and `AsyncRead` copies it once (the streams above allocate per
+record and copy the plaintext once for `AsyncBufRead`, twice for
+`AsyncRead`). A write encrypts up to 65 536 bytes straight into the bytes
+the transport is given.
+
+```rust,no_run
+use std::sync::Arc;
+
+use browntls_tokio::browntls::ServerConfig;
+use browntls_tokio::unbuffered::TlsAcceptor;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> {
+    let mut tls = TlsAcceptor::from(config).accept(tcp).await?;
+    loop {
+        // The plaintext of one record, borrowed from the receive buffer.
+        let record = tls.fill_buf().await?.to_vec();
+        if record.is_empty() {
+            break; // the peer's close_notify
+        }
+        tls.consume(record.len());
+        tls.write_all(&record).await?;
+        tls.flush().await?;
+    }
+    tls.shutdown().await
+}
+```
+
+`get_ref` gives an `UnbufferedClientConnection` or
+`UnbufferedServerConnection` (the negotiated parameters and exporters, no
+reader, writer or I/O methods), and `into_parts` the connection with the
+stream's buffers. The unbuffered connector does not send 0-RTT early data; a
+server's accepted early data is collected during the handshake
+(`TlsStream::early_data`). While more than 16 KiB of answers to the peer are
+unwritten, reads take no more input.
+
+Two things under Behaviour below are not there for these streams yet: they
+have no `into_split` (`tokio::io::split` splits them), and the `coop` feature
+does not cover them, so they take nothing from the task budget themselves (a
+transport that counts, such as Tokio's sockets, still does).
+
 ## Behaviour
 
 - **Flushing.** Records the transport does not take at once stay queued: call
@@ -163,9 +211,24 @@ the connection then refuses the handover while anything is in flight.
   write side; later writes fail with `BrokenPipe` (RFC 9846 §6.1). The peer's
   `close_notify` reads as end of file; a transport that ends without one fails
   the read with `UnexpectedEof` (a truncation).
-- **Splitting.** `tokio::io::split` gives read and write halves for two tasks.
+- **Splitting.** `into_split` on a stream gives a `ReadHalf` and a
+  `WriteHalf` for two tasks, and `reunite` gives the stream back. TLS ties
+  both directions to one connection state, so the halves take turns with the
+  stream, one poll at a time. They never wait for each other's poll: a half
+  that finds the other half's poll in progress returns `Pending` and is
+  woken when that poll ends (turns are not queued, so it may find the stream
+  taken again). If a poll of one half panics, every later operation of
+  either half fails. `tokio::io::split` works too; it takes a blocking
+  lock for every poll (a worker thread waits while the other half's poll
+  runs, record protection included) and needs Tokio's `io-util` feature.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
   `browntls::Error` (`err.get_ref()` then `downcast_ref`).
+- **Handshake state.** The handshake futures (`Connect`, `Accept` and their
+  fallible forms) give the connection through `connection()` and
+  `connection_mut()` while the handshake runs, as `get_ref()` gives the
+  transport: a caller that polls the future itself can see, say, the server
+  name and ALPN protocol as soon as the ClientHello was processed (not
+  authenticated until the handshake completes).
 - **Answers.** A read that receives a message calling for an answer (a TLS
   1.3 `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`)
   writes the answer at once if the transport has room, so a task that only
@@ -174,12 +237,35 @@ the connection then refuses the handover while anything is in flight.
   read takes no more input and waits for the transport to take them (a
   write on another task that sends them wakes it), so a peer that keeps
   asking and reads nothing cannot make them pile up.
+- **Cooperative scheduling.** With the `coop` feature the streams and
+  handshake futures take part in Tokio's
+  [cooperative scheduling](https://docs.rs/tokio/1/tokio/task/coop/index.html),
+  as Tokio's sockets and channels do: an operation that completes takes one
+  unit of the task's budget, and so does every read from the transport after
+  the first in one poll. Once the budget is spent, an operation returns
+  `Pending` and the task runs again after the others had their turn. A task
+  that is always ready (a peer that sends faster than it is read, a transport
+  that never waits) therefore cannot keep a worker thread to itself, whether
+  or not the transport counts against the budget. Over a transport that
+  counts too (Tokio's sockets), an operation that reaches it takes the
+  transport's unit as well, so the task yields that much sooner. Wrap a
+  future in `tokio::task::coop::unconstrained` to opt out for that future.
+  As with Tokio's own resources, do not drive a stream from another executor
+  blocked inside a Tokio task: a spent budget waits for Tokio's scheduler,
+  which does not run meanwhile.
 
 ## Features
 
 `native` (default), `rustcrypto`, `tls12` (default), `logging` (default),
 `prefer-post-quantum` (default), `zlib`, `brotli` and `zstd` are passed through
 to `browntls`.
+
+`coop` (default) makes the streams take part in Tokio's cooperative
+scheduling (see above). It enables Tokio's `rt` feature, which is where Tokio
+keeps the task budget; `rt` adds no dependency, and an application that runs
+a Tokio runtime has it enabled already. Without `coop` the crate uses Tokio's
+I/O traits only and takes nothing from the budget itself (a transport that
+counts still does).
 
 ## Minimum supported Rust and Tokio versions
 

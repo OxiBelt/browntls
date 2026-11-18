@@ -102,7 +102,7 @@ impl MessageDecrypter for Plain {
 /// The native provider, optionally with the identity transform in place of
 /// every TLS 1.3 AEAD. Key exchange, key schedule, signatures and the TLS
 /// 1.2 suites stay real.
-fn provider(plain: bool) -> Arc<CryptoProvider> {
+pub(crate) fn provider(plain: bool) -> Arc<CryptoProvider> {
     let mut provider = native::default_provider();
     if plain {
         for suite in &mut provider.cipher_suites {

@@ -21,7 +21,11 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["native", "tls12", "logging", "prefer-post-quantum"]
+default = ["native", "tls12", "logging", "prefer-post-quantum", "coop"]
+# Take part in Tokio's cooperative scheduling (`tokio::task::coop`), which
+# Tokio offers with its `rt` feature only. `rt` adds no dependency, and any
+# application that runs a Tokio runtime enables it already.
+coop = ["tokio/rt"]
 # Feature pass-through to `browntls`; see its manifest for what each does.
 native = ["browntls/native"]
 rustcrypto = ["browntls/rustcrypto"]
@@ -34,8 +38,9 @@ zstd = ["browntls/zstd"]
 
 [dependencies]
 browntls = { workspace = true, features = ["std"] }
-# Only the I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`),
-# which need no tokio feature: the runtime is the caller's.
+# The I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), which
+# need no tokio feature: the runtime is the caller's. The `coop` feature adds
+# `rt` for the task budget.
 tokio = { workspace = true }
 
 [dev-dependencies]

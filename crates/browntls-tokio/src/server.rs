@@ -10,8 +10,9 @@ use std::task::{Context, Poll};
 use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState};
+use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
 use crate::kernel::IntoKernelHandoff;
+use crate::split::{self, ReadHalf, WriteHalf};
 
 mod lazy;
 pub use lazy::{LazyConfigAcceptor, StartHandshake};
@@ -98,20 +99,35 @@ impl<IO> Accept<IO> {
 
     /// The transport, unless the future already returned.
     pub fn get_ref(&self) -> Option<&IO> {
-        match &self.0 {
-            MidHandshake::Handshaking(stream) => Some(&stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io()
     }
 
     /// The transport, unless the future already returned.
     pub fn get_mut(&mut self) -> Option<&mut IO> {
-        match &mut self.0 {
-            MidHandshake::Handshaking(stream) => Some(&mut stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs, for a caller that polls
+    /// this future itself and looks at the handshake between polls: once
+    /// the ClientHello was processed, the server name, the ALPN protocol
+    /// and the cipher suite are known, before the client's Finished
+    /// arrives. Until the handshake completes, what it shows is not
+    /// authenticated: the ClientHello may have been altered on the way.
+    ///
+    /// `None` once the future returned, and when there is no connection:
+    /// it could not be created, or the configuration could not serve the
+    /// ClientHello ([`StartHandshake::into_stream`]); the future then
+    /// fails.
+    pub fn connection(&self) -> Option<&ServerConnection> {
+        self.0.session()
+    }
+
+    /// Like [`connection`](Self::connection), for calls that need `&mut`.
+    ///
+    /// The future drives the connection's I/O: reading or writing TLS
+    /// records or plaintext through this reference disturbs the handshake.
+    pub fn connection_mut(&mut self) -> Option<&mut ServerConnection> {
+        self.0.session_mut()
     }
 }
 
@@ -132,6 +148,30 @@ impl<IO> fmt::Debug for Accept<IO> {
 /// Like [`Accept`], but an error comes with the transport.
 #[must_use = "futures do nothing unless polled"]
 pub struct FallibleAccept<IO>(MidHandshake<TlsStream<IO>>);
+
+impl<IO> FallibleAccept<IO> {
+    /// The transport, unless the future already returned.
+    pub fn get_ref(&self) -> Option<&IO> {
+        self.0.io()
+    }
+
+    /// The transport, unless the future already returned.
+    pub fn get_mut(&mut self) -> Option<&mut IO> {
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Accept::connection`].
+    pub fn connection(&self) -> Option<&ServerConnection> {
+        self.0.session()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Accept::connection_mut`].
+    pub fn connection_mut(&mut self) -> Option<&mut ServerConnection> {
+        self.0.session_mut()
+    }
+}
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleAccept<IO> {
     type Output = Result<TlsStream<IO>, (io::Error, IO)>;
@@ -185,6 +225,17 @@ impl<IO> TlsStream<IO> {
     pub fn into_inner(self) -> (IO, ServerConnection) {
         (self.io, self.session)
     }
+
+    /// Splits the stream into a read half and a write half that two tasks
+    /// can use at the same time.
+    ///
+    /// The halves share the stream and take turns with it, one poll at a
+    /// time. Neither ever blocks its thread for the other: a half that
+    /// finds the other's poll in progress returns `Pending` and is woken
+    /// when that poll ends. [`ReadHalf::reunite`] puts them back together.
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
+    }
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
@@ -216,6 +267,10 @@ impl<IO> IoSession for TlsStream<IO> {
         false
     }
 
+    fn refs(&self) -> (&IO, &ServerConnection) {
+        (&self.io, &self.session)
+    }
+
     fn parts(&mut self) -> (&mut StreamState, &mut IO, &mut ServerConnection) {
         (&mut self.st, &mut self.io, &mut self.session)
     }
@@ -232,14 +287,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
-        common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        ready!(coop::poll_budget(cx));
+        let poll = common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx);
+        coop::spend_if_ready(cx, poll)
     }
 
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
@@ -254,7 +315,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 
     fn poll_write_vectored(
@@ -263,7 +327,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
+        })
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -272,11 +339,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 }

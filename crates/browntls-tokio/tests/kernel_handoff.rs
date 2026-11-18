@@ -351,6 +351,39 @@ async fn plaintext_read_ahead_is_returned_in_order() {
     }
 }
 
+/// A stream put back together from its halves hands over like any other:
+/// what the read half read ahead comes back in order, behind what it gave
+/// out, and what the write half wrote has reached the peer.
+#[tokio::test]
+async fn a_reunited_stream_is_handed_over() {
+    for version in versions() {
+        let Ends {
+            client, mut server, ..
+        } = connect(version, |_, _| ()).await;
+        let down = pattern(50_000);
+        server.write_all(&down).await.unwrap();
+        server.flush().await.unwrap();
+
+        let (mut read, mut write) = client.into_split();
+        let mut first = [0u8; 10];
+        read.read_exact(&mut first).await.unwrap();
+        let up = b"from the write half";
+        write.write_all(up).await.unwrap();
+        let client = read.reunite(write).unwrap();
+
+        let (mut kernel, mut got) = timeout(LIMIT, client_kernel(client)).await.unwrap();
+        assert!(!got.is_empty(), "{version:?}");
+        got.extend(kernel.receive().await);
+        assert_eq!([&first[..], &got].concat(), down, "{version:?}");
+        let mut sent = [0u8; 19];
+        timeout(LIMIT, server.read_exact(&mut sent))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&sent, up, "{version:?}");
+    }
+}
+
 /// Records the transport would not take are written before the handover,
 /// ahead of what the kernel sends.
 #[tokio::test]

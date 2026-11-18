@@ -17,7 +17,8 @@
 //!   that outlives the call, with its length given next to it where the
 //!   call takes one, and only values borrowed mutably here are written;
 //!   a null pointer is passed only where the call takes one to mean that
-//!   it shall return nothing there (`sigtimedwait`, `pthread_sigmask`);
+//!   it shall return nothing there (`sigtimedwait`, `pthread_sigmask`) or,
+//!   in the tests, change nothing (`pthread_sigmask` reading the mask);
 //! * control messages are built and read only through the libc `CMSG_*`
 //!   functions, within a buffer aligned for `cmsghdr` and sized with
 //!   `CMSG_SPACE`, and a received control message is read only when its
@@ -28,11 +29,13 @@
 //! * a buffer the kernel wrote key material into (`TLS_TX` read back) is
 //!   wiped before the function returns;
 //! * the descriptors' flags are never changed;
-//! * no signal's disposition is changed, and the calling thread's signal
-//!   mask is changed only to hold `SIGPIPE` back for as long as a
+//! * no signal's disposition is changed (but by the tests, which count
+//!   `SIGPIPE` with a handler of their own), and the calling thread's
+//!   signal mask is changed only to hold `SIGPIPE` back for as long as a
 //!   [`HeldSigpipe`] lives (the length of a `sendfile`, or of the close of
-//!   a socket that sent files), after which the mask is what it was
-//!   before. Only a `SIGPIPE` that became pending in that time is taken.
+//!   a socket that sent files), after which `SIGPIPE` is blocked or not as
+//!   it was before. Only a `SIGPIPE` that became pending in that time is
+//!   taken, whatever raised it.
 
 #![allow(unsafe_code)]
 
@@ -514,7 +517,8 @@ pub(crate) fn sendfile(
 
 /// `SIGPIPE` held back for the calling thread, until this is dropped (in
 /// the same thread). Dropping it takes a `SIGPIPE` that became pending in
-/// the meantime, whatever raised it, and gives the thread its mask back.
+/// the meantime, whatever raised it, and unblocks the signal again unless
+/// the caller had blocked it; the rest of the thread's mask is not touched.
 /// A `SIGPIPE` that was pending before stays pending; one raised in the
 /// meantime is then left with it.
 ///
@@ -524,8 +528,6 @@ pub(crate) fn sendfile(
 pub(crate) struct HeldSigpipe {
     /// The set holding `SIGPIPE` alone.
     sigpipe: libc::sigset_t,
-    /// The thread's mask before.
-    before: libc::sigset_t,
     /// The caller had blocked the signal itself: the mask stays as it is.
     was_blocked: bool,
     /// A `SIGPIPE` was pending already: it is not ours to take.
@@ -546,7 +548,6 @@ impl HeldSigpipe {
         }
         Ok(Self {
             sigpipe,
-            before,
             was_blocked: has_sigpipe(&before),
             // Asked once the signal is held back, so that none arrives
             // between the answer and the hold.
@@ -572,10 +573,11 @@ impl Drop for HeldSigpipe {
             }
         }
         if !self.was_blocked {
-            // SAFETY: `before` is a live signal set that the call reads (a
-            // null pointer asks for no old mask); only the calling
-            // thread's mask changes, back to what it was.
-            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.before, ptr::null_mut()) };
+            // SAFETY: the set is live for the call, which reads it (a null
+            // pointer asks for no old mask); only the calling thread's
+            // mask changes, and of it only `SIGPIPE`, which the hold
+            // blocked: what else the thread changed meanwhile stays.
+            unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &self.sigpipe, ptr::null_mut()) };
         }
     }
 }
@@ -808,6 +810,28 @@ mod tests {
         assert!(!sigpipe_pending());
         assert!(!has_sigpipe(&signal_mask()));
         assert_eq!(test_signals::sigpipes_delivered(), delivered);
+    }
+
+    /// The end of a hold lets `SIGPIPE` through again and leaves alone
+    /// what else the thread blocked in the meantime.
+    #[test]
+    fn a_hold_gives_back_only_sigpipe() {
+        let mut other = empty_sigset();
+        // SAFETY: `other` is a live signal set, written during the call
+        // only; `SIGUSR2` is a valid signal number.
+        unsafe { libc::sigaddset(&mut other, libc::SIGUSR2) };
+        // SAFETY: the mask is a live signal set, which the call reads.
+        let blocks_other = || unsafe { libc::sigismember(&signal_mask(), libc::SIGUSR2) } == 1;
+        assert!(!blocks_other());
+
+        let held = HeldSigpipe::hold().unwrap();
+        // SAFETY: `other` is live for the call, which reads it; a null
+        // pointer asks for no old mask. Only this thread's mask changes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &other, ptr::null_mut()) };
+        assert_eq!(rc, 0);
+        drop(held);
+        assert!(!has_sigpipe(&signal_mask()));
+        assert!(blocks_other());
     }
 }
 

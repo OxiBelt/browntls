@@ -173,9 +173,10 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// (`EKEYEXPIRED` from the kernel) and the connection is lost.
 pub struct KtlsStream<S, Data> {
     socket: S,
-    engine: Engine<Data>,
-    /// Behind `socket`, which must be dropped first: see [`QuietClose`].
+    /// Right behind `socket`, which must be dropped first and nothing else
+    /// while the signal is held: see [`QuietClose`].
     quiet_close: QuietClose,
+    engine: Engine<Data>,
 }
 
 impl<S, Data> Drop for KtlsStream<S, Data> {
@@ -312,20 +313,31 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// that is closed for sending, as this stream's writes are, and the
     /// kernel raises it even for a call that reports bytes as sent. The
     /// call holds the signal back for its thread and takes one that became
-    /// pending meanwhile, so that none reaches the process whatever it
-    /// does with the signal; a `SIGPIPE` that was pending for the thread
-    /// before stays pending. Dropping the stream does the same around the
-    /// close of its socket, when the kernel sends the records of files it
-    /// still holds. That covers a socket the stream owns: a borrowed or
-    /// shared one that is closed elsewhere after sending files can raise
-    /// the signal there, which is then the closer's to ignore or hold
-    /// back.
+    /// pending meanwhile, so that it raises none whatever the process does
+    /// with the signal; a `SIGPIPE` that was pending for the thread before
+    /// stays pending, and one that something else sent to the process
+    /// meanwhile may be taken along. Dropping the stream does the same
+    /// around the close of its socket, when the kernel sends the records
+    /// of files it still holds.
+    ///
+    /// That covers a socket which the stream owns and nothing else holds.
+    /// The kernel sends those records when the last holder of the socket
+    /// lets go of it, in that holder's thread: a borrowed, shared or
+    /// duplicated socket that is closed elsewhere after sending files can
+    /// raise the signal there, and so can a child process that inherited
+    /// the descriptor and closes it after the stream was dropped (between
+    /// `fork` and `exec` too, where close-on-exec closes it in the new
+    /// program, whose `SIGPIPE` a spawned command usually has reset to
+    /// terminate it). The signal is then that closer's to ignore or hold
+    /// back; a process that spawns children while it sends files to peers
+    /// it does not trust is better served by writes.
     ///
     /// On a connection that has failed the kernel may go on reporting
     /// bytes as sent; [`Self::unsent`] and the reads tell.
     ///
     /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
-    /// not a regular file.
+    /// not a regular file. Where the platform's file offsets have 32 bits,
+    /// a file or an `offset` of 2 GiB or more is an error as well.
     pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
         self.quiet_close.sent_file();
         self.engine
@@ -405,17 +417,24 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// buffer, so that a peer that pads corrupts what the application
     /// reads. The stream therefore refuses to set it on a kernel whose
     /// release (as `uname` gives it) is older, including an older kernel
-    /// that was given the correction.
+    /// that was given the correction. The release is all it can go by: a
+    /// kernel built from a 7.2 pre-release source under a release that
+    /// does not say so is taken for 7.2.
     ///
     /// While it is set, a read zeroes its buffer for up to a record's
-    /// length behind the bytes it returns: the kernel's first attempt may
-    /// have left plaintext there that is not application data.
+    /// length behind the bytes it returns, and from the buffer's start
+    /// when it returns an error (`WouldBlock` included): the kernel's
+    /// first attempt may have left plaintext there that is not
+    /// application data.
     ///
     /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
     /// before 7.2 (a release candidate of 7.2 counts as one: the
     /// correction came with the last of them), and for TLS 1.2, whose
     /// records have no padding and are decrypted into the reader's buffer
-    /// as they are. Taking it back where it was not set is no error.
+    /// as they are. Taking it back where this stream did not set it is no
+    /// error and does nothing: the stream knows only of what it set, not
+    /// of an option set on the descriptor behind its back, after which
+    /// its reads zero nothing.
     pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
         self.engine
             .set_rx_expect_no_pad(self.socket.as_fd(), expect)

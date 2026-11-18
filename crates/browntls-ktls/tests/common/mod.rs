@@ -117,10 +117,18 @@ pub fn tls_stat(name: &str) -> u64 {
 /// The most padding [`padding_suite`] adds to a record.
 pub const MAX_PADDING: usize = 300;
 
+/// The one byte of application data that [`padding_suite`] sends as a
+/// record without content: its type and [`CONTENTLESS_PADDING`] zero bytes.
+pub const CONTENTLESS: u8 = 0xee;
+
+/// The padding of the record sent for [`CONTENTLESS`].
+pub const CONTENTLESS_PADDING: usize = 200;
+
 /// The TLS 1.3 `suite` with an encrypter that pads what it sends (RFC 9846
 /// §5.4): two records of three get 1 to [`MAX_PADDING`] zero bytes behind
-/// their content type, where the record has room. browntls itself never
-/// pads.
+/// their content type, where the record has room, and a write of the one
+/// byte [`CONTENTLESS`] becomes a padded record without content. browntls
+/// itself never pads.
 pub fn padding_suite(suite: SupportedCipherSuite) -> SupportedCipherSuite {
     let inner = tls13_suite(suite);
     let aead_alg = Box::leak(Box::new(PaddingAead(inner.aead_alg)));
@@ -192,7 +200,10 @@ impl MessageEncrypter for Padder {
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
+        let contentless =
+            msg.typ == ContentType::ApplicationData && msg.payload.to_vec() == [CONTENTLESS];
         let padding = match seq % 3 {
+            _ if contentless => CONTENTLESS_PADDING,
             0 => 0,
             _ => 1 + (seq as usize * 37) % MAX_PADDING,
         };
@@ -202,7 +213,10 @@ impl MessageEncrypter for Padder {
         // The content, its type and all but one byte of the padding, as
         // the content of a record of type zero: the inner encrypter adds
         // that type as the last zero.
-        let mut inner = msg.payload.to_vec();
+        let mut inner = match contentless {
+            true => Vec::new(),
+            false => msg.payload.to_vec(),
+        };
         inner.push(msg.typ.into());
         inner.resize(inner.len() + padding - 1, 0);
         self.0.encrypt(

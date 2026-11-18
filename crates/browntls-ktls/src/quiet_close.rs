@@ -6,11 +6,16 @@
 //! close of a socket whose stream sent files raises `SIGPIPE` for the
 //! closing thread, outside any call the stream could answer for.
 //!
-//! A stream therefore keeps a [`QuietClose`] in a field declared behind its
-//! socket. Its `Drop` calls [`QuietClose::closing`], which holds the signal
-//! back; the fields are then dropped in their order, the socket (closed if
-//! the stream owned it) before the `QuietClose`, whose held signal mask
-//! takes a `SIGPIPE` that the close raised and restores the thread's mask.
+//! A stream therefore keeps a [`QuietClose`] in the field declared right
+//! behind its socket. Its `Drop` calls [`QuietClose::closing`], which holds
+//! the signal back; the fields are then dropped in their order, the socket
+//! (closed if the stream owned it) and then the `QuietClose`, whose hold
+//! takes a `SIGPIPE` that the close raised and lets the signal through
+//! again. Nothing else is dropped under the hold.
+//!
+//! The kernel sends the records when the last reference to the socket goes:
+//! a duplicate, a shared owner or a child process that inherited the
+//! descriptor closes it elsewhere, and is not covered.
 
 use crate::sys::HeldSigpipe;
 

@@ -195,6 +195,9 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 pub struct AsyncKtlsStream<Data> {
     socket: TcpStream,
+    /// Right behind `socket`, which must be dropped first and nothing else
+    /// while the signal is held: see [`QuietClose`].
+    quiet_close: QuietClose,
     engine: Engine<Data>,
     /// The waker of the last write, flush or shutdown that returned
     /// `Pending`. A read that sends what the connection owes takes over
@@ -214,8 +217,6 @@ pub struct AsyncKtlsStream<Data> {
     drain: Drain,
     /// See [`early_data_len`](Self::early_data_len).
     early_data_len: usize,
-    /// Behind `socket`, which must be dropped first: see [`QuietClose`].
-    quiet_close: QuietClose,
 }
 
 impl<Data> Drop for AsyncKtlsStream<Data> {

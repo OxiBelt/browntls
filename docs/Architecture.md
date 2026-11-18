@@ -1174,13 +1174,20 @@ error behind it), and when the socket is closed, where the records the kernel
 still holds are sent with the flags of the calls that made them. Both are
 answered with `sys::HeldSigpipe`, which blocks the signal for the calling
 thread and, when dropped, takes a `SIGPIPE` that became pending meanwhile
-(`sigtimedwait`) before it gives the thread its mask back; one that was
-pending before is left alone. `sys::sendfile` holds it for the length of the
-call. A stream that sent a file holds it while it is dropped
-(`src/quiet_close.rs`): the stream's `Drop` takes the hold, and the field
-that keeps it is declared behind the socket, so that the socket is closed
-first. A socket the stream does not own (a borrowed or shared one) is closed
-elsewhere, and its closer has to see to the signal itself.
+(`sigtimedwait`) before it unblocks the signal again, if the caller had not
+blocked it; one that was pending before is left alone, and one sent to the
+process by something else meanwhile cannot be told from the kernel's and is
+taken too. `sys::sendfile` holds it for the length of the call. A stream that
+sent a file holds it while it is dropped (`src/quiet_close.rs`): the stream's
+`Drop` takes the hold, and the field that keeps it is declared right behind
+the socket, so that the socket, and nothing else, is dropped under the hold.
+The kernel sends the held records when the last reference to the socket goes,
+in whichever task drops it. A socket the stream does not own (a borrowed or
+shared one), a duplicate, and a descriptor inherited by a child process (which
+closes it at `exec` if it is close-on-exec, and whenever it does otherwise,
+possibly after the parent dropped the stream) are closed elsewhere, and that
+closer has to see to the signal itself:
+nothing in userspace can discard the records.
 
 `AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
 writable; only the socket is waited for, not the file's storage. The tests
@@ -1210,9 +1217,12 @@ application's to set. Before Linux 7.2 `tls_decrypt_sw` does not take back the
 reader's position the first attempt advanced: the copy lands behind the first
 attempt's output, and a peer that pads corrupts what the application reads.
 The engine therefore sets the option only when `uname` reports release 7.2 or
-later, and refuses it (`Unsupported`) on anything older or unreadable,
-including older kernels that carry the correction and the release candidates
-of 7.2 (the correction came with 7.2-rc7). While the option is set,
+later, and refuses it (`Unsupported`) on anything older or that it cannot
+parse, including older kernels that carry the correction and the release
+candidates of 7.2 (the correction came with 7.2-rc7); when `uname` itself
+fails, its error is returned and the option stays off. The release is the
+only evidence: a kernel built from a 7.2 pre-release source whose release
+does not name a release candidate is taken for 7.2. While the option is set,
 every read zeroes its buffer for up to a record's length behind the bytes it
 reports (and all of that length after an error, `WouldBlock` included, before
 which a padded record without content may have been decrypted there): the

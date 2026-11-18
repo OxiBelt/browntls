@@ -952,9 +952,13 @@ socket's waiters. That the socket has no room is something `poll` shows and
 Tokio's cached readiness does not, so the stream asks the kernel. Once there
 is room and the ledger still shows records held, the work item is under way
 and nothing reports its end, so the stream looks again after a pause
-(`src/drain.rs`): for the first millisecond it only yields to the runtime,
-then a clock thread wakes it after pauses of one to eight milliseconds. That
-thread is one for the whole process, started with the first alarm and gone
+(`src/drain.rs`): four times it only yields to the runtime, then a clock
+thread wakes it after pauses from a quarter of a millisecond to eight
+milliseconds. Yielding longer does not help: on the task's own processor the
+work item runs when the thread gives the processor up, which a thread that
+keeps polling does not do (on Linux 7.0, records still held after two looks
+stayed held through some four hundred more within a millisecond and were
+gone after the first pause). That thread is one for the whole process, started with the first alarm and gone
 five seconds after the last; where it cannot be started the task goes on
 yielding. The pauses use no timer of the runtime, which may have none. The
 wait ends with an error when the socket hangs up or has an error pending

@@ -164,9 +164,9 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// where they matter.
 ///
 /// Between room appearing and the kernel sending nothing wakes a task, so
-/// `shutdown` looks again after short pauses: it yields to the runtime at
-/// first, then is woken by a clock thread that the process starts for as
-/// long as streams wait this way (it needs no timer of the runtime).
+/// `shutdown` looks again after short pauses: it yields to the runtime a
+/// few times, then is woken by a clock thread that the process starts for
+/// as long as streams wait this way (it needs no timer of the runtime).
 ///
 /// ```no_run
 /// # async fn run(

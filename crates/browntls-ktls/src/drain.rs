@@ -3,11 +3,14 @@
 //! The kernel sends the records it holds from a work item, scheduled when
 //! the socket gets room; nothing wakes a task when that work is done. So
 //! once the socket has room, `shutdown` looks at the kernel's counters
-//! again after a pause: at first it only yields, since the work was
-//! scheduled before the task was woken and runs within microseconds on an
-//! idle processor; later it is woken after a few milliseconds by a clock
-//! thread, one for the whole process, which lives only while streams wait.
-//! The pauses do not use a timer of the runtime, which may have none.
+//! again after a pause. A few times it only yields: the work was scheduled
+//! before the task was woken, and on another processor it is done by then.
+//! On the task's own processor the work waits for the thread to give the
+//! processor up, which a thread that keeps polling does not do, so after
+//! that the task is woken by a clock thread, one for the whole process,
+//! which lives only while streams wait: first after a quarter of a
+//! millisecond, then after longer pauses. The pauses do not use a timer of
+//! the runtime, which may have none.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -20,13 +23,15 @@ use std::time::{Duration, Instant};
 
 use crate::ledger::Backlog;
 
-/// How long after the socket was found with room the task only yields
-/// between two looks.
-const YIELDING: Duration = Duration::from_millis(1);
+/// How many looks in a row, once the socket was found with room, the task
+/// only yields before. More do not help: on Linux 7.0, records still held
+/// after two looks stayed held through some four hundred more within a
+/// millisecond, and were gone after the first pause.
+const YIELDS: u32 = 4;
 
 /// The first pause after that; each later one is twice as long, up to
 /// [`LONGEST_PAUSE`].
-const FIRST_PAUSE: Duration = Duration::from_millis(1);
+const FIRST_PAUSE: Duration = Duration::from_micros(250);
 
 const LONGEST_PAUSE: Duration = Duration::from_millis(8);
 
@@ -66,8 +71,9 @@ pub(crate) enum Outcome {
 /// The state of one such wait.
 #[derive(Debug)]
 pub(crate) struct Drain {
-    /// When the socket was first found with room in this stretch.
-    since: Option<Instant>,
+    /// How many looks of this stretch (the socket having room) ended in
+    /// a yield.
+    yields: u32,
     /// Since when the kernel has held this many bytes with nothing in
     /// flight.
     idle: Option<(Instant, u64)>,
@@ -81,7 +87,7 @@ pub(crate) struct Drain {
 impl Drain {
     pub(crate) fn new() -> Self {
         Self {
-            since: None,
+            yields: 0,
             idle: None,
             looked: None,
             pause: FIRST_PAUSE,
@@ -139,7 +145,7 @@ impl Drain {
     /// The socket has no room: the wait is for the socket, and a new
     /// stretch begins when it has room again.
     fn reset(&mut self) {
-        self.since = None;
+        self.yields = 0;
         self.idle = None;
         self.looked = None;
         self.pause = FIRST_PAUSE;
@@ -172,15 +178,13 @@ impl Drain {
             }
             _ => self.idle = Some((now, backlog.unsent)),
         }
-        let since = *self.since.get_or_insert(now);
-        if now.saturating_duration_since(since) >= YIELDING
-            && self.sleeper.wake_after(&CLOCK, self.pause, waker)
-        {
+        if self.yields >= YIELDS && self.sleeper.wake_after(&CLOCK, self.pause, waker) {
             self.pause = (self.pause * 2).min(LONGEST_PAUSE);
         } else {
             // Yield: the task runs again after the others that are ready.
             // Also when the clock has no thread (none could be started):
             // the wait then costs processor time instead of failing.
+            self.yields = self.yields.saturating_add(1);
             waker.wake_by_ref();
         }
         Ok(())
@@ -462,21 +466,23 @@ mod tests {
         let mut drain = Drain::new();
         let start = Instant::now();
 
-        // Within the first millisecond: woken before `wait` returns.
-        drain.wait(start, HELD, &waker).unwrap();
-        assert_eq!(woken(&count), 1);
-        drain
-            .wait(start + YIELDING - Duration::from_nanos(1), HELD, &waker)
-            .unwrap();
-        assert_eq!(woken(&count), 2);
+        // The first looks: woken before `wait` returns, however long the
+        // looks took.
+        let yields = YIELDS as usize;
+        for look in 1..=yields {
+            let now = start + Duration::from_millis(look as u64 * 10);
+            drain.wait(now, HELD, &waker).unwrap();
+            assert_eq!(woken(&count), look);
+            assert_eq!(drain.pause, FIRST_PAUSE);
+        }
 
         // Afterwards the clock wakes it, later, and the pauses grow.
-        drain.wait(start + YIELDING, HELD, &waker).unwrap();
+        drain.wait(start, HELD, &waker).unwrap();
         assert_eq!(drain.pause, FIRST_PAUSE * 2);
-        wait_for(&count, 3);
+        wait_for(&count, yields + 1);
         for _ in 0..8 {
             let before = woken(&count);
-            drain.wait(start + YIELDING, HELD, &waker).unwrap();
+            drain.wait(start, HELD, &waker).unwrap();
             wait_for(&count, before + 1);
         }
         assert_eq!(drain.pause, LONGEST_PAUSE);

@@ -883,8 +883,8 @@ then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
 hanging. A close_notify followed by more data before the handover, a whole
 record or part of one, is refused without waiting for the rest. On a
 non-blocking socket the kernel may still hold part of a record after a write
-returned (see `AsyncKtlsStream` below): the caller waits for writability
-before closing.
+returned (see `AsyncKtlsStream` below): the caller lets the peer confirm the
+last bytes before closing, or at least waits for writability.
 
 What follows the handover lives in one `Engine` (`src/engine.rs`): the
 `KernelConnection`, the plaintext from before the handover, a control record
@@ -924,8 +924,12 @@ running nothing tells userspace, so the wait narrows the window without
 closing it; the documentation says to let the peer confirm the last bytes
 where they matter. A test that shut down straight after writing a megabyte
 into 4096-byte socket buffers failed in one of six kernel CI jobs with the
-wait in place (the kernel's late send met the FIN, `EPIPE`), so the
-limitation is real on loopback, not only in theory. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
+wait in place: the kernel end's read after its shutdown failed with
+`BrokenPipe`. The likely cause, from reading the kernel and not shown by the
+log, is the kernel's late send meeting the FIN (`EPIPE`, which the kernel
+then leaves on the socket as its error). The wait itself (ask the
+kernel, stay pending without room, be woken when room appears) is tested on
+plain TCP in `src/tokio_stream.rs`, on any kernel. The other tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
 running kernel like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
 offloaded server against a userspace client (tickets, KeyUpdate, closure), a

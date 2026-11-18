@@ -12,7 +12,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Wake, Waker, ready};
 
 use browntls::SideData;
 use browntls::client::ClientConnectionData;
@@ -123,8 +123,8 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// without `close_notify` fails the read with `UnexpectedEof`. Errors from
 /// the connection are [`io::ErrorKind::InvalidData`] with the
 /// [`browntls::Error`] inside; the stream has then failed for good.
-/// `shutdown` sends its alert; `flush` does when the socket has room at
-/// once, and reports the failure either way.
+/// `shutdown` sends its alert; `flush` reports the failure, after sending
+/// the alert if the socket has room for it.
 ///
 /// [`tokio::io::split`] gives halves for two tasks. The limitation of
 /// [`KtlsStream`](crate::KtlsStream) with KeyUpdate records that are not
@@ -140,7 +140,9 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// moment between room appearing and the kernel sending. Call `shutdown`
 /// before dropping a stream that has written, and where the last bytes
 /// matter, let the peer confirm them (its `close_notify`, read until end
-/// of file) before the stream is dropped.
+/// of file) before the stream is dropped. Like a write, `shutdown` waits
+/// for a peer that has stopped reading while the socket is full; give it
+/// a time limit where that matters.
 ///
 /// ```no_run
 /// # async fn run(
@@ -309,32 +311,69 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
         cx: &mut Context<'_>,
         mut op: impl FnMut(&mut Engine<Data>, BorrowedFd<'_>) -> io::Result<R>,
     ) -> Poll<io::Result<R>> {
-        loop {
-            let joint = joint_waker(cx.waker(), self.read_waker.as_ref());
-            match self
-                .socket
-                .poll_write_ready(&mut Context::from_waker(&joint))
-            {
-                Poll::Pending => {
-                    park(&mut self.write_waker, cx);
-                    return Poll::Pending;
-                }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => {}
+        let Self {
+            socket,
+            engine,
+            write_waker,
+            read_waker,
+            ..
+        } = self;
+        let result = ready!(poll_when_writable(
+            socket,
+            write_waker,
+            read_waker.as_ref(),
+            cx,
+            |fd| op(engine, fd),
+        ));
+        if !self.engine.has_outputs() {
+            // Nothing is left for a waiting read to send.
+            self.read_waker = None;
+        }
+        Poll::Ready(result)
+    }
+}
+
+/// Runs `op` once Tokio reports `socket` writable, and again after each
+/// later report while it fails with `WouldBlock`, which clears Tokio's
+/// cached readiness. While it waits the caller is parked in `parked` and
+/// registered together with `other`, a task whose registration the
+/// caller's replaces.
+fn poll_when_writable<R>(
+    socket: &TcpStream,
+    parked: &mut Option<Waker>,
+    other: Option<&Waker>,
+    cx: &mut Context<'_>,
+    mut op: impl FnMut(BorrowedFd<'_>) -> io::Result<R>,
+) -> Poll<io::Result<R>> {
+    loop {
+        let joint = joint_waker(cx.waker(), other);
+        match socket.poll_write_ready(&mut Context::from_waker(&joint)) {
+            Poll::Pending => {
+                park(parked, cx);
+                return Poll::Pending;
             }
-            let Self { socket, engine, .. } = &mut *self;
-            match socket.try_io(Interest::WRITABLE, || op(engine, socket.as_fd())) {
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                result => {
-                    self.write_waker = None;
-                    if !self.engine.has_outputs() {
-                        // Nothing is left for a waiting read to send.
-                        self.read_waker = None;
-                    }
-                    return Poll::Ready(result);
-                }
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
+        }
+        match socket.try_io(Interest::WRITABLE, || op(socket.as_fd())) {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+            result => {
+                *parked = None;
+                return Poll::Ready(result);
             }
         }
+    }
+}
+
+/// `WouldBlock` while the kernel reports no room to send on the socket.
+/// Tokio's cached readiness cannot stand in for this: it is cleared only
+/// by a call that failed for want of room, and the kernel reports a write
+/// done that it has yet to send (see [`AsyncKtlsStream`]).
+fn room(fd: BorrowedFd<'_>) -> io::Result<()> {
+    if sys::writable(fd)? {
+        Ok(())
+    } else {
+        Err(io::ErrorKind::WouldBlock.into())
     }
 }
 
@@ -528,12 +567,7 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
             // for (see the type's documentation), in which case the socket
             // is not writable; a FIN now would go out ahead of it. Tokio's
             // cached readiness cannot tell, so the kernel is asked.
-            let room = this.poll_writable(cx, |_, fd| match sys::writable(fd) {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(io::ErrorKind::WouldBlock.into()),
-                Err(err) => Err(err),
-            });
-            match room {
+            match this.poll_writable(cx, |_, fd| room(fd)) {
                 Poll::Ready(Ok(())) => this.drained = true,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
@@ -605,5 +639,101 @@ fn joint_waker(own: &Waker, other: Option<&Waker>) -> Waker {
             other: other.clone(),
         })),
         _ => own.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpSocket};
+    use tokio::time::timeout;
+
+    use super::*;
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The wait `shutdown` makes before the FIN, on plain TCP: the socket
+    /// is filled behind Tokio's back, so that its cached readiness still
+    /// says writable. The wait must ask the kernel, stay pending while
+    /// there is no room, and end once the peer has made room.
+    #[tokio::test]
+    async fn the_wait_for_room_asks_the_kernel_and_is_woken() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connecting = TcpSocket::new_v4().unwrap();
+        connecting.set_send_buffer_size(4096).unwrap();
+        let (sender, accepted) = tokio::join!(
+            connecting.connect(listener.local_addr().unwrap()),
+            listener.accept(),
+        );
+        let (sender, (mut receiver, _)) = (sender.unwrap(), accepted.unwrap());
+
+        sender.writable().await.unwrap();
+        let chunk = [0x5au8; 4096];
+        let mut sent = 0usize;
+        // Full once a round after a pause takes nothing: the receiver's
+        // window may open a little as its buffer is sized.
+        loop {
+            let before = sent;
+            loop {
+                match sys::send(sender.as_fd(), &chunk) {
+                    Ok(n) => sent += n,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(err) => panic!("{err}"),
+                }
+            }
+            if sent == before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!sys::writable(sender.as_fd()).unwrap());
+
+        // One poll: it must find no room, although Tokio's cached
+        // readiness says writable, and leave a registration behind.
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut cx = Context::from_waker(&waker);
+        let mut parked = None;
+        assert!(
+            poll_when_writable(&sender, &mut parked, None, &mut cx, room).is_pending(),
+            "the wait ended on a full socket"
+        );
+        assert!(parked.is_some());
+
+        let reader = tokio::spawn(async move {
+            let mut got = vec![0u8; sent];
+            receiver.read_exact(&mut got).await.unwrap();
+            receiver
+        });
+        // Polled again only when woken, so a poll that returned without a
+        // registration would wait here for good.
+        timeout(Duration::from_secs(20), async {
+            loop {
+                while !woken.0.swap(false, Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                match poll_when_writable(&sender, &mut parked, None, &mut cx, room) {
+                    Poll::Ready(result) => break result,
+                    Poll::Pending => {}
+                }
+            }
+        })
+        .await
+        .expect("the wait was not woken when room appeared")
+        .unwrap();
+        assert!(parked.is_none());
+        assert!(sys::writable(sender.as_fd()).unwrap());
+        drop(reader.await.unwrap());
     }
 }

@@ -219,8 +219,6 @@ pub(crate) fn send_record(fd: BorrowedFd<'_>, typ: u8, payload: &[u8]) -> io::Re
     }
 }
 
-/// One plain `send` of application data: the kernel closes its last record
-/// at the end (no `MSG_MORE`).
 /// Whether the socket has room to send right now, as the kernel reports it
 /// (`poll` with no timeout, so it never waits). An error or a hang-up
 /// pending on the socket counts as room: the next call reports it.
@@ -246,6 +244,8 @@ pub(crate) fn writable(fd: BorrowedFd<'_>) -> io::Result<bool> {
     }
 }
 
+/// One plain `send` of application data: the kernel closes its last record
+/// at the end (no `MSG_MORE`).
 pub(crate) fn send(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     loop {
         // SAFETY: `data` is a live slice of `data.len()` bytes, which the

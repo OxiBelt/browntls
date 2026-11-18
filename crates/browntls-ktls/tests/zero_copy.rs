@@ -292,16 +292,22 @@ fn a_read_that_finds_no_data_leaves_nothing_of_a_padded_record() {
         let (sent, all_sent) = mpsc::channel();
         let (go_on, gone_on) = mpsc::channel::<()>();
         thread::scope(|scope| {
+            // Dropped with this closure, so that the server is not left
+            // waiting when a check here fails.
+            let go_on = go_on;
             let pki = &pki;
             let server = scope.spawn(move || {
                 let config = pki.server_config(padding_suite(suite));
                 let conn = ServerConnection::new(Arc::new(config)).unwrap();
                 let mut tls = StreamOwned::new(conn, server_tcp);
                 assert_eq!(read_n(&mut tls, 5).unwrap(), b"hello", "{suite:?}");
+                tls.write_all(b"!").unwrap();
                 tls.write_all(&[CONTENTLESS]).unwrap();
                 tls.flush().unwrap();
                 sent.send(()).unwrap();
-                gone_on.recv().unwrap();
+                if gone_on.recv().is_err() {
+                    return;
+                }
                 tls.write_all(b"world").unwrap();
                 tls.conn.send_close_notify();
                 tls.flush().unwrap();
@@ -315,6 +321,10 @@ fn a_read_that_finds_no_data_leaves_nothing_of_a_padded_record() {
             tls.set_rx_expect_no_pad(true).unwrap();
             tls.write_all(b"hello").unwrap();
             all_sent.recv().unwrap();
+            // What came before the record (the tickets, one of them
+            // padded, and a byte of data) is read first, into a buffer
+            // too small for the record that follows.
+            assert_eq!(read_n(&mut tls, 1).unwrap(), b"!", "{suite:?}");
             tls.get_ref().set_nonblocking(true).unwrap();
             // Until the kernel has seen the record (its count of padded
             // records has grown; other tests' records count too, which

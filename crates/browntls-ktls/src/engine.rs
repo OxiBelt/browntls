@@ -156,6 +156,31 @@ impl<Data: SideData> Engine<Data> {
         }
     }
 
+    /// See [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
+    pub(crate) fn set_rx_expect_no_pad(&self, fd: BorrowedFd<'_>, expect: bool) -> io::Result<()> {
+        self.tls13_only()?;
+        sys::set_rx_expect_no_pad(fd, expect).map_err(option_error)
+    }
+
+    /// See [`KtlsStream::rx_expect_no_pad`](crate::KtlsStream::rx_expect_no_pad).
+    pub(crate) fn rx_expect_no_pad(&self, fd: BorrowedFd<'_>) -> io::Result<bool> {
+        self.tls13_only()?;
+        sys::rx_expect_no_pad(fd).map_err(option_error)
+    }
+
+    /// Padding exists in TLS 1.3 records only; the kernel refuses the
+    /// option for TLS 1.2 without saying why.
+    fn tls13_only(&self) -> io::Result<()> {
+        if self.conn.protocol_version() == ProtocolVersion::TLSv1_3 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "TLS 1.2 records have no padding: the kernel needs no promise about it",
+            ))
+        }
+    }
+
     /// Queues `close_notify` (once); [`Self::flush_outputs`] sends it.
     pub(crate) fn queue_close_notify(&mut self) -> io::Result<()> {
         self.check()?;
@@ -443,6 +468,18 @@ fn install_keys(
 ) -> io::Result<()> {
     let info = CryptoInfo::new(version, secrets, 0).map_err(io::Error::other)?;
     sys::set_crypto_info(fd, receive, info.as_bytes())
+}
+
+/// The error of a kernel TLS option the running kernel does not have.
+pub(crate) fn option_error(err: io::Error) -> io::Error {
+    if err.raw_os_error() == Some(libc::ENOPROTOOPT) {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the kernel has no such kernel TLS option (it came with Linux 6.0)",
+        )
+    } else {
+        err
+    }
 }
 
 pub(crate) fn invalid_data(err: Error) -> io::Error {

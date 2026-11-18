@@ -28,6 +28,8 @@ use crate::engine::Engine;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
 
+mod zero_copy;
+
 /// Why a `browntls-tokio` stream was not handed to the kernel
 /// ([`AsyncKtlsStream::from_client`], [`AsyncKtlsStream::from_server`]).
 pub enum StreamHandoffError<S> {

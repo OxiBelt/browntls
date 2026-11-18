@@ -35,6 +35,10 @@ use libc::{c_int, c_void};
 const TLS_TX: c_int = 1;
 /// `TLS_RX`.
 const TLS_RX: c_int = 2;
+/// `TLS_TX_ZEROCOPY_RO` (Linux 6.0).
+const TLS_TX_ZEROCOPY_RO: c_int = 3;
+/// `TLS_RX_EXPECT_NO_PAD` (Linux 6.0).
+const TLS_RX_EXPECT_NO_PAD: c_int = 4;
 /// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18).
 const TLS_TX_MAX_PAYLOAD_LEN: c_int = 5;
 /// `TLS_SET_RECORD_TYPE`: the control message giving a sent record's type.
@@ -156,6 +160,44 @@ pub(crate) fn set_tx_max_payload_len(fd: BorrowedFd<'_>, len: u16) -> io::Result
         TLS_TX_MAX_PAYLOAD_LEN,
         &len.to_ne_bytes(),
     )
+}
+
+/// Sets a kernel TLS option whose value is one `int`, zero or one.
+fn set_flag(fd: BorrowedFd<'_>, name: c_int, on: bool) -> io::Result<()> {
+    setsockopt(fd, libc::SOL_TLS, name, &c_int::from(on).to_ne_bytes())
+}
+
+/// Reads a kernel TLS option whose value is one `int`, zero or one.
+fn flag(fd: BorrowedFd<'_>, name: c_int) -> io::Result<bool> {
+    let mut value = [0u8; size_of::<c_int>()];
+    let len = getsockopt(fd, libc::SOL_TLS, name, &mut value)?;
+    if len != value.len() {
+        return Err(io::Error::other("kernel TLS returned another value"));
+    }
+    Ok(c_int::from_ne_bytes(value) != 0)
+}
+
+/// `TLS_TX_ZEROCOPY_RO`: whether a network device that encrypts the
+/// records itself is given the pages of a `sendfile` without a copy.
+pub(crate) fn set_tx_zerocopy_ro(fd: BorrowedFd<'_>, on: bool) -> io::Result<()> {
+    set_flag(fd, TLS_TX_ZEROCOPY_RO, on)
+}
+
+/// Reads `TLS_TX_ZEROCOPY_RO`.
+pub(crate) fn tx_zerocopy_ro(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    flag(fd, TLS_TX_ZEROCOPY_RO)
+}
+
+/// `TLS_RX_EXPECT_NO_PAD`: whether the kernel takes the peer's TLS 1.3
+/// records to be unpadded and decrypts them into the reader's buffer.
+/// The receive keys must be installed.
+pub(crate) fn set_rx_expect_no_pad(fd: BorrowedFd<'_>, on: bool) -> io::Result<()> {
+    set_flag(fd, TLS_RX_EXPECT_NO_PAD, on)
+}
+
+/// Reads `TLS_RX_EXPECT_NO_PAD`.
+pub(crate) fn rx_expect_no_pad(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    flag(fd, TLS_RX_EXPECT_NO_PAD)
 }
 
 /// One `sendmsg` of `payload` with a `TLS_SET_RECORD_TYPE` control message.

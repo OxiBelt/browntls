@@ -32,6 +32,27 @@ so call it, and let it finish, before dropping a stream that has written;
 with a `KtlsStream` on a non-blocking socket, wait for `unsent()` to be zero
 before closing. Blocking sockets without a send timeout are not affected.
 
+## Zero copy
+
+Two kernel options (Linux 6.0) remove copies the kernel otherwise makes.
+Both are off after the handover and set on the stream:
+
+| Method | Kernel option | Effect |
+|---|---|---|
+| `set_rx_expect_no_pad` | `TLS_RX_EXPECT_NO_PAD` | TLS 1.3 records are decrypted straight into the buffer of a read that has room for the whole record, on the promise that the peer does not pad them |
+| `set_tx_zerocopy_sendfile` | `TLS_TX_ZEROCOPY_RO` | A network device that encrypts the records itself is given the pages of a `sendfile` without a copy |
+
+A TLS 1.3 record that turns out to be padded, or not application data, is
+decrypted a second time into a buffer of the kernel's, so the peer decides
+how often the work is done twice: expect unpadded records only from peers
+trusted not to exploit that (browntls and the Linux kernel never pad what
+they send). TLS 1.2 records have no padding and need no promise; the method
+reports `Unsupported` there. With `set_tx_zerocopy_sendfile` the file must
+not change until the peer has acknowledged its bytes, or a retransmission
+carries a record that no longer authenticates and the peer ends the
+connection; where the kernel encrypts in software the option changes
+nothing.
+
 ## Tokio
 
 The `tokio` feature adds `AsyncKtlsStream`, the same offload on a
@@ -72,7 +93,8 @@ top.
 ## Testing
 
 `cargo test -p browntls-ktls --all-features` runs the handover tests over
-loopback TCP, for `KtlsStream` (`tests/offload.rs`) and for
-`AsyncKtlsStream` (`tests/tokio_offload.rs`, feature `tokio`). They are
+loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`)
+and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
+`tests/tokio_zero_copy.rs`, feature `tokio`). They are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).

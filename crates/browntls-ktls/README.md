@@ -71,10 +71,16 @@ closed for sending, and kernel TLS raises it even for a call that reports
 bytes as sent, and again when the socket is closed with records of a file
 still in the kernel. The call holds the signal back for its thread and takes
 one that became pending meanwhile, and dropping a stream that sent files
-does the same around the close of its socket, so no `SIGPIPE` reaches the
-process whatever it does with the signal. A borrowed or shared socket that
-is closed elsewhere is not covered. On a connection that has failed the
-kernel may go on reporting bytes as sent; `unsent()` and the reads tell.
+does the same around the close of its socket, so neither raises `SIGPIPE`
+whatever the process does with the signal. That holds for a socket which the
+stream owns and nothing else holds: the kernel sends those records when the
+last holder lets go, so a borrowed, shared or duplicated socket closed
+elsewhere is not covered, nor is a descriptor that a child process inherited
+(a command spawned while the stream lives closes it at `exec`, after the
+parent may have dropped the stream, and receives the signal). A `SIGPIPE`
+that something else sends to the process during the hold may be taken along.
+On a connection that has failed the kernel may go on reporting bytes as
+sent; `unsent()` and the reads tell.
 
 `AsyncKtlsStream::sendfile` waits for room on the socket; where the kernel
 must read the file from its storage first, the call blocks the thread for

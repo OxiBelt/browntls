@@ -99,9 +99,10 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// ```
     ///
     /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
-    /// not a regular file. No `SIGPIPE` reaches the process from the call,
-    /// nor from dropping the stream afterwards: see
-    /// [`KtlsStream::sendfile`](crate::KtlsStream::sendfile). The halves
+    /// not a regular file. The call raises no `SIGPIPE`, nor does dropping
+    /// the stream afterwards, within the limits (an inherited or shared
+    /// descriptor) that
+    /// [`KtlsStream::sendfile`](crate::KtlsStream::sendfile) names. The halves
     /// of `tokio::io::split` cannot call this; send files before
     /// splitting, or keep the stream whole.
     pub async fn sendfile(

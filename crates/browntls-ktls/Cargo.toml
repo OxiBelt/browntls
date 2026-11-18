@@ -13,7 +13,7 @@ documentation = "https://docs.rs/browntls-ktls"
 readme = "README.md"
 keywords = ["tls", "ktls", "linux", "kernel", "browntls"]
 categories = ["cryptography", "network-programming", "os::linux-apis"]
-include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/tests/common/mod.rs", "/README.md", "/LICENSE"]
 
 [package.metadata.docs.rs]
 all-features = true

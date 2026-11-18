@@ -1160,13 +1160,19 @@ error behind it), and when the socket is closed, where the records the kernel
 still holds are sent with the flags of the calls that made them. Both are
 answered with `sys::HeldSigpipe`, which blocks the signal for the calling
 thread and, when dropped, takes a `SIGPIPE` that became pending meanwhile
-(`sigtimedwait`) before it gives the thread its mask back; one that was
-pending before is left alone. `sys::sendfile` holds it for the length of the
-call. A stream that sent a file holds it while it is dropped
-(`src/quiet_close.rs`): the stream's `Drop` takes the hold, and the field
-that keeps it is declared behind the socket, so that the socket is closed
-first. A socket the stream does not own (a borrowed or shared one) is closed
-elsewhere, and its closer has to see to the signal itself.
+(`sigtimedwait`) before it unblocks the signal again, if the caller had not
+blocked it; one that was pending before is left alone, and one sent to the
+process by something else meanwhile cannot be told from the kernel's and is
+taken too. `sys::sendfile` holds it for the length of the call. A stream that
+sent a file holds it while it is dropped (`src/quiet_close.rs`): the stream's
+`Drop` takes the hold, and the field that keeps it is declared right behind
+the socket, so that the socket, and nothing else, is dropped under the hold.
+The kernel sends the held records when the last reference to the socket goes,
+in whichever task drops it. A socket the stream does not own (a borrowed or
+shared one), a duplicate, and a descriptor inherited by a child process (which
+closes it at `exec` at the latest, possibly after the parent dropped the
+stream) are closed elsewhere, and that closer has to see to the signal itself:
+nothing in userspace can discard the records.
 
 `AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
 writable; only the socket is waited for, not the file's storage. The tests

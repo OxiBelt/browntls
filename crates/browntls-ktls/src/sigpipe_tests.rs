@@ -84,8 +84,8 @@ fn files_sent_on_a_closed_connection_raise_no_sigpipe() {
 
             assert_eq!(tls.sendfile(&file, 0, 100_000).unwrap(), 100_000);
             shut_write(tls.get_ref());
-            // The kernel reports some of these as sent and fails others:
-            // either way it raises the signal, which must not arrive.
+            // The kernel may report these as sent or fail them: either way
+            // it raises the signal, which must not arrive.
             let mut outcomes = Vec::new();
             for _ in 0..4 {
                 outcomes.push(

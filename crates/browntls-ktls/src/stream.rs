@@ -173,9 +173,10 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// (`EKEYEXPIRED` from the kernel) and the connection is lost.
 pub struct KtlsStream<S, Data> {
     socket: S,
-    engine: Engine<Data>,
-    /// Behind `socket`, which must be dropped first: see [`QuietClose`].
+    /// Right behind `socket`, which must be dropped first and nothing else
+    /// while the signal is held: see [`QuietClose`].
     quiet_close: QuietClose,
+    engine: Engine<Data>,
 }
 
 impl<S, Data> Drop for KtlsStream<S, Data> {
@@ -312,20 +313,31 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// that is closed for sending, as this stream's writes are, and the
     /// kernel raises it even for a call that reports bytes as sent. The
     /// call holds the signal back for its thread and takes one that became
-    /// pending meanwhile, so that none reaches the process whatever it
-    /// does with the signal; a `SIGPIPE` that was pending for the thread
-    /// before stays pending. Dropping the stream does the same around the
-    /// close of its socket, when the kernel sends the records of files it
-    /// still holds. That covers a socket the stream owns: a borrowed or
-    /// shared one that is closed elsewhere after sending files can raise
-    /// the signal there, which is then the closer's to ignore or hold
-    /// back.
+    /// pending meanwhile, so that it raises none whatever the process does
+    /// with the signal; a `SIGPIPE` that was pending for the thread before
+    /// stays pending, and one that something else sent to the process
+    /// meanwhile may be taken along. Dropping the stream does the same
+    /// around the close of its socket, when the kernel sends the records
+    /// of files it still holds.
+    ///
+    /// That covers a socket which the stream owns and nothing else holds.
+    /// The kernel sends those records when the last holder of the socket
+    /// lets go of it, in that holder's thread: a borrowed, shared or
+    /// duplicated socket that is closed elsewhere after sending files can
+    /// raise the signal there, and so can a child process that inherited
+    /// the descriptor and closes it after the stream was dropped (between
+    /// `fork` and `exec` too, where close-on-exec closes it in the new
+    /// program, whose `SIGPIPE` a spawned command usually has reset to
+    /// terminate it). The signal is then that closer's to ignore or hold
+    /// back; a process that spawns children while it sends files to peers
+    /// it does not trust is better served by writes.
     ///
     /// On a connection that has failed the kernel may go on reporting
     /// bytes as sent; [`Self::unsent`] and the reads tell.
     ///
     /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
-    /// not a regular file.
+    /// not a regular file. Where the platform's file offsets have 32 bits,
+    /// a file or an `offset` of 2 GiB or more is an error as well.
     pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
         self.quiet_close.sent_file();
         self.engine

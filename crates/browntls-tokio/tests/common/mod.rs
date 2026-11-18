@@ -240,6 +240,42 @@ impl AsyncWrite for Choppy {
     }
 }
 
+/// The read and write halves of a stream, whichever way it was split.
+pub type Halves = (
+    Pin<Box<dyn AsyncRead + Send>>,
+    Pin<Box<dyn AsyncWrite + Send>>,
+);
+
+/// Splitting a stream either with its own `into_split` or with
+/// `tokio::io::split`, so that a test can run over both kinds of halves.
+pub trait SplitEither {
+    fn split_either(self, native: bool) -> Halves;
+}
+
+macro_rules! impl_split_either {
+    ($($stream:ty),*) => {$(
+        impl<IO> SplitEither for $stream
+        where
+            IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        {
+            fn split_either(self, native: bool) -> Halves {
+                if native {
+                    let (read, write) = self.into_split();
+                    (Box::pin(read), Box::pin(write))
+                } else {
+                    let (read, write) = tokio::io::split(self);
+                    (Box::pin(read), Box::pin(write))
+                }
+            }
+        }
+    )*};
+}
+
+impl_split_either!(
+    browntls_tokio::client::TlsStream<IO>,
+    browntls_tokio::server::TlsStream<IO>
+);
+
 /// Deterministic test data.
 pub fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 31 + i / 251) as u8).collect()

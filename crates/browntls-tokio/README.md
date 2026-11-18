@@ -121,9 +121,24 @@ repeat.
   write side; later writes fail with `BrokenPipe` (RFC 9846 §6.1). The peer's
   `close_notify` reads as end of file; a transport that ends without one fails
   the read with `UnexpectedEof` (a truncation).
-- **Splitting.** `tokio::io::split` gives read and write halves for two tasks.
+- **Splitting.** `into_split` on a stream gives a `ReadHalf` and a
+  `WriteHalf` for two tasks, and `reunite` gives the stream back. TLS ties
+  both directions to one connection state, so the halves take turns with the
+  stream, one poll at a time. They never wait for each other's poll: a half
+  that finds the other half's poll in progress returns `Pending` and is
+  woken when that poll ends (turns are not queued, so it may find the stream
+  taken again). If a poll of one half panics, every later operation of
+  either half fails. `tokio::io::split` works too; it takes a blocking
+  lock for every poll (a worker thread waits while the other half's poll
+  runs, record protection included) and needs Tokio's `io-util` feature.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
   `browntls::Error` (`err.get_ref()` then `downcast_ref`).
+- **Handshake state.** The handshake futures (`Connect`, `Accept` and their
+  fallible forms) give the connection through `connection()` and
+  `connection_mut()` while the handshake runs, as `get_ref()` gives the
+  transport: a caller that polls the future itself can see, say, the server
+  name and ALPN protocol as soon as the ClientHello was processed (not
+  authenticated until the handshake completes).
 - **Answers.** A read that receives a message calling for an answer (a TLS
   1.3 `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`)
   writes the answer at once if the transport has room, so a task that only
@@ -132,6 +147,22 @@ repeat.
   read takes no more input and waits for the transport to take them (a
   write on another task that sends them wakes it), so a peer that keeps
   asking and reads nothing cannot make them pile up.
+- **Cooperative scheduling.** With the `coop` feature the streams and
+  handshake futures take part in Tokio's
+  [cooperative scheduling](https://docs.rs/tokio/1/tokio/task/coop/index.html),
+  as Tokio's sockets and channels do: an operation that completes takes one
+  unit of the task's budget, and so does every read from the transport after
+  the first in one poll. Once the budget is spent, an operation returns
+  `Pending` and the task runs again after the others had their turn. A task
+  that is always ready (a peer that sends faster than it is read, a transport
+  that never waits) therefore cannot keep a worker thread to itself, whether
+  or not the transport counts against the budget. Over a transport that
+  counts too (Tokio's sockets), an operation that reaches it takes the
+  transport's unit as well, so the task yields that much sooner. Wrap a
+  future in `tokio::task::coop::unconstrained` to opt out for that future.
+  As with Tokio's own resources, do not drive a stream from another executor
+  blocked inside a Tokio task: a spent budget waits for Tokio's scheduler,
+  which does not run meanwhile.
 
 ## Features
 
@@ -139,9 +170,19 @@ repeat.
 `prefer-post-quantum` (default), `zlib`, `brotli` and `zstd` are passed through
 to `browntls`.
 
-## Minimum supported Rust version
+`coop` (default) makes the streams take part in Tokio's cooperative
+scheduling (see above). It enables Tokio's `rt` feature, which is where Tokio
+keeps the task budget; `rt` adds no dependency, and an application that runs
+a Tokio runtime has it enabled already. Without `coop` the crate uses Tokio's
+I/O traits only and takes nothing from the budget itself (a transport that
+counts still does).
 
-The workspace's pinned toolchain, Rust 1.99.1.
+## Minimum supported Rust and Tokio versions
+
+Rust: the workspace's pinned toolchain, Rust 1.100.0.
+
+Tokio: 1.53, the newest long-term support line (supported by Tokio until
+September 2027), or any later 1.x release.
 
 ## Acknowledgements
 

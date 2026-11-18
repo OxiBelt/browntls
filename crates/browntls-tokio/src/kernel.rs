@@ -28,7 +28,7 @@
 //! [`KernelHandoff::early_data_len`] tells where it ends.
 //!
 //! The module makes no system call and works over any transport; an
-//! asynchronous kernel TLS stream is built on top of it.
+//! asynchronous kernel TLS stream can be built on top of it.
 //!
 //! [`TlsStream::into_inner`]: crate::client::TlsStream::into_inner
 //! [`TlsStream::into_kernel_handoff`]: crate::client::TlsStream::into_kernel_handoff

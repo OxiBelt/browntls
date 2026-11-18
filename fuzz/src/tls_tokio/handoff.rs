@@ -6,9 +6,9 @@
 //!   before (the harness's prefix check), on success, on failure and when
 //!   the future is given up;
 //! * the 0-RTT data counted lies within the plaintext set aside, a client
-//!   has none, and what a server's handoff counts as 0-RTT data continues
-//!   the 0-RTT data the client sent (the server leaves it unread first
-//!   when `flags` says so);
+//!   has none, and what a server's handoff counts as 0-RTT data is held
+//!   against what the client sent first (the server leaves it unread when
+//!   `flags` says so; the seed test checks the exact split);
 //! * a stream reported ready has no handoff blocker, and its connection's
 //!   `dangerous_into_kernel_connection` succeeds;
 //! * whatever comes back (a ready stream turned back, a refused one, an
@@ -222,7 +222,11 @@ pub(super) fn early_seed() -> Vec<u8> {
     write(&mut s, CLIENT, EARLY);
     op(&mut s, Op::Pump, 0);
     write(&mut s, CLIENT, AFTER_EARLY);
-    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::Flush, CLIENT);
+    // One byte of it is read; the handoff takes the 0-RTT data and the
+    // rest together.
+    op(&mut s, Op::Read, SERVER);
+    s.extend([0, 1]);
     op(&mut s, Op::Handoff, SERVER);
     s.push(0xf0 | KEEP_EARLY | BACK_TO_USERSPACE);
     write(&mut s, CLIENT, b"more");

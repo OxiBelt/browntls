@@ -152,11 +152,11 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// the socket is readable or writable", since a read may first have to send
 /// a control record (a KeyUpdate answer) that did not fit.
 ///
-/// Known kernel limitation, on sockets whose sends do not wait without
-/// limit (non-blocking, or with a send timeout): Linux reports a write as
-/// done once the record is encrypted, even when TCP had no room for all of
-/// it, and sends the rest when room appears; nothing tells userspace when
-/// that has happened. Shutting the socket's write side or closing it
+/// Known kernel limitation, on non-blocking sockets (and, as the kernel's
+/// code reads, untested here, on sockets with a send timeout): Linux
+/// reports a write as done once the record is encrypted, even when TCP
+/// had no room for all of it, and sends the rest when room appears;
+/// nothing tells userspace when that has happened. Shutting the socket's write side or closing it
 /// before then drops what is left, and the peer sees a truncated stream.
 /// Waiting until the socket is writable before closing it covers the wait
 /// for room, but not the moment between room appearing and the kernel

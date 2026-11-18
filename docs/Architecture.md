@@ -882,7 +882,8 @@ starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
 hanging. A close_notify followed by more data before the handover, a whole
 record or part of one, is refused without waiting for the rest. On a
-non-blocking socket the kernel may still hold part of a record after a write
+non-blocking socket (and, as the kernel's code reads, one with a send
+timeout) the kernel may still hold part of a record after a write
 returned (see `AsyncKtlsStream` below): the caller lets the peer confirm the
 last bytes before closing, or at least waits for writability.
 

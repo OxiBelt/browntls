@@ -299,6 +299,9 @@ fn a_read_that_finds_no_data_leaves_nothing_of_a_padded_record() {
             let server = scope.spawn(move || {
                 let config = pki.server_config(padding_suite(suite));
                 let conn = ServerConnection::new(Arc::new(config)).unwrap();
+                // The record must not wait for the byte before it to be
+                // acknowledged: the client looks for it once told.
+                server_tcp.set_nodelay(true).unwrap();
                 let mut tls = StreamOwned::new(conn, server_tcp);
                 assert_eq!(read_n(&mut tls, 5).unwrap(), b"hello", "{suite:?}");
                 tls.write_all(b"!").unwrap();

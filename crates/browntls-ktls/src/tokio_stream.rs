@@ -141,19 +141,26 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// [`KtlsStream`](crate::KtlsStream) with KeyUpdate records that are not
 /// one whole KeyUpdate applies here too.
 ///
-/// Known kernel limitation: on a non-blocking socket Linux reports a write
-/// as done once the record is encrypted, even when TCP had no room for all
-/// of it, and sends the rest when room appears; nothing tells userspace
-/// when that has happened. Closing the socket, or its write side, before
+/// On a non-blocking socket Linux reports a write as done once the record
+/// is encrypted, even when TCP had no room for all of it, and sends the
+/// rest when room appears. Closing the socket, or its write side, before
 /// then drops what is left, and the peer sees a truncated stream.
-/// `shutdown` therefore waits until the kernel reports room to send before
-/// it shuts the write side, which covers the wait for room but not the
-/// moment between room appearing and the kernel sending. Call `shutdown`
-/// before dropping a stream that has written, and where the last bytes
-/// matter, let the peer confirm them (its `close_notify`, read until end
-/// of file) before the stream is dropped. Like a write, `shutdown` waits
-/// for a peer that has stopped reading while the socket is full; give it
-/// a time limit where that matters.
+/// `shutdown` therefore shuts the write side only when the kernel's own
+/// counters show that TCP has taken every record
+/// ([`unsent`](Self::unsent) is zero), and waits for the kernel while they
+/// do not. So call `shutdown`, and let it finish, before dropping a stream
+/// that has written: a drop alone loses what the kernel still holds.
+///
+/// Like a write, `shutdown` waits for a peer that has stopped reading
+/// while records are held back; give it a time limit where that matters.
+/// It fails when the connection ends with records unsent, and with
+/// [`io::ErrorKind::TimedOut`] when the kernel has held the same records
+/// for five seconds although the socket had room and nothing was in
+/// flight. Where the stream has no count of what the kernel holds (see
+/// [`unsent`](Self::unsent)), `shutdown` waits until the socket has room
+/// instead, which does not cover the moment between room appearing and
+/// the kernel sending: there, let the peer confirm the last bytes (its
+/// `close_notify`, read until end of file) where they matter.
 ///
 /// ```no_run
 /// # async fn run(
@@ -288,6 +295,10 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// room; the rest is sent by the next write or flush. Overcount when
     /// unsure: one `send` of `n` bytes without `MSG_MORE` makes at most
     /// `n.div_ceil(16384)` records.
+    ///
+    /// The stream then no longer knows what the socket was given:
+    /// [`unsent`](Self::unsent) reports `Unsupported` from this call on,
+    /// and `shutdown` waits for room on the socket only.
     pub fn records_sent(&mut self, records: u64) -> io::Result<()> {
         self.engine.records_sent(self.socket.as_fd(), records)
     }
@@ -624,8 +635,9 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
     }
 
     /// Sends `close_notify` (an alert instead, after a failure), waits
-    /// until the socket has room to send, then shuts its write side.
-    /// Reads go on until the peer's `close_notify`.
+    /// until the kernel has given TCP every record (see the type's
+    /// documentation), then shuts the socket's write side. Reads go on
+    /// until the peer's `close_notify`.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.closing {

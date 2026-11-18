@@ -19,6 +19,8 @@
 //! * no Rust value is created from kernel output except plain integers and
 //!   bytes copied out of buffers the kernel wrote, within the length it
 //!   reported;
+//! * a buffer the kernel wrote key material into (`TLS_TX` read back) is
+//!   wiped before the function returns;
 //! * the descriptor's flags are never changed.
 
 #![allow(unsafe_code)]

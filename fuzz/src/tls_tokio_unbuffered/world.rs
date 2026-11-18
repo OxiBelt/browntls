@@ -6,10 +6,11 @@ use std::future::Future;
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use browntls::client::UnbufferedClientConnection;
+use browntls::crypto::CryptoProvider;
 use browntls::server::{ServerSessionMemoryCache, UnbufferedAcceptor, UnbufferedServerConnection};
 use browntls::{ClientConfig, ServerConfig, version};
 use browntls_tokio::unbuffered as ub;
@@ -37,7 +38,12 @@ pub(super) fn cx() -> Context<'static> {
 /// (`connection::provider`): the handshake stays genuine, and records the
 /// input writes are accepted once keys exist.
 fn forgeable_configs(knobs: Knobs) -> Option<(ClientConfig, ServerConfig)> {
-    let provider = crate::connection::provider(true);
+    // The provider's cipher suites are leaked to be `'static`: one provider
+    // serves the whole process, or every input would leak them again.
+    static PROVIDER: OnceLock<Arc<CryptoProvider>> = OnceLock::new();
+    let provider = PROVIDER
+        .get_or_init(|| crate::connection::provider(true))
+        .clone();
     let pki = Pki::get();
     let mut client = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&version::TLS13])

@@ -3,8 +3,9 @@
 // `encrypted_payload_len` understates a data record makes the record not
 // fit after the size check passed, and a provider's `encrypt_into` may fail
 // after it wrote the plaintext, or report a length that is not the record it
-// wrote: each time the write fails with `Failed`, the buffer is wiped from
-// where the record began, and the connection is finished.
+// wrote, or write a record of another content type: each time the write
+// fails with `Failed`, the buffer is wiped from where the record began (the
+// records before it stay), and the connection is finished.
 
 /// What the encrypter of [`Faulty`] does with a 3-byte plaintext.
 #[derive(Clone, Copy, Debug)]
@@ -22,11 +23,13 @@ enum Fault {
     ReportsShort,
     /// Writes the record with a header that states one byte more.
     WrongHeader,
+    /// Writes the record, well framed, as a handshake record.
+    WrongType,
     /// Copies the plaintext into the buffer and fails.
     PlaintextThenError,
 }
 
-const FAULTS: [Fault; 9] = [
+const FAULTS: [Fault; 10] = [
     Fault::UnderstatedProvided,
     Fault::UnderstatedInPlace,
     Fault::Reports(0),
@@ -35,6 +38,7 @@ const FAULTS: [Fault; 9] = [
     Fault::ReportsPastTheBuffer,
     Fault::ReportsShort,
     Fault::WrongHeader,
+    Fault::WrongType,
     Fault::PlaintextThenError,
 ];
 
@@ -83,6 +87,11 @@ impl browntls::crypto::cipher::MessageEncrypter for FaultyEncrypter {
             Fault::WrongHeader => {
                 let len = self.inner.encrypt_into(msg, seq, out)?;
                 out[4] += 1;
+                Ok(len)
+            }
+            Fault::WrongType => {
+                let len = self.inner.encrypt_into(msg, seq, out)?;
+                out[0] = 22;
                 Ok(len)
             }
             Fault::PlaintextThenError => {
@@ -143,10 +152,20 @@ impl browntls::crypto::cipher::Tls13AeadAlgorithm for Faulty {
     }
 }
 
+/// The largest plaintext of one record under [`SMALL_RECORDS`].
+const FRAGMENT: usize = 59;
+/// A `max_fragment_size` (it counts the record header).
+const SMALL_RECORDS: usize = FRAGMENT + 5;
+
 #[test]
 fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
     init_logging();
-    for fault in FAULTS {
+    // The faulty record is the write's only one, or follows a whole one.
+    for (fault, before) in FAULTS
+        .into_iter()
+        .flat_map(|fault| [(fault, 0), (fault, FRAGMENT)])
+    {
+        let case = format!("{fault:?} after {before} bytes");
         let orig = prov::cipher_suite::TLS13_AES_128_GCM_SHA256
             .tls13()
             .unwrap();
@@ -167,14 +186,14 @@ fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
         let chain = server_chain(KeyType::Ed25519);
         let mut p = prov::default_provider();
         p.cipher_suites = vec![browntls::SupportedCipherSuite::Tls13(suite)];
-        let cc = Arc::new(
-            ClientConfig::builder_with_provider(Arc::new(p))
-                .with_protocol_versions(&[&version::TLS13])
-                .unwrap()
-                .dangerous()
-                .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
-                .with_no_client_auth(),
-        );
+        let mut cc = ClientConfig::builder_with_provider(Arc::new(p))
+            .with_protocol_versions(&[&version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+            .with_no_client_auth();
+        cc.max_fragment_size = Some(SMALL_RECORDS);
+        let cc = Arc::new(cc);
         let sc = Arc::new(versioned_server(&chain, ProtocolVersion::TLSv1_3));
         let mut c = ub_client(&cc, Feed::Whole);
         let mut s = b_server(&sc);
@@ -186,13 +205,22 @@ fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
         else {
             panic!("expected WriteTraffic");
         };
-        let secret = [0x5e, 0xc2, 0xe7];
-        let required = match w.encrypt(&secret, &mut []) {
+        let needs = |w: &mut browntls::unbuffered::WriteTraffic<'_, _>, data: &[u8]| match w
+            .encrypt(data, &mut [])
+        {
             Err(EncryptError::InsufficientSize(InsufficientSizeError { required_size })) => {
                 required_size
             }
             other => panic!("{other:?}"),
         };
+        let mut secret = vec![0x3c; before];
+        secret.extend([0x5e, 0xc2, 0xe7]);
+        let kept = if before == 0 {
+            0
+        } else {
+            needs(&mut w, &secret[..before])
+        };
+        let required = needs(&mut w, &secret);
         // An understated record fails only where it does not fit. The
         // others get more room than the record needs: all of it is wiped.
         let spare = match fault {
@@ -203,17 +231,25 @@ fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
         assert_eq!(
             w.encrypt(&secret, &mut buf),
             Err(EncryptError::Failed),
-            "{fault:?}"
+            "{case}"
         );
-        assert!(buf.iter().all(|b| *b == 0), "{fault:?}: {buf:02x?}");
+        // The record before the faulty one is whole; nothing follows it.
+        let (whole, wiped) = buf.split_at(kept);
+        if before != 0 {
+            assert_eq!(whole[..5], [23, 3, 3, 0, (kept - 5) as u8], "{case}");
+            assert!(whole[5..].iter().any(|b| *b != 0), "{case}");
+        }
+        assert!(wiped.iter().all(|b| *b == 0), "{case}: {wiped:02x?}");
         // The sequence number is spent: nothing more goes out.
         assert_eq!(
             w.encrypt(b"four", &mut [0u8; 64]),
-            Err(EncryptError::Failed)
+            Err(EncryptError::Failed),
+            "{case}"
         );
         assert_eq!(
             c.conn.process_tls_records(&mut []).state.err(),
-            Some(Error::EncryptError)
+            Some(Error::EncryptError),
+            "{case}"
         );
     }
 }

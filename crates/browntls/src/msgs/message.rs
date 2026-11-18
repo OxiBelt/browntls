@@ -270,7 +270,8 @@ pub(crate) fn encode_header(
     len: usize,
 ) -> [u8; HEADER_SIZE] {
     let version = u16::from(version).to_be_bytes();
-    // `len` is bounded by `MAX_WIRE_SIZE`, so it fits.
+    // The record layer bounds `len` by `MAX_WIRE_SIZE`, and the providers'
+    // record builders (`seal_record`) by `u16::MAX`, so it fits.
     let len = (len as u16).to_be_bytes();
     [typ.into(), version[0], version[1], len[0], len[1]]
 }

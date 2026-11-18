@@ -621,9 +621,11 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   the header and sealed, without a per-record allocation for the built-in
   providers (an encrypter that keeps the provided `encrypt_into` allocates
   one record and copies it). What an encrypter reports is accepted only as
-  one record within the buffer; otherwise, and when it fails, the buffer is
-  zeroed from that record on and the write fails. A KeyUpdate that is due (an answer to the peer, or
-  the RFC 9846 §5.5 refresh) is written into the same buffer in order. At
+  one application data record within the buffer; otherwise, and when it
+  fails, the buffer is zeroed from that record on and the write fails. A
+  KeyUpdate that is due (an answer to the peer, or the RFC 9846 §5.5
+  refresh) is written into the same buffer in order, and one that fails to
+  encrypt fails the write before any data is taken. At
   the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
   `EncryptExhausted`, and a server's half-RTT data fails with the temporary
   `KeyUpdateAwaitsHandshake` until the client's Finished arrives, instead of

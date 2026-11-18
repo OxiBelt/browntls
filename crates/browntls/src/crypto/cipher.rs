@@ -649,6 +649,23 @@ mod tests {
             seal_record_into(typ, v, &plain, 5, 10, &mut [0u8; 15], seal),
             Err(Error::EncryptError)
         );
+        // A body the header's length field cannot state.
+        let most = usize::from(u16::MAX);
+        let mut out = alloc::vec![0x55u8; most + 6];
+        assert!(seal_record(typ, v, &plain, 2, most, seal).is_ok());
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, most, &mut out, seal),
+            Ok(most + 5)
+        );
+        assert_eq!(out[3..5], [0xff, 0xff]);
+        out.fill(0x55);
+        assert!(seal_record(typ, v, &plain, 2, most + 1, seal).is_err());
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, most + 1, &mut out, seal),
+            Err(Error::EncryptError)
+        );
+        assert!(out.iter().all(|b| *b == 0x55));
+
         let data: [&[u8]; 1] = [b"abc"];
         let short = OutboundChunks::Multiple {
             chunks: &data,

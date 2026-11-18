@@ -405,6 +405,11 @@ impl<Data: SideData> ConnectionCore<Data> {
             self.maybe_send_key_update()
                 .map_err(|_| EncryptError::Failed)?;
         }
+        if self.common_state.encrypt_failed {
+            // The KeyUpdate was not encrypted, but the key is the next one
+            // already: data under it would follow no KeyUpdate.
+            return Err(EncryptError::Failed);
+        }
         // Anything queued (the KeyUpdate just made) precedes the data. If it
         // does not fit after all (a provider understating its record
         // length), it stays queued and no data is taken.
@@ -443,9 +448,11 @@ impl<Data: SideData> ConnectionCore<Data> {
             // RFC 9846 §5.5: refresh before the next write passes the limit.
             self.common_state.refresh_traffic_keys_pending = true;
         }
+        if rekey_after && self.maybe_send_key_update().is_err() {
+            self.common_state.encrypt_failed = true;
+            return Err(EncryptError::Failed);
+        }
         if rekey_after {
-            self.maybe_send_key_update()
-                .map_err(|_| EncryptError::Failed)?;
             // The data records are already sequenced and in `outgoing`: a
             // KeyUpdate that does not fit after all stays queued for
             // `EncodeTlsData` (and goes before any later write) rather than
@@ -789,8 +796,8 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
     /// after the data, and counted in the size required.
     ///
     /// The records are built in `outgoing_tls` itself. After
-    /// [`EncryptError::Failed`] its contents are not to be sent: the buffer
-    /// is zeroed from the record that failed to its end.
+    /// [`EncryptError::Failed`] nothing the call wrote there is to be sent;
+    /// from a data record that failed, the buffer is zeroed to its end.
     pub fn encrypt(
         &mut self,
         application_data: &[u8],
@@ -836,7 +843,9 @@ impl MayEncryptEarlyData<'_> {
 
     /// Encrypts all of `early_data` under the early traffic key into
     /// `outgoing_tls` and returns the bytes written. Fails, sending nothing,
-    /// when it exceeds [`Self::bytes_left`].
+    /// when it exceeds [`Self::bytes_left`]. The records are built in
+    /// `outgoing_tls` itself, as by [`WriteTraffic::encrypt`]: after an
+    /// encryption failure nothing the call wrote there is to be sent.
     pub fn encrypt(
         &mut self,
         early_data: &[u8],

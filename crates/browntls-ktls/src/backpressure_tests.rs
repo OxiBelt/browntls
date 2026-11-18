@@ -28,10 +28,11 @@ use crate::{CryptoInfo, KtlsStream, sys};
 use common::{Pki, kernel_tls, localhost, offloadable_suites, tcp_pair};
 
 /// The most KeyUpdate requests the peer sends, each followed by one byte
-/// of data (which renews the server's budget of requests). The kernel
-/// still takes small control records for a while after it refuses data
-/// (some hundreds to a few thousand answers here), so the peer asks well
-/// beyond that, or until its own socket has no room.
+/// of data (which renews the server's budget of requests). A socket that
+/// refused data once may still take small control records (over a
+/// thousand answers here when it was not filled again, see [`fill`]), so
+/// the peer asks well beyond the budget, or until its own socket has no
+/// room.
 const CYCLES: usize = 4000;
 
 /// How long reading must make no progress to count as stopped.
@@ -185,6 +186,36 @@ fn read_once<S: AsFd, D: browntls::SideData>(tls: &mut KtlsStream<S, D>) -> Opti
     }
 }
 
+/// Fills a socket whose peer reads nothing, through `write` (one
+/// non-blocking write): large, then small, writes until [`FULL_AFTER`] in
+/// a row find no room, retrying after a pause each time. Returns the bytes
+/// written.
+///
+/// Each refused write is tried again: TCP goes on sending what is queued
+/// as far as the peer's window allows, which leaves room behind the first
+/// refusal, and small control records fit in it.
+fn fill(mut write: impl FnMut(&[u8]) -> io::Result<usize>) -> usize {
+    let chunk = vec![7; 1 << 16];
+    let mut filled = 0;
+    for len in [chunk.len(), 64] {
+        let mut refused = 0;
+        while refused < FULL_AFTER {
+            match write(&chunk[..len]) {
+                Ok(n) => {
+                    filled += n;
+                    refused = 0;
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    refused += 1;
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
+    }
+    filled
+}
+
 #[test]
 fn ktls_stream_stops_reading_while_answers_wait() {
     if !kernel_tls() {
@@ -201,26 +232,7 @@ fn ktls_stream_stops_reading_while_answers_wait() {
     let conn = ServerConnection::new(Arc::new(server_config(&pki, suite))).unwrap();
     let mut tls = KtlsStream::new(conn, server_tcp).unwrap();
     tls.get_ref().set_nonblocking(true).unwrap();
-    // The peer reads nothing: fill the socket until large, then small,
-    // writes keep failing.
-    let chunk = vec![7; 1 << 16];
-    let mut filled = 0;
-    for len in [chunk.len(), 64] {
-        let mut refused = 0;
-        while refused < FULL_AFTER {
-            match tls.write(&chunk[..len]) {
-                Ok(n) => {
-                    filled += n;
-                    refused = 0;
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    refused += 1;
-                    thread::sleep(Duration::from_millis(2));
-                }
-                Err(err) => panic!("{err}"),
-            }
-        }
-    }
+    let filled = fill(|data| tls.write(data));
     eprintln!("socket full after {filled} bytes");
     start.send(()).unwrap();
     let sent = peer.flooded.recv_timeout(LIMIT).unwrap();
@@ -289,22 +301,22 @@ fn async_ktls_stream_stops_reading_while_answers_wait() {
             .await
             .unwrap()
             .unwrap();
-        // The peer reads nothing: write until large, then small, writes
-        // stay pending.
+        // The peer reads nothing: write until a write stays pending.
         let chunk = vec![7; 1 << 16];
         let mut filled = 0;
-        for len in [chunk.len(), 64] {
-            let mut pending = 0;
-            while pending < FULL_AFTER / 5 {
-                match timeout(Duration::from_millis(10), tls.write(&chunk[..len])).await {
-                    Ok(written) => {
-                        filled += written.unwrap();
-                        pending = 0;
-                    }
-                    Err(_) => pending += 1,
-                }
-            }
+        while let Ok(written) = timeout(Duration::from_millis(50), tls.write(&chunk)).await {
+            filled += written.unwrap();
         }
+        // A pending write waits for Tokio to report the socket writable,
+        // which takes a third of its buffer free; it does not try again
+        // when TCP has made less room by sending what is queued. Answers
+        // would fit there, so the socket is filled up with sends of its
+        // own, reported to the stream.
+        filled += fill(|data| {
+            let sent = sys::send(tls.get_ref().as_fd(), data)?;
+            tls.records_sent(u64::try_from(sent.div_ceil(1 << 14)).unwrap())?;
+            Ok(sent)
+        });
         eprintln!("socket full after {filled} bytes");
         start.send(()).unwrap();
         let (peer, sent) = tokio::task::spawn_blocking(move || {

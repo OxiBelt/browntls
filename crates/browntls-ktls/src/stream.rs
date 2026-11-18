@@ -326,9 +326,11 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// length behind the bytes it returns: the kernel's first attempt may
     /// have left plaintext there that is not application data.
     ///
-    /// The error is [`io::ErrorKind::Unsupported`] on a kernel before
-    /// 7.2, and for TLS 1.2, whose records have no padding and are
-    /// decrypted into the reader's buffer as they are.
+    /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
+    /// before 7.2 (a release candidate of 7.2 counts as one: the
+    /// correction came with the last of them), and for TLS 1.2, whose
+    /// records have no padding and are decrypted into the reader's buffer
+    /// as they are. Taking it back where it was not set is no error.
     pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
         self.engine
             .set_rx_expect_no_pad(self.socket.as_fd(), expect)

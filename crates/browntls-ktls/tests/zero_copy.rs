@@ -126,11 +126,12 @@ fn the_options_are_read_back_as_set() {
             if !tls13(suite) {
                 for err in [
                     tls.set_rx_expect_no_pad(true).unwrap_err(),
-                    tls.set_rx_expect_no_pad(false).unwrap_err(),
                     tls.rx_expect_no_pad().unwrap_err(),
                 ] {
                     assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{suite:?}");
                 }
+                // Taking back a promise that was not made is no error.
+                tls.set_rx_expect_no_pad(false).unwrap();
             } else if promised {
                 assert!(!tls.rx_expect_no_pad().unwrap(), "{suite:?}");
                 tls.set_rx_expect_no_pad(true).unwrap();

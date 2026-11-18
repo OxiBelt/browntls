@@ -1143,9 +1143,11 @@ reader's position the first attempt advanced: the copy lands behind the first
 attempt's output, and a peer that pads corrupts what the application reads.
 The engine therefore sets the option only when `uname` reports release 7.2 or
 later, and refuses it (`Unsupported`) on anything older or unreadable,
-including older kernels that carry the correction. While the option is set,
+including older kernels that carry the correction and the release candidates
+of 7.2 (the correction came with 7.2-rc7). While the option is set,
 every read zeroes its buffer for up to a record's length behind the bytes it
-reports (and all of that length after an error other than `WouldBlock`): the
+reports (and all of that length after an error, `WouldBlock` included, before
+which a padded record without content may have been decrypted there): the
 first attempt writes there the plaintext of a control record that follows the
 data, a padded record's padding, or the output for a record that then fails to
 authenticate. `tests/zero_copy.rs` reads against a userspace peer that pads two

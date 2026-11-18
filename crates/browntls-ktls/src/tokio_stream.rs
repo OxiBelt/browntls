@@ -53,6 +53,10 @@ pub enum StreamHandoffError<S> {
         /// Application data taken from the stream, to be read before
         /// anything the stream yields.
         received: Vec<u8>,
+        /// How many bytes at the start of `received` are 0-RTT data a
+        /// server had accepted and not read: an attacker can replay that
+        /// data, and reads of the stream would not have returned it.
+        early_data_len: usize,
         /// What stood in the way.
         error: io::Error,
     },
@@ -76,11 +80,15 @@ impl<S> fmt::Debug for StreamHandoffError<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Refused {
-                error, received, ..
+                error,
+                received,
+                early_data_len,
+                ..
             } => f
                 .debug_struct("Refused")
                 .field("error", error)
                 .field("received", &received.len())
+                .field("early_data_len", early_data_len)
                 .finish_non_exhaustive(),
             Self::Failed(error) => f.debug_tuple("Failed").field(error).finish(),
         }
@@ -182,6 +190,8 @@ pub struct AsyncKtlsStream<Data> {
     closing: bool,
     /// `shutdown` has seen room to send after everything was written.
     drained: bool,
+    /// See [`early_data_len`](Self::early_data_len).
+    early_data_len: usize,
 }
 
 /// Nothing in the stream is pinned: the socket and the connection state
@@ -233,7 +243,21 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             read_waker: None,
             closing: false,
             drained: false,
+            early_data_len: 0,
         }
+    }
+
+    /// How many of the first bytes this stream returns are 0-RTT data that
+    /// a server had accepted and not read when its stream was handed over
+    /// ([`from_server`](AsyncKtlsStream::from_server)). An attacker can
+    /// replay that data, so a server must not act on it as on the rest;
+    /// a `browntls-tokio` stream returns it only through `early_data()`,
+    /// this stream returns it first, in the order it was sent. The number
+    /// is fixed at the handover and does not shrink as the data is read.
+    /// Zero for a client, and for a stream made with
+    /// [`new`](AsyncKtlsStream::new), whose caller supplied the data.
+    pub fn early_data_len(&self) -> usize {
+        self.early_data_len
     }
 
     /// The connection's state after the handover.
@@ -392,7 +416,10 @@ macro_rules! from_stream {
             /// 0-RTT phase completed, queued records written, the input
             /// read up to a record boundary) and the keys are installed.
             /// The application data received before that is returned by
-            /// the first reads.
+            /// the first reads; 0-RTT data a server had accepted and not
+            /// read comes first in it, and
+            /// [`early_data_len`](AsyncKtlsStream::early_data_len) tells
+            /// how much of it there is.
             ///
             /// Until the keys are installed every failure returns the
             /// stream ([`StreamHandoffError::Refused`]). Dropping the
@@ -416,6 +443,7 @@ macro_rules! from_stream {
                     return Err(StreamHandoffError::Refused {
                         stream,
                         received: Vec::new(),
+                        early_data_len: 0,
                         error,
                     });
                 }
@@ -425,22 +453,28 @@ macro_rules! from_stream {
                         return Err(StreamHandoffError::Refused {
                             stream: err.stream,
                             received: err.received,
+                            early_data_len: err.early_data_len,
                             error: err.error,
                         });
                     }
                 };
+                let early_data_len = handoff.early_data_len();
                 let (socket, conn) = handoff.get_ref();
                 if let Err(error) = check_record_size(conn, socket.as_fd()) {
                     let (stream, received) = handoff.into_stream();
                     return Err(StreamHandoffError::Refused {
                         stream,
                         received,
+                        early_data_len,
                         error,
                     });
                 }
                 let (socket, conn, received) = handoff.into_parts();
                 match install(conn, socket.as_fd(), received) {
-                    Ok(engine) => Ok(Self::with_engine(socket, engine)),
+                    Ok(engine) => Ok(Self {
+                        early_data_len,
+                        ..Self::with_engine(socket, engine)
+                    }),
                     Err(error) => Err(StreamHandoffError::Failed(error)),
                 }
             }

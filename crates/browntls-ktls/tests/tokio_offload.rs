@@ -441,12 +441,17 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
             let limit = if accept_early { 1024 } else { 0 };
             let mut server = acceptor(limit).accept(server_tcp).await.unwrap();
             let mut tls = if accept_early {
-                // Accepted 0-RTT data comes first out of the kernel stream.
+                // Accepted 0-RTT data comes first out of the kernel stream,
+                // which tells how much of it there is.
                 assert!(server.get_mut().1.early_data().is_some());
-                server_kernel(server).await
+                let tls = server_kernel(server).await;
+                assert_eq!(tls.early_data_len(), b"early request".len());
+                tls
             } else {
                 assert!(server.get_mut().1.early_data().is_none());
-                server_kernel(server).await
+                let tls = server_kernel(server).await;
+                assert_eq!(tls.early_data_len(), 0);
+                tls
             };
             assert_eq!(
                 read_n_async(&mut tls, 22).await,
@@ -597,6 +602,7 @@ async fn a_peer_that_closed_tcp_is_left_to_userspace() {
         stream: mut client,
         received,
         error,
+        ..
     }) = AsyncKtlsStream::from_client(client).await
     else {
         panic!("handed over after the peer closed TCP");
@@ -668,6 +674,7 @@ async fn a_refused_handover_returns_the_stream() {
     let Err(StreamHandoffError::Refused {
         stream: mut server,
         received,
+        early_data_len,
         error,
     }) = AsyncKtlsStream::from_server(server).await
     else {
@@ -675,6 +682,7 @@ async fn a_refused_handover_returns_the_stream() {
     };
     assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
     assert!(received.is_empty());
+    assert_eq!(early_data_len, 0);
     assert_eq!(read_n_async(&mut server, 3).await, b"llo");
     write_all_async(&mut server, b"world").await;
     timeout(LIMIT, server.flush()).await.unwrap().unwrap();

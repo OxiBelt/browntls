@@ -37,7 +37,9 @@ The `tokio` feature adds `AsyncKtlsStream`, the same offload on a
 [browntls-tokio](../browntls-tokio/README.md) stream: they ready it with
 `into_kernel_handoff` (handshake and 0-RTT phase completed, queued records
 written, input read up to a record boundary), install the keys, and return
-the application data received before that from the first reads.
+the application data received before that from the first reads. 0-RTT data
+a server had accepted and not read comes first in it; `early_data_len` says
+how much, since that data can be replayed.
 
 ```rust
 use browntls_ktls::{AsyncKtlsStream, StreamHandoffError};

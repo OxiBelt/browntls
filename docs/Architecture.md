@@ -906,8 +906,11 @@ taken from the stream, ready it with
 [`into_kernel_handoff`](#asynchronous-streams-browntls-tokio), check the
 record size and install the keys. Until the keys go in, every failure returns
 the stream and the plaintext taken (`StreamHandoffError::Refused`), so it can
-go on in userspace. `AsyncKtlsStream::new` takes a connection already at rest
-and its socket. A read that owes the peer something (a KeyUpdate answer) and
+go on in userspace. 0-RTT data a server had accepted and not read is the
+front of the plaintext the stream returns first; the stream and the refusal
+carry its length (`early_data_len`), because it can be replayed and a
+`browntls-tokio` stream would have returned it through `early_data()` only.
+`AsyncKtlsStream::new` takes a connection already at rest and its socket. A read that owes the peer something (a KeyUpdate answer) and
 finds the socket full registers for writability as well as readability.
 Tokio keeps one waker per direction, and the stream may be split into halves
 on two tasks, so the reader and a parked writer register a waker that wakes

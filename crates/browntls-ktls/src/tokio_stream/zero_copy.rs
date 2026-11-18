@@ -77,7 +77,8 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// long, as reading the file there would. It never asks the kernel
     /// for more than the file holds, whatever `count` is, because the
     /// kernel would then wait for TCP to take the last record; a file
-    /// that is cut short while it is sent can still cause that wait.
+    /// that holds less than the size it reports (cut short while it is
+    /// sent, for one) can still cause that wait.
     ///
     /// ```no_run
     /// # async fn send<D: browntls::SideData>(
@@ -98,7 +99,8 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// ```
     ///
     /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
-    /// not a regular file. No `SIGPIPE` reaches the process: see
+    /// not a regular file. No `SIGPIPE` reaches the process from the call,
+    /// nor from dropping the stream afterwards: see
     /// [`KtlsStream::sendfile`](crate::KtlsStream::sendfile). The halves
     /// of `tokio::io::split` cannot call this; send files before
     /// splitting, or keep the stream whole.
@@ -128,6 +130,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             return Poll::Ready(Err(err));
         }
         let file = file.as_fd();
+        self.quiet_close.sent_file();
         self.poll_writable(cx, |engine, fd| engine.sendfile(fd, file, offset, count))
     }
 }

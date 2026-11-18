@@ -59,6 +59,14 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
+mod quiet_close;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(feature = "native", feature = "rustcrypto")
+))]
+mod sigpipe_tests;
+#[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
 mod sys;

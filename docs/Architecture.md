@@ -1137,8 +1137,9 @@ The engine never asks for more than the file holds behind the offset
 less, the kernel closes the last record like a write. When it finds the end of
 the file before the count, having sent something, it sends what it holds
 without `MSG_DONTWAIT` (`tls_sw_splice_eof`), and the call waits for TCP to
-take all of it, on a non-blocking socket too. A file cut short between the two
-calls can still bring that about.
+take all of it, on a non-blocking socket too. A file that holds less than the
+size it reports (cut short between the two calls, or on a file system that
+reports sizes it does not have) can still bring that about.
 
 The records are counted by the kernel's record sequence number, read on both
 sides of the call, plus one. A call cut short (no room on a non-blocking
@@ -1152,18 +1153,31 @@ those the bytes alone make.
 
 `sendfile(2)` has no flag against `SIGPIPE`, which a peer could otherwise
 bring upon a process that does not ignore the signal by resetting the
-connection. `sys::sendfile` blocks the signal for the calling thread for the
-length of the call and takes the one the call raised (`sigtimedwait`) before
-it gives the thread its mask back; a `SIGPIPE` that was pending before is left
-alone.
+connection. Kernel TLS raises it in two places: during a `sendfile` on a
+connection closed for sending, even when the call reports bytes as sent
+(`tls_sw_sendmsg_locked` returns what it copied and raises the signal for the
+error behind it), and when the socket is closed, where the records the kernel
+still holds are sent with the flags of the calls that made them. Both are
+answered with `sys::HeldSigpipe`, which blocks the signal for the calling
+thread and, when dropped, takes a `SIGPIPE` that became pending meanwhile
+(`sigtimedwait`) before it gives the thread its mask back; one that was
+pending before is left alone. `sys::sendfile` holds it for the length of the
+call. A stream that sent a file holds it while it is dropped
+(`src/quiet_close.rs`): the stream's `Drop` takes the hold, and the field
+that keeps it is declared behind the socket, so that the socket is closed
+first. A socket the stream does not own (a borrowed or shared one) is closed
+elsewhere, and its closer has to see to the signal itself.
 
 `AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
 writable; only the socket is waited for, not the file's storage. The tests
 (`tests/sendfile.rs`, `tests/tokio_zero_copy.rs`, and unit tests in
-`src/sys.rs`) count the records on the wire, drive KeyUpdates with a suite
-whose keys last for 100 records, fill a non-blocking socket, and show that a
-count past the end of the file does not wait for a peer that is not reading
-and that no `SIGPIPE` reaches a process that would die of it.
+`src/sys.rs` and `src/sigpipe_tests.rs`) count the records on the wire, drive
+KeyUpdates with a suite whose keys last for 100 records, fill a non-blocking
+socket, and show that a count past the end of the file does not wait for a
+peer that is not reading. A handler counts the `SIGPIPE`s delivered to the
+test process: none from `sendfile` on plain TCP and on kernel TLS sockets of
+both streams whose write side was closed, and none from dropping those
+streams.
 
 `set_tx_zerocopy_sendfile` on either stream sets `TLS_TX_ZEROCOPY_RO` (Linux
 5.19; off after the handover), which lets a network device that encrypts the

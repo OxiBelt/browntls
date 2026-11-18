@@ -12,6 +12,7 @@ use browntls::{
 };
 
 use crate::engine::{Engine, invalid_data, option_error};
+use crate::quiet_close::QuietClose;
 use crate::sys;
 
 mod sealed {
@@ -173,6 +174,14 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 pub struct KtlsStream<S, Data> {
     socket: S,
     engine: Engine<Data>,
+    /// Behind `socket`, which must be dropped first: see [`QuietClose`].
+    quiet_close: QuietClose,
+}
+
+impl<S, Data> Drop for KtlsStream<S, Data> {
+    fn drop(&mut self) {
+        self.quiet_close.closing();
+    }
 }
 
 impl<S, Data> KtlsStream<S, Data>
@@ -226,7 +235,11 @@ where
             return Err(refused(conn, socket, pending, error));
         }
         match install(conn, socket.as_fd(), pending) {
-            Ok(engine) => Ok(Self { socket, engine }),
+            Ok(engine) => Ok(Self {
+                socket,
+                engine,
+                quiet_close: QuietClose::default(),
+            }),
             Err(error) => Err(HandoffError::Failed(error)),
         }
     }
@@ -291,19 +304,30 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// The call never asks the kernel for more than the file holds behind
     /// `offset`, whatever `count` is: finding the end of a file before the
     /// count it was given, the kernel waits for TCP to take the last
-    /// record even on a non-blocking socket. A file that is cut short
-    /// while it is sent can still cause that wait.
+    /// record even on a non-blocking socket. A file that holds less than
+    /// the size it reports (cut short while it is sent, for one) can
+    /// still cause that wait.
     ///
     /// `sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection
-    /// that is closed for sending, as this stream's writes are. The call
-    /// holds the signal back for its thread and takes the one it caused,
-    /// so that the error is all the caller sees whatever the process does
-    /// with the signal; a `SIGPIPE` that was pending for the thread before
-    /// stays pending.
+    /// that is closed for sending, as this stream's writes are, and the
+    /// kernel raises it even for a call that reports bytes as sent. The
+    /// call holds the signal back for its thread and takes one that became
+    /// pending meanwhile, so that none reaches the process whatever it
+    /// does with the signal; a `SIGPIPE` that was pending for the thread
+    /// before stays pending. Dropping the stream does the same around the
+    /// close of its socket, when the kernel sends the records of files it
+    /// still holds. That covers a socket the stream owns: a borrowed or
+    /// shared one that is closed elsewhere after sending files can raise
+    /// the signal there, which is then the closer's to ignore or hold
+    /// back.
+    ///
+    /// On a connection that has failed the kernel may go on reporting
+    /// bytes as sent; [`Self::unsent`] and the reads tell.
     ///
     /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
     /// not a regular file.
     pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
+        self.quiet_close.sent_file();
         self.engine
             .sendfile(self.socket.as_fd(), file.as_fd(), offset, count)
     }

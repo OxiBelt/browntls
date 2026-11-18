@@ -143,7 +143,7 @@ lets it go out ahead of the client's Finished (0.5-RTT data). The reader's end
 of file comes with the end of the handshake, which the client only reaches
 after the server's flight: read a request by its own framing to answer sooner.
 A handshake that fails then fails every later operation. The reader borrows
-the stream: read the early data before `tokio::io::split`.
+the stream: read the early data before `into_split`.
 
 Early data can be replayed by an attacker: send only requests that are safe to
 repeat. On the server, a replay cannot complete a handshake, so early data read
@@ -197,7 +197,8 @@ async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> 
 reader, writer or I/O methods), and `into_parts` the connection with the
 stream's buffers. The unbuffered connector does not send 0-RTT early data; a
 server's accepted early data is collected during the handshake
-(`TlsStream::early_data`). While more than 16 KiB of answers to the peer are
+(`TlsStream::early_data`), and the unbuffered acceptors have no
+`early_data` option to return a stream before the handshake completes. While more than 16 KiB of answers to the peer are
 unwritten, reads take no more input.
 
 Two things under Behaviour below are not there for these streams yet: they

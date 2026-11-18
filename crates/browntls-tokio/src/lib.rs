@@ -53,7 +53,9 @@
 //! each record in place in one receive buffer, so [`AsyncBufRead`] lends
 //! the plaintext without a copy and [`AsyncRead`] copies it once. Its
 //! streams have no `into_split` and the `coop` feature does not cover them
-//! yet.
+//! yet. Its client sends no early data, and its acceptors have no
+//! `early_data` option: a server has the early data it accepted only as
+//! collected during the handshake.
 //!
 //! # Flushing
 //!

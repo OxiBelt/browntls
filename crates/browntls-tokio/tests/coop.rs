@@ -630,3 +630,35 @@ async fn a_client_hello_in_small_pieces_spends_the_budget() {
     client.unwrap();
     server.unwrap();
 }
+
+#[tokio::test]
+async fn a_server_early_data_read_of_many_small_records_spends_the_budget() {
+    use std::io::Write as _;
+
+    const LEN: usize = 2000;
+    let setup = common::server_early::Setup::new();
+    setup.first_connection().await;
+    let mut client = setup.manual_client(&[]);
+    let mut early = client.early_data().unwrap();
+    for byte in pattern(LEN) {
+        early.write_all(&[byte]).unwrap();
+    }
+    let mut tls = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut tls).unwrap();
+    }
+    // The ClientHello and the first early data record go before the accept,
+    // which returns with the rest still to come: the reader reads it.
+    let rest = (LEN - 1) * SMALL_RECORD;
+    let (server_io, mut client_io) = raw_pair(SMALL_RECORD);
+    let reads = server_io.reads.clone();
+    client_io.write_all(&tls[..tls.len() - rest]).await.unwrap();
+    let mut server = setup.acceptor(false).accept(server_io).await.unwrap();
+    assert!(server.get_ref().1.is_handshaking());
+    client_io.write_all(&tls[tls.len() - rest..]).await.unwrap();
+
+    let read = async move { read_filling(server.early_data().unwrap(), LEN).await };
+    let (bytes, counts) = count_reads_per_poll(read, reads).await;
+    assert_eq!(bytes, pattern(LEN));
+    assert_budgeted(&counts, 1 + BUDGET);
+}

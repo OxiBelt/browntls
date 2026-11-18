@@ -789,8 +789,8 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
 - With the `coop` feature the streams, the server's `EarlyDataReader`, the
-  handshake futures and `LazyConfigAcceptor` take part in Tokio's cooperative scheduling
-  (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
+  handshake futures and `LazyConfigAcceptor` take part in Tokio's
+  cooperative scheduling (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
   task's budget per completed operation and return `Pending`, rescheduling
   the task, once it is spent. A TLS stream completes operations the
   transport never sees (reads of buffered plaintext, writes the connection
@@ -807,8 +807,8 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   with the transport more than once (a read copies chunk after chunk into
   the caller's buffer; a client finishes an early-data handshake and then
   reads, and so does a server stream returned early; a server's early data
-  reader drives the handshake step after step), so the stream's state carries "this poll has read" from one
-  pairing to the next (`StreamState::read_before`, cleared when a poll
+  reader drives the handshake step after step), so the stream's state
+  carries "this poll has read" from one pairing to the next (`StreamState::read_before`, cleared when a poll
   begins). Writes need no such bound: one poll writes only what the caller
   handed it and what was queued. A read wakes its own task and returns
   `Pending` in two places, both after the control records the connection

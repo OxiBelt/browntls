@@ -313,7 +313,8 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// straight into `outgoing`; returns the bytes written.
     ///
     /// Everything is decided and the size checked before anything changes:
-    /// on error nothing of `payload` was taken and no state was touched. A
+    /// on error nothing of `payload` was taken, and no state was touched
+    /// unless the error is `Failed`, which finishes the connection. A
     /// KeyUpdate that is due (an answer to the peer, or a refresh for the
     /// confidentiality limit, RFC 9846 §5.5) goes out first, in the same
     /// buffer; one that this write makes due follows it.
@@ -448,15 +449,15 @@ impl<Data: SideData> ConnectionCore<Data> {
             // RFC 9846 §5.5: refresh before the next write passes the limit.
             self.common_state.refresh_traffic_keys_pending = true;
         }
-        if rekey_after && self.maybe_send_key_update().is_err() {
-            self.common_state.encrypt_failed = true;
-            return Err(EncryptError::Failed);
-        }
         if rekey_after {
+            self.maybe_send_key_update()
+                .map_err(|_| EncryptError::Failed)?;
             // The data records are already sequenced and in `outgoing`: a
             // KeyUpdate that does not fit after all stays queued for
             // `EncodeTlsData` (and goes before any later write) rather than
-            // failing the call.
+            // failing the call. Nor does one that failed to encrypt: the
+            // data before it is good and reported, and the connection is
+            // finished for everything after it (`encrypt_failed`).
             written += self
                 .drain_queued_into(&mut outgoing[written..])
                 .unwrap_or(0);
@@ -470,6 +471,10 @@ impl<Data: SideData> ConnectionCore<Data> {
         let common = &self.common_state;
         if common.has_sent_close_notify() || common.sent_fatal_alert {
             return Ok(0);
+        }
+        if common.encrypt_failed {
+            // The peer could not read the alert: see `encrypt_failed`.
+            return Err(EncryptError::Failed);
         }
         let required = common.sendable_tls.len()
             + HEADER_SIZE
@@ -797,7 +802,11 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
     ///
     /// The records are built in `outgoing_tls` itself. After
     /// [`EncryptError::Failed`] nothing the call wrote there is to be sent;
-    /// from a data record that failed, the buffer is zeroed to its end.
+    /// from a data record that failed, the buffer is zeroed to its end. A
+    /// KeyUpdate before the data that cannot be encrypted fails the call
+    /// like that, with no data taken. One after the data does not: the
+    /// call reports the data it wrote, which is good to send, and the
+    /// calls after it fail.
     pub fn encrypt(
         &mut self,
         application_data: &[u8],
@@ -810,7 +819,9 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
 
     /// Writes a `close_notify` alert into `outgoing_tls` and returns the
     /// bytes written (zero if it was already sent). No application data can
-    /// be sent afterwards (RFC 9846 §6.1).
+    /// be sent afterwards (RFC 9846 §6.1). After a record failed to encrypt
+    /// ([`EncryptError::Failed`]) no alert is made either: the peer could
+    /// not read it.
     pub fn queue_close_notify(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         self.conn.core.close_notify_into(outgoing_tls)
     }

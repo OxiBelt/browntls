@@ -233,13 +233,11 @@ fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
             Err(EncryptError::Failed),
             "{case}"
         );
-        // The record before the faulty one is whole; nothing follows it.
+        // The record before the faulty one is whole (the peer reads it);
+        // nothing follows it.
         let (whole, wiped) = buf.split_at(kept);
-        if before != 0 {
-            assert_eq!(whole[..5], [23, 3, 3, 0, (kept - 5) as u8], "{case}");
-            assert!(whole[5..].iter().any(|b| *b != 0), "{case}");
-        }
         assert!(wiped.iter().all(|b| *b == 0), "{case}: {wiped:02x?}");
+        let whole = whole.to_vec();
         // The sequence number is spent: nothing more goes out.
         assert_eq!(
             w.encrypt(b"four", &mut [0u8; 64]),
@@ -251,5 +249,8 @@ fn a_faulty_data_encrypter_fails_the_write_and_leaves_no_plaintext() {
             Some(Error::EncryptError),
             "{case}"
         );
+        s.give_input(&whole);
+        assert_eq!(s.error, None, "{case}");
+        assert_eq!(s.take_received(), secret[..before], "{case}");
     }
 }

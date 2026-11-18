@@ -443,8 +443,13 @@ impl<Data: SideData> PlaintextSink for ConnectionCore<Data> {
         // being refused (RFC 9846 §5.5). A write the record layer held back
         // for the refresh is retried once under the new key. Errors are left
         // for `process_new_packets` to report: the bytes taken are queued.
+        // But when the KeyUpdate was not encrypted, nothing may follow it
+        // under the next key: a write that was held back for it fails.
         if self.common_state.refresh_traffic_keys_pending {
             let _ = self.maybe_send_key_update();
+            if len == 0 && self.common_state.encrypt_failed {
+                return Err(std::io::Error::other("record encryption failed"));
+            }
             if len == 0 && !self.common_state.refresh_traffic_keys_pending {
                 len = self
                     .common_state

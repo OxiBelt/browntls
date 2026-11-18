@@ -503,3 +503,4 @@ include!("unbuffered/exporters.rs");
 include!("unbuffered/acceptor.rs");
 include!("unbuffered/kernel.rs");
 include!("unbuffered/encrypt_failure.rs");
+include!("unbuffered/key_update_failure.rs");

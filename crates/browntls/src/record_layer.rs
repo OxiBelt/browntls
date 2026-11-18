@@ -188,6 +188,25 @@ impl RecordLayer {
         &mut self,
         plain: OutboundPlainMessage<'_>,
     ) -> Result<OutboundOpaqueMessage, Error> {
+        let seq = self.next_write_seq()?;
+        self.message_encrypter.encrypt(plain, seq)
+    }
+
+    /// Like `encrypt_outgoing`, but writes the record to the front of `out`
+    /// and returns its length. The sequence number is used even when this
+    /// fails because `out` is too short.
+    pub(crate) fn encrypt_outgoing_into(
+        &mut self,
+        plain: OutboundPlainMessage<'_>,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let seq = self.next_write_seq()?;
+        self.message_encrypter.encrypt_into(plain, seq, out)
+    }
+
+    /// Takes the write sequence number for one record, if encryption is
+    /// active and the sequence space is not exhausted.
+    fn next_write_seq(&mut self) -> Result<u64, Error> {
         if self.encrypt_state != DirectionState::Active {
             return Err(Error::EncryptError);
         }
@@ -196,7 +215,7 @@ impl RecordLayer {
         }
         let seq = self.write_seq;
         self.write_seq += 1;
-        self.message_encrypter.encrypt(plain, seq)
+        Ok(seq)
     }
 
     /// Installs a new encrypter and resets the write sequence number.
@@ -409,13 +428,52 @@ mod tests {
     #[test]
     fn encrypting_without_cipher_fails() {
         let mut rl = RecordLayer::new();
-        let plain = OutboundPlainMessage {
+        let plain = || OutboundPlainMessage {
             typ: ContentType::ApplicationData,
             version: ProtocolVersion::TLSv1_2,
             payload: OutboundChunks::Single(&[1]),
         };
-        assert_eq!(rl.encrypt_outgoing(plain).err(), Some(Error::EncryptError));
+        assert_eq!(
+            rl.encrypt_outgoing(plain()).err(),
+            Some(Error::EncryptError)
+        );
+        let mut out = [0u8; 64];
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 0);
         assert_eq!(rl.pre_encrypt_action(1), PreEncryptAction::Nothing);
+    }
+
+    #[test]
+    fn encrypting_into_uses_sequence_numbers_as_encrypt_outgoing() {
+        let plain = || OutboundPlainMessage {
+            typ: ContentType::ApplicationData,
+            version: ProtocolVersion::TLSv1_2,
+            payload: OutboundChunks::Single(&[1]),
+        };
+        let mut rl = RecordLayer::new();
+        rl.set_message_encrypter(<dyn MessageEncrypter>::invalid(), u64::MAX);
+        let mut out = [0u8; 64];
+        // A failing encrypter still uses the sequence number.
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 1);
+        assert_eq!(
+            rl.encrypt_outgoing(plain()).err(),
+            Some(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 2);
+        // At the hard limit nothing is used.
+        rl.write_seq = SEQ_HARD_LIMIT;
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, SEQ_HARD_LIMIT);
     }
 
     #[test]

@@ -21,10 +21,15 @@
 //!   one handshake message being reassembled. Both are bounded by the
 //!   protocol, not by the amount of application data.
 //!
-//! The record layer still allocates one temporary vector per record it
-//! encrypts (the [`MessageEncrypter`](crate::crypto::cipher::MessageEncrypter)
-//! interface returns an owned record); nothing is kept once the record has
-//! been copied out.
+//! Application data and 0-RTT data records are built in place in the
+//! output buffer
+//! ([`MessageEncrypter::encrypt_into`](crate::crypto::cipher::MessageEncrypter::encrypt_into)):
+//! the plaintext is copied once, behind the record header, and sealed
+//! there. The built-in providers allocate nothing per record on that path.
+//! A third-party encrypter that does not override `encrypt_into` allocates
+//! one temporary record per call and copies it out. Handshake messages,
+//! alerts and KeyUpdates are encrypted into a temporary vector each and
+//! queued as described above.
 //!
 //! # Driving a connection
 //!
@@ -412,14 +417,26 @@ impl<Data: SideData> ConnectionCore<Data> {
                 version: ProtocolVersion::TLSv1_2,
                 payload: chunk.into(),
             };
-            let record = match self.common_state.record_layer.encrypt_outgoing(plain) {
-                Ok(record) => record.encode(),
-                Err(_) => {
+            // The record is built in place in `outgoing`. Any failure has
+            // used the record's sequence number (an `outgoing` too short
+            // means the provider's `encrypted_payload_len` was wrong), so
+            // the stream cannot continue consistently. What the provider
+            // reports must be one record within `out`, or it is a failure
+            // too; and whatever a failing provider left in `out` (the
+            // plaintext, for one that copies it there first) is wiped.
+            let out = outgoing.get_mut(written..).unwrap_or_default();
+            match self
+                .common_state
+                .record_layer
+                .encrypt_outgoing_into(plain, out)
+            {
+                Ok(len) if is_one_record(out, len) => written += len,
+                _ => {
+                    crate::crypto::zeroize_slice(out);
                     self.common_state.encrypt_failed = true;
                     return Err(EncryptError::Failed);
                 }
-            };
-            written += self.copy_record(&record, &mut outgoing[written..])?;
+            }
         }
 
         if rekey_after || refresh_later {
@@ -476,23 +493,16 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
         Ok(self.common_state.sendable_tls.read(outgoing))
     }
+}
 
-    /// Copies one encrypted record into `outgoing`.
-    fn copy_record(&mut self, record: &[u8], outgoing: &mut [u8]) -> Result<usize, EncryptError> {
-        match outgoing.get_mut(..record.len()) {
-            Some(out) => {
-                out.copy_from_slice(record);
-                Ok(record.len())
-            }
-            None => {
-                // The provider's `encrypted_payload_len` was wrong and the
-                // record has used its sequence number: the stream cannot
-                // continue consistently.
-                self.common_state.encrypt_failed = true;
-                Err(EncryptError::Failed)
-            }
-        }
-    }
+/// Whether the first `len` bytes of `out` are framed as one application
+/// data record: its header, and a body of the length the header states.
+fn is_one_record(out: &[u8], len: usize) -> bool {
+    out.get(..len).is_some_and(|record| {
+        record.len() >= HEADER_SIZE
+            && record[0] == u8::from(ContentType::ApplicationData)
+            && usize::from(u16::from_be_bytes([record[3], record[4]])) + HEADER_SIZE == record.len()
+    })
 }
 
 /// What [`UnbufferedConnectionCommon::advance`] found.
@@ -777,6 +787,10 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
     /// On error nothing of `application_data` was sent. A KeyUpdate that is
     /// due (RFC 9846 §4.7.3, §5.5) is written into the same buffer, before or
     /// after the data, and counted in the size required.
+    ///
+    /// The records are built in `outgoing_tls` itself. After
+    /// [`EncryptError::Failed`] its contents are not to be sent: the buffer
+    /// is zeroed from the record that failed to its end.
     pub fn encrypt(
         &mut self,
         application_data: &[u8],
@@ -899,7 +913,8 @@ pub enum EncryptError {
     /// Our `close_notify` (or a fatal alert) was already sent, or the
     /// connection has failed.
     AlreadyClosed,
-    /// Record protection failed; the connection is unusable.
+    /// Record protection failed; the connection is unusable, and what the
+    /// call wrote to the output buffer must not be sent.
     Failed,
 }
 

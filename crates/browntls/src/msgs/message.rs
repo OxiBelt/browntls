@@ -115,6 +115,41 @@ impl<'a> OutboundChunks<'a> {
         }
     }
 
+    /// Copies the data to the front of `out`. Returns `None` if `out` is
+    /// shorter than [`Self::len`] (nothing is written) or the chunks hold
+    /// less than [`Self::len`] bytes.
+    pub(crate) fn copy_to_slice(&self, out: &mut [u8]) -> Option<()> {
+        let out = out.get_mut(..self.len())?;
+        match self {
+            Self::Single(c) => out.copy_from_slice(c),
+            Self::Multiple { chunks, start, end } => {
+                let (mut offset, mut written) = (0, 0);
+                for chunk in chunks.iter() {
+                    let chunk_start = offset;
+                    let chunk_end = offset + chunk.len();
+                    offset = chunk_end;
+                    if chunk_end <= *start {
+                        continue;
+                    }
+                    if chunk_start >= *end {
+                        break;
+                    }
+                    let from = start.saturating_sub(chunk_start);
+                    let to = (*end - chunk_start).min(chunk.len());
+                    let part = chunk.get(from..to)?;
+                    out.get_mut(written..written + part.len())?
+                        .copy_from_slice(part);
+                    written += part.len();
+                }
+                // Chunks shorter than `end` claims.
+                if written != out.len() {
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+
     /// The data as a fresh vector.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.len());
@@ -223,12 +258,21 @@ impl OutboundOpaqueMessage {
     pub fn encode(self) -> Vec<u8> {
         let mut bytes = self.payload.0;
         let len = bytes.len() - HEADER_SIZE;
-        bytes[0] = self.typ.into();
-        bytes[1..3].copy_from_slice(&u16::from(self.version).to_be_bytes());
-        // `len` is bounded by `MAX_WIRE_SIZE`, so it fits.
-        bytes[3..5].copy_from_slice(&(len as u16).to_be_bytes());
+        bytes[..HEADER_SIZE].copy_from_slice(&encode_header(self.typ, self.version, len));
         bytes
     }
+}
+
+/// The record header for a body of `len` bytes.
+pub(crate) fn encode_header(
+    typ: ContentType,
+    version: ProtocolVersion,
+    len: usize,
+) -> [u8; HEADER_SIZE] {
+    let version = u16::from(version).to_be_bytes();
+    // `len` is bounded by `MAX_WIRE_SIZE`, so it fits.
+    let len = (len as u16).to_be_bytes();
+    [typ.into(), version[0], version[1], len[0], len[1]]
 }
 
 impl fmt::Debug for OutboundOpaqueMessage {
@@ -658,6 +702,33 @@ mod tests {
         let (e, f) = OutboundChunks::Single(&[1, 2]).split_at(5);
         assert_eq!(e.len(), 2);
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn chunks_copy_to_slice() {
+        let data: [&[u8]; 4] = [&[1, 2], &[], &[3], &[4, 5, 6]];
+        let window = OutboundChunks::Multiple {
+            chunks: &data,
+            start: 1,
+            end: 5,
+        };
+        let mut out = [0xaa; 6];
+        assert_eq!(window.copy_to_slice(&mut out), Some(()));
+        assert_eq!(out, [2, 3, 4, 5, 0xaa, 0xaa]);
+        assert_eq!(window.copy_to_slice(&mut out[..3]), None);
+        let mut out = [0u8; 2];
+        assert_eq!(
+            OutboundChunks::Single(&[7, 8]).copy_to_slice(&mut out),
+            Some(())
+        );
+        assert_eq!(out, [7, 8]);
+        // `end` past the data.
+        let short = OutboundChunks::Multiple {
+            chunks: &data,
+            start: 0,
+            end: 9,
+        };
+        assert_eq!(short.copy_to_slice(&mut [0u8; 9]), None);
     }
 
     #[test]

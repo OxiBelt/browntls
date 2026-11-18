@@ -616,7 +616,13 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   server's early-data store only flag it instead of copying it.
   `WriteTraffic::encrypt` encrypts into a caller buffer after checking the
   whole size first (`InsufficientSize` carries the exact requirement, and
-  nothing is consumed); a KeyUpdate that is due (an answer to the peer, or
+  nothing is consumed). Each data record is built in place there
+  (`MessageEncrypter::encrypt_into`): the plaintext is copied once behind
+  the header and sealed, without a per-record allocation for the built-in
+  providers (an encrypter that keeps the provided `encrypt_into` allocates
+  one record and copies it). What an encrypter reports is accepted only as
+  one record within the buffer; otherwise, and when it fails, the buffer is
+  zeroed from that record on and the write fails. A KeyUpdate that is due (an answer to the peer, or
   the RFC 9846 §5.5 refresh) is written into the same buffer in order. At
   the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
   `EncryptExhausted`, and a server's half-RTT data fails with the temporary

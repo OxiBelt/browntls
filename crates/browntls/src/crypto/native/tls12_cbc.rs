@@ -23,10 +23,10 @@ use super::{hash, prf};
 use crate::crypto::KeyExchangeAlgorithm;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, KeyBlockShape, MessageDecrypter,
-    MessageEncrypter, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
-    Tls12BlockCipherAlgorithm, Tls12MacOrder, Tls12RecordProtection,
+    MessageEncrypter, OutboundOpaqueMessage, OutboundPlainMessage, Tls12BlockCipherAlgorithm,
+    Tls12MacOrder, Tls12RecordProtection, seal_record, seal_record_into,
 };
-use crate::enums::CipherSuite;
+use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::message::MAX_PLAINTEXT_LEN;
 use crate::suites::{CipherSuiteCommon, SupportedCipherSuite};
@@ -209,19 +209,17 @@ struct CbcEncrypter {
     key: RecordKey<AesCbcKey>,
 }
 
-impl MessageEncrypter for CbcEncrypter {
-    fn encrypt(
-        &mut self,
-        msg: OutboundPlainMessage<'_>,
+impl CbcEncrypter {
+    /// Seals a record body: room for the IV, the plaintext, then room for
+    /// the MAC and padding.
+    fn seal(
+        &self,
+        typ: ContentType,
+        version: ProtocolVersion,
         seq: u64,
-    ) -> Result<OutboundOpaqueMessage, Error> {
-        let plaintext_len = msg.payload.len();
-        let total_len = self.encrypted_payload_len(plaintext_len);
-        let mut payload = PrefixedPayload::with_capacity(total_len);
-        payload.extend_from_slice(&[0u8; BLOCK_LEN]);
-        payload.extend_from_chunks(&msg.payload);
-        payload.resize(total_len);
-
+        plaintext_len: usize,
+        body: &mut [u8],
+    ) -> Result<(), Error> {
         // RFC 5246 §6.2.3.2: the IV must be unpredictable; a fresh random
         // value per record.
         let mut iv = [0u8; BLOCK_LEN];
@@ -231,16 +229,56 @@ impl MessageEncrypter for CbcEncrypter {
             .key
             .seal(
                 seq,
-                msg.typ.into(),
-                msg.version.to_array(),
+                typ.into(),
+                version.to_array(),
                 &iv,
-                payload.as_mut(),
+                body,
                 plaintext_len,
             )
             .map_err(|_| Error::EncryptError)?;
-        debug_assert_eq!(written, total_len);
-        payload.truncate(written);
-        Ok(OutboundOpaqueMessage::new(msg.typ, msg.version, payload))
+        // `body` is `sealed_len(plaintext_len)` long, which `seal` fills.
+        if written != body.len() {
+            return Err(Error::EncryptError);
+        }
+        Ok(())
+    }
+}
+
+impl MessageEncrypter for CbcEncrypter {
+    fn encrypt(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        let plaintext_len = msg.payload.len();
+        let body_len = self.encrypted_payload_len(plaintext_len);
+        seal_record(
+            msg.typ,
+            msg.version,
+            &msg.payload,
+            BLOCK_LEN,
+            body_len,
+            |body| self.seal(msg.typ, msg.version, seq, plaintext_len, body),
+        )
+    }
+
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let plaintext_len = msg.payload.len();
+        let body_len = self.encrypted_payload_len(plaintext_len);
+        seal_record_into(
+            msg.typ,
+            msg.version,
+            &msg.payload,
+            BLOCK_LEN,
+            body_len,
+            out,
+            |body| self.seal(msg.typ, msg.version, seq, plaintext_len, body),
+        )
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -283,7 +321,6 @@ impl MessageDecrypter for CbcDecrypter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enums::{ContentType, ProtocolVersion};
     use crate::msgs::message::OutboundChunks;
 
     fn inbound(typ: ContentType, wire: &mut [u8]) -> InboundOpaqueMessage<'_> {

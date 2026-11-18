@@ -34,24 +34,21 @@ before closing. Blocking sockets without a send timeout are not affected.
 
 ## Zero copy
 
-Two kernel options (Linux 6.0) remove copies the kernel otherwise makes.
-Both are off after the handover and set on the stream:
+`set_tx_zerocopy_sendfile` on either stream sets the kernel's
+`TLS_TX_ZEROCOPY_RO` option (Linux 5.19; off after the handover): a network
+device that encrypts the records itself is then given the pages of a
+`sendfile` without the kernel copying them first. The file must not change
+until the peer has acknowledged its bytes, or a retransmission carries a
+record that no longer authenticates and the peer ends the connection. Where
+the kernel encrypts in software the option changes nothing: the ciphertext
+goes to pages of the kernel's own either way.
 
-| Method | Kernel option | Effect |
-|---|---|---|
-| `set_rx_expect_no_pad` | `TLS_RX_EXPECT_NO_PAD` | TLS 1.3 records are decrypted straight into the buffer of a read that has room for the whole record, on the promise that the peer does not pad them |
-| `set_tx_zerocopy_sendfile` | `TLS_TX_ZEROCOPY_RO` | A network device that encrypts the records itself is given the pages of a `sendfile` without a copy |
-
-A TLS 1.3 record that turns out to be padded, or not application data, is
-decrypted a second time into a buffer of the kernel's, so the peer decides
-how often the work is done twice: expect unpadded records only from peers
-trusted not to exploit that (browntls and the Linux kernel never pad what
-they send). TLS 1.2 records have no padding and need no promise; the method
-reports `Unsupported` there. With `set_tx_zerocopy_sendfile` the file must
-not change until the peer has acknowledged its bytes, or a retransmission
-carries a record that no longer authenticates and the peer ends the
-connection; where the kernel encrypts in software the option changes
-nothing.
+`TLS_RX_EXPECT_NO_PAD`, which lets the kernel decrypt TLS 1.3 records
+straight into the reader's buffer, is not offered: before Linux 7.2 the
+kernel copies a record to the wrong place in the reader's buffer when it
+has to decrypt it a second time (a padded record, or one that is not
+application data), so a peer that pads would corrupt what the application
+reads.
 
 ## Tokio
 

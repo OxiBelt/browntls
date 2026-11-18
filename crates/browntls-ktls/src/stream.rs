@@ -299,42 +299,10 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
         Ok(backlog.unsent)
     }
 
-    /// Tells the kernel whether to expect the peer's TLS 1.3 records to be
-    /// unpadded (`TLS_RX_EXPECT_NO_PAD`, Linux 6.0; off after the
-    /// handover).
-    ///
-    /// A TLS 1.3 record may end in padding, which hides its content type
-    /// and the length of its data until it is decrypted, so the kernel
-    /// decrypts into a buffer of its own and copies the data out. With
-    /// this set it decrypts straight into the buffer of a read that has
-    /// room for the whole record. A record that turns out to be padded, or
-    /// not application data, is decrypted a second time the usual way:
-    /// nothing is lost or accepted that would not be otherwise, but the
-    /// peer decides how often the work is done twice. Set it only for
-    /// peers trusted not to exploit that; browntls and the Linux kernel
-    /// never pad the records they send. The kernel counts the second
-    /// decryptions (`TlsDecryptRetry` and `TlsRxNoPadViolation` in
-    /// `/proc/net/tls_stat`).
-    ///
-    /// TLS 1.2 records have no padding and are decrypted into the reader's
-    /// buffer as they are: the error is then
-    /// [`io::ErrorKind::Unsupported`], as it is when the kernel lacks the
-    /// option.
-    pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
-        self.engine
-            .set_rx_expect_no_pad(self.socket.as_fd(), expect)
-    }
-
-    /// Whether the kernel expects unpadded records
-    /// ([`Self::set_rx_expect_no_pad`]).
-    pub fn rx_expect_no_pad(&self) -> io::Result<bool> {
-        self.engine.rx_expect_no_pad(self.socket.as_fd())
-    }
-
     /// Lets a network device that encrypts the records itself (kernel TLS
     /// device offload) send the pages of a file given to `sendfile`
     /// without the kernel copying them first (`TLS_TX_ZEROCOPY_RO`, Linux
-    /// 6.0; off after the handover).
+    /// 5.19; off after the handover).
     ///
     /// The file must then not change until the peer has acknowledged its
     /// bytes: a retransmission would carry the changed bytes, and the

@@ -35,10 +35,8 @@ use libc::{c_int, c_void};
 const TLS_TX: c_int = 1;
 /// `TLS_RX`.
 const TLS_RX: c_int = 2;
-/// `TLS_TX_ZEROCOPY_RO` (Linux 6.0).
+/// `TLS_TX_ZEROCOPY_RO` (Linux 5.19).
 const TLS_TX_ZEROCOPY_RO: c_int = 3;
-/// `TLS_RX_EXPECT_NO_PAD` (Linux 6.0).
-const TLS_RX_EXPECT_NO_PAD: c_int = 4;
 /// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18).
 const TLS_TX_MAX_PAYLOAD_LEN: c_int = 5;
 /// `TLS_SET_RECORD_TYPE`: the control message giving a sent record's type.
@@ -186,18 +184,6 @@ pub(crate) fn set_tx_zerocopy_ro(fd: BorrowedFd<'_>, on: bool) -> io::Result<()>
 /// Reads `TLS_TX_ZEROCOPY_RO`.
 pub(crate) fn tx_zerocopy_ro(fd: BorrowedFd<'_>) -> io::Result<bool> {
     flag(fd, TLS_TX_ZEROCOPY_RO)
-}
-
-/// `TLS_RX_EXPECT_NO_PAD`: whether the kernel takes the peer's TLS 1.3
-/// records to be unpadded and decrypts them into the reader's buffer.
-/// The receive keys must be installed.
-pub(crate) fn set_rx_expect_no_pad(fd: BorrowedFd<'_>, on: bool) -> io::Result<()> {
-    set_flag(fd, TLS_RX_EXPECT_NO_PAD, on)
-}
-
-/// Reads `TLS_RX_EXPECT_NO_PAD`.
-pub(crate) fn rx_expect_no_pad(fd: BorrowedFd<'_>) -> io::Result<bool> {
-    flag(fd, TLS_RX_EXPECT_NO_PAD)
 }
 
 /// One `sendmsg` of `payload` with a `TLS_SET_RECORD_TYPE` control message.

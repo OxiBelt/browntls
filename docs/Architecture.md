@@ -1125,26 +1125,21 @@ the handover, or bytes were sent on the socket directly
 (`Unsupported`). A FIN takes a sequence number, so the count no longer fits
 once the write side is shut.
 
-Two kernel options (Linux 6.0) that remove copies are set on either stream
-and are off after the handover. `set_rx_expect_no_pad`
-(`TLS_RX_EXPECT_NO_PAD`, TLS 1.3 only) promises that the peer does not pad its
-records, so that the kernel decrypts a record straight into the buffer of a
-read with room for all of it instead of into a buffer of its own; without the
-promise it cannot, since padding hides the length of the data and the content
-type until the record is decrypted. A record that is padded after all, or is
-not application data (every KeyUpdate, ticket and alert), is decrypted a
-second time the ordinary way, so nothing is accepted that would not be
-otherwise, but the peer decides how often the work is done twice: the option
-is for peers trusted not to exploit that. TLS 1.2 records have no padding and
-the kernel already decrypts them in place; the method reports `Unsupported`
-there rather than passing on the kernel's `EINVAL`. `set_tx_zerocopy_sendfile`
-(`TLS_TX_ZEROCOPY_RO`) lets a network device that encrypts the records itself
-send the pages of a `sendfile` without a copy; the file must then not change
-until its bytes are acknowledged, or a retransmission carries a record that
-does not authenticate. With software encryption in the kernel the option
-changes nothing. The tests (`tests/zero_copy.rs`, `tests/tokio_zero_copy.rs`)
-read the options back on the running kernel and keep a stream that expects
-unpadded records going across tickets, KeyUpdates and new receive keys.
+`set_tx_zerocopy_sendfile` on either stream sets `TLS_TX_ZEROCOPY_RO` (Linux
+5.19; off after the handover), which lets a network device that encrypts the
+records itself send the pages of a `sendfile` without a copy; the file must
+then not change until its bytes are acknowledged, or a retransmission carries
+a record that does not authenticate. With software encryption in the kernel
+the option changes nothing. The tests (`tests/zero_copy.rs`,
+`tests/tokio_zero_copy.rs`) read it back on the running kernel.
+`TLS_RX_EXPECT_NO_PAD` (TLS 1.3 records decrypted straight into the reader's
+buffer on the promise that the peer does not pad) is deliberately not offered.
+A record that is padded after all, or is not application data, is decrypted a
+second time into a buffer of the kernel's and copied out, and before Linux 7.2
+`tls_decrypt_sw` does not take back the reader's position the first attempt
+advanced: the copy lands behind the first attempt's output. A peer that pads
+would so corrupt what the application reads, and a control record needs twice
+its length in the reader's buffer.
 
 `AsyncKtlsStream` (feature `tokio`) is the engine with a
 `tokio::net::TcpStream`, implementing `AsyncRead` and `AsyncWrite`. Each

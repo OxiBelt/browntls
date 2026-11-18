@@ -12,7 +12,8 @@
 //! reads (`poll_read` or `poll_fill_buf` and `consume`), flushes,
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
 //! accessors, early data reads, the lazy acceptor's `take_io`, pumping
-//! until idle, and reconnection (resumption and 0-RTT).
+//! until idle, reconnection (resumption and 0-RTT), and a stream split into
+//! its read and write halves, used through them and put back together.
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -23,6 +24,8 @@
 //!   prefix of what the peer wrote, whatever happened to the bytes;
 //! * a write never reports more bytes than it was given, and never `Ok(0)`
 //!   for a non-empty buffer;
+//! * the halves of a stream are a pair and reunite into it, and halves of
+//!   two streams do neither and come back unharmed;
 //! * nothing panics, and no poll loops forever.
 
 use std::cell::RefCell;
@@ -36,8 +39,8 @@ use std::task::{Context, Poll, Waker};
 use browntls::server::Acceptor;
 use browntls::{ClientConfig, ServerConfig};
 use browntls_tokio::{
-    Accept, Connect, FallibleAccept, FallibleConnect, LazyConfigAcceptor, StartHandshake,
-    TlsAcceptor, TlsConnector, TlsStream,
+    Accept, Connect, FallibleAccept, FallibleConnect, LazyConfigAcceptor, ReadHalf, ReuniteError,
+    StartHandshake, TlsAcceptor, TlsConnector, TlsStream, WriteHalf,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
@@ -46,6 +49,9 @@ use crate::tls_conn::setup::{Knobs, assert_prefix, server_name};
 
 const MAX_OPS: usize = 96;
 const MAX_CONNECTIONS: usize = 3;
+/// What the split seeds write through a write half, and in how many rounds.
+const SPLIT_DATA: &[u8] = b"through a half";
+const SPLIT_ROUNDS: u8 = 8;
 const CLIENT: usize = 0;
 const SERVER: usize = 1;
 /// The most bytes one direction of the transport holds.
@@ -185,9 +191,12 @@ enum Op {
     Pump,
     /// Starts a new connection with the same configurations.
     Reconnect,
+    /// `side, how, data (short field), size`: splits that side's stream,
+    /// writes, flushes and reads once through the halves and reunites them.
+    Split,
 }
 
-const OPS: [Op; 14] = [
+const OPS: [Op; 15] = [
     Op::Poll,
     Op::Write,
     Op::Read,
@@ -202,6 +211,7 @@ const OPS: [Op; 14] = [
     Op::TakeIo,
     Op::Pump,
     Op::Reconnect,
+    Op::Split,
 ];
 
 struct World {
@@ -225,6 +235,28 @@ struct World {
 
 fn cx() -> Context<'static> {
     Context::from_waker(Waker::noop())
+}
+
+/// The stream of its two halves, asked of either half.
+fn rejoin<S>(read: ReadHalf<S>, write: WriteHalf<S>, write_first: bool) -> S {
+    assert!(read.is_pair_of(&write) && write.is_pair_of(&read));
+    let stream = if write_first {
+        write.reunite(read)
+    } else {
+        read.reunite(write)
+    };
+    match stream {
+        Ok(stream) => stream,
+        Err(_) => panic!("the halves of one stream did not reunite"),
+    }
+}
+
+/// What a handshake future's accessors returned: `(get_ref, get_mut)` and
+/// `(connection, connection_mut)`, each as "is some".
+fn check_future_accessors(io: (bool, bool), conn: (bool, bool)) {
+    assert_eq!(io.0, io.1, "get_ref and get_mut disagree");
+    assert_eq!(conn.0, conn.1, "connection and connection_mut disagree");
+    assert!(io.0 || !conn.0, "a connection without a transport");
 }
 
 impl World {
@@ -415,6 +447,106 @@ impl World {
         self.check();
     }
 
+    fn take_stream(&mut self, side: usize) -> Option<TlsStream<End>> {
+        self.stream(side)?;
+        let taken = if side == CLIENT {
+            std::mem::replace(&mut self.client, Client::Gone)
+        } else {
+            match std::mem::replace(&mut self.server, Server::Gone) {
+                Server::Ready(stream) => Client::Ready(stream),
+                _ => Client::Gone,
+            }
+        };
+        match taken {
+            Client::Ready(stream) => Some(stream),
+            _ => None,
+        }
+    }
+
+    fn put_stream(&mut self, side: usize, stream: TlsStream<End>) {
+        if side == CLIENT {
+            self.client = Client::Ready(stream);
+        } else {
+            self.server = Server::Ready(stream);
+        }
+    }
+
+    /// One write, one flush and one read through the halves of `side`'s
+    /// stream.
+    fn use_halves<S>(
+        &mut self,
+        side: usize,
+        (read, write): (&mut ReadHalf<S>, &mut WriteHalf<S>),
+        vectored: bool,
+        data: &[u8],
+        size: usize,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        assert!(read.is_pair_of(write) && write.is_pair_of(read));
+        let mut cx = cx();
+        let poll = if vectored && data.len() > 1 {
+            let (a, b) = data.split_at(data.len() / 2);
+            Pin::new(&mut *write).poll_write_vectored(&mut cx, &[IoSlice::new(a), IoSlice::new(b)])
+        } else {
+            Pin::new(&mut *write).poll_write(&mut cx, data)
+        };
+        if let Poll::Ready(Ok(n)) = poll {
+            assert!(n <= data.len(), "wrote more than given");
+            assert!(n > 0 || data.is_empty(), "Ok(0) for a non-empty write");
+            self.sent[side].extend_from_slice(&data[..n]);
+        }
+        let _ = Pin::new(write).poll_flush(&mut cx);
+        let mut buf = vec![0; size.max(1)];
+        let mut rb = ReadBuf::new(&mut buf);
+        if let Poll::Ready(Ok(())) = Pin::new(read).poll_read(&mut cx, &mut rb) {
+            self.received[side].extend_from_slice(rb.filled());
+        }
+    }
+
+    /// Splits `side`'s stream (the unified stream, or the client or server
+    /// stream in it), uses the halves and puts the stream back together.
+    fn split(&mut self, side: usize, how: u8, data: &[u8], size: usize) {
+        let Some(stream) = self.take_stream(side) else {
+            return;
+        };
+        let (inner, write_first, vectored) = (how & 1 != 0, how & 2 != 0, how & 4 != 0);
+        let stream = match stream {
+            TlsStream::Client(client) if inner => {
+                let (mut read, mut write) = client.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                TlsStream::Client(rejoin(read, write, write_first))
+            }
+            TlsStream::Server(server) if inner => {
+                let (mut read, mut write) = server.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                TlsStream::Server(rejoin(read, write, write_first))
+            }
+            stream => {
+                let (mut read, mut write) = stream.into_split();
+                self.use_halves(side, (&mut read, &mut write), vectored, data, size);
+                // The peer's stream is another stream: its halves pair with
+                // neither of these, and a refused reunion returns both.
+                if let Some(other) = self.take_stream(1 - side) {
+                    let (other_read, other_write) = other.into_split();
+                    assert!(!read.is_pair_of(&other_write) && !other_write.is_pair_of(&read));
+                    let Err(ReuniteError(back, other_write)) = read.reunite(other_write) else {
+                        panic!("halves of two streams reunited");
+                    };
+                    let Err(ReuniteError(other_read, back_write)) = write.reunite(other_read)
+                    else {
+                        panic!("halves of two streams reunited");
+                    };
+                    (read, write) = (back, back_write);
+                    self.put_stream(1 - side, rejoin(other_read, other_write, !write_first));
+                }
+                rejoin(read, write, write_first)
+            }
+        };
+        self.put_stream(side, stream);
+        self.check();
+    }
+
     fn check(&self) {
         assert_prefix(&self.received[CLIENT], &self.sent[SERVER], "client read");
         assert_prefix(&self.early, &self.sent[CLIENT], "0-RTT data");
@@ -437,11 +569,31 @@ impl World {
     fn accessors(&mut self, side: usize) {
         let _ = (self.connector.config(), self.server_config.fips());
         match (side, &mut self.client, &mut self.server) {
+            // A handshake future shows a connection only while it shows its
+            // transport (it may have only an alert left to send, or nothing
+            // at all once it returned), and `&` and `&mut` access agree.
             (CLIENT, Client::Connecting(f), _) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+            }
+            (CLIENT, Client::Fallible(f), _) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (SERVER, _, Server::Accepting(f)) => {
-                let _ = (f.get_ref().is_some(), f.get_mut().is_some());
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
+                if let Some(conn) = f.connection() {
+                    let _ = (conn.is_handshaking(), conn.server_name());
+                }
+            }
+            (SERVER, _, Server::Fallible(f)) => {
+                let io = (f.get_ref().is_some(), f.get_mut().is_some());
+                let conn = (f.connection().is_some(), f.connection_mut().is_some());
+                check_future_accessors(io, conn);
             }
             (CLIENT, Client::Ready(s), _) | (SERVER, _, Server::Ready(s)) => {
                 let _ = s.get_ref().1.is_handshaking();
@@ -604,13 +756,20 @@ fn play(data: &[u8]) -> Option<World> {
                     world.connect();
                 }
             }
+            Op::Split => {
+                let how = input.byte();
+                let data = input.short_field();
+                let size = usize::from(input.byte());
+                world.split(side, how, data, size);
+            }
         }
     }
     Some(world)
 }
 
 /// Seeds: every creation mode with a full exchange, 0-RTT on a resumed
-/// connection, a refused plain-text request, and damaged handshakes.
+/// connection, a refused plain-text request, damaged handshakes, and an
+/// exchange through split halves.
 pub fn seeds() -> Vec<Vec<u8>> {
     let op = |out: &mut Vec<u8>, op: Op, side: usize| {
         out.push(op as u8);
@@ -672,6 +831,23 @@ pub fn seeds() -> Vec<Vec<u8>> {
     put_short_field(&mut s, b"later");
     op(&mut s, Op::Pump, 0);
     seeds.push(s);
+    // Split halves, of the unified stream and of each side's own, in every
+    // way to write and to reunite; each side reads what the peer's halves
+    // wrote in the round before.
+    for versions in [1u8, 2] {
+        let mut s = vec![versions, 0, 0, 0, 0, 0, 255, 0, 255, 0];
+        op(&mut s, Op::Pump, 0);
+        for how in 0..SPLIT_ROUNDS {
+            for side in [CLIENT, SERVER] {
+                op(&mut s, Op::Split, side);
+                s.push(how);
+                put_short_field(&mut s, SPLIT_DATA);
+                s.push(64);
+            }
+        }
+        op(&mut s, Op::Pump, 0);
+        seeds.push(s);
+    }
     // A lazy acceptor refusing a plain-text request, then giving the
     // transport back.
     let mut s = vec![1, 0, 0, 0, 0, 0x10, 255, 0, 255, 0];
@@ -730,6 +906,20 @@ mod tests {
         assert!(world.early_attempted);
         assert_eq!(world.early, b"early request");
         assert_eq!(world.received[SERVER], b"later");
+
+        let split: Vec<_> = seeds
+            .iter()
+            .filter(|s| s.get(12) == Some(&(Op::Split as u8)))
+            .collect();
+        assert_eq!(split.len(), 2);
+        for seed in split {
+            let world = play(seed).expect("configurations");
+            let all = SPLIT_DATA.repeat(usize::from(SPLIT_ROUNDS));
+            assert_eq!(world.received[CLIENT], all);
+            assert_eq!(world.received[SERVER], all);
+            assert!(matches!(world.client, Client::Ready(_)));
+            assert!(matches!(world.server, Server::Ready(_)));
+        }
 
         let refused = seeds
             .iter()

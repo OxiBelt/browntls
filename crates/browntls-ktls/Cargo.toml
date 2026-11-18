@@ -27,6 +27,9 @@ native = ["browntls/native"]
 rustcrypto = ["browntls/rustcrypto"]
 tls12 = ["browntls/tls12"]
 logging = ["browntls/logging"]
+# `AsyncKtlsStream`: kernel TLS on a `tokio::net::TcpStream`, and the
+# handover of `browntls-tokio` streams.
+tokio = ["dep:tokio", "dep:browntls-tokio"]
 
 [dependencies]
 browntls = { workspace = true, features = ["std"] }
@@ -35,8 +38,12 @@ browntls = { workspace = true, features = ["std"] }
 # (`src/sys.rs`, the crate's only unsafe code).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2.191", default-features = false }
+# Readiness of the socket (`net`); the runtime is the caller's.
+tokio = { workspace = true, optional = true, features = ["net"] }
+browntls-tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 # Certificates generated at test run time (no committed private keys).
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 

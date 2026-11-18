@@ -13,10 +13,12 @@ mod common;
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use browntls::client::ClientConnectionData;
+use browntls::kernel::KernelHandoffBlocker;
 use browntls::server::ServerConnectionData;
 use browntls::{
     ClientConnection, ProtocolVersion, ServerConnection, StreamOwned, SupportedCipherSuite,
@@ -265,6 +267,64 @@ fn truncation_is_reported() {
     });
 }
 
+/// The connection stops at the peer's `close_notify`: a byte of another
+/// record behind it would stay unprocessed for good, so the handover is
+/// refused at once instead of waiting for the rest of that record.
+#[test]
+fn data_after_close_notify_is_refused() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+    let (mut client_tcp, server_tcp) = tcp_pair();
+    let (done, wait) = mpsc::channel::<()>();
+    let pki = &pki;
+    thread::scope(|scope| {
+        // Dropped if the test fails, which lets the server go.
+        let done = done;
+        let server = scope.spawn(move || {
+            let conn = ServerConnection::new(Arc::new(pki.server_config(suite))).unwrap();
+            let mut tls = StreamOwned::new(conn, server_tcp);
+            tls.write_all(b"!").unwrap();
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+            // The first byte of another record; the socket stays open.
+            tls.sock.write_all(&[0x17]).unwrap();
+            let _ = wait.recv();
+        });
+        let mut conn =
+            ClientConnection::new(Arc::new(pki.client_config(suite)), localhost()).unwrap();
+        while conn.is_handshaking() || conn.wants_write() {
+            conn.complete_io(&mut client_tcp).unwrap();
+        }
+        // Reads the close_notify and the byte behind it in userspace.
+        let mut data = Vec::new();
+        loop {
+            let state = conn.process_new_packets().unwrap();
+            let _ = conn.reader().read_to_end(&mut data);
+            if state.peer_has_closed()
+                && conn.kernel_handoff_blocker() == Some(KernelHandoffBlocker::UnprocessedInput)
+            {
+                break;
+            }
+            assert!(conn.read_tls(&mut client_tcp).unwrap() > 0);
+        }
+        assert_eq!(data, b"!");
+
+        // A handover that waited for the rest of the record would time out.
+        client_tcp
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let Err(HandoffError::Refused { error, .. }) = KtlsStream::new(conn, client_tcp) else {
+            panic!("handed over with data after close_notify");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        done.send(()).unwrap();
+        server.join().unwrap();
+    });
+}
+
 /// Without secret extraction nothing is handed over, the socket is left
 /// alone, and the connection carries on in userspace. Needs no kernel TLS.
 #[test]
@@ -340,7 +400,7 @@ fn a_refused_handover_can_be_retried() {
                     (conn, socket) = (c, s);
                     retries += 1;
                     assert!(retries < 10_000, "no progress");
-                    thread::sleep(std::time::Duration::from_millis(1));
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(err) => panic!("{err}"),
             }
@@ -366,7 +426,7 @@ fn a_key_update_waits_for_room_on_a_non_blocking_socket() {
         return;
     };
     let (client_tcp, server_tcp) = tcp_pair();
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<usize>();
+    let (done_tx, done_rx) = mpsc::channel::<usize>();
     let pki = &pki;
     thread::scope(|scope| {
         let server = scope.spawn(move || {
@@ -408,7 +468,7 @@ fn a_key_update_waits_for_room_on_a_non_blocking_socket() {
             match tls.flush() {
                 Ok(()) => break,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(std::time::Duration::from_millis(1));
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(err) => panic!("{err}"),
             }

@@ -40,6 +40,7 @@ pub mod tls_kernel;
 pub mod tls_psk;
 pub mod tls_quic;
 pub mod tls_tokio;
+pub mod tls_tokio_unbuffered;
 pub mod tls_unbuffered;
 
 pub use codec::{cert_decompress, deframer, handshake_message};

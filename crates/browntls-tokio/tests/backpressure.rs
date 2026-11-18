@@ -165,6 +165,15 @@ async fn reads_wait_for_owed_answers_to_be_written() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_split_reader_waiting_for_answers_wakes_when_the_writer_sends_them() {
+    split_reader_waiting_for_answers_wakes_when_the_writer_sends_them(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_read_half_waiting_for_answers_wakes_when_the_writer_sends_them() {
+    split_reader_waiting_for_answers_wakes_when_the_writer_sends_them(true).await;
+}
+
+async fn split_reader_waiting_for_answers_wakes_when_the_writer_sends_them(native: bool) {
     let pki = Pki::new();
     let version = &browntls::version::TLS13;
     let (c, s) = duplex(1 << 20);
@@ -194,7 +203,7 @@ async fn a_split_reader_waiting_for_answers_wakes_when_the_writer_sends_them() {
     client_io.write_all(&records).await.unwrap();
 
     // The reader waits for its answer to be written.
-    let (mut rd, mut wr) = tokio::io::split(server);
+    let (mut rd, mut wr) = server.split_either(native);
     let len = data.len();
     let reader = tokio::spawn(async move {
         let mut received = vec![0u8; len];

@@ -91,9 +91,11 @@ newest release, so CI's `Tokio lower bound` job also builds and tests
 `browntls-tokio` and `browntls-ktls` (its `tokio` feature) against the first
 release of the bound.
 
-`browntls-tokio` depends on `tokio` with no features enabled: it uses only the
-I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), and the
-runtime is the application's. That build of `tokio` pulls in
+`browntls-tokio` uses `tokio`'s I/O traits (`AsyncRead`, `AsyncWrite`,
+`AsyncBufRead`, `ReadBuf`), which need no `tokio` feature, and the runtime is
+the application's. Its default `coop` feature enables `tokio`'s `rt` feature
+for the task budget (`tokio::task::coop`); `rt` compiles the runtime's code
+but adds no dependency. Either build of `tokio` pulls in
 `pin-project-lite` only (MIT, and Apache-2.0 OR MIT); both are pure Rust, and `tokio`
 contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of

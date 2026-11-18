@@ -18,6 +18,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use browntls::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+mod coalesce;
+pub(crate) mod coop;
 mod handshake;
 pub(crate) use handshake::{IoSession, MidHandshake};
 
@@ -81,6 +83,10 @@ pub(crate) struct StreamState {
     /// A read queued TLS bytes the peer may be waiting for, and they are
     /// not all written yet: later reads keep writing them.
     pub(crate) answering: bool,
+    /// The poll now running already read from the transport: its later
+    /// reads take from the task's cooperative budget, whichever [`Stream`]
+    /// of the poll makes them (`begin_poll` clears it).
+    pub(crate) read_before: bool,
 }
 
 impl StreamState {
@@ -92,7 +98,14 @@ impl StreamState {
             write_waker: None,
             read_waker: None,
             answering: false,
+            read_before: false,
         }
+    }
+
+    /// Starts a poll of the stream that may read from the transport: its
+    /// first read is free of the cooperative budget again.
+    pub(crate) fn begin_poll(&mut self) {
+        self.read_before = false;
     }
 
     /// Records the waker of a read about to wait for queued TLS bytes to be
@@ -186,6 +199,11 @@ pub(crate) struct Stream<'a, IO, C> {
     pub(crate) need_flush: bool,
     /// Some TLS bytes reached the transport during this poll.
     pub(crate) wrote: bool,
+    /// This poll already read from the transport: its later reads take
+    /// from the task's cooperative budget. A poll that uses several
+    /// `Stream`s carries it from one to the next in
+    /// [`StreamState::read_before`].
+    pub(crate) read_before: bool,
 }
 
 impl<'a, IO, C, SD> Stream<'a, IO, C>
@@ -201,6 +219,7 @@ where
             eof: false,
             need_flush: false,
             wrote: false,
+            read_before: false,
         }
     }
 
@@ -214,18 +233,42 @@ where
         self
     }
 
+    pub(crate) fn set_read_before(mut self, read_before: bool) -> Self {
+        self.read_before = read_before;
+        self
+    }
+
     pub(crate) fn as_mut_pin(&mut self) -> Pin<&mut Self> {
         Pin::new(self)
     }
 
     /// Reads TLS bytes from the transport and processes them. `Ready(Ok(0))`
     /// is end of file.
+    ///
+    /// Every read after the first in one poll takes a unit of the task's
+    /// cooperative budget, and is `Pending` (the task being rescheduled)
+    /// once the budget is spent: the peer decides how long a read loop goes
+    /// on (records without plaintext, a handshake in small pieces), and the
+    /// transport need not take part in the budget itself.
     pub(crate) fn read_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let unit = match self.read_before {
+            true => Some(ready!(coop::poll_proceed(cx))),
+            false => None,
+        };
         let mut reader = SyncReadAdapter { io: self.io, cx };
         let n = match self.session.read_tls(&mut reader) {
-            Ok(n) => n,
+            // The transport is not ready: `unit` returns to the budget.
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
-            Err(err) => return Poll::Ready(Err(err)),
+            result => {
+                self.read_before = true;
+                if let Some(unit) = unit {
+                    unit.spent();
+                }
+                match result {
+                    Ok(n) => n,
+                    Err(err) => return Poll::Ready(Err(err)),
+                }
+            }
         };
 
         if let Err(err) = self.session.process_new_packets() {
@@ -367,6 +410,8 @@ where
                 }
             }
         }
+        // Nothing below reads from the transport.
+        st.read_before = self.read_before;
 
         // An answer partly written by an earlier read is still ours to
         // finish, even though bytes were queued when this read began.
@@ -407,10 +452,15 @@ where
             Ok(chunk) => Poll::Ready(Ok(chunk)),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if !io_pending {
-                    // The connection stopped wanting to read without
-                    // plaintext or closure, so no transport waker is
-                    // registered: poll again rather than hang. Tokio's
-                    // cooperative budget bounds a pathological loop.
+                    // The read loop stopped because the backlog of control
+                    // records the connection owes was full (when the poll
+                    // began, or once this poll's reads filled it), and the
+                    // answer above then wrote all of it. No transport
+                    // waker is registered (the last read returned, or none
+                    // was made) and nothing is left to write: poll again
+                    // rather than hang. The next poll reads, so the wake
+                    // does not repeat, and the task returns to the
+                    // scheduler in between.
                     cx.waker().wake_by_ref();
                 }
                 Poll::Pending
@@ -644,7 +694,8 @@ where
     if !st.state.readable() {
         return Poll::Ready(Ok(&[]));
     }
-    match Stream::new(io, session).poll_fill_buf(cx, st) {
+    let stream = Stream::new(io, session).set_read_before(st.read_before);
+    match stream.poll_fill_buf(cx, st) {
         Poll::Ready(Ok(chunk)) => {
             if chunk.is_empty() {
                 st.state.shutdown_read();
@@ -821,7 +872,9 @@ impl<T: AsyncRead + Unpin> Read for SyncReadAdapter<'_, '_, T> {
 }
 
 /// Gives `browntls`'s blocking `write_tls` an [`AsyncWrite`], turning
-/// `Pending` into `WouldBlock`.
+/// `Pending` into `WouldBlock`. The records `write_tls` offers go to a
+/// transport with a vectored write as they are, and to any other gathered
+/// into one write (see [`coalesce`]).
 pub(crate) struct SyncWriteAdapter<'a, 'b, T> {
     pub(crate) io: &'a mut T,
     pub(crate) cx: &'a mut Context<'b>,
@@ -845,7 +898,13 @@ impl<T: AsyncWrite + Unpin> Write for SyncWriteAdapter<'_, '_, T> {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.poll_with(|io, cx| io.poll_write_vectored(cx, bufs))
+        self.poll_with(|io, cx| {
+            if io.is_write_vectored() {
+                io.poll_write_vectored(cx, bufs)
+            } else {
+                coalesce::poll_write_coalesced(io, cx, bufs)
+            }
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {

@@ -28,7 +28,7 @@ browntls-ktls       Linux kernel TLS offload of browntls connections
 | `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, HPKE, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
-| `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API | Forbidden |
+| `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
 | `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
@@ -667,8 +667,9 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 ### Asynchronous streams (`browntls-tokio`)
 
 `browntls-tokio` adapts the buffered API to Tokio's `AsyncRead`,
-`AsyncBufRead` and `AsyncWrite`; it depends only on Tokio's I/O traits (no
-Tokio feature, no runtime). Each poll pairs the connection with the
+`AsyncBufRead` and `AsyncWrite`, and the unbuffered API in its `unbuffered`
+module (below); it depends only on Tokio's I/O traits (no Tokio feature, no
+runtime). In the streams at the crate root, each poll pairs the connection with the
 transport for its duration (`common::Stream`) and drives `read_tls` and
 `write_tls` through adapters that turn the task context's `Pending` into
 `WouldBlock`, the design of tokio-rustls:
@@ -729,6 +730,74 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
 - TLS errors surface as `io::Error` of kind `InvalidData` wrapping
   `browntls::Error`; the alert describing a local failure is written if
   the transport takes it at once.
+
+The `unbuffered` module drives `UnbufferedClientConnection`,
+`UnbufferedServerConnection` and `UnbufferedAcceptor` instead, with its own
+`TlsConnector`, `TlsAcceptor`, `LazyConfigAcceptor` and one generic
+`TlsStream<IO, C>`. The buffered streams copy the plaintext of a received
+record out of the deframer into a chunk allocated for it, which
+`poll_fill_buf` lends and `poll_read` copies again into the caller's
+buffer (one allocation per record, one or two copies); these allocate
+nothing per record and copy plaintext at most once:
+
+- The stream owns the buffers (`unbuffered/buffers.rs`). `Incoming` is one
+  allocation of 18 437 bytes (a TLS 1.2 record at its largest), made at the
+  first read and never grown (it is larger only when
+  `StartHandshake::from_parts` is given more bytes than that).
+  `process_tls_records` decrypts the record at its front in place; the
+  plaintext stays there, before the bytes not processed yet, until the
+  caller has read it, and no TLS bytes are read or moved meanwhile.
+  `poll_fill_buf` lends it, one record at a time; `poll_read` copies it
+  into the caller's buffer. A partly received record moves to the front
+  only when the rest of it, by its header, would not fit behind it
+  (ciphertext, moved before it is decrypted). `Outgoing` holds encoded
+  records the transport has not taken; it grows to what one write needs
+  and is reused.
+- One step function (`driver.rs`, `read_step`) maps a `ConnectionState` to
+  what the poll functions do next: encode a handshake or control record
+  into `Outgoing`, mark it transmitted, lend plaintext, collect early data,
+  or ask for input. Write-side operations call `process_tls_records` with
+  no input (`write_step`), which never decrypts a record, to reach
+  `WriteTraffic` and to encode what the connection has queued (a KeyUpdate
+  the application asked for through `get_mut`).
+- The handshake future reads and writes until `is_handshaking` is false
+  and checks that before every read, since the call that processes the
+  peer's last flight already reports `WriteTraffic`. While its own flight
+  waits for the transport it still takes the peer's bytes in (what a
+  handshake makes the connection queue is bounded), so a peer that writes
+  more before it reads does not deadlock with it. A failure encodes its
+  alert, writes it and then fails; later operations fail the same way.
+  Early data a server accepts is appended to a vector the stream keeps
+  (`early_data`, `take_early_data`), bounded by
+  `ServerConfig::max_early_data_size`. The connector does not send early
+  data.
+- A write encrypts at most 65 536 bytes and returns that count; the next
+  write first waits for `Outgoing` to drain, so it holds the records of
+  one write at most, besides the bounded answers below and `close_notify`. A vectored write gathers small slices, up to 16 384 bytes, into
+  one record through a scratch buffer that is zeroed afterwards.
+- A read that encodes records for the peer (a KeyUpdate answer, a
+  post-handshake authentication response, an alert) writes them at once
+  with the joint waker described above, and the write side wakes a parked
+  reader when it moves bytes or fails. Until the transport has taken and
+  flushed them, later reads go on writing and flushing (a transport that
+  buffers until flushed must not keep the answer), and the read's waker is
+  kept: a write, flush or shutdown polled meanwhile registers it with the
+  transport next to its own, so a write future that took the registration
+  over and was then dropped (a timeout) does not strand the read. The
+  stream counts the bytes of records the connection queued (application
+  data aside) since the last application write; while more than 16 KiB of
+  them are unwritten, reads take no input and wait for the transport.
+  Application data that writes encrypted does not count, so two peers
+  that both write before reading do not stop each other.
+- `LazyConfigAcceptor` feeds the same `Incoming` to `UnbufferedAcceptor`;
+  bytes behind the ClientHello stay in it for the connection
+  `StartHandshake::into_stream` builds. A refusal encodes the
+  `UnbufferedAcceptedAlert`, writes and flushes it, then fails.
+  `StartHandshake::into_parts` and `from_parts` let a caller keep the
+  accepted ClientHello and the received bytes across its own decision.
+- `TlsStream::into_parts` returns the transport, the connection, the
+  unread plaintext and the TLS bytes not processed or not written, to go
+  on by hand or to hand the connection to the kernel.
 
 ### Kernel TLS offload (`browntls::kernel`)
 

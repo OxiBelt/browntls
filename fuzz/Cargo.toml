@@ -20,7 +20,7 @@ browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli
 browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
 browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12"] }
-# Only the I/O traits the `tls_tokio` harness polls directly (no runtime).
+# Only the I/O traits the `tls_tokio` harnesses poll directly (no runtime).
 tokio = { version = "1.47", default-features = false }
 libfuzzer-sys = "0.4"
 # Independent implementations used only as differential oracles by the
@@ -243,6 +243,13 @@ bench = false
 [[bin]]
 name = "tls_tokio"
 path = "fuzz_targets/tls_tokio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_tokio_unbuffered"
+path = "fuzz_targets/tls_tokio_unbuffered.rs"
 test = false
 doc = false
 bench = false

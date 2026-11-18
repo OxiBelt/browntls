@@ -53,6 +53,12 @@ pub struct Pki {
 
 impl Pki {
     pub fn new() -> Self {
+        Self::with_client_names(vec!["client.example".to_string()])
+    }
+
+    /// Like [`Self::new`], with a client certificate for `client_names`
+    /// (many of them make a large certificate).
+    pub fn with_client_names(client_names: Vec<String>) -> Self {
         let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -74,7 +80,7 @@ impl Pki {
         let ee_cert = ee_params.signed_by(&ee_key, &issuer).unwrap();
 
         let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+        let mut client_params = CertificateParams::new(client_names).unwrap();
         client_params.is_ca = IsCa::NoCa;
         client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];

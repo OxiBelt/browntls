@@ -45,6 +45,11 @@
 //! [`ServerConnection::early_data`](browntls::ServerConnection::early_data)
 //! (`stream.get_mut().1.early_data()`) once the handshake is done.
 //!
+//! The [`unbuffered`] module has the same connector, acceptor and lazy
+//! acceptor over `browntls`'s unbuffered connection API: its streams decrypt
+//! each record in place in one receive buffer, so [`AsyncBufRead`] lends
+//! the plaintext without a copy and [`AsyncRead`] copies it once.
+//!
 //! # Flushing
 //!
 //! A write encrypts the plaintext into TLS records and writes as many of
@@ -124,6 +129,7 @@ macro_rules! ready {
 pub mod client;
 mod common;
 pub mod server;
+pub mod unbuffered;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};
 pub use server::{Accept, FallibleAccept, LazyConfigAcceptor, StartHandshake, TlsAcceptor};

@@ -85,7 +85,7 @@ impl Pki {
         })
     }
 
-    fn server_key(&self) -> PrivateKeyDer<'static> {
+    pub(crate) fn server_key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()))
     }
 

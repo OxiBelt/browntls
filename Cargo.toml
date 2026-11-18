@@ -24,6 +24,9 @@ publish = false
 browntls-crypto = { path = "crates/browntls-crypto", version = "=0.1.0-dev", default-features = false }
 browntls-pki = { path = "crates/browntls-pki", version = "=0.1.0-dev", default-features = false }
 browntls = { path = "crates/browntls", version = "=0.1.0-dev", default-features = false }
+# The lower bound is the newest Tokio LTS line (docs/Maintenance.md); crates
+# add the features they need.
+tokio = { version = "1.53", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

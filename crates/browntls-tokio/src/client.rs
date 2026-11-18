@@ -11,7 +11,8 @@ use browntls::pki_types::ServerName;
 use browntls::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState};
+use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
+use crate::split::{self, ReadHalf, WriteHalf};
 
 mod early;
 use early::EarlyData;
@@ -188,20 +189,31 @@ impl<IO> Connect<IO> {
 
     /// The transport, unless the future already returned.
     pub fn get_ref(&self) -> Option<&IO> {
-        match &self.0 {
-            MidHandshake::Handshaking(stream) => Some(&stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io()
     }
 
     /// The transport, unless the future already returned.
     pub fn get_mut(&mut self) -> Option<&mut IO> {
-        match &mut self.0 {
-            MidHandshake::Handshaking(stream) => Some(&mut stream.io),
-            MidHandshake::Error { io, .. } | MidHandshake::SendAlert { io, .. } => Some(io),
-            MidHandshake::End => None,
-        }
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs, for a caller that polls
+    /// this future itself and looks at the handshake between polls (which
+    /// messages arrived, what was negotiated so far). Until the handshake
+    /// completes, what it shows is not authenticated.
+    ///
+    /// `None` once the future returned, and when the connection could not
+    /// be created, which the future's first poll reports.
+    pub fn connection(&self) -> Option<&ClientConnection> {
+        self.0.session()
+    }
+
+    /// Like [`connection`](Self::connection), for calls that need `&mut`.
+    ///
+    /// The future drives the connection's I/O: reading or writing TLS
+    /// records or plaintext through this reference disturbs the handshake.
+    pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
+        self.0.session_mut()
     }
 }
 
@@ -222,6 +234,30 @@ impl<IO> fmt::Debug for Connect<IO> {
 /// Like [`Connect`], but an error comes with the transport.
 #[must_use = "futures do nothing unless polled"]
 pub struct FallibleConnect<IO>(MidHandshake<TlsStream<IO>>);
+
+impl<IO> FallibleConnect<IO> {
+    /// The transport, unless the future already returned.
+    pub fn get_ref(&self) -> Option<&IO> {
+        self.0.io()
+    }
+
+    /// The transport, unless the future already returned.
+    pub fn get_mut(&mut self) -> Option<&mut IO> {
+        self.0.io_mut()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Connect::connection`].
+    pub fn connection(&self) -> Option<&ClientConnection> {
+        self.0.session()
+    }
+
+    /// The connection while the handshake runs; see
+    /// [`Connect::connection_mut`].
+    pub fn connection_mut(&mut self) -> Option<&mut ClientConnection> {
+        self.0.session_mut()
+    }
+}
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Future for FallibleConnect<IO> {
     type Output = Result<TlsStream<IO>, (io::Error, IO)>;
@@ -271,6 +307,17 @@ impl<IO> TlsStream<IO> {
     pub fn into_inner(self) -> (IO, ClientConnection) {
         (self.io, self.session)
     }
+
+    /// Splits the stream into a read half and a write half that two tasks
+    /// can use at the same time.
+    ///
+    /// The halves share the stream and take turns with it, one poll at a
+    /// time. Neither ever blocks its thread for the other: a half that
+    /// finds the other's poll in progress returns `Pending` and is woken
+    /// when that poll ends. [`ReadHalf::reunite`] puts them back together.
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
+    }
 }
 
 impl<IO> IoSession for TlsStream<IO> {
@@ -279,6 +326,10 @@ impl<IO> IoSession for TlsStream<IO> {
 
     fn skip_handshake(&self) -> bool {
         self.early.is_some()
+    }
+
+    fn refs(&self) -> (&IO, &ClientConnection) {
+        (&self.io, &self.session)
     }
 
     fn parts(&mut self) -> (&mut StreamState, &mut IO, &mut ClientConnection) {
@@ -354,16 +405,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_finish_early_for_read(cx))?;
-        common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            ready!(this.poll_finish_early_for_read(cx))?;
+            common::poll_read(&mut this.io, &mut this.session, &mut this.st, cx, buf)
+        })
     }
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for TlsStream<IO> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
-        ready!(this.poll_finish_early_for_read(cx))?;
-        common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        ready!(coop::poll_budget(cx));
+        let poll = match this.poll_finish_early_for_read(cx) {
+            Poll::Ready(Ok(())) => {
+                common::poll_fill_buf(&mut this.io, &mut this.session, &mut this.st, cx)
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        };
+        coop::spend_if_ready(cx, poll)
     }
 
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
@@ -378,13 +440,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.st.begin_poll();
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
-            0 => common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf),
-            n => Poll::Ready(Ok(n)),
-        }
+        coop::budgeted(cx, |cx| {
+            match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
+                0 => common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf),
+                n => Poll::Ready(Ok(n)),
+            }
+        })
     }
 
     fn poll_write_vectored(
@@ -393,15 +458,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.st.begin_poll();
         if bufs.iter().all(|buf| buf.is_empty()) {
             return Poll::Ready(Ok(0));
         }
-        match ready!(this.poll_write_early(cx, bufs))? {
+        coop::budgeted(cx, |cx| match ready!(this.poll_write_early(cx, bufs))? {
             0 => {
                 common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
             }
             n => Poll::Ready(Ok(n)),
-        }
+        })
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -410,15 +476,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let poll = this.poll_finish_early(cx);
-        ready!(this.st.track(cx, poll))?;
-        common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            let poll = this.poll_finish_early(cx);
+            ready!(this.st.track(cx, poll))?;
+            common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let poll = this.poll_finish_early(cx);
-        ready!(this.st.track(cx, poll))?;
-        common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        this.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            let poll = this.poll_finish_early(cx);
+            ready!(this.st.track(cx, poll))?;
+            common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
+        })
     }
 }

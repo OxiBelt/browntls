@@ -12,7 +12,7 @@ use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{Accept, EarlyPhase, TlsStream};
-use crate::common::{MidHandshake, StreamState, SyncReadAdapter, poll_send_alert};
+use crate::common::{MidHandshake, StreamState, SyncReadAdapter, coop, poll_send_alert};
 
 /// Reads a ClientHello so the server can pick a [`ServerConfig`] for it
 /// (by SNI, ALPN or cipher suites, say), then continues the handshake with
@@ -80,6 +80,20 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        coop::budgeted(cx, |cx| this.poll_client_hello(cx))
+    }
+}
+
+impl<IO> LazyConfigAcceptor<IO>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_client_hello(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<StartHandshake<IO>>> {
+        let this = self;
+        // Every read after the first in one poll takes a unit of the task's
+        // cooperative budget, as in `Stream::read_io`: the client decides
+        // in how many pieces its ClientHello arrives.
+        let mut read_before = false;
         loop {
             let Some(io) = this.io.as_mut() else {
                 return Poll::Ready(Err(io::Error::other(
@@ -101,8 +115,21 @@ where
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
             }
 
+            let unit = match read_before {
+                true => Some(ready!(coop::poll_proceed(cx))),
+                false => None,
+            };
             let mut reader = SyncReadAdapter { io, cx };
-            match this.acceptor.read_tls(&mut reader) {
+            let result = match this.acceptor.read_tls(&mut reader) {
+                // The transport is not ready: `unit` returns to the budget.
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
+                result => result,
+            };
+            read_before = true;
+            if let Some(unit) = unit {
+                unit.spent();
+            }
+            match result {
                 Ok(0) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -110,7 +137,6 @@ where
                     )));
                 }
                 Ok(_) => {}
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
                 Err(err) => return Poll::Ready(Err(err)),
             }
 

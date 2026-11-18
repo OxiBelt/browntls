@@ -12,7 +12,8 @@
 //! reads (`poll_read` or `poll_fill_buf` and `consume`), flushes,
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
 //! accessors, early data reads, the lazy acceptor's `take_io`, pumping
-//! until idle, and reconnection (resumption and 0-RTT).
+//! until idle, reconnection (resumption and 0-RTT), and the kernel handoff
+//! of a stream (`handoff`).
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -43,6 +44,8 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::input::{Input, put_short_field};
 use crate::tls_conn::setup::{Knobs, assert_prefix, server_name};
+
+mod handoff;
 
 const MAX_OPS: usize = 96;
 const MAX_CONNECTIONS: usize = 3;
@@ -185,9 +188,11 @@ enum Op {
     Pump,
     /// Starts a new connection with the same configurations.
     Reconnect,
+    /// `side, flags`: `into_kernel_handoff` (see `handoff`).
+    Handoff,
 }
 
-const OPS: [Op; 14] = [
+const OPS: [Op; 15] = [
     Op::Poll,
     Op::Write,
     Op::Read,
@@ -202,6 +207,7 @@ const OPS: [Op; 14] = [
     Op::TakeIo,
     Op::Pump,
     Op::Reconnect,
+    Op::Handoff,
 ];
 
 struct World {
@@ -415,6 +421,16 @@ impl World {
         self.check();
     }
 
+    /// The server reads the 0-RTT data it accepted.
+    fn early_read(&mut self) {
+        if let Server::Ready(TlsStream::Server(s)) = &mut self.server
+            && let Some(mut early) = s.get_mut().1.early_data()
+        {
+            let _ = early.read_to_end(&mut self.early);
+        }
+        self.check();
+    }
+
     fn check(&self) {
         assert_prefix(&self.received[CLIENT], &self.sent[SERVER], "client read");
         assert_prefix(&self.early, &self.sent[CLIENT], "0-RTT data");
@@ -577,14 +593,7 @@ fn play(data: &[u8]) -> Option<World> {
                 None => {}
             },
             Op::Accessors => world.accessors(side),
-            Op::EarlyRead => {
-                if let Server::Ready(TlsStream::Server(s)) = &mut world.server
-                    && let Some(mut early) = s.get_mut().1.early_data()
-                {
-                    let _ = early.read_to_end(&mut world.early);
-                }
-                world.check();
-            }
+            Op::EarlyRead => world.early_read(),
             Op::TakeIo => {
                 if let Server::Lazy(lazy) = &mut world.server {
                     if let Some(io) = lazy.take_io() {
@@ -603,6 +612,10 @@ fn play(data: &[u8]) -> Option<World> {
                     world.finish();
                     world.connect();
                 }
+            }
+            Op::Handoff => {
+                let flags = input.byte();
+                world.handoff(side, flags);
             }
         }
     }
@@ -699,6 +712,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
         s.extend([0, 16]);
         seeds.push(s);
     }
+    seeds.extend(handoff::seeds());
     seeds
 }
 
@@ -738,5 +752,42 @@ mod tests {
         let world = play(refused).expect("configurations");
         assert!(matches!(world.server, Server::Gone));
         assert!(!world.lanes.borrow()[SERVER].bytes.is_empty(), "no alert");
+    }
+
+    /// The handoff seeds do what they are meant to: with secret extraction
+    /// a polled stream becomes ready with the unread plaintext set aside,
+    /// without it the stream is refused untouched, and every stream that
+    /// comes back carries on.
+    #[test]
+    fn handoff_seeds_hand_streams_over() {
+        use handoff::{AFTER, BEFORE};
+        for case in handoff::cases() {
+            let (_, extraction, side, flags) = case;
+            let world = play(&handoff::seed(case)).expect("configurations");
+            let gone = match side {
+                CLIENT => matches!(world.client, Client::Gone),
+                _ => matches!(world.server, Server::Gone),
+            };
+            let got = &world.received[side];
+            if handoff::ends_the_stream(extraction, flags) {
+                assert!(gone, "{case:?}");
+                // A refusal up front takes nothing out of the stream.
+                let expected = if extraction { BEFORE } else { &BEFORE[..7] };
+                assert_eq!(got, expected, "{case:?}");
+            } else {
+                assert!(!gone, "{case:?}");
+                assert_eq!(*got, [BEFORE, b"more"].concat(), "{case:?}");
+                assert_eq!(world.received[1 - side], AFTER, "{case:?}");
+            }
+        }
+
+        // 0-RTT data left unread is set aside by the handoff and counted.
+        let world = play(&handoff::early_seed()).expect("configurations");
+        assert!(world.early_attempted);
+        assert_eq!(world.early, handoff::EARLY);
+        assert_eq!(
+            world.received[SERVER],
+            [handoff::AFTER_EARLY, b"more"].concat()
+        );
     }
 }

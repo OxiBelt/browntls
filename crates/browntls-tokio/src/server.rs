@@ -11,6 +11,7 @@ use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, StreamState};
+use crate::kernel::IntoKernelHandoff;
 
 mod lazy;
 pub use lazy::{LazyConfigAcceptor, StartHandshake};
@@ -175,8 +176,35 @@ impl<IO> TlsStream<IO> {
     }
 
     /// The transport and the connection, ending the stream.
+    ///
+    /// A read error the stream kept for the next read is dropped with it.
+    /// The connection keeps its own queues (records not yet written,
+    /// plaintext not yet read). To move the connection to kernel TLS, use
+    /// [`into_kernel_handoff`](Self::into_kernel_handoff), which settles
+    /// all of that first.
     pub fn into_inner(self) -> (IO, ServerConnection) {
         (self.io, self.session)
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
+    /// Readies the stream for kernel TLS offload (see [`crate::kernel`]):
+    /// writes and flushes every queued record, reads exactly up to the next
+    /// record boundary, and sets the received plaintext (accepted 0-RTT
+    /// data first) aside.
+    ///
+    /// 0-RTT data the server accepted and has not read with `early_data()`
+    /// comes first in that plaintext, and can be replayed by an attacker:
+    /// [`KernelHandoff::early_data_len`](crate::kernel::KernelHandoff::early_data_len)
+    /// tells where it ends. The transport must not read ahead (see
+    /// [`crate::kernel`]).
+    ///
+    /// The configuration must have `enable_secret_extraction` set. On
+    /// failure the stream comes back in the
+    /// [`KernelHandoffError`](crate::kernel::KernelHandoffError), with the
+    /// data already taken out of it.
+    pub fn into_kernel_handoff(self) -> IntoKernelHandoff<Self> {
+        IntoKernelHandoff::new(self)
     }
 }
 

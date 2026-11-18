@@ -12,6 +12,7 @@ use browntls::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
+use crate::split::{self, ReadHalf, WriteHalf};
 
 mod early;
 use early::EarlyData;
@@ -305,6 +306,17 @@ impl<IO> TlsStream<IO> {
     /// The transport and the connection, ending the stream.
     pub fn into_inner(self) -> (IO, ClientConnection) {
         (self.io, self.session)
+    }
+
+    /// Splits the stream into a read half and a write half that two tasks
+    /// can use at the same time.
+    ///
+    /// The halves share the stream and take turns with it, one poll at a
+    /// time. Neither ever blocks its thread for the other: a half that
+    /// finds the other's poll in progress returns `Pending` and is woken
+    /// when that poll ends. [`ReadHalf::reunite`] puts them back together.
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
     }
 }
 

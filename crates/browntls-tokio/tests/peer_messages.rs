@@ -236,6 +236,15 @@ async fn a_task_polling_both_directions_does_not_spin_while_answering() {
 
 #[tokio::test]
 async fn a_parked_writer_is_woken_after_a_read_took_its_registration() {
+    parked_writer_is_woken_after_a_read_took_its_registration(false).await;
+}
+
+#[tokio::test]
+async fn a_parked_writer_of_native_halves_is_woken_after_a_read_took_its_registration() {
+    parked_writer_is_woken_after_a_read_took_its_registration(true).await;
+}
+
+async fn parked_writer_is_woken_after_a_read_took_its_registration(native: bool) {
     let pki = Pki::new();
     let version = &browntls::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
@@ -259,7 +268,7 @@ async fn a_parked_writer_is_woken_after_a_read_took_its_registration() {
     assert!(client.get_ref().1.wants_write());
 
     // A writer task parks on the full transport.
-    let (mut rd, mut wr) = tokio::io::split(client);
+    let (mut rd, mut wr) = client.split_either(native);
     let total = 256 * 1024;
     let writer = tokio::spawn(async move {
         wr.write_all(&vec![7u8; total]).await.unwrap();

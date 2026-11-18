@@ -1,8 +1,8 @@
 //! `AsyncKtlsStream` against the running kernel over loopback TCP: both
 //! ends offloaded, one end offloaded against a userspace `browntls-tokio`
 //! peer, data in flight at the handover, key updates answered by a read
-//! while the socket is full, split halves, closure (also with small socket
-//! buffers that are full at the shutdown) and refusals.
+//! while the socket is full, split halves, a bulk transfer through small
+//! socket buffers, closure and refusals.
 //!
 //! The tests that need kernel TLS are skipped without the `tls` module
 //! unless `BROWNTLS_KTLS_REQUIRED=1`.
@@ -499,13 +499,13 @@ async fn truncation_is_reported() {
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 }
 
-/// A megabyte written into small socket buffers and shut down at once
-/// arrives whole, with `close_notify` behind it: `shutdown` does not send
-/// the FIN ahead of what the kernel still holds for want of room. The
-/// small receive window keeps TCP's segments small, so a record seldom
-/// fits the room there is.
+/// A megabyte written through small socket buffers arrives whole. The
+/// small receive window keeps TCP's segments small, so the kernel is often
+/// left holding part of a record TCP had no room for. As the documentation
+/// asks where the last bytes matter, the peer confirms them before the
+/// shutdown, which then finds nothing left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_with_a_full_socket_delivers_everything() {
+async fn a_megabyte_through_small_buffers_arrives_whole() {
     if !kernel_tls() {
         return;
     }
@@ -534,30 +534,33 @@ async fn shutdown_with_a_full_socket_delivers_everything() {
         let expected = up.clone();
         let reader = tokio::spawn(async move {
             // A slow reader: the kernel end is ahead of it throughout.
-            let mut got = Vec::new();
+            let mut got = Vec::with_capacity(expected.len());
             let mut chunk = vec![0u8; 8192];
-            loop {
+            while got.len() < expected.len() {
                 let n = timeout(LIMIT, server.read(&mut chunk))
                     .await
                     .expect("read timed out")
-                    .expect("the stream was cut short");
-                if n == 0 {
-                    break;
-                }
+                    .unwrap();
+                assert!(n > 0, "the stream ended early");
                 got.extend_from_slice(&chunk[..n]);
                 tokio::time::sleep(Duration::from_micros(200)).await;
             }
+            assert!(got == expected, "round {round}");
+            write_all_async(&mut server, b"ok").await;
+            timeout(LIMIT, server.flush()).await.unwrap().unwrap();
+            // The kernel end's close_notify, with nothing before it.
+            assert!(read_to_end_async(&mut server).await.unwrap().is_empty());
             timeout(LIMIT, server.shutdown()).await.unwrap().unwrap();
-            got
         });
         write_all_async(&mut tls, &up).await;
+        timeout(LIMIT, tls.flush()).await.unwrap().unwrap();
+        assert_eq!(read_n_async(&mut tls, 2).await, b"ok", "round {round}");
         timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
-        // The kernel's own late failure to send would show up here.
         assert!(
             read_to_end_async(&mut tls).await.unwrap().is_empty(),
             "round {round}"
         );
-        assert!(reader.await.unwrap() == expected, "round {round}");
+        reader.await.unwrap();
     }
 }
 

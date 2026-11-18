@@ -922,14 +922,18 @@ socket is not writable, which `poll` shows and Tokio's cached readiness does
 not, so the stream asks the kernel. Between room appearing and the work item
 running nothing tells userspace, so the wait narrows the window without
 closing it; the documentation says to let the peer confirm the last bytes
-where they matter. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
+where they matter. A test that shut down straight after writing a megabyte
+into 4096-byte socket buffers failed in one of six kernel CI jobs with the
+wait in place (the kernel's late send met the FIN, `EPIPE`), so the
+limitation is real on loopback, not only in theory. The tests (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the
 running kernel like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
 offloaded server against a userspace client (tickets, KeyUpdate, closure), a
 KeyUpdate answered by a read while the socket is full (the answer seen on the
 wire by a relay), split halves across key updates, a client still in its
-0-RTT phase, truncation, a megabyte written into small socket buffers and
-shut down at once, a peer that closed TCP before the handover (the
+0-RTT phase, truncation, a megabyte written through small socket buffers
+and confirmed by the peer before the shutdown, a peer that closed TCP before
+the handover (the
 kernel attaches the upper layer protocol to an established connection only,
 `ENOTCONN`; the stream goes on in userspace), and refusals that return the
 stream.

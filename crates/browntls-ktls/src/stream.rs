@@ -349,6 +349,49 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
         Ok(backlog.unsent)
     }
 
+    /// Tells the kernel whether to expect the peer's TLS 1.3 records to be
+    /// unpadded (`TLS_RX_EXPECT_NO_PAD`; off after the handover). Setting
+    /// it takes Linux 7.2 or later.
+    ///
+    /// A TLS 1.3 record may end in padding, which hides its content type
+    /// and the length of its data until it is decrypted, so the kernel
+    /// decrypts into a buffer of its own and copies the data out. With
+    /// this set it decrypts straight into the buffer of a read that has
+    /// room for the whole record. A record that turns out to be padded, or
+    /// not application data, is decrypted a second time the usual way, so
+    /// the peer decides how often the work is done twice: set it only for
+    /// peers trusted not to exploit that. browntls and the Linux kernel
+    /// never pad the records they send. The kernel counts the second
+    /// decryptions (`TlsDecryptRetry` and `TlsRxNoPadViolation` in
+    /// `/proc/net/tls_stat`).
+    ///
+    /// The kernel has had the option since Linux 6.0, but before 7.2 it
+    /// copies the second decryption to the wrong place in the reader's
+    /// buffer, so that a peer that pads corrupts what the application
+    /// reads. The stream therefore refuses to set it on a kernel whose
+    /// release (as `uname` gives it) is older, including an older kernel
+    /// that was given the correction.
+    ///
+    /// While it is set, a read zeroes its buffer for up to a record's
+    /// length behind the bytes it returns: the kernel's first attempt may
+    /// have left plaintext there that is not application data.
+    ///
+    /// The error is [`io::ErrorKind::Unsupported`] on a kernel before
+    /// 7.2, and for TLS 1.2, whose records have no padding and are
+    /// decrypted into the reader's buffer as they are.
+    pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
+        self.engine
+            .set_rx_expect_no_pad(self.socket.as_fd(), expect)
+    }
+
+    /// Whether the kernel expects unpadded records
+    /// ([`Self::set_rx_expect_no_pad`]). The error is
+    /// [`io::ErrorKind::Unsupported`] for TLS 1.2 and when the kernel
+    /// lacks the option (it came with Linux 6.0).
+    pub fn rx_expect_no_pad(&self) -> io::Result<bool> {
+        self.engine.rx_expect_no_pad(self.socket.as_fd())
+    }
+
     /// Lets a network device that encrypts the records itself (kernel TLS
     /// device offload) send the pages of a file given to `sendfile`
     /// without the kernel copying them first (`TLS_TX_ZEROCOPY_RO`, Linux

@@ -98,7 +98,8 @@ otherwise). The kernel has had it since 6.0, but before 7.2 it copies the
 second decryption to the wrong place in the reader's buffer, and a peer
 that pads corrupts what the application reads. The kernel is told apart by
 the release `uname` reports, so an older kernel that was given the
-correction is refused as well.
+correction is refused as well, and so is a release candidate of 7.2 (the
+correction came with the last of them).
 
 ## Tokio
 
@@ -145,3 +146,7 @@ loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
 `tests/tokio_zero_copy.rs`, feature `tokio`). They are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).
+
+The tests of `set_rx_expect_no_pad` with a peer that pads need Linux 7.2;
+on an older kernel they check the refusal only and skip the rest, unless
+`BROWNTLS_KTLS_NO_PAD_REQUIRED=1` is set.

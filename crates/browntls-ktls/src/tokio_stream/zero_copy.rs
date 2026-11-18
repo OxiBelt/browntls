@@ -21,9 +21,9 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// record's length behind the bytes it returns: see
     /// [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
     ///
-    /// The error is [`io::ErrorKind::Unsupported`] on a kernel before
-    /// Linux 7.2, which misplaces a padded record in the reader's buffer,
-    /// and for TLS 1.2, whose records have no padding.
+    /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
+    /// before Linux 7.2, which misplaces a padded record in the reader's
+    /// buffer, and for TLS 1.2, whose records have no padding.
     pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
         self.engine
             .set_rx_expect_no_pad(self.socket.as_fd(), expect)

@@ -70,7 +70,8 @@
 //! * **0-RTT.** A client does not send early data here; a configuration
 //!   that enables it handshakes without sending any. A server that accepts
 //!   early data ([`ServerConfig::max_early_data_size`]) has it collected
-//!   during the handshake: [`TlsStream::early_data`].
+//!   during the handshake: [`TlsStream::early_data`]. The acceptors have no
+//!   `early_data` option: a stream is returned only after the handshake.
 //!
 //! Flushing, closing and errors are as described at the
 //! [crate root](crate). Two things described there are not here yet. The

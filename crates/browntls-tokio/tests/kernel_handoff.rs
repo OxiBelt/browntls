@@ -13,8 +13,9 @@ mod common;
 mod sim;
 
 use std::future::poll_fn;
-use std::io;
+use std::io::{self, Write as _};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -624,6 +625,14 @@ async fn data_after_close_notify_fails_the_handoff() {
                 .unwrap_err();
             assert_eq!(err.error.kind(), io::ErrorKind::InvalidData, "{err}");
             assert!(err.received.is_empty());
+            assert_eq!(err.early_data_len, 0);
+            // Only reading is over: the stream still writes and closes.
+            let mut client = err.stream;
+            client.write_all(b"still here").await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut got = Vec::new();
+            server.read_to_end(&mut got).await.unwrap();
+            assert_eq!(got, b"still here");
         }
     }
 }
@@ -839,6 +848,68 @@ async fn accepted_early_data_is_returned_first() {
     timeout(LIMIT, async { tokio::join!(client_side, server_side) })
         .await
         .expect("timed out");
+}
+
+/// The length of the 0-RTT data is also given when the handoff fails
+/// (bytes behind the client's `close_notify`) and when its future is given
+/// up (a record the transport does not take).
+#[tokio::test]
+async fn early_data_is_counted_when_the_handoff_does_not_complete() {
+    for give_up in [false, true] {
+        let setup = EarlySetup::new(&[]);
+        setup.first_connection().await;
+        let (c, s) = duplex(1 << 16);
+        let gate = Gate::new();
+        let s = Gated {
+            inner: s,
+            gate: gate.clone(),
+        };
+        let all_sent = AtomicBool::new(false);
+        let client_side = async {
+            let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+            client.write_all(b"early request").await.unwrap();
+            client.flush().await.unwrap();
+            assert!(client.get_ref().1.is_early_data_accepted());
+            client.write_all(b" and the rest").await.unwrap();
+            client.flush().await.unwrap();
+            if !give_up {
+                client.get_mut().1.send_close_notify();
+                client.flush().await.unwrap();
+                client.get_mut().0.write_all(&[0x17, 3]).await.unwrap();
+            }
+            all_sent.store(true, Ordering::SeqCst);
+            client
+        };
+        let server_side = async {
+            let mut server = setup.acceptor(1024).accept(s).await.unwrap();
+            while !all_sent.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            // Reads the first ordinary record ahead of the handover.
+            let mut first = [0u8; 1];
+            server.read_exact(&mut first).await.unwrap();
+            let (early, received) = if give_up {
+                gate.set_write_open(false);
+                server.get_mut().1.writer().write_all(b"queued").unwrap();
+                let mut handoff = server.into_kernel_handoff();
+                let waited = timeout(Duration::from_millis(50), &mut handoff).await;
+                assert!(waited.is_err(), "handed over with a record unsent");
+                assert!(format!("{handoff:?}").contains("early_data_len: 13"));
+                let early = handoff.early_data_len();
+                (early, handoff.into_stream().unwrap().1)
+            } else {
+                let err = server.into_kernel_handoff().await.unwrap_err();
+                assert_eq!(err.error.kind(), io::ErrorKind::InvalidData, "{err}");
+                assert!(format!("{err:?}").contains("early_data_len: 13"));
+                (err.early_data_len, err.received)
+            };
+            assert_eq!(&received[..early], b"early request");
+            assert_eq!(&received[early..], b"and the rest");
+        };
+        timeout(LIMIT, async { tokio::join!(client_side, server_side) })
+            .await
+            .expect("timed out");
+    }
 }
 
 /// The debug output of the handoff types shows no application data.

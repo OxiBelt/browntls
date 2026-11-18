@@ -5,7 +5,10 @@
 //! * the plaintext the handoff sets aside continues what that side read
 //!   before (the harness's prefix check), on success, on failure and when
 //!   the future is given up;
-//! * the 0-RTT data counted lies within the plaintext set aside;
+//! * the 0-RTT data counted lies within the plaintext set aside, a client
+//!   has none, and what a server's handoff counts as 0-RTT data continues
+//!   the 0-RTT data the client sent (the server leaves it unread first
+//!   when `flags` says so);
 //! * a stream reported ready has no handoff blocker, and its connection's
 //!   `dangerous_into_kernel_connection` succeeds;
 //! * whatever comes back (a ready stream turned back, a refused one, an
@@ -25,13 +28,17 @@ use crate::input::put_short_field;
 const BACK_TO_USERSPACE: u8 = 1;
 /// `flags` bit 1: a refused stream is dropped (`into_io_error`).
 const DROP_REFUSED: u8 = 2;
+/// `flags` bit 2: a server leaves the 0-RTT data it accepted unread, for
+/// the handoff to set aside.
+const KEEP_EARLY: u8 = 4;
 
 impl World {
     /// Hands `side`'s stream to `into_kernel_handoff`, polling the future
     /// `flags >> 4` times before giving it up.
     pub(super) fn handoff(&mut self, side: usize, flags: u8) {
-        // 0-RTT data is tracked apart from the server's ordinary data.
-        if side == SERVER {
+        // 0-RTT data is tracked apart from the server's ordinary data:
+        // read first, or left to the handoff, which counts it.
+        if side == SERVER && flags & KEEP_EARLY == 0 {
             self.early_read();
         }
         let stream = match side {
@@ -51,8 +58,8 @@ impl World {
             },
         };
 
-        /// Evaluates to the stream to go on with, if any, and the plaintext
-        /// taken out of it.
+        /// Evaluates to the stream to go on with, if any, the plaintext
+        /// taken out of it, and how much of that is 0-RTT data.
         macro_rules! drive {
             ($stream:expr) => {{
                 let mut future = $stream.into_kernel_handoff();
@@ -70,7 +77,7 @@ impl World {
                         let (stream, received) =
                             future.into_stream().expect("the future did not return");
                         assert!(early <= received.len(), "0-RTT data beyond the data taken");
-                        (Some(stream), received)
+                        (Some(stream), received, early)
                     }
                     Some(Ok(handoff)) => {
                         let _ = format!("{handoff:?}");
@@ -80,14 +87,12 @@ impl World {
                             "a ready stream has a handoff blocker"
                         );
                         let received = handoff.received().to_vec();
-                        assert!(
-                            handoff.early_data_len() <= received.len(),
-                            "0-RTT data beyond the data taken"
-                        );
+                        let early = handoff.early_data_len();
+                        assert!(early <= received.len(), "0-RTT data beyond the data taken");
                         if flags & BACK_TO_USERSPACE != 0 {
                             let (stream, taken) = handoff.into_stream();
                             assert_eq!(taken, received);
-                            (Some(stream), received)
+                            (Some(stream), received, early)
                         } else {
                             let (_io, conn, taken) = handoff.into_parts();
                             assert_eq!(taken, received);
@@ -95,37 +100,42 @@ impl World {
                                 conn.dangerous_into_kernel_connection().is_ok(),
                                 "the kernel handover of a ready connection failed"
                             );
-                            (None, received)
+                            (None, received, early)
                         }
                     }
                     Some(Err(err)) => {
                         let _ = format!("{err} {err:?}");
+                        let early = err.early_data_len;
                         assert!(
-                            err.early_data_len <= err.received.len(),
+                            early <= err.received.len(),
                             "0-RTT data beyond the data taken"
                         );
                         if flags & DROP_REFUSED != 0 {
                             let received = err.received.clone();
                             let _ = err.into_io_error();
-                            (None, received)
+                            (None, received, early)
                         } else {
-                            (Some(err.stream), err.received)
+                            (Some(err.stream), err.received, early)
                         }
                     }
                 }
             }};
         }
-        let (stream, received) = match stream {
+        let (stream, received, early) = match stream {
             TlsStream::Client(stream) => {
-                let (stream, received) = drive!(stream);
-                (stream.map(TlsStream::Client), received)
+                let (stream, received, early) = drive!(stream);
+                assert_eq!(early, 0, "0-RTT data received by a client");
+                (stream.map(TlsStream::Client), received, early)
             }
             TlsStream::Server(stream) => {
-                let (stream, received) = drive!(stream);
-                (stream.map(TlsStream::Server), received)
+                let (stream, received, early) = drive!(stream);
+                (stream.map(TlsStream::Server), received, early)
             }
         };
-        self.received[side].extend_from_slice(&received);
+        // `check` holds the 0-RTT part against what the client sent first.
+        let (early, rest) = received.split_at(early);
+        self.early.extend_from_slice(early);
+        self.received[side].extend_from_slice(rest);
         if let Some(stream) = stream {
             match side {
                 CLIENT => self.client = Client::Ready(stream),
@@ -188,8 +198,48 @@ pub(super) fn seed((versions, extraction, side, flags): Case) -> Vec<u8> {
     s
 }
 
+/// A server handed over with accepted 0-RTT data unread: a first
+/// connection leaves a ticket, the second writes early, and the handoff
+/// sets the 0-RTT data aside in front of what followed it. The stream
+/// goes on in userspace.
+pub(super) fn early_seed() -> Vec<u8> {
+    let op = |out: &mut Vec<u8>, op: Op, side: usize| {
+        out.push(op as u8);
+        out.push(side as u8);
+    };
+    let write = |out: &mut Vec<u8>, side: usize, data: &[u8]| {
+        op(out, Op::Write, side);
+        out.push(0);
+        put_short_field(out, data);
+    };
+    let mut s = vec![0x41, 4, 0, 0, 0, 0x40, 255, 0, 255, 0];
+    op(&mut s, Op::Pump, 0);
+    write(&mut s, SERVER, b"ticket");
+    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::Reconnect, 0);
+    // The connect future returns at once, before the handshake.
+    op(&mut s, Op::Poll, CLIENT);
+    write(&mut s, CLIENT, EARLY);
+    op(&mut s, Op::Pump, 0);
+    write(&mut s, CLIENT, AFTER_EARLY);
+    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::Handoff, SERVER);
+    s.push(0xf0 | KEEP_EARLY | BACK_TO_USERSPACE);
+    write(&mut s, CLIENT, b"more");
+    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::Read, SERVER);
+    s.extend([0, 16]);
+    s
+}
+
+/// What the client of [`early_seed`] sends as 0-RTT data, and after it.
+pub(super) const EARLY: &[u8] = b"early request";
+pub(super) const AFTER_EARLY: &[u8] = b", then the rest";
+
 pub(super) fn seeds() -> Vec<Vec<u8>> {
-    cases().into_iter().map(seed).collect()
+    let mut seeds: Vec<_> = cases().into_iter().map(seed).collect();
+    seeds.push(early_seed());
+    seeds
 }
 
 /// Whether a stream handed over with `flags` is gone afterwards.

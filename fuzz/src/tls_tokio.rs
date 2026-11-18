@@ -780,5 +780,14 @@ mod tests {
                 assert_eq!(world.received[1 - side], AFTER, "{case:?}");
             }
         }
+
+        // 0-RTT data left unread is set aside by the handoff and counted.
+        let world = play(&handoff::early_seed()).expect("configurations");
+        assert!(world.early_attempted);
+        assert_eq!(world.early, handoff::EARLY);
+        assert_eq!(
+            world.received[SERVER],
+            [handoff::AFTER_EARLY, b"more"].concat()
+        );
     }
 }

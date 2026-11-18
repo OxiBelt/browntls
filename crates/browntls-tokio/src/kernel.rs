@@ -27,8 +27,8 @@
 //! reads of the stream never return it) comes first in that plaintext;
 //! [`KernelHandoff::early_data_len`] tells where it ends.
 //!
-//! The module needs no operating system support and works over any
-//! transport; `browntls-ktls` builds its Tokio stream on it.
+//! The module makes no system call and works over any transport; an
+//! asynchronous kernel TLS stream is built on top of it.
 //!
 //! [`TlsStream::into_inner`]: crate::client::TlsStream::into_inner
 //! [`TlsStream::into_kernel_handoff`]: crate::client::TlsStream::into_kernel_handoff
@@ -79,7 +79,9 @@ impl<S> KernelHandoff<S> {
     }
 
     /// Goes on in userspace: the stream, and the data to read before
-    /// anything the stream yields.
+    /// anything the stream yields. Its first
+    /// [`early_data_len`](Self::early_data_len) bytes are 0-RTT data;
+    /// take that length first, this drops it.
     pub fn into_stream(self) -> (S, Vec<u8>) {
         (self.stream, self.received)
     }
@@ -106,7 +108,9 @@ impl<IO> KernelHandoff<server::TlsStream<IO>> {
     }
 
     /// The transport, the connection to hand to the kernel, and the data to
-    /// read before anything the kernel delivers.
+    /// read before anything the kernel delivers. Its first
+    /// [`early_data_len`](Self::early_data_len) bytes are 0-RTT data;
+    /// take that length first, this drops it.
     pub fn into_parts(self) -> (IO, ServerConnection, Vec<u8>) {
         let (io, conn) = self.stream.into_inner();
         (io, conn, self.received)
@@ -133,10 +137,13 @@ pub struct KernelHandoffError<S> {
     /// The stream. It is still usable when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded:
     /// a [`KernelHandoffBlocker`] that driving the stream does not clear)
-    /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent);
-    /// after any other error it has failed like a stream whose read or
-    /// write returned that error (a connection that had failed before
-    /// reports its error again).
+    /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent),
+    /// and it can still write and shut down when the error says that data
+    /// follows the peer's `close_notify`
+    /// ([`io::ErrorKind::InvalidData`] without a [`browntls::Error`]
+    /// inside); after any other error it has failed like a stream whose
+    /// read or write returned that error (a connection that had failed
+    /// before reports its error again).
     pub stream: S,
     /// Application data taken from the stream before the error, to be read
     /// before anything the stream yields.
@@ -162,6 +169,7 @@ impl<S> fmt::Debug for KernelHandoffError<S> {
         f.debug_struct("KernelHandoffError")
             .field("error", &self.error)
             .field("received", &self.received.len())
+            .field("early_data_len", &self.early_data_len)
             .finish_non_exhaustive()
     }
 }
@@ -205,8 +213,9 @@ impl<S> IntoKernelHandoff<S> {
     }
 
     /// Gives up: the stream and the application data already taken out of
-    /// it, to be read before anything the stream yields. `None` once the
-    /// future returned.
+    /// it, to be read before anything the stream yields. Its first
+    /// [`early_data_len`](Self::early_data_len) bytes are 0-RTT data; take
+    /// that length first, this drops it. `None` once the future returned.
     pub fn into_stream(self) -> Option<(S, Vec<u8>)> {
         Some((self.stream?, self.taken.data))
     }
@@ -216,6 +225,7 @@ impl<S> fmt::Debug for IntoKernelHandoff<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoKernelHandoff")
             .field("received", &self.taken.data.len())
+            .field("early_data_len", &self.taken.early_len)
             .finish_non_exhaustive()
     }
 }
@@ -388,7 +398,8 @@ where
             }
             other => {
                 // A connection that has failed says so (it reports an
-                // incomplete handshake); anything else stays as it is.
+                // incomplete handshake); any other blocker here is one
+                // that driving the stream does not clear.
                 let _ = process(io, session, cx)?;
                 return Poll::Ready(Err(unsupported(other)));
             }

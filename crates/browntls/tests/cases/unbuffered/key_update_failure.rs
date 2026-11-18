@@ -1,8 +1,9 @@
 // A KeyUpdate goes through the queue, where a failure to encrypt it is only
-// noted (`encrypt_failed`) while the write key has already moved on. Nothing
-// may be encrypted after that: data under the next key would reach the peer
-// with no KeyUpdate before it. The suites here have a confidentiality limit
-// of a record or two, and an encrypter that fails for a KeyUpdate.
+// noted (`encrypt_failed`) while the write key has already moved on.
+// `WriteTraffic` encrypts nothing after that: data or an alert under the
+// next key would reach the peer with no KeyUpdate before it. The suites
+// here have a confidentiality limit of a record or two, and an encrypter
+// that fails for a KeyUpdate.
 
 /// A TLS 1.3 AEAD whose encrypter fails for the 5 bytes of a KeyUpdate.
 struct FailsKeyUpdates(&'static dyn browntls::crypto::cipher::Tls13AeadAlgorithm);
@@ -154,7 +155,8 @@ fn no_data_follows_a_key_update_that_failed_to_encrypt() {
     // No data was encrypted under the key that follows the lost KeyUpdate.
     assert!(buf.iter().all(|b| *b == 0xa5), "{buf:02x?}");
     assert_eq!(w.encrypt(b"y", &mut buf), Err(EncryptError::Failed));
-    // Nor is an alert.
+    // Nor is an alert, however often it is asked for.
+    assert_eq!(w.queue_close_notify(&mut buf), Err(EncryptError::Failed));
     let closed = w.queue_close_notify(&mut buf);
     assert!(buf.iter().all(|b| *b == 0xa5), "{buf:02x?}");
     assert_finished(&mut s.conn, closed);
@@ -197,27 +199,4 @@ fn data_before_a_key_update_that_failed_to_encrypt_is_good() {
     let closed = w.queue_close_notify(&mut later);
     assert!(later.iter().all(|b| *b == 0xa5), "{later:02x?}");
     assert_finished(&mut c.conn, closed);
-}
-
-#[test]
-fn the_buffered_writer_sends_no_data_after_a_key_update_that_failed_to_encrypt() {
-    init_logging();
-    let chain = server_chain(KeyType::Ed25519);
-    // The tickets passed the limit: the write is held back for a KeyUpdate.
-    let sc = server_whose_key_updates_fail(&chain, 1);
-    let cc = Arc::new(versioned_client(&chain, ProtocolVersion::TLSv1_3));
-    let mut c = b_client(&cc);
-    let mut s = b_server(&sc);
-    handshake(&mut c, &mut s);
-
-    assert!(s.conn.writer().write(b"x").is_err());
-    assert!(s.take_output().is_empty());
-    assert!(s.conn.writer().write(b"y").is_err());
-    s.conn.send_close_notify();
-    assert!(s.take_output().is_empty());
-    assert_eq!(
-        s.conn.process_new_packets().err(),
-        Some(Error::EncryptError)
-    );
-    assert!(s.take_output().is_empty());
 }

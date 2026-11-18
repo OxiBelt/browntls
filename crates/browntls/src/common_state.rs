@@ -588,12 +588,6 @@ impl CommonState {
     }
 
     fn send_single_fragment(&mut self, m: OutboundPlainMessage<'_>) {
-        if self.encrypt_failed {
-            // A record is missing from the stream (and the key may have
-            // moved on past a KeyUpdate that was not sent): the peer can
-            // read nothing that follows, so nothing more is encrypted.
-            return;
-        }
         let application_data = m.typ == ContentType::ApplicationData;
         match self.record_layer.encrypt_outgoing(m) {
             Ok(em) if application_data => {

@@ -625,13 +625,14 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   fails, the buffer is zeroed from that record on and the write fails. A
   KeyUpdate that is due (an answer to the peer, or the RFC 9846 §5.5
   refresh) is written into the same buffer in order. Once a record has
-  failed to encrypt (`encrypt_failed`), nothing more is encrypted on the
-  connection, by either API: the peer could not read it, and after a
-  KeyUpdate that was lost the write key has moved on without it. So a
-  KeyUpdate before the data that fails to encrypt fails the write with no
-  data taken (the buffered writer's `write` errors likewise), one after the
+  failed to encrypt (`encrypt_failed`), `WriteTraffic` encrypts nothing
+  more: the peer could not read it, and after a KeyUpdate that was lost the
+  write key has moved on without the peer. So a KeyUpdate before the data
+  that fails to encrypt fails the write with no data taken, one after the
   data leaves that write's records good and reported, and no `close_notify`
-  or other alert follows either. At
+  follows either. (The buffered connection reports the failure at its next
+  `process_new_packets` or write; records it encrypts until then are ones
+  the peer cannot read and answers with an alert.) At
   the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
   `EncryptExhausted`, and a server's half-RTT data fails with the temporary
   `KeyUpdateAwaitsHandshake` until the client's Finished arrives, instead of

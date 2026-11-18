@@ -473,7 +473,9 @@ impl<Data: SideData> ConnectionCore<Data> {
             return Ok(0);
         }
         if common.encrypt_failed {
-            // The peer could not read the alert: see `encrypt_failed`.
+            // A record is missing from the stream, and after a KeyUpdate
+            // that was lost the key has moved on without the peer, who
+            // could not read the alert. It is not made, nor marked as sent.
             return Err(EncryptError::Failed);
         }
         let required = common.sendable_tls.len()

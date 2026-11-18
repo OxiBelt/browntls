@@ -461,10 +461,12 @@ fn poll_when_writable<R>(
 /// [`Room::Ended`], with an error pending on the socket as that error
 /// (taken from the socket). The kernel raises the same flag when only the
 /// socket's error queue holds something (transmit timestamps, zero-copy
-/// notices), which is not an end. Tokio reports such a socket as ready
-/// from then on, whatever this function returns, so `WouldBlock` would
+/// notices), which is not an end. Tokio may report such a socket as ready
+/// from then on, whatever this function returns, so `WouldBlock` could
 /// make the caller ask in a loop without ever waiting: that socket is
 /// reported as [`Room::Free`], and the caller looks again after a pause.
+/// (A caller without the kernel's counters takes it for room, as it took
+/// every pending error before.)
 fn room(socket: &TcpStream) -> io::Result<Room> {
     let sendable = sys::sendable(socket.as_fd())?;
     if sendable.hung_up {

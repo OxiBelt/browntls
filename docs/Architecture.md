@@ -861,11 +861,14 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   (the connection would never process them), as does a connection that has
   failed before, with its own error. A server's stream returned before its
   handshake completed (`TlsAcceptor::early_data`) leaves its early phase
-  first, as it does before a flush: the handshake is completed with the
+  first, as it does in a flush: 0.5-RTT data is written and flushed, and
+  the handshake is completed with the
   0-RTT data left where the stream's reader finds it, so a future given
   up while it waits returns the stream as it was, and a handshake that
   fails, then or before, is kept by the stream and fails its later
-  operations too. The transport must not read ahead of
+  operations too. The generic loop therefore never meets a handshake in
+  progress, and refuses one as it refuses any blocker it cannot clear.
+  The transport must not read ahead of
   what it is asked for: bytes it held back would never reach the kernel.
   It resolves to a `KernelHandoff` (the transport, the
   connection without a blocker, the plaintext to read first), which can
@@ -884,7 +887,12 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   unread plaintext, a partial record, records not yet written, a KeyUpdate
   in flight and declined or accepted 0-RTT data; a read error kept for the
   next read, data after `close_notify` and a failed connection fail the
-  handoff.
+  handoff. `tests/kernel_handoff_early.rs` hands over a server's stream
+  returned before its handshake completed: the handshake completed by the
+  handoff with the unread 0-RTT data counted in front, 0.5-RTT data sent
+  through a buffering transport before the wait, a future given up with
+  nothing taken, and a handshake that failed before or fails under the
+  handoff reported by it and by the stream afterwards.
 
 The `unbuffered` module drives `UnbufferedClientConnection`,
 `UnbufferedServerConnection` and `UnbufferedAcceptor` instead, with its own

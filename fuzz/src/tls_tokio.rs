@@ -17,7 +17,8 @@
 //! the handshake, or straight from the connection), the lazy acceptor's
 //! `take_io`, pumping until idle, reconnection (resumption and 0-RTT), a
 //! stream split into its read and write halves, used through them and put
-//! back together, and the kernel handoff of a stream (`handoff`).
+//! back together, and the kernel handoff of a stream (`handoff`), also of
+//! a server's stream returned before its handshake completed.
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for

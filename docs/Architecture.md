@@ -859,7 +859,13 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   blocker it met, moves bytes or returns, so it cannot spin; bytes after
   the peer's `close_notify`, a whole record or part of one, fail it at once
   (the connection would never process them), as does a connection that has
-  failed before, with its own error. The transport must not read ahead of
+  failed before, with its own error. A server's stream returned before its
+  handshake completed (`TlsAcceptor::early_data`) leaves its early phase
+  first, as it does before a flush: the handshake is completed with the
+  0-RTT data left where the stream's reader finds it, so a future given
+  up while it waits returns the stream as it was, and a handshake that
+  fails, then or before, is kept by the stream and fails its later
+  operations too. The transport must not read ahead of
   what it is asked for: bytes it held back would never reach the kernel.
   It resolves to a `KernelHandoff` (the transport, the
   connection without a blocker, the plaintext to read first), which can

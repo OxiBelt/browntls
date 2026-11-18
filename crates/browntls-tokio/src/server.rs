@@ -363,6 +363,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// tells where it ends. The transport must not read ahead (see
     /// [`crate::kernel`]).
     ///
+    /// A stream returned before its handshake completed (see
+    /// [`TlsAcceptor::early_data`]) has the handshake completed first, as
+    /// by a flush: the future waits for the client's Finished, and a
+    /// handshake that fails fails it, and every later operation of the
+    /// stream that comes back, with its error.
+    ///
     /// The configuration must have `enable_secret_extraction` set. On
     /// failure the stream comes back in the
     /// [`KernelHandoffError`](crate::kernel::KernelHandoffError), with the
@@ -404,7 +410,7 @@ impl<IO> IoSession for TlsStream<IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// Ends the early phase, if any, before ordinary I/O: completes the
     /// handshake.
-    fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub(crate) fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         early::poll_finish(
             &mut self.early,
             &mut self.io,

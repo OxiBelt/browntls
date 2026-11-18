@@ -161,7 +161,8 @@ timeouts of their own: the one around `accept` no longer covers them.
 
 `into_kernel_handoff` readies a client or server stream for kernel TLS
 offload (the configuration needs `enable_secret_extraction`): it finishes a
-0-RTT phase, writes and flushes every queued record, reads exactly up to the
+0-RTT phase (a client's, or the handshake of a server stream returned
+before its end), writes and flushes every queued record, reads exactly up to the
 next record boundary, and sets the plaintext already received aside. The
 `KernelHandoff` it resolves to gives the transport, the connection (for
 `dangerous_into_kernel_connection`, see `browntls::kernel`) and that

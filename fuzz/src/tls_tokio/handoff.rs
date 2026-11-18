@@ -236,6 +236,54 @@ pub(super) fn early_seed() -> Vec<u8> {
     s
 }
 
+/// A server handed over in the middle of its handshake: its accept future
+/// returned early for the 0-RTT data (mode bit 7), which nobody read. With
+/// `finished`, the client's Finished and more data are on their way and
+/// the handoff completes the handshake; without, the handoff is given up
+/// while it waits and the stream finishes its handshake afterwards. The
+/// stream goes on in userspace either way.
+pub(super) fn returned_early_seed(finished: bool) -> Vec<u8> {
+    let op = |out: &mut Vec<u8>, op: Op, side: usize| {
+        out.push(op as u8);
+        out.push(side as u8);
+    };
+    let write = |out: &mut Vec<u8>, side: usize, data: &[u8]| {
+        op(out, Op::Write, side);
+        out.push(0);
+        put_short_field(out, data);
+    };
+    let mut s = vec![0x41, 4, 0, 0, 0, 0xc0, 255, 0, 255, 0];
+    op(&mut s, Op::Pump, 0);
+    write(&mut s, SERVER, b"ticket");
+    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::Reconnect, 0);
+    op(&mut s, Op::Poll, CLIENT);
+    write(&mut s, CLIENT, EARLY);
+    // The ClientHello and the early data go out, and the accept future
+    // returns with the server's flight written.
+    op(&mut s, Op::Flush, CLIENT);
+    op(&mut s, Op::Poll, SERVER);
+    op(&mut s, Op::Poll, SERVER);
+    if finished {
+        // The client alone moves on: its Finished, then more data.
+        op(&mut s, Op::Flush, CLIENT);
+        write(&mut s, CLIENT, AFTER_EARLY);
+        op(&mut s, Op::Flush, CLIENT);
+    }
+    op(&mut s, Op::Handoff, SERVER);
+    s.push(0xf0 | KEEP_EARLY | BACK_TO_USERSPACE);
+    if !finished {
+        op(&mut s, Op::Flush, CLIENT);
+        write(&mut s, CLIENT, AFTER_EARLY);
+    }
+    write(&mut s, CLIENT, b"more");
+    op(&mut s, Op::Pump, 0);
+    op(&mut s, Op::EarlyRead, SERVER);
+    op(&mut s, Op::Read, SERVER);
+    s.extend([0, 32]);
+    s
+}
+
 /// What the client of [`early_seed`] sends as 0-RTT data, and after it.
 pub(super) const EARLY: &[u8] = b"early request";
 pub(super) const AFTER_EARLY: &[u8] = b", then the rest";
@@ -243,6 +291,8 @@ pub(super) const AFTER_EARLY: &[u8] = b", then the rest";
 pub(super) fn seeds() -> Vec<Vec<u8>> {
     let mut seeds: Vec<_> = cases().into_iter().map(seed).collect();
     seeds.push(early_seed());
+    seeds.push(returned_early_seed(true));
+    seeds.push(returned_early_seed(false));
     seeds
 }
 
@@ -293,5 +343,48 @@ mod tests {
         assert!(world.early_attempted);
         assert_eq!(world.early, EARLY);
         assert_eq!(world.received[SERVER], [AFTER_EARLY, b"more"].concat());
+    }
+
+    /// A server's stream returned before its handshake completed is handed
+    /// over in that state. The handoff completes the handshake and counts
+    /// the 0-RTT data nobody read; one given up while it waits takes
+    /// nothing, and the stream completes its handshake afterwards.
+    #[test]
+    fn handoff_seeds_hand_over_a_stream_returned_early() {
+        for finished in [true, false] {
+            let seed = returned_early_seed(finished);
+            let at = seed
+                .windows(2)
+                .position(|w| w == [Op::Handoff as u8, SERVER as u8])
+                .expect("the handoff");
+
+            let world = play(&seed[..at]).expect("configurations");
+            assert_eq!(world.server_returned_early, 1);
+            let Server::Ready(server) = &world.server else {
+                panic!("no server stream");
+            };
+            assert!(server.get_ref().1.is_handshaking());
+            assert!(world.early.is_empty() && world.received[SERVER].is_empty());
+
+            let world = play(&seed[..at + 3]).expect("configurations");
+            let Server::Ready(server) = &world.server else {
+                panic!("no server stream");
+            };
+            assert_eq!(server.get_ref().1.is_handshaking(), !finished);
+            if finished {
+                assert_eq!(world.early, EARLY);
+                assert!(AFTER_EARLY.starts_with(&world.received[SERVER]));
+            } else {
+                assert!(world.early.is_empty() && world.received[SERVER].is_empty());
+            }
+
+            let world = play(&seed).expect("configurations");
+            assert_eq!(world.early, EARLY, "{finished}");
+            assert_eq!(
+                world.received[SERVER],
+                [AFTER_EARLY, b"more"].concat(),
+                "{finished}"
+            );
+        }
     }
 }

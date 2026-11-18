@@ -283,7 +283,7 @@ fn the_records_of_a_file_count_against_the_confidentiality_limit() {
     );
 }
 
-/// A file goes out in the small records a peer asked for (Linux 6.18):
+/// A file goes out in the small records a peer asked for (Linux 6.19):
 /// the userspace server refuses larger ones.
 #[test]
 fn a_file_is_sent_in_the_records_the_peer_asked_for() {

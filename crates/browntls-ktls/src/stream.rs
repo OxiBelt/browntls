@@ -466,7 +466,7 @@ impl<S, Data> fmt::Debug for KtlsStream<S, Data> {
 }
 
 /// Refuses a connection whose peer asked for smaller records than the
-/// kernel can be told to make: `TLS_TX_MAX_PAYLOAD_LEN` needs Linux 6.18.
+/// kernel can be told to make: `TLS_TX_MAX_PAYLOAD_LEN` needs Linux 6.19.
 /// Asked with the upper layer protocol attached and before any key is set,
 /// while a refusal still leaves the connection usable.
 pub(crate) fn check_record_size<Data: SideData>(
@@ -478,7 +478,7 @@ pub(crate) fn check_record_size<Data: SideData>(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "the peer's record_size_limit needs TLS_TX_MAX_PAYLOAD_LEN (Linux 6.18)",
+        "the peer's record_size_limit needs TLS_TX_MAX_PAYLOAD_LEN (Linux 6.19)",
     ))
 }
 

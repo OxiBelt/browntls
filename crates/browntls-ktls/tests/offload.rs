@@ -220,7 +220,7 @@ fn check_explicit_nonces(suite: SupportedCipherSuite, wire: &Wire) {
     }
 }
 
-/// The kernel honours a peer's smaller `record_size_limit` (Linux 6.18:
+/// The kernel honours a peer's smaller `record_size_limit` (Linux 6.19:
 /// `TLS_TX_MAX_PAYLOAD_LEN`); the userspace server refuses larger records.
 #[test]
 fn a_smaller_record_size_limit_reaches_the_kernel() {

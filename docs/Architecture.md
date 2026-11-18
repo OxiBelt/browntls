@@ -1025,7 +1025,7 @@ authentication requests are bounded per application data received, which the
 driver reports (`application_data_received`). `max_tx_payload_len` gives the
 fragment length the peer's `record_size_limit` or the configured
 `max_fragment_size` asks for, which the kernel must be told
-(`TLS_TX_MAX_PAYLOAD_LEN`, Linux 6.18). The kernel does not pad TLS 1.3
+(`TLS_TX_MAX_PAYLOAD_LEN`, Linux 6.19). The kernel does not pad TLS 1.3
 records or enforce the record size limit we announced on what it receives.
 
 Tests drive a `KernelConnection` against a userspace stand-in for the kernel
@@ -1080,7 +1080,7 @@ on the socket directly (`splice`) must be reported with
 counts for itself. TCP closing without `close_notify` is
 `UnexpectedEof`, as is every later call. A refused handover can be retried on
 the same socket (an attached `tls` ULP is accepted), and a peer
-`record_size_limit` the kernel cannot honour (before Linux 6.18) is refused
+`record_size_limit` the kernel cannot honour (before Linux 6.19) is refused
 before any key is installed. Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of

@@ -14,7 +14,7 @@
 //! Supported: TLS 1.2 and TLS 1.3 with AES-128-GCM, AES-256-GCM and
 //! ChaCha20-Poly1305, TLS 1.3 AES-128-CCM. TLS 1.3 key updates need Linux
 //! 6.14; a peer's `record_size_limit` below the protocol maximum needs
-//! Linux 6.18 (`TLS_TX_MAX_PAYLOAD_LEN`). The `tls` kernel module must be
+//! Linux 6.19 (`TLS_TX_MAX_PAYLOAD_LEN`). The `tls` kernel module must be
 //! available (`modprobe tls`).
 //!
 //! ```no_run

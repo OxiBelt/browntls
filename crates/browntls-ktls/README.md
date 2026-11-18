@@ -13,7 +13,7 @@ handled by `browntls::kernel::KernelConnection`.
 |---|---|
 | Protocols | TLS 1.2, TLS 1.3 |
 | Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, TLS 1.3 AES-128-CCM |
-| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.18 for a peer `record_size_limit` below 16384; 7.2 for `set_rx_expect_no_pad` |
+| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for a peer `record_size_limit` below 16384; 7.2 for `set_rx_expect_no_pad` |
 
 The configuration must set `enable_secret_extraction`. When the kernel or
 the connection cannot be offloaded, the connection and the socket come back

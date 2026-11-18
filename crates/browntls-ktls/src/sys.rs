@@ -48,7 +48,7 @@ const TLS_RX: c_int = 2;
 const TLS_TX_ZEROCOPY_RO: c_int = 3;
 /// `TLS_RX_EXPECT_NO_PAD` (Linux 6.0).
 const TLS_RX_EXPECT_NO_PAD: c_int = 4;
-/// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18).
+/// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.19).
 const TLS_TX_MAX_PAYLOAD_LEN: c_int = 5;
 /// `TLS_SET_RECORD_TYPE`: the control message giving a sent record's type.
 const TLS_SET_RECORD_TYPE: c_int = 1;
@@ -144,7 +144,7 @@ pub(crate) fn set_ulp_tls(fd: BorrowedFd<'_>) -> io::Result<()> {
     }
 }
 
-/// Whether the kernel knows `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18), asked
+/// Whether the kernel knows `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.19), asked
 /// after the upper layer protocol is attached and before any key is set.
 pub(crate) fn has_tx_max_payload_len(fd: BorrowedFd<'_>) -> io::Result<bool> {
     let mut value = [0u8; 2];

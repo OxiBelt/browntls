@@ -124,6 +124,12 @@ repeat.
 - **Splitting.** `tokio::io::split` gives read and write halves for two tasks.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
   `browntls::Error` (`err.get_ref()` then `downcast_ref`).
+- **Handshake state.** The handshake futures (`Connect`, `Accept` and their
+  fallible forms) give the connection through `connection()` and
+  `connection_mut()` while the handshake runs, as `get_ref()` gives the
+  transport: a caller that polls the future itself can see, say, the server
+  name and ALPN protocol as soon as the ClientHello was processed (not
+  authenticated until the handshake completes).
 - **Answers.** A read that receives a message calling for an answer (a TLS
   1.3 `KeyUpdate` asking for ours, a post-handshake `CertificateRequest`)
   writes the answer at once if the transport has room, so a task that only

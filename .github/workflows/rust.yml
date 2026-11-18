@@ -291,6 +291,15 @@ jobs:
         # (the workspace jobs enable every feature).
         run: cargo test -p browntls-tokio --no-default-features --features native,tls12,logging,prefer-post-quantum --locked
 
+      # `AsyncKtlsStream` drives Tokio sockets (`net`) on the runner's kernel.
+      - name: Load the kernel TLS module
+        run: sudo modprobe tls
+
+      - name: Test browntls-ktls
+        env:
+          BROWNTLS_KTLS_REQUIRED: '1'
+        run: cargo test -p browntls-ktls --all-features --locked
+
       - name: Build the end-to-end peer
         run: cargo build -p browntls-e2e --locked
 

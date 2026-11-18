@@ -3,7 +3,8 @@
 //! Exception to the workspace's `unsafe_code = "deny"` (CONTRIBUTING.md,
 //! "Security requirements"): the socket options and the `sendmsg`/`recvmsg`
 //! control messages of kernel TLS have no safe wrapper in the standard
-//! library. Every function here keeps these invariants:
+//! library, nor has asking the kernel whether a socket has room to send
+//! (`poll`). Every function here keeps these invariants:
 //!
 //! * the descriptor is a [`BorrowedFd`], open for the whole call;
 //! * every pointer passed to the kernel points into a live Rust value
@@ -214,6 +215,31 @@ pub(crate) fn send_record(fd: BorrowedFd<'_>, typ: u8, payload: &[u8]) -> io::Re
                 return Err(io::Error::other("the kernel took part of a control record"));
             }
             other => return other.map(|_| ()),
+        }
+    }
+}
+
+/// Whether the socket has room to send right now, as the kernel reports it
+/// (`poll` with no timeout, so it never waits). An error or a hang-up
+/// pending on the socket counts as room: the next call reports it.
+#[cfg(feature = "tokio")]
+pub(crate) fn writable(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    let mut entry = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: `entry` is one live `pollfd` and the count given is one;
+        // the kernel writes only its `revents`. `fd` is open for the call.
+        let rc = unsafe { libc::poll(&mut entry, 1, 0) };
+        if rc >= 0 {
+            let ready = libc::POLLOUT | libc::POLLERR | libc::POLLHUP;
+            return Ok(entry.revents & ready != 0);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
         }
     }
 }

@@ -56,6 +56,8 @@ pub use crypto_info::{CryptoInfo, UnsupportedCipher};
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
+mod ledger;
+#[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
 mod sys;
@@ -63,6 +65,8 @@ mod sys;
 #[cfg(target_os = "linux")]
 pub use stream::{HandoffError, KtlsStream, Offload};
 
+#[cfg(all(target_os = "linux", feature = "tokio"))]
+mod drain;
 #[cfg(all(target_os = "linux", feature = "tokio"))]
 mod tokio_stream;
 #[cfg(all(target_os = "linux", feature = "tokio"))]

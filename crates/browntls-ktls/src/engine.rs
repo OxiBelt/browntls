@@ -21,6 +21,7 @@ use browntls::{
 };
 
 use crate::crypto_info::CryptoInfo;
+use crate::ledger::{Backlog, Ledger};
 use crate::sys;
 
 /// The most plaintext in one record (RFC 9846 §5.1), which the kernel puts
@@ -50,6 +51,10 @@ pub(crate) struct Engine<Data> {
     backlog: VecDeque<KernelOutput>,
     /// The connection failed; every later call reports this.
     failed: Option<(io::ErrorKind, Error)>,
+    /// What the kernel was given to send, to be set against what TCP has
+    /// taken. `None` when the kernel's counters could not be read, or when
+    /// the socket was given bytes the engine did not see.
+    ledger: Option<Ledger>,
 }
 
 impl<Data: SideData> Engine<Data> {
@@ -70,6 +75,7 @@ impl<Data: SideData> Engine<Data> {
             scratch: Vec::new(),
             backlog: VecDeque::new(),
             failed: None,
+            ledger: None,
         };
         engine.install_handover_keys(fd, secrets)?;
         // The keys are in the kernel: an output a full non-blocking socket
@@ -92,6 +98,8 @@ impl<Data: SideData> Engine<Data> {
         let tx = CryptoInfo::new(version, tx, *tx_seq).map_err(io::Error::other)?;
         let rx = CryptoInfo::new(version, rx, *rx_seq).map_err(io::Error::other)?;
         sys::set_crypto_info(fd, false, tx.as_bytes())?;
+        // From here on the socket's output is records; none was made yet.
+        self.ledger = Ledger::open(fd, &tx, *tx_seq).ok();
         if let Some(len) = self.conn.max_tx_payload_len() {
             // After `TLS_TX`, so that the kernel applies the TLS 1.3 bound.
             sys::set_tx_max_payload_len(fd, len)?;
@@ -121,6 +129,9 @@ impl<Data: SideData> Engine<Data> {
     /// See [`KtlsStream::records_sent`](crate::KtlsStream::records_sent).
     pub(crate) fn records_sent(&mut self, fd: BorrowedFd<'_>, records: u64) -> io::Result<()> {
         self.check()?;
+        // Their bytes went past the engine: its count of the plaintext no
+        // longer covers what the socket was given.
+        self.ledger = None;
         let result = self.conn.records_sent(records);
         self.flush_outputs_if_room(fd)?;
         result.map_err(|err| self.fail(err))
@@ -132,6 +143,17 @@ impl<Data: SideData> Engine<Data> {
         let result = self.conn.refresh_traffic_keys();
         self.flush_outputs_if_room(fd)?;
         result.map_err(invalid_data)
+    }
+
+    /// See [`KtlsStream::unsent`](crate::KtlsStream::unsent).
+    pub(crate) fn backlog(&self, fd: BorrowedFd<'_>) -> io::Result<Backlog> {
+        match &self.ledger {
+            Some(ledger) => ledger.backlog(fd),
+            None => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the stream has no count of what the kernel was given to send",
+            )),
+        }
     }
 
     /// Queues `close_notify` (once); [`Self::flush_outputs`] sends it.
@@ -156,9 +178,25 @@ impl<Data: SideData> Engine<Data> {
         while let Some(output) = self.backlog.pop_front() {
             let result = match &output {
                 KernelOutput::Record { typ, payload } => {
-                    sys::send_record(fd, u8::from(*typ), payload)
+                    let sent = sys::send_record(fd, u8::from(*typ), payload);
+                    if let (Ok(()), Some(ledger)) = (&sent, &mut self.ledger) {
+                        ledger.sent(payload.len());
+                    }
+                    sent
                 }
-                KernelOutput::TxKeys(secrets) => install_keys(fd, version, false, secrets),
+                KernelOutput::TxKeys(secrets) => {
+                    // The kernel counts the records of new keys from zero:
+                    // what the old keys made is read before they go.
+                    let made = self.ledger.as_ref().map(|ledger| ledger.records_made(fd));
+                    let installed = install_keys(fd, version, false, secrets);
+                    if installed.is_ok() {
+                        match (&mut self.ledger, made) {
+                            (Some(ledger), Some(Ok(made))) => ledger.rekeyed(made),
+                            _ => self.ledger = None,
+                        }
+                    }
+                    installed
+                }
                 KernelOutput::RxKeys(secrets) => install_keys(fd, version, true, secrets),
                 other => Err(io::Error::other(format!("unknown kernel output {other:?}"))),
             };
@@ -201,7 +239,9 @@ impl<Data: SideData> Engine<Data> {
     /// connection's: nothing more can be sent safely.
     fn output_failed(&mut self, err: io::Error) -> io::Error {
         // What was queued behind it (records, keys) would now go out of
-        // step with the kernel: drop it.
+        // step with the kernel: drop it. So is the count of what the
+        // kernel was given (it may have taken part of a record).
+        self.ledger = None;
         self.backlog.clear();
         while self.conn.pop_output().is_some() {}
         self.fail_with(err.kind(), Error::General(format!("kernel TLS: {err}")))
@@ -354,6 +394,9 @@ impl<Data: SideData> Engine<Data> {
             .map_or(MAX_PAYLOAD, usize::from);
         let take = buf.len().min(max * RECORDS_PER_WRITE);
         let sent = sys::send(fd, &buf[..take])?;
+        if let Some(ledger) = &mut self.ledger {
+            ledger.sent(sent);
+        }
         // A plain `send` closes its last record, so `sent` bytes made at
         // most this many (barring the kernel closing records early under
         // memory pressure).

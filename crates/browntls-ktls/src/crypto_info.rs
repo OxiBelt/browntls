@@ -12,11 +12,11 @@ const CIPHER_AES_GCM_256: u16 = 52;
 /// `TLS_CIPHER_AES_CCM_128`.
 const CIPHER_AES_CCM_128: u16 = 53;
 /// `TLS_CIPHER_CHACHA20_POLY1305`.
-const CIPHER_CHACHA20_POLY1305: u16 = 54;
+pub(crate) const CIPHER_CHACHA20_POLY1305: u16 = 54;
 
 /// The largest `tls12_crypto_info_*` structure (AES-256-GCM and
 /// ChaCha20-Poly1305: 56 bytes).
-const MAX_LEN: usize = 56;
+pub(crate) const MAX_LEN: usize = 56;
 
 /// The value of the `TLS_TX` or `TLS_RX` socket option for one direction:
 /// a `struct tls12_crypto_info_*` in its exact byte layout.

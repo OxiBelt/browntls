@@ -2,7 +2,8 @@
 //! ends offloaded, one end offloaded against a userspace `browntls-tokio`
 //! peer, data in flight at the handover, key updates answered by a read
 //! while the socket is full, split halves, a bulk transfer through small
-//! socket buffers, closure and refusals.
+//! socket buffers shut down at once, what the kernel holds back from TCP,
+//! closure and refusals.
 //!
 //! The tests that need kernel TLS are skipped without the `tls` module
 //! unless `BROWNTLS_KTLS_REQUIRED=1`.
@@ -113,6 +114,35 @@ async fn server_kernel(
         .unwrap()
 }
 
+/// Waits until the kernel has given TCP every record of `tls`, which it
+/// does as the peer reads.
+async fn all_sent<Data: browntls::SideData>(tls: &AsyncKtlsStream<Data>) {
+    timeout(LIMIT, async {
+        while tls.unsent().unwrap() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the kernel kept records back");
+}
+
+/// A loopback pair with a 4096-byte send buffer at the client and a
+/// 4096-byte receive buffer at the server, so that a record of full size
+/// never fits into what TCP takes at once: (client, server).
+async fn narrow_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpSocket::new_v4().unwrap();
+    listener.set_recv_buffer_size(4096).unwrap();
+    listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = listener.listen(1).unwrap();
+    let connecting = TcpSocket::new_v4().unwrap();
+    connecting.set_send_buffer_size(4096).unwrap();
+    let (client, server) = tokio::join!(
+        connecting.connect(listener.local_addr().unwrap()),
+        listener.accept(),
+    );
+    (client.unwrap(), server.unwrap().0)
+}
+
 /// Both ends in the kernel, for every suite: data both ways, a key refresh
 /// from each end (TLS 1.3), `close_notify` both ways.
 #[tokio::test]
@@ -144,6 +174,9 @@ async fn both_ends_offloaded_for_every_suite() {
             }
             write_all_async(&mut tls, &up[LEN / 2..]).await;
             assert_eq!(read_n_async(&mut tls, LEN).await, down, "{suite:?}");
+            // The server has read everything: the kernel's counters and
+            // the stream's come to agree, to the byte.
+            all_sent(&tls).await;
             timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
             // Nothing may be written after close_notify.
             let err = timeout(LIMIT, tls.write(b"late"))
@@ -504,30 +537,20 @@ async fn truncation_is_reported() {
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 }
 
-/// A megabyte written through small socket buffers arrives whole. The
-/// small receive window keeps TCP's segments small, so the kernel is often
-/// left holding part of a record TCP had no room for. As the documentation
-/// asks where the last bytes matter, the peer confirms them before the
-/// shutdown, which then finds nothing left behind.
+/// A megabyte written through small socket buffers and shut down at once
+/// arrives whole, `close_notify` included. The kernel reports each write
+/// done while it still holds most of a record TCP had no room for;
+/// `shutdown` waits until the kernel's counters show every record with
+/// TCP before it sends the FIN.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_megabyte_through_small_buffers_arrives_whole() {
+async fn a_megabyte_shut_down_at_once_arrives_whole() {
     if !kernel_tls() {
         return;
     }
     let pki = Pki::new();
     let suite = offloadable_suites()[0];
     for round in 0..8u8 {
-        let listener = TcpSocket::new_v4().unwrap();
-        listener.set_recv_buffer_size(4096).unwrap();
-        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let listener = listener.listen(1).unwrap();
-        let connecting = TcpSocket::new_v4().unwrap();
-        connecting.set_send_buffer_size(4096).unwrap();
-        let (client_tcp, server_tcp) = tokio::join!(
-            connecting.connect(listener.local_addr().unwrap()),
-            listener.accept(),
-        );
-        let (client_tcp, (server_tcp, _)) = (client_tcp.unwrap(), server_tcp.unwrap());
+        let (client_tcp, server_tcp) = narrow_pair().await;
         let (client, server) = tokio::join!(
             TlsConnector::from(Arc::new(pki.client_config(suite))).connect(localhost(), client_tcp),
             TlsAcceptor::from(Arc::new(pki.server_config(suite))).accept(server_tcp),
@@ -541,31 +564,90 @@ async fn a_megabyte_through_small_buffers_arrives_whole() {
             // A slow reader: the kernel end is ahead of it throughout.
             let mut got = Vec::with_capacity(expected.len());
             let mut chunk = vec![0u8; 8192];
-            while got.len() < expected.len() {
+            loop {
                 let n = timeout(LIMIT, server.read(&mut chunk))
                     .await
                     .expect("read timed out")
-                    .unwrap();
-                assert!(n > 0, "the stream ended early");
+                    .expect("the stream was cut short");
+                if n == 0 {
+                    break;
+                }
                 got.extend_from_slice(&chunk[..n]);
                 tokio::time::sleep(Duration::from_micros(200)).await;
             }
-            assert!(got == expected, "round {round}");
-            write_all_async(&mut server, b"ok").await;
-            timeout(LIMIT, server.flush()).await.unwrap().unwrap();
-            // The kernel end's close_notify, with nothing before it.
-            assert!(read_to_end_async(&mut server).await.unwrap().is_empty());
+            assert!(got == expected, "round {round}: {} bytes", got.len());
             timeout(LIMIT, server.shutdown()).await.unwrap().unwrap();
         });
         write_all_async(&mut tls, &up).await;
-        timeout(LIMIT, tls.flush()).await.unwrap().unwrap();
-        assert_eq!(read_n_async(&mut tls, 2).await, b"ok", "round {round}");
         timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
         assert!(
             read_to_end_async(&mut tls).await.unwrap().is_empty(),
             "round {round}"
         );
         reader.await.unwrap();
+    }
+}
+
+/// What the kernel accepted and TCP had no room for is counted, and
+/// `shutdown` does not end ahead of it: with a peer that does not read, a
+/// write of four records is reported done while most of it is still with
+/// the kernel, and the shutdown stays pending (on a socket this full, in
+/// sending `close_notify` or in the wait for room that follows). Once the
+/// peer reads, it gets every byte and `close_notify`, and the shutdown
+/// ends. The moment this cannot hold still, records held while the socket
+/// has room, is covered by the megabyte test above (now and then) and by
+/// the unit test of the decision (always).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_what_the_kernel_holds() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    for suite in offloadable_suites() {
+        let (client_tcp, server_tcp) = narrow_pair().await;
+        let (client, server) = tokio::join!(
+            TlsConnector::from(Arc::new(pki.client_config(suite))).connect(localhost(), client_tcp),
+            TlsAcceptor::from(Arc::new(pki.server_config(suite))).accept(server_tcp),
+        );
+        let (client, mut server) = (client.unwrap(), server.unwrap());
+        let mut tls = client_kernel(client).await;
+        assert_eq!(tls.unsent().unwrap(), 0, "{suite:?}");
+
+        let up = pattern(4 * 16384, 9);
+        let taken = timeout(LIMIT, tls.write(&up)).await.unwrap().unwrap();
+        assert!(taken >= 16384, "{suite:?}: {taken}");
+        let held = tls.unsent().unwrap();
+        // More than the socket's buffers can have taken is left, and no
+        // more than the records of what was written come to.
+        assert!(held > 0, "{suite:?}");
+        let most = taken + 29 * taken.div_ceil(16384);
+        assert!(held <= most as u64, "{suite:?}: {held} of {most}");
+
+        // Dropping the future gives up the wait, not the shutdown.
+        for _ in 0..2 {
+            assert!(
+                timeout(Duration::from_millis(100), tls.shutdown())
+                    .await
+                    .is_err(),
+                "{suite:?}: shut down with {} bytes unsent",
+                tls.unsent().unwrap_or(u64::MAX)
+            );
+        }
+        assert!(tls.unsent().unwrap() > 0, "{suite:?}");
+
+        let reader = tokio::spawn(async move {
+            let got = read_to_end_async(&mut server)
+                .await
+                .expect("the stream was cut short");
+            timeout(LIMIT, server.shutdown()).await.unwrap().unwrap();
+            got
+        });
+        timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
+        assert!(
+            read_to_end_async(&mut tls).await.unwrap().is_empty(),
+            "{suite:?}"
+        );
+        assert!(reader.await.unwrap() == up[..taken], "{suite:?}");
     }
 }
 

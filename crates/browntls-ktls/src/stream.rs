@@ -152,18 +152,19 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// the socket is readable or writable", since a read may first have to send
 /// a control record (a KeyUpdate answer) that did not fit.
 ///
-/// Known kernel limitation, on non-blocking sockets (and, as the kernel's
-/// code reads, untested here, on sockets with a send timeout): Linux
-/// reports a write as done once the record is encrypted, even when TCP
-/// had no room for all of it, and sends the rest when room appears;
-/// nothing tells userspace when that has happened. Shutting the socket's
-/// write side or closing it before then drops what is left, and the peer
-/// sees a truncated stream.
-/// Waiting until the socket is writable before closing it covers the wait
-/// for room, but not the moment between room appearing and the kernel
-/// sending: where the last bytes matter, let the peer confirm them (its
-/// `close_notify`) before closing. A blocking socket without a send
-/// timeout waits inside the write and needs no such care.
+/// On non-blocking sockets (and, as the kernel's code reads, untested
+/// here, on sockets with a send timeout) Linux reports a write as done
+/// once the record is encrypted, even when TCP had no room for all of it,
+/// and sends the rest when room appears. Shutting the socket's write side
+/// or closing it before then drops what is left, and the peer sees a
+/// truncated stream. [`unsent`](Self::unsent) tells how much the kernel
+/// still holds: before closing such a socket, send what the stream itself
+/// still holds ([`Write::flush`] until it succeeds) and wait until
+/// `unsent` is zero. While it is not, wait for the socket to be writable;
+/// if it is writable already, the kernel is about to send, usually within
+/// microseconds, so ask again after a short pause and not in a tight loop.
+/// A blocking socket without a send timeout waits inside the write and
+/// needs no such care.
 ///
 /// Known kernel limitation: Linux pauses reception when a handshake record
 /// merely starts with the KeyUpdate type byte, or holds only the start of a
@@ -254,6 +255,9 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     ///
     /// On a non-blocking socket what the socket has no room for is sent by
     /// the next write or [`Write::flush`].
+    ///
+    /// The stream then no longer knows what the socket was given:
+    /// [`Self::unsent`] reports `Unsupported` from this call on.
     pub fn records_sent(&mut self, records: u64) -> io::Result<()> {
         self.engine.records_sent(self.socket.as_fd(), records)
     }
@@ -264,6 +268,35 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// and the new keys installed, by the next write or [`Write::flush`].
     pub fn refresh_traffic_keys(&mut self) -> io::Result<()> {
         self.engine.refresh_traffic_keys(self.socket.as_fd())
+    }
+
+    /// How many bytes of TLS records the kernel has accepted from this
+    /// stream and not yet given to TCP.
+    ///
+    /// Zero means that everything the kernel accepted so far, control
+    /// records included, is in TCP's hands, which delivers it or reports a
+    /// failure as for any socket: the write side can then be shut, or the
+    /// socket closed, without cutting the stream short. A control record
+    /// the socket had no room for at all (`WouldBlock` from
+    /// [`Self::send_close_notify`] or [`Write::flush`]) is still with the
+    /// stream and not counted here. On a blocking socket without a send
+    /// timeout this is zero after every call. On other sockets the kernel
+    /// sends what is left when TCP has room (see the type's
+    /// documentation for how to wait). The number may be reported higher
+    /// than it is when acknowledgements kept arriving while it was read,
+    /// never lower.
+    ///
+    /// It is worked out from two counters the kernel keeps (the records it
+    /// has made and the bytes TCP has taken) and the plaintext this stream
+    /// handed over. The error is [`io::ErrorKind::Unsupported`] when the
+    /// stream has no such count: the counters could not be read at the
+    /// handover, or bytes were sent on the socket directly
+    /// ([`Self::records_sent`]). Any other error means the counters cannot
+    /// be read or do not fit together, as after the write side was shut
+    /// (TCP counts the FIN).
+    pub fn unsent(&self) -> io::Result<u64> {
+        let backlog = self.engine.backlog(self.socket.as_fd())?;
+        Ok(backlog.unsent)
     }
 
     /// Sends `close_notify`; nothing can be written afterwards. The socket

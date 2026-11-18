@@ -1087,8 +1087,8 @@ hanging. A close_notify followed by more data before the handover, a whole
 record or part of one, is refused without waiting for the rest. On a
 non-blocking socket (and, as the kernel's code reads, one with a send
 timeout) the kernel may still hold part of a record after a write
-returned (see `AsyncKtlsStream` below): the caller lets the peer confirm the
-last bytes before closing, or at least waits for writability.
+returned: `KtlsStream::unsent` tells how much (see the ledger below), and the
+caller waits for it to be zero before closing.
 
 What follows the handover lives in one `Engine` (`src/engine.rs`): the
 `KernelConnection`, the plaintext from before the handover, a control record
@@ -1096,6 +1096,34 @@ in transit and the backlog. It owns no socket; every call takes the
 descriptor, and reports `WouldBlock` only for what it documents (a read when
 the kernel has no record, a write or flush when the socket has no room).
 `KtlsStream` is that engine with a socket.
+
+The engine also keeps a ledger (`src/ledger.rs`) of what the kernel was given
+to send, because the kernel does not say when it has sent it. On a
+non-blocking socket Linux reports a write as done once the record is
+encrypted, even when TCP had no room for all of it (`tls_sw_sendmsg` does not
+pass on the `EAGAIN` of its push), and sends the rest from a work item when
+room appears; a FIN or a close before that drops what is left, and the peer
+sees a truncated stream. Nothing reports that work, but two counters tell how
+far it has come. The transmit record sequence number, read back with
+`getsockopt(TLS_TX)`, counts the records made (exactly: the kernel may close
+records earlier than the stream can predict); the buffer is wiped after the
+read, since the kernel returns the key with it. TCP's count of the bytes it
+has taken is `tcpi_bytes_acked` (`TCP_INFO`) plus the unacknowledged bytes it
+holds (`SIOCOUTQ`); the two come from two calls, so the acknowledged count,
+which only grows, is read on both sides of the other and the reading repeated
+while it moved, and a reading that never settles is a lower bound. The ledger
+takes TCP's count when the transmit keys are installed, adds up the plaintext
+the engine hands over (application data and control records) and the records
+made under each set of keys (the kernel counts from zero after a key update),
+and knows what a record adds to its plaintext (22 bytes in TLS 1.3; 29 in
+TLS 1.2 with AES-GCM, 21 with ChaCha20-Poly1305). The records' bytes on the
+wire less what TCP has taken since the handover is what the kernel still
+holds: `unsent()` on both streams, which may read high while
+acknowledgements arrive and never low. When the counters cannot be read at
+the handover, or bytes were sent on the socket directly
+(`records_sent`), there is no ledger and `unsent()` says so
+(`Unsupported`). A FIN takes a sequence number, so the count no longer fits
+once the write side is shut.
 
 `AsyncKtlsStream` (feature `tokio`) is the engine with a
 `tokio::net::TcpStream`, implementing `AsyncRead` and `AsyncWrite`. Each
@@ -1119,25 +1147,41 @@ full registers for writability as well as readability.
 Tokio keeps one waker per direction, and the stream may be split into halves
 on two tasks, so the reader and a parked writer register a waker that wakes
 both: neither can lose its wakeup to the other's registration. `poll_shutdown`
-queues `close_notify` once, sends what waits, waits until the kernel reports
-room to send, and shuts the socket's write side. The wait is for a kernel
-limitation of non-blocking sockets: Linux reports a write as done once the
-record is encrypted, even when TCP had no room for all of it
-(`tls_sw_sendmsg` does not pass on the `EAGAIN` of its push), and sends the
-rest from a work item when room appears; a FIN or a close before that drops
-what is left, and the peer sees a truncated stream. While the rest waits the
-socket is not writable, which `poll` shows and Tokio's cached readiness does
-not, so the stream asks the kernel. Between room appearing and the work item
-running nothing tells userspace, so the wait narrows the window without
-closing it; the documentation says to let the peer confirm the last bytes
-where they matter. A test that shut down straight after writing a megabyte
-into 4096-byte socket buffers failed in one of six kernel CI jobs with the
-wait in place: the kernel end's read after its shutdown failed with
-`BrokenPipe`. The likely cause, from reading the kernel and not shown by the
-log, is the kernel's late send meeting the FIN (`EPIPE`, which the kernel
-then leaves on the socket as its error). The wait itself (ask the
-kernel, stay pending without room, be woken when room appears) is tested on
-plain TCP in `src/tokio_stream.rs`, on any kernel. The other tests
+queues `close_notify` once, sends what waits, waits until the ledger shows
+that TCP has taken every record, and shuts the socket's write side. While
+the kernel holds records, the stream waits for the socket to have room: the
+kernel schedules its work item when room appears, just before it wakes the
+socket's waiters. That the socket has no room is something `poll` shows and
+Tokio's cached readiness does not, so the stream asks the kernel. Once there
+is room and the ledger still shows records held, the work item is under way
+and nothing reports its end, so the stream looks again after a pause
+(`src/drain.rs`): four times it only yields to the runtime, then a clock
+thread wakes it after pauses from a quarter of a millisecond to eight
+milliseconds. Yielding longer was not seen to help: on one Linux 7.0 host,
+in four runs, records still held after two looks stayed held through 315 to
+393 more within a millisecond and were gone after the first pause (the work
+item, queued on the task's own processor, may not run until the thread
+blocks or the scheduler's next tick; a reading, not shown). That thread is
+one for the whole process, started with the first alarm and gone
+five seconds after the last; where it cannot be started the task goes on
+yielding. The pauses use no timer of the runtime, which may have none. The
+wait ends with an error when the socket hangs up or has an error pending
+while records are held (they will not be sent; `POLLERR` alone is not taken
+for that, since the socket's error queue raises it too), when the counters
+cannot be read or do not fit, and with `TimedOut` when the same records have
+been held for five seconds although the socket had room and TCP had nothing
+in flight whose acknowledgement would make the kernel send. Only where there
+is no ledger (`Unsupported`) does the stream wait for room alone, as it did
+before the ledger existed: that narrows the window without closing it. A test of that earlier wait, which
+shut down straight after writing a megabyte into 4096-byte socket buffers,
+failed in one of six kernel CI jobs: the kernel end's read after its shutdown
+failed with `BrokenPipe`. The likely cause, from reading the kernel and not
+shown by the log, is the kernel's late send meeting the FIN (`EPIPE`, which
+the kernel then leaves on the socket as its error). The wait for room (ask
+the kernel, stay pending without room, be woken when room appears), the
+pauses and the five-second limit are tested without kernel TLS
+(`src/tokio_stream.rs`, `src/drain.rs`), as is TCP's count on plain TCP
+(`src/ledger.rs`). The other tests
 (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the running kernel
 like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
@@ -1145,22 +1189,26 @@ offloaded server against a userspace client (tickets, KeyUpdate, closure), a
 KeyUpdate answered by a read while the socket is full (the answer seen on the
 wire by a relay), split halves across key updates, a client still in its
 0-RTT phase (with the server's count of accepted 0-RTT data), truncation, a
-megabyte written through small socket buffers and confirmed by the peer
-before the shutdown, a peer that closed TCP before the handover (the kernel
+megabyte written through small socket buffers and shut down at once, a
+shutdown that stays pending while the kernel holds records a peer does not
+read (and the count of them), a peer that closed TCP before the handover (the kernel
 attaches the upper layer protocol to an established connection only,
 `ENOTCONN`; the stream goes on in userspace), and refusals that return the
 stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, and `sendmsg`/`recvmsg` with one control message. Its
+without waiting, `ioctl(SIOCOUTQ)`, and `sendmsg`/`recvmsg` with one control
+message. Its
 invariants are listed at its top: borrowed descriptors,
 pointers only into live values with their lengths, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
 sized with `CMSG_SPACE`, and no value created from kernel output but plain
 integers. The tests (`crates/browntls-ktls/tests/offload.rs`) run over
 loopback TCP against the running kernel: both ends offloaded for every suite
-with KeyUpdates from both sides, an offloaded end against a userspace peer in
+with KeyUpdates from both sides (and, on these blocking sockets, the ledger
+at zero to the byte after every call), an offloaded end against a userspace
+peer in
 each role (tickets, a KeyUpdate from the userspace end, data that arrived with
 the Finished, closure, and the recorded TLS 1.2 explicit nonces, which must
 never repeat), a peer's smaller `record_size_limit`, truncation, and a refused

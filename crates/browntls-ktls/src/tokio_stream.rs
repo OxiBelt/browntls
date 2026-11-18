@@ -13,6 +13,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker, ready};
+use std::time::Instant;
 
 use browntls::SideData;
 use browntls::client::ClientConnectionData;
@@ -22,6 +23,7 @@ use browntls_tokio::{client, server};
 use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 use tokio::net::TcpStream;
 
+use crate::drain::{Drain, Outcome, Room};
 use crate::engine::Engine;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
@@ -138,19 +140,33 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// [`KtlsStream`](crate::KtlsStream) with KeyUpdate records that are not
 /// one whole KeyUpdate applies here too.
 ///
-/// Known kernel limitation: on a non-blocking socket Linux reports a write
-/// as done once the record is encrypted, even when TCP had no room for all
-/// of it, and sends the rest when room appears; nothing tells userspace
-/// when that has happened. Closing the socket, or its write side, before
+/// On a non-blocking socket Linux reports a write as done once the record
+/// is encrypted, even when TCP had no room for all of it, and sends the
+/// rest when room appears. Closing the socket, or its write side, before
 /// then drops what is left, and the peer sees a truncated stream.
-/// `shutdown` therefore waits until the kernel reports room to send before
-/// it shuts the write side, which covers the wait for room but not the
-/// moment between room appearing and the kernel sending. Call `shutdown`
-/// before dropping a stream that has written, and where the last bytes
-/// matter, let the peer confirm them (its `close_notify`, read until end
-/// of file) before the stream is dropped. Like a write, `shutdown` waits
-/// for a peer that has stopped reading while the socket is full; give it
-/// a time limit where that matters.
+/// `shutdown` therefore shuts the write side only when the kernel's own
+/// counters show that TCP has taken every record
+/// ([`unsent`](Self::unsent) is zero), and waits for the kernel while they
+/// do not. So call `shutdown`, and let it finish, before dropping a stream
+/// that has written: a drop alone loses what the kernel still holds.
+///
+/// Like a write, `shutdown` waits for a peer that has stopped reading
+/// while records are held back; give it a time limit where that matters.
+/// It fails when the connection ends with records unsent, when the
+/// kernel's counters cannot be read or do not fit together, and with
+/// [`io::ErrorKind::TimedOut`] when the kernel has held the same records
+/// for five seconds although the socket had room and nothing was in
+/// flight. Where the stream has no count of what the kernel holds
+/// ([`unsent`](Self::unsent) reports `Unsupported`), `shutdown` waits
+/// until the socket has room instead, which does not cover the moment
+/// between room appearing and the kernel sending: there, let the peer
+/// confirm the last bytes (its `close_notify`, read until end of file)
+/// where they matter.
+///
+/// Between room appearing and the kernel sending nothing wakes a task, so
+/// `shutdown` looks again after short pauses: it yields to the runtime a
+/// few times, then is woken by a clock thread that the process starts for
+/// as long as streams wait this way (it needs no timer of the runtime).
 ///
 /// ```no_run
 /// # async fn run(
@@ -188,8 +204,11 @@ pub struct AsyncKtlsStream<Data> {
     read_waker: Option<Waker>,
     /// `shutdown` has queued `close_notify`.
     closing: bool,
-    /// `shutdown` has seen room to send after everything was written.
+    /// `shutdown` has found every record with TCP (or, without the
+    /// kernel's counters, room to send after everything was written).
     drained: bool,
+    /// The pauses of that wait.
+    drain: Drain,
     /// See [`early_data_len`](Self::early_data_len).
     early_data_len: usize,
 }
@@ -243,6 +262,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             read_waker: None,
             closing: false,
             drained: false,
+            drain: Drain::new(),
             early_data_len: 0,
         }
     }
@@ -281,6 +301,10 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// room; the rest is sent by the next write or flush. Overcount when
     /// unsure: one `send` of `n` bytes without `MSG_MORE` makes at most
     /// `n.div_ceil(16384)` records.
+    ///
+    /// The stream then no longer knows what the socket was given:
+    /// [`unsent`](Self::unsent) reports `Unsupported` from this call on,
+    /// and `shutdown` waits for room on the socket only.
     pub fn records_sent(&mut self, records: u64) -> io::Result<()> {
         self.engine.records_sent(self.socket.as_fd(), records)
     }
@@ -290,6 +314,32 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// keys installed, by the next write or flush.
     pub fn refresh_traffic_keys(&mut self) -> io::Result<()> {
         self.engine.refresh_traffic_keys(self.socket.as_fd())
+    }
+
+    /// How many bytes of TLS records the kernel has accepted from this
+    /// stream and not yet given to TCP: what
+    /// [`shutdown`](AsyncWrite::poll_shutdown) waits for before it shuts
+    /// the write side.
+    ///
+    /// Zero means that everything the kernel accepted so far, control
+    /// records included, is in TCP's hands, which delivers it or reports a
+    /// failure as for any socket. Otherwise the kernel sends what is left
+    /// when TCP has room. A control record the socket had no room for at
+    /// all is still with the stream (a flush sends it) and not counted.
+    /// The number may be reported higher than it is when acknowledgements
+    /// kept arriving while it was read, never lower.
+    ///
+    /// It is worked out from two counters the kernel keeps (the records it
+    /// has made and the bytes TCP has taken) and the plaintext this stream
+    /// handed over. The error is [`io::ErrorKind::Unsupported`] when the
+    /// stream has no such count: the counters could not be read at the
+    /// handover, or bytes were sent on the socket directly
+    /// ([`Self::records_sent`]). Any other error means the counters cannot
+    /// be read or do not fit together, as after the write side was shut
+    /// (TCP counts the FIN).
+    pub fn unsent(&self) -> io::Result<u64> {
+        let backlog = self.engine.backlog(self.socket.as_fd())?;
+        Ok(backlog.unsent)
     }
 
     /// For a read: sends what the connection owes as far as the socket has
@@ -357,6 +407,19 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     }
 }
 
+impl<Data> AsyncKtlsStream<Data> {
+    /// The error of a `shutdown` that found the connection ended while the
+    /// kernel still held records: the socket's own error if it has one.
+    fn unsent_for_good(&self) -> io::Error {
+        self.socket.take_error().ok().flatten().unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the connection ended before the kernel had sent every record",
+            )
+        })
+    }
+}
+
 /// Runs `op` once Tokio reports `socket` writable, and again after each
 /// later report while it fails with `WouldBlock`, which clears Tokio's
 /// cached readiness. While it waits the caller is parked in `parked` and
@@ -389,13 +452,34 @@ fn poll_when_writable<R>(
     }
 }
 
-/// `WouldBlock` while the kernel reports no room to send on the socket.
+/// `WouldBlock` while the kernel reports no room to send on `socket`.
 /// Tokio's cached readiness cannot stand in for this: it is cleared only
 /// by a call that failed for want of room, and the kernel reports a write
 /// done that it has yet to send (see [`AsyncKtlsStream`]).
-fn room(fd: BorrowedFd<'_>) -> io::Result<()> {
-    if sys::writable(fd)? {
-        Ok(())
+///
+/// A connection that is over ends the wait too: after a hang-up as
+/// [`Room::Ended`], with an error pending on the socket as that error
+/// (taken from the socket). The kernel raises the same flag when only the
+/// socket's error queue holds something (transmit timestamps, zero-copy
+/// notices), which is not an end. Tokio may report such a socket as ready
+/// from then on, whatever this function returns, so `WouldBlock` could
+/// make the caller ask in a loop without ever waiting: that socket is
+/// reported as [`Room::Free`], and the caller looks again after a pause.
+/// (A caller without the kernel's counters takes it for room, as it took
+/// every pending error before.)
+fn room(socket: &TcpStream) -> io::Result<Room> {
+    let sendable = sys::sendable(socket.as_fd())?;
+    if sendable.hung_up {
+        return Ok(Room::Ended);
+    }
+    if sendable.error {
+        return match socket.take_error()? {
+            Some(err) => Err(err),
+            None => Ok(Room::Free),
+        };
+    }
+    if sendable.room {
+        Ok(Room::Free)
     } else {
         Err(io::ErrorKind::WouldBlock.into())
     }
@@ -580,8 +664,9 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
     }
 
     /// Sends `close_notify` (an alert instead, after a failure), waits
-    /// until the socket has room to send, then shuts its write side.
-    /// Reads go on until the peer's `close_notify`.
+    /// until the kernel has given TCP every record (see the type's
+    /// documentation), then shuts the socket's write side. Reads go on
+    /// until the peer's `close_notify`.
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if !this.closing {
@@ -597,14 +682,30 @@ impl<Data: SideData> AsyncWrite for AsyncKtlsStream<Data> {
             }
         }
         if !this.drained {
-            // The kernel may still hold part of a record TCP had no room
-            // for (see the type's documentation), in which case the socket
-            // is not writable; a FIN now would go out ahead of it. Tokio's
-            // cached readiness cannot tell, so the kernel is asked.
-            match this.poll_writable(cx, |_, fd| room(fd)) {
-                Poll::Ready(Ok(())) => this.drained = true,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => return Poll::Pending,
+            // The kernel may still hold records TCP had no room for (see
+            // the type's documentation); a FIN now would go out ahead of
+            // them and cut the stream short. Tokio's cached readiness
+            // cannot tell whether the socket has room, so the kernel is
+            // asked.
+            let Self {
+                socket,
+                engine,
+                write_waker,
+                read_waker,
+                drain,
+                ..
+            } = &mut *this;
+            let backlog = engine.backlog(socket.as_fd());
+            let waker = cx.waker().clone();
+            let outcome = ready!(drain.step(Instant::now(), backlog, &waker, || {
+                poll_when_writable(socket, write_waker, read_waker.as_ref(), cx, |_| {
+                    room(socket)
+                })
+            }));
+            match outcome {
+                Ok(Outcome::Sent) => this.drained = true,
+                Ok(Outcome::Lost) => return Poll::Ready(Err(this.unsent_for_good())),
+                Err(err) => return Poll::Ready(Err(err)),
             }
         }
         match Pin::new(&mut this.socket).poll_shutdown(cx) {
@@ -731,7 +832,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(!sys::writable(sender.as_fd()).unwrap());
+        assert!(!sys::sendable(sender.as_fd()).unwrap().room);
 
         // One poll: it must find no room, although Tokio's cached
         // readiness says writable, and leave a registration behind.
@@ -740,7 +841,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let mut parked = None;
         assert!(
-            poll_when_writable(&sender, &mut parked, None, &mut cx, room).is_pending(),
+            poll_when_writable(&sender, &mut parked, None, &mut cx, |_| room(&sender)).is_pending(),
             "the wait ended on a full socket"
         );
         assert!(parked.is_some());
@@ -757,7 +858,7 @@ mod tests {
                 while !woken.0.swap(false, Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(2)).await;
                 }
-                match poll_when_writable(&sender, &mut parked, None, &mut cx, room) {
+                match poll_when_writable(&sender, &mut parked, None, &mut cx, |_| room(&sender)) {
                     Poll::Ready(result) => break result,
                     Poll::Pending => {}
                 }
@@ -767,7 +868,7 @@ mod tests {
         .expect("the wait was not woken when room appeared")
         .unwrap();
         assert!(parked.is_none());
-        assert!(sys::writable(sender.as_fd()).unwrap());
+        assert!(sys::sendable(sender.as_fd()).unwrap().room);
         drop(reader.await.unwrap());
     }
 }

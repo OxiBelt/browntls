@@ -24,10 +24,13 @@ established connection only (`ENOTCONN`).
 On a non-blocking socket Linux reports a write as done once the record is
 encrypted, even when TCP had no room for all of it, and sends the rest when
 room appears. Closing the socket or its write side before then truncates the
-stream for the peer. `AsyncKtlsStream`'s `shutdown` waits for room first,
-which narrows the window without closing it; where the last bytes matter,
-let the peer confirm them (read until its `close_notify`) before dropping
-the stream. Blocking sockets without a send timeout are not affected.
+stream for the peer. The streams therefore keep count: `unsent()` sets the
+records the kernel has made (its transmit record sequence number) against
+the bytes TCP has taken, and tells how much the kernel still holds.
+`AsyncKtlsStream`'s `shutdown` shuts the write side only when that is zero,
+so call it, and let it finish, before dropping a stream that has written;
+with a `KtlsStream` on a non-blocking socket, wait for `unsent()` to be zero
+before closing. Blocking sockets without a send timeout are not affected.
 
 ## Tokio
 

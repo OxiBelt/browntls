@@ -4,7 +4,8 @@
 //! "Security requirements"): the socket options and the `sendmsg`/`recvmsg`
 //! control messages of kernel TLS have no safe wrapper in the standard
 //! library, nor has asking the kernel whether a socket has room to send
-//! (`poll`) or how many bytes TCP holds unacknowledged (`ioctl`). Every
+//! (`poll`), how many bytes TCP holds unacknowledged (`ioctl`), or sending
+//! a file's pages without reading them into userspace (`sendfile`). Every
 //! function here keeps these invariants:
 //!
 //! * the descriptor is a [`BorrowedFd`], open for the whole call;
@@ -419,6 +420,42 @@ pub(crate) fn send(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// One `sendfile` of at most `count` bytes of `file`, from `offset`, to
+/// the socket: the kernel makes records of the file's pages without the
+/// bytes passing through userspace. Returns the bytes sent, zero at the
+/// end of the file. The file's own position is neither used nor moved.
+///
+/// The kernel closes the last record when it has sent all of `count` or
+/// reached the end of the file (Linux 6.5; no `MSG_MORE` on the last
+/// part). Unlike `send`, `sendfile` cannot ask for no `SIGPIPE`.
+pub(crate) fn sendfile(
+    fd: BorrowedFd<'_>,
+    file: BorrowedFd<'_>,
+    offset: u64,
+    count: usize,
+) -> io::Result<usize> {
+    let offset =
+        libc::off_t::try_from(offset).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    loop {
+        // The kernel writes back where it stopped: each attempt starts
+        // from the caller's offset.
+        let mut position = offset;
+        // SAFETY: `position` is a live `off_t`, which the kernel reads and
+        // writes during the call only; no other memory of this process is
+        // involved (the bytes go from the file's pages to the socket);
+        // both descriptors are open for the call.
+        let sent =
+            unsafe { libc::sendfile(fd.as_raw_fd(), file.as_raw_fd(), &mut position, count) };
+        if sent >= 0 {
+            return Ok(sent as usize);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 /// What one `recvmsg` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Received {
@@ -480,4 +517,78 @@ pub(crate) fn recv(fd: BorrowedFd<'_>, buf: &mut [u8], nonblocking: bool) -> io:
         record_type,
         end_of_record: msg.msg_flags & libc::MSG_EOR != 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsFd;
+
+    use super::*;
+
+    /// A file holding `contents`, whose name is removed at once.
+    fn temp_file(contents: &[u8]) -> File {
+        let path = std::env::temp_dir().join(format!(
+            "browntls-ktls-sys-{}-{}",
+            std::process::id(),
+            contents.len()
+        ));
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file.write_all(contents).unwrap();
+        file
+    }
+
+    /// `sendfile` on plain TCP: the bytes asked for, from the offset asked
+    /// for, nothing at or past the end of the file, the file's position
+    /// left alone, and `WouldBlock` from a full non-blocking socket.
+    #[test]
+    fn sendfile_sends_the_bytes_asked_for() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut receiver, _) = listener.accept().unwrap();
+        let contents: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let mut file = temp_file(&contents);
+        let (fd, input) = (sender.as_fd(), file.as_fd());
+
+        assert_eq!(sendfile(fd, input, 10, 5000).unwrap(), 5000);
+        let mut got = vec![0; 5000];
+        receiver.read_exact(&mut got).unwrap();
+        assert_eq!(got, contents[10..5010]);
+
+        // Past the end: what is left, then nothing.
+        assert_eq!(sendfile(fd, input, 99_000, 5000).unwrap(), 1000);
+        receiver.read_exact(&mut got[..1000]).unwrap();
+        assert_eq!(got[..1000], contents[99_000..]);
+        assert_eq!(sendfile(fd, input, 100_000, 5000).unwrap(), 0);
+        assert_eq!(sendfile(fd, input, 1 << 40, 5000).unwrap(), 0);
+        assert_eq!(sendfile(fd, input, 0, 0).unwrap(), 0);
+        let err = sendfile(fd, input, u64::MAX, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // The file was written to its end and stays there.
+        let mut rest = Vec::new();
+        file.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+
+        sender.set_nonblocking(true).unwrap();
+        let mut sent = 0;
+        let err = loop {
+            match sendfile(sender.as_fd(), file.as_fd(), 0, contents.len()) {
+                Ok(n) => sent += n,
+                Err(err) => break err,
+            }
+            assert!(sent < 1 << 30, "the socket never filled");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
 }

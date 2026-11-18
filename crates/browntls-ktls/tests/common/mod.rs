@@ -8,8 +8,10 @@
     clippy::panic
 )]
 
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -231,4 +233,25 @@ pub fn read_n(r: &mut impl Read, n: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0; n];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// A file holding `contents`, open for reading. Its name is removed from
+/// the temporary directory before this returns, so nothing is left behind
+/// however the test ends.
+pub fn temp_file(contents: &[u8]) -> File {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "browntls-ktls-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    file.write_all(contents).unwrap();
+    file
 }

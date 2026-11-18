@@ -289,10 +289,11 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
 
     /// The socket.
     ///
-    /// Bytes sent on it directly (for example with `sendfile`) become
+    /// Bytes sent on it directly (for example with `splice`) become
     /// application data records the stream did not count: report them with
-    /// [`Self::records_sent`]. Reading from it directly loses the records
-    /// that are not application data.
+    /// [`Self::records_sent`]. For a file, [`Self::sendfile`] does the
+    /// counting. Reading from it directly loses the records that are not
+    /// application data.
     pub fn get_ref(&self) -> &TcpStream {
         &self.socket
     }

@@ -240,11 +240,61 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
 
     /// The socket.
     ///
-    /// Bytes sent on it directly (for example with `sendfile`) become
+    /// Bytes sent on it directly (for example with `splice`) become
     /// application data records the stream did not count: report them with
-    /// [`Self::records_sent`].
+    /// [`Self::records_sent`]. For a file, [`Self::sendfile`] does the
+    /// counting.
     pub fn get_ref(&self) -> &S {
         &self.socket
+    }
+
+    /// Sends up to `count` bytes of `file`, starting at `offset`, as
+    /// application data with `sendfile(2)`: the kernel makes the records
+    /// from the file's pages, and the bytes never pass through userspace.
+    /// Returns how many bytes were sent, which is zero only at the end of
+    /// the file (or for a `count` of zero) and may be less than `count`:
+    /// call again with the offset moved on, as with [`Write::write`]. One
+    /// call sends at most 64 records' worth (a mebibyte, unless the peer
+    /// asked for smaller records). The file's own position is neither
+    /// used nor moved.
+    ///
+    /// `file` is whatever `sendfile` reads from, a regular file as a rule.
+    /// Like a write, the call first sends what the stream holds, counts
+    /// the records against the cipher suite's confidentiality limit and
+    /// refreshes the keys at it, and keeps [`Self::unsent`] exact, which
+    /// `sendfile` on [`Self::get_ref`] would not.
+    ///
+    /// ```no_run
+    /// # fn send<S: std::os::fd::AsFd, D: browntls::SideData>(
+    /// #     tls: &mut browntls_ktls::KtlsStream<S, D>,
+    /// # ) -> std::io::Result<()> {
+    /// let file = std::fs::File::open("index.html")?;
+    /// let len = file.metadata()?.len();
+    /// let mut offset = 0;
+    /// while offset < len {
+    ///     let rest = usize::try_from(len - offset).unwrap_or(usize::MAX);
+    ///     match tls.sendfile(&file, offset, rest)? {
+    ///         0 => break, // the file was cut short meanwhile
+    ///         n => offset += n as u64,
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// On a non-blocking socket `WouldBlock` means no room, as for a
+    /// write, and a call that sent less than `count` may leave its last
+    /// bytes in a record the kernel has not closed: they go out with what
+    /// is sent next (more of the file, a write, `close_notify`), and
+    /// [`Self::unsent`] counts them until then.
+    ///
+    /// `sendfile` cannot ask the kernel not to raise `SIGPIPE` when the
+    /// connection has been reset, as this stream's writes do. Rust
+    /// programs ignore that signal unless they changed its handling; in
+    /// other processes ignore or handle it.
+    pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
+        self.engine
+            .sendfile(self.socket.as_fd(), file.as_fd(), offset, count)
     }
 
     /// Reports `records` application data records sent on the socket

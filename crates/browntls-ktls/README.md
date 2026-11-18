@@ -34,6 +34,34 @@ before closing. Blocking sockets without a send timeout are not affected.
 
 ## Zero copy
 
+`sendfile` on either stream sends part of a file as application data with
+`sendfile(2)`: the kernel makes the records from the file's pages, and the
+bytes never pass through userspace. Like a write it first sends what the
+stream holds, counts the records against the confidentiality limit (by the
+kernel's own record count, since the kernel may close a record after any
+part of the file) and keeps `unsent()` exact; `sendfile` on the socket
+itself (`get_ref`) does none of that. One call sends at most 64 records'
+worth, so call it until the file is sent:
+
+```rust
+let file = std::fs::File::open("index.html")?;
+let len = file.metadata()?.len();
+let mut offset = 0;
+while offset < len {
+    let rest = usize::try_from(len - offset).unwrap_or(usize::MAX);
+    match tls.sendfile(&file, offset, rest)? {
+        0 => break, // the file was cut short meanwhile
+        n => offset += n as u64,
+    }
+}
+```
+
+`AsyncKtlsStream::sendfile` waits for room on the socket; where the kernel
+must read the file from its storage first, the call blocks the thread for
+that long. `sendfile(2)` cannot ask the kernel not to raise `SIGPIPE` on a
+reset connection: Rust programs ignore that signal unless they changed its
+handling.
+
 Two kernel options (Linux 6.0) remove copies the kernel otherwise makes.
 Both are off after the handover and set on the stream:
 
@@ -86,15 +114,15 @@ match AsyncKtlsStream::from_client(tls).await {
 `KernelHandoff::into_parts` returns it) and its socket. The feature enables
 Tokio's `net` only; the runtime is the application's.
 
-`src/sys.rs` holds the crate's only `unsafe` code, the socket options and
-`sendmsg`/`recvmsg` control messages of kernel TLS; see the invariants at its
-top.
+`src/sys.rs` holds the crate's only `unsafe` code, the socket options,
+`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS; see the
+invariants at its top.
 
 ## Testing
 
 `cargo test -p browntls-ktls --all-features` runs the handover tests over
-loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`)
-and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
+loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
+`tests/sendfile.rs`) and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
 `tests/tokio_zero_copy.rs`, feature `tokio`). They are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).

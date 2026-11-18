@@ -29,7 +29,7 @@ browntls-ktls       Linux kernel TLS offload of browntls connections
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
-| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
+| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options, `sendmsg`/`recvmsg` control messages and `sendfile` |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -1075,8 +1075,9 @@ so `n` bytes make at most `n.div_ceil(max)` records (unless the kernel closes
 records early under memory pressure); that bound is reported with
 `records_sent`, and a write takes at most 64 records so the confidentiality
 limit is met in steps (it can be passed by fewer than 64 records). Bytes sent
-on the socket directly (`sendfile`) must be reported with
-`KtlsStream::records_sent`. TCP closing without `close_notify` is
+on the socket directly (`splice`) must be reported with
+`KtlsStream::records_sent`; a file is sent with `sendfile` (below), which
+counts for itself. TCP closing without `close_notify` is
 `UnexpectedEof`, as is every later call. A refused handover can be retried on
 the same socket (an attached `tls` ULP is accepted), and a peer
 `record_size_limit` the kernel cannot honour (before Linux 6.18) is refused
@@ -1125,6 +1126,23 @@ the handover, or bytes were sent on the socket directly
 (`Unsupported`). A FIN takes a sequence number, so the count no longer fits
 once the write side is shut.
 
+`sendfile` on either stream sends part of a file as application data with
+`sendfile(2)`, the kernel making the records from the file's pages. It goes
+through the engine like a write (the outputs that wait first, at most 64
+records' worth a call, the plaintext entered in the ledger), with one
+difference in the count of records. The kernel takes a file in parts, one
+`sendmsg` each, and closes a record at the end of a part when it believes the
+part to be the last, which a short read of the file makes it believe early; so
+the bytes sent do not bound the records made. The engine reads the kernel's
+record sequence number on both sides of the call instead and reports the
+difference plus one, for a record that a call cut short by a full
+non-blocking socket can leave open: its bytes go out with whatever is sent
+next and are in `unsent()` until then. Without the kernel's counters it
+reports a record for every 4096 bytes on top of those the bytes alone make.
+`AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
+writable; only the socket is waited for, not the file's storage. `sendfile(2)`
+has no flag against `SIGPIPE`.
+
 Two kernel options (Linux 6.0) that remove copies are set on either stream
 and are off after the handover. `set_rx_expect_no_pad`
 (`TLS_RX_EXPECT_NO_PAD`, TLS 1.3 only) promises that the peer does not pad its
@@ -1144,7 +1162,12 @@ until its bytes are acknowledged, or a retransmission carries a record that
 does not authenticate. With software encryption in the kernel the option
 changes nothing. The tests (`tests/zero_copy.rs`, `tests/tokio_zero_copy.rs`)
 read the options back on the running kernel and keep a stream that expects
-unpadded records going across tickets, KeyUpdates and new receive keys.
+unpadded records going across tickets, KeyUpdates and new receive keys; those
+of `sendfile` (`tests/sendfile.rs`, `tests/tokio_zero_copy.rs`, and
+`src/sys.rs` on plain TCP) send a file between writes and key updates to a
+userspace peer with the ledger at zero after every call, in the small records
+a peer asked for, past the end of the file, on a closed stream, and through a
+full non-blocking socket and small socket buffers.
 
 `AsyncKtlsStream` (feature `tokio`) is the engine with a
 `tokio::net::TcpStream`, implementing `AsyncRead` and `AsyncWrite`. Each
@@ -1219,8 +1242,8 @@ stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, `ioctl(SIOCOUTQ)`, and `sendmsg`/`recvmsg` with one control
-message. Its
+without waiting, `ioctl(SIOCOUTQ)`, `sendfile` (whose only pointer is to the
+offset), and `sendmsg`/`recvmsg` with one control message. Its
 invariants are listed at its top: borrowed descriptors,
 pointers only into live values with their lengths, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer

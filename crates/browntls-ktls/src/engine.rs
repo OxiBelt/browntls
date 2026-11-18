@@ -34,6 +34,10 @@ const MAX_PAYLOAD: usize = 16384;
 /// suite's margin).
 const RECORDS_PER_WRITE: usize = 64;
 
+/// The smallest page of the architectures Linux runs on: `sendfile` takes
+/// a file in parts of at least one page (but for its ends).
+const SMALLEST_PAGE: usize = 4096;
+
 /// `ContentType::ApplicationData`.
 const APPLICATION_DATA: u8 = 23;
 
@@ -402,10 +406,72 @@ impl<Data: SideData> Engine<Data> {
     /// Gives application data to the kernel: first the outputs that wait,
     /// then one `send` of at most [`RECORDS_PER_WRITE`] records.
     pub(crate) fn write(&mut self, fd: BorrowedFd<'_>, buf: &[u8]) -> io::Result<usize> {
+        let Some(max) = self.before_application_data(fd, buf.len())? else {
+            return Ok(0);
+        };
+        let take = buf.len().min(max * RECORDS_PER_WRITE);
+        let sent = sys::send(fd, &buf[..take])?;
+        // A plain `send` closes its last record, so `sent` bytes made at
+        // most this many (barring the kernel closing records early under
+        // memory pressure).
+        let records = u64::try_from(sent.div_ceil(max)).unwrap_or(u64::MAX);
+        Ok(self.application_data_sent(fd, sent, records))
+    }
+
+    /// See [`KtlsStream::sendfile`](crate::KtlsStream::sendfile): first the
+    /// outputs that wait, then one `sendfile` of at most
+    /// [`RECORDS_PER_WRITE`] records' worth of the file.
+    pub(crate) fn sendfile(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        file: BorrowedFd<'_>,
+        offset: u64,
+        count: usize,
+    ) -> io::Result<usize> {
+        let Some(max) = self.before_application_data(fd, count)? else {
+            return Ok(0);
+        };
+        let take = count.min(max * RECORDS_PER_WRITE);
+        let made_before = self.records_made(fd);
+        let sent = sys::sendfile(fd, file, offset, take)?;
+        if sent == 0 {
+            // The end of the file.
+            return Ok(0);
+        }
+        // The kernel takes the file in parts and may close a record at the
+        // end of each, so the bytes alone do not bound the records. Its
+        // own count does; one more for a record a shortened call left
+        // open, which a later call closes without counting it.
+        let records = match (made_before, self.records_made(fd)) {
+            (Some(before), Some(after)) if after >= before => after - before + 1,
+            // Without the kernel's count: a record closed after every page
+            // of the file, the smallest part the kernel takes it in.
+            _ => u64::try_from(sent.div_ceil(max) + sent.div_ceil(SMALLEST_PAGE) + 1)
+                .unwrap_or(u64::MAX),
+        };
+        Ok(self.application_data_sent(fd, sent, records))
+    }
+
+    /// The records the kernel has made under the current transmit keys,
+    /// where it can be asked.
+    fn records_made(&self, fd: BorrowedFd<'_>) -> Option<u64> {
+        self.ledger.as_ref()?.records_made(fd).ok()
+    }
+
+    /// What comes before `len` bytes of application data are given to the
+    /// kernel: the connection must not have failed, the outputs that wait
+    /// go first, and the connection must be open for sending. Returns the
+    /// most plaintext the kernel puts into one record, or `None` when
+    /// there is nothing to send.
+    fn before_application_data(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        len: usize,
+    ) -> io::Result<Option<usize>> {
         self.check()?;
         self.flush_outputs(fd)?;
-        if buf.is_empty() {
-            return Ok(0);
+        if len == 0 {
+            return Ok(None);
         }
         if !self.conn.may_send_application_data() {
             return Err(io::Error::new(
@@ -413,29 +479,30 @@ impl<Data: SideData> Engine<Data> {
                 "the connection is closed for sending",
             ));
         }
-        let max = self
-            .conn
-            .max_tx_payload_len()
-            .map_or(MAX_PAYLOAD, usize::from);
-        let take = buf.len().min(max * RECORDS_PER_WRITE);
-        let sent = sys::send(fd, &buf[..take])?;
+        Ok(Some(
+            self.conn
+                .max_tx_payload_len()
+                .map_or(MAX_PAYLOAD, usize::from),
+        ))
+    }
+
+    /// Counts `sent` bytes of application data the kernel accepted, in at
+    /// most `records` records, and carries out what the connection then
+    /// asks for. Returns `sent`.
+    fn application_data_sent(&mut self, fd: BorrowedFd<'_>, sent: usize, records: u64) -> usize {
         if let Some(ledger) = &mut self.ledger {
             ledger.sent(sent);
         }
-        // A plain `send` closes its last record, so `sent` bytes made at
-        // most this many (barring the kernel closing records early under
-        // memory pressure).
-        let records = u64::try_from(sent.div_ceil(max)).unwrap_or(u64::MAX);
         let result = self.conn.records_sent(records);
         if let Err(err) = result {
             // The bytes were sent; the next call reports the failure.
             self.failed = Some((io::ErrorKind::InvalidData, err));
         }
-        // The bytes were sent, so this call succeeds whatever happens to
+        // The bytes were sent, so the call succeeds whatever happens to
         // the outputs (a key refresh): what waits goes out next time, and
         // a failure is reported by the next call.
         let _ = self.flush_outputs(fd);
-        Ok(sent)
+        sent
     }
 
     /// Sends what waits, including a fatal alert after a failure.

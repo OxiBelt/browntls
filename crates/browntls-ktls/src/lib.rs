@@ -58,6 +58,8 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
+mod outputs;
+#[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
 mod sys;
@@ -72,3 +74,6 @@ mod tokio_stream;
 #[cfg(all(target_os = "linux", feature = "tokio"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use tokio_stream::{AsyncKtlsStream, StreamHandoffError};
+
+#[cfg(all(test, target_os = "linux"))]
+mod backpressure_tests;

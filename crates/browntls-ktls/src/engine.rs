@@ -6,11 +6,11 @@
 //!
 //! Every call that reaches the socket may return `WouldBlock` on a
 //! non-blocking one. [`Engine::read`] does so only when the kernel has no
-//! record to give (it tolerates a full socket for what it has to send);
-//! [`Engine::write`], [`Engine::flush`] and [`Engine::flush_outputs`] only
-//! when the socket has no room.
+//! record to give, or when the outputs waiting for room cost more than
+//! their budget ([`Engine::reading_paused`]); short of that it tolerates a
+//! full socket for what it has to send. [`Engine::write`], [`Engine::flush`]
+//! and [`Engine::flush_outputs`] return it only when the socket has no room.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -22,6 +22,7 @@ use browntls::{
 
 use crate::crypto_info::CryptoInfo;
 use crate::ledger::{Backlog, Ledger};
+use crate::outputs::Waiting;
 use crate::sys;
 
 /// The most plaintext in one record (RFC 9846 §5.1), which the kernel puts
@@ -48,7 +49,7 @@ pub(crate) struct Engine<Data> {
     scratch: Vec<u8>,
     /// Outputs waiting behind a record the socket had no room for, in
     /// order; carried out first next time. Never new receive keys.
-    waiting: VecDeque<KernelOutput>,
+    waiting: Waiting,
     /// The connection failed; every later call reports this.
     failed: Option<(io::ErrorKind, Error)>,
     /// What the kernel was given to send, to be set against what TCP has
@@ -73,7 +74,7 @@ impl<Data: SideData> Engine<Data> {
             pending_pos: 0,
             control: None,
             scratch: Vec::new(),
-            waiting: VecDeque::new(),
+            waiting: Waiting::default(),
             failed: None,
             ledger: None,
         };
@@ -107,6 +108,12 @@ impl<Data: SideData> Engine<Data> {
         sys::set_crypto_info(fd, true, rx.as_bytes())
     }
 
+    /// How many outputs wait for room (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting_len(&self) -> usize {
+        self.waiting.len()
+    }
+
     pub(crate) fn conn(&self) -> &KernelConnection<Data> {
         &self.conn
     }
@@ -114,6 +121,15 @@ impl<Data: SideData> Engine<Data> {
     /// Whether outputs (control records, keys) wait to be carried out.
     pub(crate) fn has_outputs(&self) -> bool {
         !self.waiting.is_empty() || self.conn.has_output()
+    }
+
+    /// Whether reading has stopped until the socket takes the outputs that
+    /// wait: they cost more than [`crate::outputs::BUDGET`]. A peer that
+    /// asks for answers (KeyUpdates, post-handshake authentication) and
+    /// reads none of them cannot make them pile up without bound, as the
+    /// userspace connection's `wants_read` ensures.
+    pub(crate) fn reading_paused(&self) -> bool {
+        self.waiting.over_budget()
     }
 
     /// Whether [`Self::read`] returns without asking the kernel: plaintext
@@ -237,7 +253,7 @@ impl<Data: SideData> Engine<Data> {
     }
 
     /// Carries out the outputs, tolerating a full socket: what waits is
-    /// sent by a later call.
+    /// sent by a later call (and stops reading past its budget).
     fn flush_outputs_if_room(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
         match self.flush_outputs(fd) {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
@@ -306,6 +322,10 @@ impl<Data: SideData> Engine<Data> {
             // Keys to install come before the next record; answers owed are
             // sent when there is room (or by the next write or flush).
             self.flush_outputs_if_room(fd)?;
+            if self.reading_paused() {
+                // Nothing more is read until the socket takes what waits.
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
             let continuing = self.control.as_ref().map(|(typ, _)| *typ);
             let into: &mut [u8] = if continuing.is_some() {
                 self.scratch.resize(MAX_PAYLOAD + 256, 0);

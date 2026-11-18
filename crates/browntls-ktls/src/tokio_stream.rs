@@ -129,7 +129,10 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// A read that owes the peer something (a KeyUpdate answer, a
 /// post-handshake authentication response) sends it as far as the socket
 /// has room and, while some is left, is also woken when the socket has
-/// room again; a write or flush sends it too. A TCP connection that ends
+/// room again; a write or flush sends it too. While what it owes and
+/// cannot send yet takes more than 64 KiB (a peer that keeps asking and
+/// reads no answers), the read takes in nothing more and waits for room
+/// before it reads on. A TCP connection that ends
 /// without `close_notify` fails the read with `UnexpectedEof`. Errors from
 /// the connection are [`io::ErrorKind::InvalidData`] with the
 /// [`browntls::Error`] inside; the stream has then failed for good.
@@ -283,6 +286,12 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// The connection's state after the handover.
     pub fn kernel_connection(&self) -> &KernelConnection<Data> {
         self.engine.conn()
+    }
+
+    /// How many outputs wait for room (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting_len(&self) -> usize {
+        self.engine.waiting_len()
     }
 
     /// The socket.
@@ -608,6 +617,12 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
             let direct = this.engine.reads_without_socket();
             if !direct {
                 this.poll_send_owed(cx)?;
+                if this.engine.reading_paused() {
+                    // The outputs that wait cost more than their budget:
+                    // nothing more is read until the socket takes them.
+                    // `poll_send_owed` left the task registered for room.
+                    return Poll::Pending;
+                }
                 match this.socket.poll_read_ready(cx) {
                     Poll::Ready(Ok(())) => {}
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -617,19 +632,30 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
             let Self { socket, engine, .. } = &mut *this;
             let fd = socket.as_fd();
             let result = if direct {
-                engine.read(fd, buf.initialize_unfilled())
+                engine.read(fd, buf.initialize_unfilled()).map(Some)
             } else {
                 // Fails with `WouldBlock` only when the kernel has no
-                // record to give.
+                // record to give. Reading that stopped for the outputs
+                // that wait (`None`) leaves the read readiness alone: the
+                // records the kernel holds are read once there is room.
                 socket.try_io(Interest::READABLE, || {
-                    engine.read(fd, buf.initialize_unfilled())
+                    match engine.read(fd, buf.initialize_unfilled()) {
+                        Err(err)
+                            if err.kind() == io::ErrorKind::WouldBlock
+                                && engine.reading_paused() =>
+                        {
+                            Ok(None)
+                        }
+                        other => other.map(Some),
+                    }
                 })
             };
             match result {
-                Ok(n) => {
+                Ok(Some(n)) => {
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
                 }
+                Ok(None) => {}
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                 Err(err) => return Poll::Ready(Err(err)),
             }

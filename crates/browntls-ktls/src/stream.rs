@@ -150,7 +150,15 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 ///
 /// The socket may be non-blocking: `WouldBlock` then means "call again when
 /// the socket is readable or writable", since a read may first have to send
-/// a control record (a KeyUpdate answer) that did not fit.
+/// a control record (a KeyUpdate answer) that did not fit. While the
+/// control records it owes and cannot send yet take more than 64 KiB (a
+/// peer that keeps asking for KeyUpdates or post-handshake authentication
+/// and reads no answers), a read takes in nothing more and returns
+/// `WouldBlock` until the socket has taken enough of them, although the
+/// socket stays readable. So when a read returns `WouldBlock` while the
+/// socket was reported readable, wait for it to be writable (not readable)
+/// before reading again, or the wait returns at once. A blocking socket
+/// sends them inside the read.
 ///
 /// On non-blocking sockets (and, as the kernel's code reads, untested
 /// here, on sockets with a send timeout) Linux reports a write as done
@@ -233,6 +241,12 @@ where
 }
 
 impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
+    /// How many outputs wait for room (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting_len(&self) -> usize {
+        self.engine.waiting_len()
+    }
+
     /// The connection's state after the handover.
     pub fn kernel_connection(&self) -> &KernelConnection<Data> {
         self.engine.conn()

@@ -954,11 +954,12 @@ is room and the ledger still shows records held, the work item is under way
 and nothing reports its end, so the stream looks again after a pause
 (`src/drain.rs`): four times it only yields to the runtime, then a clock
 thread wakes it after pauses from a quarter of a millisecond to eight
-milliseconds. Yielding longer does not help: on the task's own processor the
-work item runs when the thread gives the processor up, which a thread that
-keeps polling does not do (on Linux 7.0, records still held after two looks
-stayed held through some four hundred more within a millisecond and were
-gone after the first pause). That thread is one for the whole process, started with the first alarm and gone
+milliseconds. Yielding longer was not seen to help: on one Linux 7.0 host,
+in four runs, records still held after two looks stayed held through 315 to
+393 more within a millisecond and were gone after the first pause (the work
+item, queued on the task's own processor, may not run until the thread
+blocks or the scheduler's next tick; a reading, not shown). That thread is
+one for the whole process, started with the first alarm and gone
 five seconds after the last; where it cannot be started the task goes on
 yielding. The pauses use no timer of the runtime, which may have none. The
 wait ends with an error when the socket hangs up or has an error pending

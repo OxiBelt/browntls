@@ -4,9 +4,8 @@
 //! the socket gets room; nothing wakes a task when that work is done. So
 //! once the socket has room, `shutdown` looks at the kernel's counters
 //! again after a pause. A few times it only yields: the work was scheduled
-//! before the task was woken, and on another processor it is done by then.
-//! On the task's own processor the work waits for the thread to give the
-//! processor up, which a thread that keeps polling does not do, so after
+//! before the task was woken, and may be done by the next look. Where it
+//! is not, more yields were not seen to help (see [`YIELDS`]), so after
 //! that the task is woken by a clock thread, one for the whole process,
 //! which lives only while streams wait: first after a quarter of a
 //! millisecond, then after longer pauses. The pauses do not use a timer of
@@ -23,10 +22,17 @@ use std::time::{Duration, Instant};
 
 use crate::ledger::Backlog;
 
-/// How many looks in a row, once the socket was found with room, the task
-/// only yields before. More do not help: on Linux 7.0, records still held
-/// after two looks stayed held through some four hundred more within a
-/// millisecond, and were gone after the first pause.
+/// How many looks in a row, once the socket was found with room, end in
+/// a yield only.
+///
+/// Observed on one Linux 7.0 host, in the ten of sixty runs of a test that
+/// came to this wait: one or two looks were enough in six; in the other
+/// four the same records stayed held through 315 to 393 looks within a
+/// millisecond of yielding and were gone after the first pause. A likely
+/// reading, not shown: the kernel's work item is queued on the task's own
+/// processor and may not run until the thread blocks or the scheduler's
+/// next tick. Four leaves a margin over the two that were seen to be
+/// enough.
 const YIELDS: u32 = 4;
 
 /// The first pause after that; each later one is twice as long, up to

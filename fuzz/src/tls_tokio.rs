@@ -15,9 +15,10 @@
 //! shutdowns, damaged, inserted or ended transport bytes, key updates,
 //! accessors, early data reads (through the stream's reader, which drives
 //! the handshake, or straight from the connection), the lazy acceptor's
-//! `take_io`, pumping until idle, reconnection (resumption and 0-RTT), and
-//! a stream split into its read and write halves, used through them and
-//! put back together.
+//! `take_io`, pumping until idle, reconnection (resumption and 0-RTT), a
+//! stream split into its read and write halves, used through them and put
+//! back together, and the kernel handoff of a stream (`handoff`), also of
+//! a server's stream returned before its handshake completed.
 //!
 //! The futures and streams are polled with a no-op waker, one poll per
 //! operation: the harness drives them itself rather than waiting for
@@ -32,9 +33,8 @@
 //!   two streams do neither and come back unharmed;
 //! * nothing panics, and no poll loops forever.
 
+mod handoff;
 mod seeds;
-
-pub use seeds::seeds;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -54,6 +54,13 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::input::Input;
 use crate::tls_conn::setup::{Knobs, assert_prefix, server_name};
+
+/// Seeds: the exchanges of `seeds`, and the kernel handoff's own.
+pub fn seeds() -> Vec<Vec<u8>> {
+    let mut seeds = seeds::seeds();
+    seeds.extend(handoff::seeds());
+    seeds
+}
 
 const MAX_OPS: usize = 96;
 const MAX_CONNECTIONS: usize = 3;
@@ -203,9 +210,11 @@ enum Op {
     /// `side, how, data (short field), size`: splits that side's stream,
     /// writes, flushes and reads once through the halves and reunites them.
     Split,
+    /// `side, flags`: `into_kernel_handoff` (see `handoff`).
+    Handoff,
 }
 
-const OPS: [Op; 15] = [
+const OPS: [Op; 16] = [
     Op::Poll,
     Op::Write,
     Op::Read,
@@ -221,6 +230,7 @@ const OPS: [Op; 15] = [
     Op::Pump,
     Op::Reconnect,
     Op::Split,
+    Op::Handoff,
 ];
 
 struct World {
@@ -596,6 +606,20 @@ impl World {
         }
     }
 
+    /// The server reads the 0-RTT data it accepted: through the stream's
+    /// early data reader, which drives the handshake, or what the
+    /// connection holds.
+    fn early_read(&mut self, through_reader: bool) {
+        if let Server::Ready(TlsStream::Server(s)) = &mut self.server {
+            if through_reader {
+                read_early(s, &mut self.early);
+            } else if let Some(mut early) = s.get_mut().1.early_data() {
+                let _ = early.read_to_end(&mut self.early);
+            }
+        }
+        self.check();
+    }
+
     fn accessors(&mut self, side: usize) {
         let _ = (self.connector.config(), self.server_config.fips());
         match (side, &mut self.client, &mut self.server) {
@@ -759,16 +783,7 @@ fn play(data: &[u8]) -> Option<World> {
                 None => {}
             },
             Op::Accessors => world.accessors(side),
-            Op::EarlyRead => {
-                if let Server::Ready(TlsStream::Server(s)) = &mut world.server {
-                    if side == SERVER {
-                        read_early(s, &mut world.early);
-                    } else if let Some(mut early) = s.get_mut().1.early_data() {
-                        let _ = early.read_to_end(&mut world.early);
-                    }
-                }
-                world.check();
-            }
+            Op::EarlyRead => world.early_read(side == SERVER),
             Op::TakeIo => {
                 if let Server::Lazy(lazy) = &mut world.server {
                     if let Some(io) = lazy.take_io() {
@@ -793,6 +808,10 @@ fn play(data: &[u8]) -> Option<World> {
                 let data = input.short_field();
                 let size = usize::from(input.byte());
                 world.split(side, how, data, size);
+            }
+            Op::Handoff => {
+                let flags = input.byte();
+                world.handoff(side, flags);
             }
         }
     }

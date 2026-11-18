@@ -841,6 +841,58 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `coop` feature makes it do. The read half is not an
   `AsyncBufRead`, since the stream's buffer cannot be lent out between two
   polls while the other half uses the stream.
+- `into_kernel_handoff` (`browntls_tokio::kernel`) readies a client or
+  server stream for [kernel TLS offload](#kernel-tls-offload-browntlskernel)
+  without operating system support of its own. `into_inner` would drop what
+  only the stream holds (an unfinished 0-RTT phase with the early data to
+  send again, a read error kept for the next read), and the connection's
+  handover then fails on what is still in flight. The future instead clears
+  the connection's `kernel_handoff_blocker` step by step: it ends the 0-RTT
+  phase as any other operation would (so `EarlyDataNotResent` is reported
+  and the stream stays usable), completes a handshake still in progress,
+  writes and flushes the queued records, reads exactly
+  `bytes_to_record_boundary` bytes while a record is incomplete and
+  processes them (answering a KeyUpdate received on the way), and moves the
+  received plaintext, accepted 0-RTT data first, into a buffer of its own.
+  That 0-RTT data can be replayed and is never returned by reads of the
+  stream, so `early_data_len` tells where it ends. Every round clears the
+  blocker it met, moves bytes or returns, so it cannot spin; bytes after
+  the peer's `close_notify`, a whole record or part of one, fail it at once
+  (the connection would never process them), as does a connection that has
+  failed before, with its own error. A server's stream returned before its
+  handshake completed (`TlsAcceptor::early_data`) leaves its early phase
+  first, as it does in a flush: 0.5-RTT data is written and flushed, and
+  the handshake is completed with the
+  0-RTT data left where the stream's reader finds it, so a future given
+  up while it waits returns the stream as it was, and a handshake that
+  fails, then or before, is kept by the stream and fails its later
+  operations too. The generic loop therefore never meets a handshake in
+  progress, and refuses one as it refuses any blocker it cannot clear.
+  The transport must not read ahead of
+  what it is asked for: bytes it held back would never reach the kernel.
+  It resolves to a `KernelHandoff` (the transport, the
+  connection without a blocker, the plaintext to read first), which can
+  also go on in userspace when the kernel declines. A blocker that driving
+  the stream cannot clear is `Unsupported`; every failure returns the
+  stream and the plaintext already taken (`KernelHandoffError`), and a
+  future given up hands both back (`IntoKernelHandoff::into_stream`). The
+  future takes no unit of the task's budget for resolving (`coop`): it
+  resolves once, and its read towards a record boundary ends with that
+  record. A 0-RTT phase or handshake it completes counts its reads as the
+  stream's own operations do, every read after the first in one poll. The
+  tests (`crates/browntls-tokio/tests/kernel_handoff.rs`) hand streams to
+  the kernel stand-in of the `browntls` kernel tests, keyed with the
+  extracted secrets, over a transport that cuts records short and holds
+  writes back: no byte is lost or read twice in either direction with
+  unread plaintext, a partial record, records not yet written, a KeyUpdate
+  in flight and declined or accepted 0-RTT data; a read error kept for the
+  next read, data after `close_notify` and a failed connection fail the
+  handoff. `tests/kernel_handoff_early.rs` hands over a server's stream
+  returned before its handshake completed: the handshake completed by the
+  handoff with the unread 0-RTT data counted in front, 0.5-RTT data sent
+  through a buffering transport before the wait, a future given up with
+  nothing taken, and a handshake that failed before or fails under the
+  handoff reported by it and by the stream afterwards.
 
 The `unbuffered` module drives `UnbufferedClientConnection`,
 `UnbufferedServerConnection` and `UnbufferedAcceptor` instead, with its own

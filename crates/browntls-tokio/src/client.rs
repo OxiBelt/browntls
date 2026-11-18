@@ -12,6 +12,7 @@ use browntls::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
+use crate::kernel::IntoKernelHandoff;
 use crate::split::{self, ReadHalf, WriteHalf};
 
 mod early;
@@ -304,6 +305,13 @@ impl<IO> TlsStream<IO> {
     }
 
     /// The transport and the connection, ending the stream.
+    ///
+    /// Whatever the stream still held is dropped with it: an unfinished
+    /// 0-RTT phase and the early data it would send again, a read error
+    /// kept for the next read. The connection keeps its own queues (records
+    /// not yet written, plaintext not yet read). To move the connection to
+    /// kernel TLS, use [`into_kernel_handoff`](Self::into_kernel_handoff),
+    /// which settles all of that first.
     pub fn into_inner(self) -> (IO, ClientConnection) {
         (self.io, self.session)
     }
@@ -317,6 +325,23 @@ impl<IO> TlsStream<IO> {
     /// when that poll ends. [`ReadHalf::reunite`] puts them back together.
     pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
         split::split(self)
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
+    /// Readies the stream for kernel TLS offload (see [`crate::kernel`]):
+    /// completes the handshake of a stream returned early for 0-RTT data
+    /// (sending declined early data again where that is allowed), writes
+    /// and flushes every queued record, reads exactly up to the next record
+    /// boundary, and sets the received plaintext aside. The transport must
+    /// not read ahead (see [`crate::kernel`]).
+    ///
+    /// The configuration must have `enable_secret_extraction` set. On
+    /// failure the stream comes back in the
+    /// [`KernelHandoffError`](crate::kernel::KernelHandoffError), with the
+    /// data already taken out of it.
+    pub fn into_kernel_handoff(self) -> IntoKernelHandoff<Self> {
+        IntoKernelHandoff::new(self)
     }
 }
 
@@ -344,7 +369,7 @@ impl<IO> IoSession for TlsStream<IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// Ends the early-data phase, if any, before ordinary I/O: completes the
     /// handshake and resends declined early data.
-    fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub(crate) fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         early::poll_finish(
             &mut self.early,
             &mut self.io,

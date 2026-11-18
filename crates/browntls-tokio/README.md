@@ -157,6 +157,49 @@ handshake completes only on requests that are safe to repeat (RFC 9846 §8, RFC
 8470 for HTTP), and bound the operations that complete the handshake with
 timeouts of their own: the one around `accept` no longer covers them.
 
+## Kernel TLS
+
+`into_kernel_handoff` readies a client or server stream for kernel TLS
+offload (the configuration needs `enable_secret_extraction`): it finishes a
+0-RTT phase (a client's, or the handshake of a server stream returned
+before its end), writes and flushes every queued record, reads exactly up to the
+next record boundary, and sets the plaintext already received aside. The
+`KernelHandoff` it resolves to gives the transport, the connection (for
+`dangerous_into_kernel_connection`, see `browntls::kernel`) and that
+plaintext, which is read before anything the kernel delivers.
+
+```rust,no_run
+use browntls_tokio::client::TlsStream;
+use tokio::net::TcpStream;
+
+async fn offload(tls: TlsStream<TcpStream>) -> std::io::Result<()> {
+    let handoff = match tls.into_kernel_handoff().await {
+        Ok(handoff) => handoff,
+        // Nothing is lost: `err.stream` (usable when the connection merely
+        // cannot be offloaded) and `err.received` come back.
+        Err(err) => return Err(err.into_io_error()),
+    };
+    let (tcp, conn, received) = handoff.into_parts();
+    let (secrets, kernel_conn) = conn
+        .dangerous_into_kernel_connection()
+        .map_err(std::io::Error::other)?;
+    // Install `secrets` on `tcp`, read `received` first, and give the
+    // records the kernel passes back to `kernel_conn`.
+    drop((tcp, secrets, kernel_conn, received));
+    Ok(())
+}
+```
+
+The transport must not read ahead of what it is asked for (no buffered
+reader below the stream): the bytes after the record boundary are the
+kernel's. 0-RTT data a server accepted and has not read comes first in the
+plaintext set aside; it can be replayed, and `early_data_len` tells where it
+ends.
+
+Taking a stream apart with `into_inner` instead drops what only the stream
+holds (an unfinished 0-RTT phase, a read error kept for the next read), and
+the connection then refuses the handover while anything is in flight.
+
 ## Unbuffered streams
 
 `browntls_tokio::unbuffered` has the same connector, acceptor and lazy

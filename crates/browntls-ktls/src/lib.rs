@@ -59,6 +59,8 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
+mod meter;
+#[cfg(target_os = "linux")]
 mod outputs;
 #[cfg(target_os = "linux")]
 mod quiet_close;
@@ -75,6 +77,10 @@ mod sys;
 
 #[cfg(target_os = "linux")]
 pub use stream::{HandoffError, KtlsStream, Offload};
+
+#[cfg(all(target_os = "linux", feature = "native"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+pub mod routing;
 
 #[cfg(all(target_os = "linux", feature = "tokio"))]
 mod drain;

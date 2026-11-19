@@ -7,8 +7,9 @@
 //! (`poll`), how many bytes TCP holds unacknowledged (`ioctl`), which
 //! release it is (`uname`), or sending a file's pages without reading them
 //! into userspace (`sendfile`, with `fstat` for the file's length and the
-//! thread's signal mask to hold `SIGPIPE` back). Every function here keeps
-//! these invariants:
+//! thread's signal mask to hold `SIGPIPE` back), or reading the processor
+//! time the calling thread has used (`clock_gettime`). Every function here
+//! keeps these invariants:
 //!
 //! * every descriptor is a [`BorrowedFd`], open for the whole call;
 //! * every pointer passed to the kernel or to libc points into a live Rust
@@ -454,6 +455,25 @@ pub(crate) fn send(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// The processor time the calling thread has used so far, in nanoseconds:
+/// time it spent running, in userspace and in the kernel on its behalf,
+/// and none of the time it waited. `None` if the clock cannot be read.
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+pub(crate) fn thread_cpu_nanos() -> Option<u64> {
+    // SAFETY: `timespec` is a struct of integers, for which all zero bytes
+    // are a valid value.
+    let mut time: libc::timespec = unsafe { mem::zeroed() };
+    // SAFETY: `time` is a live `timespec` that the call writes and that
+    // outlives it.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    if result != 0 {
+        return None;
+    }
+    let seconds = u64::try_from(time.tv_sec).ok()?;
+    let nanos = u64::try_from(time.tv_nsec).ok()?;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
 /// The length of `file` if it is a regular file; `None` for anything else
 /// (a directory, a device, a pipe, a socket).
 pub(crate) fn regular_file_len(file: BorrowedFd<'_>) -> io::Result<Option<u64>> {
@@ -681,6 +701,31 @@ mod tests {
     use std::os::fd::AsFd;
 
     use super::*;
+
+    #[test]
+    fn thread_time_counts_work_and_not_waiting() {
+        let start = thread_cpu_nanos().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let slept = thread_cpu_nanos().unwrap();
+        // Asleep the thread used next to nothing (far below the 200 ms).
+        assert!(
+            slept >= start && slept - start < 50_000_000,
+            "{}",
+            slept - start
+        );
+        let mut x = 1u64;
+        while thread_cpu_nanos().unwrap() - slept < 20_000_000 {
+            for i in 0..10_000u64 {
+                x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(i));
+            }
+        }
+        // Another thread has a clock of its own.
+        let other = std::thread::spawn(thread_cpu_nanos)
+            .join()
+            .unwrap()
+            .unwrap();
+        assert!(other < thread_cpu_nanos().unwrap() - start, "{other}");
+    }
 
     /// A file holding `contents`, whose name is removed at once.
     fn temp_file(contents: &[u8]) -> File {

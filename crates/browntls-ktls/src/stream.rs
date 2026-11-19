@@ -209,7 +209,10 @@ where
     ///
     /// When the kernel lacks TLS support (no `tls` module), or the
     /// connection cannot be offloaded, the connection and the socket come
-    /// back unharmed in [`HandoffError::Refused`].
+    /// back unharmed in [`HandoffError::Refused`]. A running kernel that
+    /// lacks the suite's cipher refuses the keys only after they were taken
+    /// out of the connection: that is [`HandoffError::Failed`], and the
+    /// connection is lost.
     ///
     /// A refused handover can be tried again on the same socket.
     pub fn new<C>(mut conn: C, mut socket: S) -> Result<Self, HandoffError<C, S>>
@@ -283,7 +286,7 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// or behind the end of the file (or for a `count` of zero) and may be
     /// less than `count`: call again with the offset moved on, as with
     /// [`Write::write`]. One call sends at most 64 records' worth (a
-    /// mebibyte, unless the peer asked for smaller records). The file's
+    /// mebibyte, unless the connection sends smaller records). The file's
     /// own position is neither used nor moved.
     ///
     /// Like a write, the call first sends what the stream holds, counts
@@ -524,7 +527,8 @@ impl<S, Data> fmt::Debug for KtlsStream<S, Data> {
     }
 }
 
-/// Refuses a connection whose peer asked for smaller records than the
+/// Refuses a connection that must send smaller records (a peer's
+/// `record_size_limit`, or the configured `max_fragment_size`) than the
 /// kernel can be told to make: `TLS_TX_MAX_PAYLOAD_LEN` needs Linux 6.19.
 /// Asked with the upper layer protocol attached and before any key is set,
 /// while a refusal still leaves the connection usable.
@@ -537,7 +541,7 @@ pub(crate) fn check_record_size<Data: SideData>(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "the peer's record_size_limit needs TLS_TX_MAX_PAYLOAD_LEN (Linux 6.19)",
+        "records below the protocol maximum need TLS_TX_MAX_PAYLOAD_LEN (Linux 6.19)",
     ))
 }
 

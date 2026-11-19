@@ -5,7 +5,8 @@
 browntls is an independent Rust TLS library project with intended kernel
 integration. It is in initial development: the TLS implementation, primitives
 and PKI code are unreleased, unaudited and carry no production-readiness claim.
-Public APIs may change and kernel mechanisms remain undecided. No cryptographic
+Public APIs may change. Kernel integration so far is Linux kernel TLS offload
+(`browntls::kernel`, `browntls-ktls`); other kernel mechanisms remain undecided. No cryptographic
 certification is claimed.
 
 `main` is the supported development branch for triage and fixes; it is not a
@@ -19,7 +20,8 @@ affected. There are no blanket finding-class exclusions or accepted-risk waivers
 
 ## Threat boundaries and security requirements
 
-These are requirements for future design and review, not implemented controls:
+These are requirements for design and review, not claims that the controls
+are implemented or verified:
 
 - Treat peer-controlled protocol bytes, certificates, extensions, and negotiation
   state as untrusted. Preserve authentication and protocol state; reject invalid
@@ -30,7 +32,10 @@ These are requirements for future design and review, not implemented controls:
   failures must produce safe errors rather than silent verification bypasses,
   fallback to weaker policy, or externally reachable panics.
 - Review privilege, ownership, memory, lifetime, concurrency, and cleanup across
-  userspace/kernel, syscall, FFI, and unsafe-code boundaries when introduced.
+  userspace/kernel, syscall, FFI, and unsafe-code boundaries: Linux kernel TLS
+  offload and its system calls (`browntls-ktls`), the `unsafe` backend,
+  CPU-detection and system-call modules of `browntls-crypto`, and any
+  introduced later.
 - Preserve build and release integrity across dependencies, native code, build
   scripts, Actions, tool downloads, signing, and publication credentials.
 

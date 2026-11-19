@@ -3,7 +3,7 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
-`browntls-tokio`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
+`browntls-tokio`, `browntls-ktls`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
@@ -100,7 +100,8 @@ but adds no dependency. Either build of `tokio` pulls in
 contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
 `browntls-tokio` alone, with no `cargo vet` audit yet. The test-only
-features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
+features (`rt`, `rt-multi-thread`, `macros`, `net`, `io-util`, `time`,
+`test-util`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
 are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
 `browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which
@@ -115,15 +116,15 @@ prerequisites below are met.
 
 [`fuzz/`](../fuzz/README.md) holds cargo-fuzz targets for the handshake
 message codecs, the record deframer, certificate decompression, PEM, X.509
-path validation, CRLs and the client and server connections, and one target
-per topic of the public API, which together must reach every public function
-of the library crates (checked in CI by `scripts/fuzz/api_coverage.py`; the
+path validation, CRLs and the client and server connections, and API-sequence
+targets grouped by topic of the public API, which together must reach every public function
+of the library crates other than `browntls-ktls` (checked in CI by `scripts/fuzz/api_coverage.py`; the
 few exemptions are listed with their reasons in
 `fuzz/api-coverage-exemptions.txt`). CI builds the harnesses with the pinned
 stable toolchain and runs them over generated seeds; the Fuzz workflow fuzzes
 the targets as a matrix with a pinned nightly toolchain: briefly on pull
-requests for the targets whose sources changed, and daily for twenty minutes
-per target and architecture, keeping corpora in the Actions cache. The nightly
+requests for the targets whose sources changed, and weekly for twenty minutes
+per target on one x86-64 runner, keeping corpora in the Actions cache. The nightly
 toolchain and `cargo-fuzz` versions are pinned in the workflow and upgraded
 explicitly. Longer campaigns are still run by hand and recorded with the
 change they support: revision, toolchain, targets, duration and outcome. A

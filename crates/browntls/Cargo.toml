@@ -1,0 +1,84 @@
+[package]
+name = "browntls"
+description = "A TLS 1.2 and TLS 1.3 library with a pluggable cryptography provider, with optional Tokio streams and Linux kernel TLS offload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Kept unpublished like the rest of the workspace until the release
+# prerequisites in docs/Maintenance.md are met.
+publish.workspace = true
+documentation = "https://docs.rs/browntls"
+readme = "README.md"
+keywords = ["tls", "ssl", "tokio", "ktls", "cryptography"]
+categories = ["cryptography", "network-programming", "asynchronous"]
+include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
+
+[package.metadata.docs.rs]
+all-features = true
+# `browntls::ktls` is all but empty on other systems.
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+# This crate holds no code of its own: it re-exports `browntls-core` and, by
+# feature, `browntls-tokio` (`browntls::tokio`) and `browntls-ktls`
+# (`browntls::ktls`). Every feature below turns on the feature of the same
+# name in the crates that have it; `tests/scripts/check_facade_features.py`
+# keeps the tables in step.
+[features]
+# The defaults of `browntls-core`, plus `coop`, which `browntls-tokio` has
+# on by default and which does nothing until `tokio` is enabled.
+default = ["std", "native", "tls12", "logging", "prefer-post-quantum", "coop"]
+
+# Asynchronous streams for Tokio: `browntls::tokio` (`browntls-tokio`).
+tokio = ["std", "dep:browntls-tokio", "browntls-ktls?/tokio"]
+# Linux kernel TLS offload: `browntls::ktls` (`browntls-ktls`). With `tokio`
+# it includes `AsyncKtlsStream`.
+ktls = ["std", "dep:browntls-ktls"]
+
+# Features of `browntls-tokio`. `coop` takes effect once `tokio` is enabled;
+# `ocsp` enables `tokio`.
+coop = ["browntls-tokio?/coop"]
+ocsp = ["tokio", "browntls-tokio/ocsp"]
+
+# Features of `browntls-core`, passed on to the optional crates that have a
+# feature of the same name; see the `browntls-core` manifest for what each
+# does.
+std = ["alloc", "browntls-core/std"]
+alloc = ["browntls-core/alloc"]
+tls12 = ["browntls-core/tls12", "browntls-tokio?/tls12", "browntls-ktls?/tls12"]
+logging = ["browntls-core/logging", "browntls-tokio?/logging", "browntls-ktls?/logging"]
+prefer-post-quantum = ["browntls-core/prefer-post-quantum", "browntls-tokio?/prefer-post-quantum"]
+zlib = ["browntls-core/zlib", "browntls-tokio?/zlib"]
+brotli = ["browntls-core/brotli", "browntls-tokio?/brotli"]
+zstd = ["browntls-core/zstd", "browntls-tokio?/zstd"]
+native = ["browntls-core/native", "browntls-tokio?/native", "browntls-ktls?/native"]
+rustcrypto = ["browntls-core/rustcrypto", "browntls-tokio?/rustcrypto", "browntls-ktls?/rustcrypto"]
+
+[dependencies]
+browntls-core = { workspace = true }
+browntls-tokio = { workspace = true, optional = true }
+browntls-ktls = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests name browntls items through this crate only, as an application
+# does; Tokio is the runtime an application brings itself.
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }
+# Certificates generated at test run time (no committed private keys).
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[[test]]
+name = "facade"
+required-features = ["std", "native"]
+
+[[test]]
+name = "tokio"
+required-features = ["tokio", "native"]
+
+[[test]]
+name = "ktls"
+required-features = ["ktls", "native"]
+
+[lints]
+workspace = true

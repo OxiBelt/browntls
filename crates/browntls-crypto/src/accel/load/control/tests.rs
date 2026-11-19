@@ -556,6 +556,83 @@ fn the_choices_of_a_call_are_independent() {
 }
 
 #[test]
+fn placed_work_follows_the_share_and_is_timed_where_it_is() {
+    // Slot 0 is the primary and slot 1 its only alternate, as for work
+    // that is placed as a whole (`super::super::kernel`).
+    const ONE: u8 = 0b10;
+    const LEN: usize = 16384;
+    let s = Stream::bulk("test");
+    let mut calls = Calls(0);
+    let mut placed = |s: &Stream, n: u64| {
+        (0..n)
+            .filter(|_| s.place(calls.next(), 0, ONE) == 1)
+            .count()
+    };
+    let mut calls = Calls(1 << 40);
+    let mut timed = |s: &Stream, len, slot| {
+        (0..16_000)
+            .filter(|_| s.timed(calls.next(), len, slot))
+            .count()
+    };
+    let observe = |slot, ps: u64| s.observe(slot, LEN, ps * LEN as u64 / 1000, 0, ONE, PARAMS);
+
+    // Steady: everything is placed on the primary; on either slot one
+    // long call in sixteen is timed and no short one.
+    assert_eq!(placed(&s, 1000), 0);
+    for slot in [0, 1] {
+        assert!(timed(&s, LEN, slot).abs_diff(1000) < 150);
+        assert_eq!(timed(&s, 4095, slot), 0);
+    }
+    assert!(s.measurable(4096) && !s.measurable(4095));
+
+    // A fixed share is the fraction of the placements.
+    for (share, tolerance) in [(0, 0), (64, 300), (FULL_SHARE, 0)] {
+        s.fix(0, 1, share);
+        let expected = 100 * share as usize;
+        assert!(placed(&s, 25_600).abs_diff(expected) <= tolerance);
+        assert!(timed(&s, LEN, 1).abs_diff(1000) < 150);
+    }
+    s.release();
+
+    // Probing: every placement goes to the alternate until it has its
+    // samples, then one in eight. Its long calls are all timed, as
+    // nothing else would measure it, and the primary is timed more often
+    // than when steady.
+    for _ in 0..500 {
+        observe(0, 100);
+    }
+    while ctl(&s).phase == Phase::Steady {
+        observe(0, 200);
+    }
+    assert_eq!((ctl(&s).phase, ctl(&s).alt), (Phase::Probing, 1));
+    assert_eq!(placed(&s, 1000), 1000);
+    assert_eq!(timed(&s, LEN, 1), 16_000);
+    assert_eq!(timed(&s, 4095, 1), 0);
+    assert!(timed(&s, LEN, 0).abs_diff(4000) < 300);
+    for _ in 0..PROBES {
+        observe(1, 120);
+    }
+    assert_eq!(ctl(&s).phase, Phase::Probing);
+    assert!(placed(&s, 8000).abs_diff(1000) < 150);
+
+    // The alternate measured cheaper: the share of the placements grows
+    // to the limit and comes back when the primary has recovered.
+    for _ in 0..400 {
+        observe(0, 200);
+    }
+    let c = ctl(&s);
+    assert_eq!((c.phase, c.share), (Phase::Shifting, MAX_AUTO_SHARE));
+    let expected = 100 * MAX_AUTO_SHARE as usize;
+    assert!(placed(&s, 25_600).abs_diff(expected) < 300);
+    assert!(timed(&s, LEN, 1).abs_diff(4000) < 300);
+    for _ in 0..400 {
+        observe(0, 100);
+    }
+    assert_eq!(ctl(&s).phase, Phase::Steady);
+    assert_eq!(placed(&s, 1000), 0);
+}
+
+#[test]
 fn concurrent_observers_keep_the_state_in_range() {
     let s = Stream::op("test");
     std::thread::scope(|scope| {

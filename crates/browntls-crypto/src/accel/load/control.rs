@@ -440,6 +440,50 @@ impl Stream {
         }
     }
 
+    /// Chooses the slot for work that is placed as a whole and stays where
+    /// it was put (a connection's records, see `super::kernel`), with the
+    /// share and the probes of [`Stream::decide`]. Whether its calls are
+    /// timed is decided call by call ([`Stream::timed`]).
+    ///
+    /// A probe cannot wait for one placement in eight: placements may be
+    /// rare next to the calls, and the probe is given up after
+    /// [`PROBE_PATIENCE`] samples of the primary. So until the alternate
+    /// has its [`PROBES`] samples, every placement goes to it.
+    pub(crate) fn place(&self, word: u64, primary: usize, mask: u8) -> usize {
+        let ctl = Ctl::unpack(self.ctl.load(Relaxed));
+        if ctl.phase == Phase::Probing
+            && ctl.primary == primary
+            && mask & (1 << ctl.alt) != 0
+            && self.channels.0[ctl.alt].samples.load(Relaxed) < PROBES
+        {
+            return ctl.alt;
+        }
+        self.decide(word, self.min_units, primary, mask).0
+    }
+
+    /// Whether to time a call of `units` units that runs on `slot` whatever
+    /// its word, because its work was placed before ([`Stream::place`]):
+    /// the calls [`Stream::decide`] would time on that slot, and every
+    /// measurable call of an alternate while it is probed, since no call
+    /// can be sent there for the purpose.
+    pub(crate) fn timed(&self, word: u64, units: usize, slot: usize) -> bool {
+        if units < self.min_units {
+            return false;
+        }
+        let ctl = Ctl::unpack(self.ctl.load(Relaxed));
+        let sampling = word >> 32;
+        match ctl.phase {
+            Phase::Steady | Phase::Fixed => sampling & self.sample_mask == 0,
+            Phase::Probing if slot == ctl.alt => true,
+            Phase::Probing | Phase::Shifting => sampling & self.sample_mask & BUSY_SAMPLE_MASK == 0,
+        }
+    }
+
+    /// Whether a call of `units` units is long enough to time.
+    pub(crate) fn measurable(&self, units: usize) -> bool {
+        units >= self.min_units
+    }
+
     /// Records that `units` units of work took `nanos` nanoseconds on `slot`
     /// and lets the controller react.
     pub(crate) fn observe(

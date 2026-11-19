@@ -8,7 +8,7 @@ name: Fuzz
 #
 # * Pull requests fuzz, for a short time, the targets whose sources or
 #   harnesses changed (every target when the fuzz infrastructure changed).
-# * The daily schedule fuzzes every target for longer, and keeps each
+# * The weekly schedule fuzzes every target for longer, and keeps each
 #   target's minimized corpus in the Actions cache, which later runs
 #   (including pull requests) start from. Topic-granularity runs keep a
 #   corpus per topic instead.

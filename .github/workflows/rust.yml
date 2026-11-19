@@ -303,8 +303,8 @@ jobs:
       - name: Build the end-to-end peer
         run: cargo build -p browntls-e2e --locked
 
-  # The fuzz targets need a nightly toolchain to be instrumented, which CI
-  # does not install. This job keeps them building on the pinned toolchain
+  # The fuzz targets need a nightly toolchain to be instrumented, which only
+  # the Fuzz workflow (fuzz.yml) installs. This job keeps them building on the pinned toolchain
   # and runs each harness over its generated seeds (fuzz/README.md).
   fuzz-harness:
     name: Fuzz harnesses (stable build and seeds)

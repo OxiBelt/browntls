@@ -16,6 +16,10 @@
         prints them) only the targets whose sources, harness or target file
         changed are planned; a change to the shared fuzz infrastructure plans
         every target. An empty selection prints {"include": []}.
+
+    plan.py matrix --args TARGET
+        Prints TARGET's extra libFuzzer arguments instead (used by
+        scripts/fuzz/run-targets.sh).
 """
 
 from __future__ import annotations

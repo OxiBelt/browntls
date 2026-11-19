@@ -19,7 +19,7 @@ Current layout:
 
 - Root Markdown files: project and contributor guidance.
 - `crates/browntls-crypto/`: primitives and architecture backends (`unsafe`
-  confined to backend modules).
+  confined to backend, CPU-detection, zeroisation and system-call modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
 - `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls`
@@ -32,9 +32,13 @@ Current layout:
 - `crates/browntls-entropy/`: statistical entropy checks of generated keys,
   nonces and handshake secrets (test tooling, not published).
 - `docs/`: technical and maintenance documentation.
-- `scripts/`: QEMU cross-testing and CI helpers.
+- `scripts/`: QEMU cross-testing, CI and fuzzing helpers, and the OpenSSL
+  benchmark comparison.
 - `tests/scripts/`: portable repository checks and their regression tests.
 - `tests/e2e/`: Docker end-to-end interoperability matrix and its harness tests.
+- `tests/kubernetes/`: certificate revocation test on minikube.
+- `fuzz/`: cargo-fuzz targets (own manifest, outside the workspace).
+- `.agents/` (linked from `.claude/`): agent skills.
 - `.github/`: workflows, contribution templates, and update automation.
 
 ## Working principles

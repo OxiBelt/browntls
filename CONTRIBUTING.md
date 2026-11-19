@@ -10,7 +10,9 @@ agent orientation and [Architecture](docs/Architecture.md) the design.
 Root documents describe the project and its policies. Rust crates live in
 `crates/`, technical documentation in `docs/`, cross-testing and CI helpers in
 `scripts/`, portable repository checks in `tests/scripts/`, the Docker
-end-to-end harness in `tests/e2e/`, and GitHub automation in `.github/`. Do not create empty runtime directories to imply an
+end-to-end harness in `tests/e2e/`, the Kubernetes revocation test in
+`tests/kubernetes/`, cargo-fuzz targets in `fuzz/`, and GitHub automation in
+`.github/`. Do not create empty runtime directories to imply an
 architecture.
 
 Use repository-relative paths in documentation and contribution descriptions.
@@ -53,7 +55,8 @@ it is not a complete CommonMark parser. External HTTP(S) and mail links are not
 fetched. Each destination is checked once per file, diagnostics quote at most
 200 characters of a Markdown value with backslashes and non-printable
 characters escaped, and the first 1000 diagnostics found are printed, followed
-by the total error count. CI uses the same checks and pins the downloaded
+by the total error count. CI runs the same checks (whitespace with
+`git show --check` on the checked-out commit) and pins the downloaded
 actionlint archive by SHA-256. Optional shellcheck and pyflakes integrations
 are disabled so the documented actionlint result does not depend on
 host-installed analyzers.
@@ -93,7 +96,8 @@ BROWNTLS_ENTROPY_SAMPLES=4194304 \
   cargo test -p browntls-entropy --test os_rng -- --nocapture --test-threads=1
 ```
 
-The Docker end-to-end matrix runs browntls against OpenSSL, GnuTLS and itself
+The Docker end-to-end matrix runs browntls against OpenSSL, GnuTLS, itself and
+Go `crypto/tls` (Encrypted Client Hello)
 in separate containers for x86-64-v3, aarch64 and riscv64 (natively and under
 QEMU with vector crypto). It needs Docker and the musl target of the
 architecture; see [Docker end-to-end tests](tests/e2e/README.md):
@@ -211,7 +215,7 @@ Generate test certificates, keys, configurations, and logs per run in temporary
 directories. Clean them up on failure where practical. Do not commit real secrets,
 generated private keys, build artifacts, or security scan evidence.
 
-Docker checks, and Kubernetes checks if introduced, must be reproducible
+Docker and Kubernetes checks must be reproducible
 locally and in CI. Rootful and rootless Docker may be used where available;
 do not assume that both exist. Account for remote-daemon mount paths, use
 run-specific names or labels, and clean up only resources created by the run.

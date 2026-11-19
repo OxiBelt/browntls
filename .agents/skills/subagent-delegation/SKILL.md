@@ -120,7 +120,8 @@ Use these prompts where relevant, without turning every task into a full audit:
 - Unsafe, FFI, kernel, and concurrency: confinement, safety invariants,
   ownership/lifetimes, synchronization, cancellation and cleanup, supported
   platforms, and applicable Miri/sanitizer/fuzz/syscall evidence with limits.
-  No kernel mechanism is currently designed; do not invent one for this workflow.
+  The only kernel mechanism is Linux kernel TLS offload (`browntls::kernel`,
+  `browntls-ktls`); do not invent others for this workflow.
 
 Start from a trustworthy review baseline: an immutable revision with relevant
 scope, configuration/platform, retained evidence, and explicit gaps. Check that

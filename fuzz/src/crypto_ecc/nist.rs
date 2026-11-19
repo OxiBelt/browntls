@@ -22,6 +22,28 @@ use num_bigint::BigUint;
 use crate::crypto_hash::with_fixed_share;
 use crate::input::Input;
 
+/// `der` with a PKCS #8 version of 1 (v2, `OneAsymmetricKey`) changed to 0
+/// (v1), or `None` if it does not start that way.
+///
+/// RFC 5958 sets v2 when `publicKey` is present, but the field is OPTIONAL
+/// in the v2 syntax and browntls accepts a v2 key without it (as it does
+/// for Ed25519 and Ed448). The oracle refuses one, so the harness asks it
+/// about the same key as v1 instead; any other difference still fails.
+fn pkcs8_v2_as_v1(der: &[u8]) -> Option<Vec<u8>> {
+    let header = match der.get(..2)? {
+        [0x30, len] if *len < 0x80 => 2,
+        [0x30, 0x81] => 3,
+        [0x30, 0x82] => 4,
+        _ => return None,
+    };
+    if der.get(header..header + 3)? != [0x02, 0x01, 0x01] {
+        return None;
+    }
+    let mut v1 = der.to_vec();
+    v1[header + 2] = 0;
+    Some(v1)
+}
+
 /// Every hash ECDSA accepts.
 pub const HASHES: [HashAlgorithm; 7] = [
     HashAlgorithm::Sha224,
@@ -92,7 +114,7 @@ macro_rules! nist_ops {
             use browntls_crypto::nist::$ours as ours;
             use browntls_crypto::rand::FixedRng;
 
-            use super::{HASHES, check_routed, digest, order_minus, portable};
+            use super::{HASHES, check_routed, digest, order_minus, pkcs8_v2_as_v1, portable};
             use crate::crypto_ecc::{edit, flip_bit, message};
             use crate::input::Input;
 
@@ -334,7 +356,10 @@ macro_rules! nist_ops {
                         } else {
                             (
                                 ours::SecretKey::from_pkcs8_der(&bytes),
-                                ::$rc::SecretKey::from_pkcs8_der(&bytes).ok(),
+                                ::$rc::SecretKey::from_pkcs8_der(&bytes).ok().or_else(|| {
+                                    let v1 = pkcs8_v2_as_v1(&bytes)?;
+                                    ::$rc::SecretKey::from_pkcs8_der(&v1).ok()
+                                }),
                             )
                         };
                         let key = match ours {
@@ -571,3 +596,32 @@ nist_ops!(
     P521,
     "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409"
 );
+
+#[cfg(test)]
+mod tests {
+    use p521::pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _};
+
+    use super::pkcs8_v2_as_v1;
+
+    /// A PKCS #8 v2 key without `publicKey`: browntls accepts it, the oracle
+    /// only as v1 (the CI finding behind `pkcs8_v2_as_v1`).
+    #[test]
+    fn pkcs8_v2_without_public_key() {
+        let mut d = [0u8; 66];
+        d[65] = 7;
+        let theirs = p521::SecretKey::from_slice(&d).expect("scalar");
+        let v1 = theirs.to_pkcs8_der().expect("PKCS #8").as_bytes().to_vec();
+        let mut v2 = v1.clone();
+        // SEQUENCE with a one-byte long-form length (0x30 0x81 len), then
+        // the version INTEGER 0x02 0x01 0x00.
+        assert_eq!(v2[..2], [0x30, 0x81]);
+        assert_eq!(v2[3..6], [0x02, 0x01, 0x00]);
+        v2[5] = 1;
+        let ours = browntls_crypto::nist::p521::SecretKey::from_pkcs8_der(&v2).expect("browntls");
+        assert_eq!(&ours.to_bytes()[..], &d[..]);
+        assert!(p521::SecretKey::from_pkcs8_der(&v2).is_err());
+        assert_eq!(pkcs8_v2_as_v1(&v2), Some(v1.clone()));
+        assert!(p521::SecretKey::from_pkcs8_der(&v1).is_ok());
+        assert_eq!(pkcs8_v2_as_v1(&v1), None);
+    }
+}

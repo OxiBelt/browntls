@@ -22,6 +22,11 @@ browntls-core -----> browntls-pki   PKI types, PEM, X.509 path validation;
        |
 browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls-core
 browntls-ktls       Linux kernel TLS offload of browntls-core connections
+       ^
+       | (features "tokio" and "ktls"; browntls-core always)
+browntls            the crate applications depend on; no code of its own:
+                    its root is browntls-core, browntls::tokio is
+                    browntls-tokio and browntls::ktls is browntls-ktls
 ```
 
 | Crate | Role | `unsafe` |
@@ -31,6 +36,7 @@ browntls-ktls       Linux kernel TLS offload of browntls-core connections
 | `browntls-core` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
 | `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`: the kernel TLS socket options, `sendmsg`/`recvmsg` control messages, `sendfile` and the other system calls listed under [Linux kernel TLS](#linux-kernel-tls-browntls-ktls) |
+| `browntls` | The crate applications depend on: re-exports `browntls-core` at its root and, by feature, `browntls-tokio` as `browntls::tokio` and `browntls-ktls` as `browntls::ktls`; no code of its own (see [Facade crate](#facade-crate-browntls)) | Forbidden |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -40,6 +46,171 @@ compared byte for byte except for `id-RSASSA-PSS`, whose equivalent
 parameter encodings (RFC 4055) are first mapped to one canonical constant
 (`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
 path validation and by handshake signature verification alike).
+
+### Facade crate (`browntls`)
+
+`browntls` is the one dependency of an application. It exists as a separate
+crate because of the dependency order above: `browntls-tokio` and
+`browntls-ktls` depend on the protocol crate, and a crate that re-exports
+them depends on them, so the protocol crate cannot be that crate (Cargo
+rejects such a dependency cycle). The protocol crate is therefore
+`browntls-core`, and `browntls` sits on top of all three.
+
+Its `src/lib.rs` holds three re-exports and no other public item:
+
+| Path | Is | Present |
+|---|---|---|
+| `browntls::*` | `browntls_core::*` (`pub use browntls_core::*`) | always |
+| `browntls::tokio` | the crate `browntls-tokio` (`pub use browntls_tokio as tokio`) | feature `tokio` |
+| `browntls::ktls` | the crate `browntls-ktls` (`pub use browntls_ktls as ktls`) | feature `ktls` |
+
+The items are the ones those crates define, not copies or wrappers:
+`browntls::ClientConfig` and `browntls_core::ClientConfig` are one type, and
+so are `browntls::tokio::TlsConnector` and `browntls_tokio::TlsConnector`. A
+library written against `browntls-core` or `browntls-tokio` therefore works
+with an application that depends on `browntls`, as long as both resolve to
+the same version of the crate behind. `browntls-tokio` re-exports the
+protocol crate itself (`browntls_tokio::browntls`), so
+`browntls::tokio::browntls::ClientConfig` is the same type once more
+(`crates/browntls/tests/tokio.rs` passes one value through both paths).
+
+Where this document says where code lives it names the crate that defines it
+(`browntls_core::kernel`, `browntls_tokio::unbuffered`,
+`browntls_ktls::routing`). An application reaches the same items as
+`browntls::kernel`, `browntls::tokio::unbuffered` and
+`browntls::ktls::routing`.
+
+#### Feature forwarding
+
+Every feature of the three crates behind the facade, except the `fuzzing`
+feature of `browntls-core` (see below), exists in it under the same name and
+turns that feature on in each of those crates that has it (the table under [Cargo features](#cargo-features-browntls-core) lists
+what the features of `browntls-core` do):
+
+- The facade takes the three crates without their default features, so its
+  own feature set alone decides what is built: `default-features = false`
+  on `browntls` turns off the defaults of all of them.
+- The default set is the one of `browntls-core` (`std`, `native`, `tls12`,
+  `logging`, `prefer-post-quantum`) plus `coop`, the one default of
+  `browntls-tokio` that `browntls-core` does not have. The defaults of
+  `browntls-ktls` (`native`, `tls12`, `logging`) are among them.
+- `tokio` and `ktls` enable the optional crates, and `std`, which both need.
+  With both, `browntls-ktls` is built with its own `tokio` feature, so
+  `browntls::ktls::AsyncKtlsStream` exists exactly then.
+- A feature that an optional crate shares (`native`, `rustcrypto`, `tls12`,
+  `logging` for both; `prefer-post-quantum`, `zlib`, `brotli`, `zstd` for
+  `browntls-tokio`) reaches that crate only when the crate is enabled and
+  does not enable it (`browntls-tokio?/tls12`). The same holds for `coop`,
+  which does nothing without `tokio`. `ocsp` is the exception: it enables
+  `tokio`, since it is `browntls::tokio::revocation`.
+- `alloc` is present because `browntls-core` has it; it gates nothing.
+
+`browntls-core`'s `fuzzing` feature is not offered. It opens unstable entry
+points into private codecs for the [fuzz targets](../fuzz/README.md) and is
+not a supported API, so the facade has no feature that turns it on, and the
+fuzz project depends on `browntls-core` directly. This is not a barrier:
+Cargo builds one `browntls-core` for the whole dependency graph, so if any
+other package in an application's graph enables `browntls-core/fuzzing`,
+the module is also nameable as `browntls::fuzzing` through the glob
+re-export.
+
+`tests/scripts/check_facade_features.py` reads the manifests of the facade
+and of the three crates behind it and fails when a feature of one of them
+is missing from the facade (other than `fuzzing`) or is not passed on, when
+the default sets differ, when an optional crate has no feature that enables
+it, or when the facade takes a crate with its default features. It also
+fails when a facade feature turns on a feature of another name in those
+crates or `browntls-core/fuzzing`, when a feature that does not enable an
+optional crate names it with a strong reference (`browntls-tokio/tls12`,
+which would pull the crate in, instead of `browntls-tokio?/tls12`), and when
+a default feature enables an optional crate. A feature is added to the
+facade in the change that adds it to one of those crates.
+
+#### The name `browntls::tokio`
+
+The module has the name of the external crate `tokio`, which an application
+on Tokio depends on as well. Paths that start at `browntls` and paths that
+start at `tokio` do not meet, so this compiles:
+
+```text
+use browntls::tokio::TlsConnector;
+use tokio::net::TcpStream;
+```
+
+Bringing the module itself into scope under its bare name changes what
+`tokio` means in that scope. Measured with the pinned toolchain (Rust
+1.100.0, edition 2024) in a crate that depends on both:
+
+| In scope | Then | Result |
+|---|---|---|
+| `use browntls::tokio;` | `use tokio::net::TcpStream;`, `tokio::net::TcpStream` in a type, `#[tokio::main]` | Errors: `tokio` is the module, which has no `net` or `main` (E0432, E0433) |
+| `use browntls::*;` | `use tokio::net::TcpStream;`, `#[tokio::main]` | Error E0659: `tokio` is ambiguous between the glob import and the external crate |
+| `use browntls::*;` | `tokio::net::TcpStream` in a type | Error E0433: the glob import wins and the module has no `net` |
+| `use browntls::*;` | `tokio::TlsConnector` | Compiles, naming `browntls::tokio::TlsConnector` |
+| either | `use ::tokio::net::TcpStream;`, `::tokio::runtime::Runtime` in a type (leading `::`) | Compiles: always the external crate |
+| either | `#[::tokio::main]` | Errors (E0432 after `use browntls::tokio;`, E0659 after the glob): the code the attribute generates names `tokio` without the leading `::` |
+| `use browntls::tokio as tls;` | `tls::TlsConnector`, `use tokio::net::TcpStream;` | Compiles |
+
+An application on Tokio therefore names items by path
+(`browntls::tokio::TlsConnector`) or imports the module under another name,
+and does not glob-import the crate root. The crate's own tests and the
+end-to-end peer follow the first form. `browntls::ktls` has no such
+namesake among the project's dependencies.
+
+#### Without `std`
+
+The crate is `#![no_std]`. Without the `std` feature its root is
+`browntls-core` built without `std` (the unbuffered API with `alloc`), and
+the `tokio` and `ktls` features are off, since each of them enables `std`.
+CI lints that configuration on the x86-64 host target with each provider
+(`--lib --no-default-features --features native`, and the same with
+`rustcrypto`); no job builds
+`browntls-core` or the facade for a target without an operating system (the
+`Build without std` job covers `browntls-crypto` and `browntls-pki`).
+
+#### Facade tests
+
+- `crates/browntls/tests/facade.rs`: a handshake and application data over
+  loopback TCP between a client and a server that name every item through
+  `browntls`, and probes of the root's features (`native`, `rustcrypto`,
+  `tls12`, `prefer-post-quantum`, the compression features) that fail or
+  do not compile when the facade's feature does not reach `browntls-core`.
+- `tests/tokio.rs` (feature `tokio`): a handshake through
+  `browntls::tokio`, the identity of the types behind both paths, the
+  `revocation` module with `ocsp`, and `AsyncKtlsStream` with `ktls`.
+- `tests/ktls.rs` (feature `ktls`, Linux): a client hands its connection to
+  the running kernel through `browntls::ktls`, or gets it back unharmed
+  where the kernel has no `tls` module; the `routing` module with `native`.
+- The examples of the crate documentation and of its README are compiled
+  as doctests and not run (the README's with `tokio`, `ktls` and `native`
+  on Linux).
+- CI (`.github/workflows/rust.yml`): the workspace jobs build and test the
+  crate with every feature at once, where another crate's features can hide
+  one the facade fails to pass on; Clippy also runs with the default set,
+  with `tokio` alone, with `ktls` alone, with `std` and `native` only, with
+  `rustcrypto` in place of `native`, and without `std`; the
+  `Facade feature sets` job runs the tests with the default set, `tokio`,
+  `ktls`, `tokio,ktls,ocsp`, and `std` and `native` only (no TLS 1.2,
+  X25519 first), with the kernel's `tls` module loaded.
+- The [Docker end-to-end](../tests/e2e/README.md) peer `browntls-e2e` depends
+  on `browntls` alone (default features off; `std`, `native`, `tls12`,
+  `prefer-post-quantum`, `tokio`, `coop`), so that matrix exercises the
+  blocking connections and the Tokio streams through the paths an
+  application uses. It does not enable `ktls`.
+
+These tests show that the paths and features of the facade reach the crates
+behind it. They are not a second test suite of the protocol, the streams or
+the offload: that evidence is the one of the crates behind, listed under
+[Testing strategy](#testing-strategy).
+
+#### Where code goes
+
+Nothing is implemented in `crates/browntls`. New protocol code goes into
+`browntls-core`, code that needs Tokio into `browntls-tokio`, code that
+needs Linux kernel TLS into `browntls-ktls`; the facade changes only when
+one of them gains or loses a feature, or when another crate joins it as a
+module. Its `src/lib.rs` carries the crate documentation, the re-exports and
+the doctest hook for the README.
 
 ### Certificate inspection
 
@@ -1753,6 +1924,10 @@ supported.
 | `zstd` | no | Zstandard certificate compression (RFC 8879), `ruzstd` |
 | `fuzzing` | no | Unstable entry points for the [fuzz targets](../fuzz/README.md); not a supported API |
 
+An application sets these features on `browntls`, which has each of them
+except `fuzzing` under the same name, and `tokio`, `ktls`, `coop` and `ocsp`
+besides (see [Facade crate](#facade-crate-browntls)).
+
 ### Certificate compression (RFC 8879)
 
 `browntls_core::compress` defines the `CertCompressor` and `CertDecompressor`
@@ -2263,7 +2438,8 @@ entropy from the optional `getrandom` crate feature.
   plus `rt` with the default `coop` feature and `time` with `ocsp`) for
   `browntls-tokio`; `libc` (Linux only) for `browntls-ktls`, plus
   `tokio` with `net` (adding `mio` and `socket2`) and `browntls-tokio` with
-  its `tokio` feature. Independent implementations (RustCrypto, rustls with
+  its `tokio` feature; none of its own for `browntls`, whose dependencies
+  are the three crates it re-exports. Independent implementations (RustCrypto, rustls with
   ring, tokio-rustls, rcgen) are dev-dependencies used as test oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.
@@ -2277,8 +2453,9 @@ entropy from the optional `getrandom` crate feature.
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
 | TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
-| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
-| End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine and Ubuntu 26.04, the latter not on native riscv64), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8, Go `crypto/tls` (Encrypted Client Hello scenarios only) and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
+| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed; `browntls` defines no function of its own) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
+| Facade | `browntls` adds paths and features, no behaviour: a handshake through each of its three paths (the root, `browntls::tokio`, and `browntls::ktls` against the running kernel), probes that the forwarded features reach the crates behind it, the feature sets an application picks in their own CI job, and a manifest check of the feature tables (`crates/browntls/tests/`, `tests/scripts/check_facade_features.py`; see [Facade crate](#facade-tests)) |
+| End-to-end | Release builds of the `browntls-e2e` client and server (built on the `browntls` facade alone) in containers on a Docker network against OpenSSL 3.5 (Alpine and Ubuntu 26.04, the latter not on native riscv64), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8, Go `crypto/tls` (Encrypted Client Hello scenarios only) and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are
 committed. Successful CI is evidence for the tested configurations only and

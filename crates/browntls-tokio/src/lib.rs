@@ -8,6 +8,17 @@
 //! implement [`AsyncRead`], [`AsyncBufRead`] and [`AsyncWrite`] over the
 //! plaintext.
 //!
+//! Applications normally reach this crate through the `browntls` crate,
+//! whose `tokio` feature re-exports it as the module `browntls::tokio`
+//! (`browntls::tokio::TlsConnector` is [`TlsConnector`]):
+//!
+//! ```toml
+//! [dependencies]
+//! browntls = { git = "https://github.com/OxiBelt/browntls", features = ["tokio"] }
+//! ```
+//!
+//! The examples here name the items through this crate.
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //!

@@ -3,7 +3,8 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls-core`,
-`browntls-tokio`, `browntls-ktls`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
+`browntls-tokio`, `browntls-ktls`, the facade `browntls` that re-exports the
+last three, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
@@ -120,13 +121,41 @@ keywords, categories, an `include` list and the licence file), but they
 stay `publish = false` with the rest of the workspace until the release
 prerequisites below are met.
 
+### Facade crate
+
+`browntls` (`crates/browntls`) is the crate applications depend on. It has
+no code of its own and no dependency outside the workspace: it re-exports
+`browntls-core` and, by feature, `browntls-tokio` and `browntls-ktls`
+([Architecture](Architecture.md#facade-crate-browntls)), so its dependency
+graph is theirs and it adds no crate to the dependency review. With the
+`tokio` feature it brings in what `browntls-tokio` needs, with `ktls` what
+`browntls-ktls` needs, and with both also `browntls-ktls`'s `tokio`
+feature (above). Its dev-dependencies (`tokio` with test features, `rcgen`)
+are ones other workspace crates already use (`safe-to-run`).
+
+- Keep its feature table in step with the crates behind it:
+  `tests/scripts/check_facade_features.py` fails in the repository checks
+  otherwise ([contributor guide](../CONTRIBUTING.md#local-checks)).
+- A new library crate that applications should reach joins the facade as an
+  optional dependency and a module, with its features forwarded; it does
+  not become a second crate for applications to add.
+- The workspace crates depend on each other by exact version
+  (`=0.1.0-dev` in `[workspace.dependencies]`), so one version of
+  `browntls` resolves to exactly one version of each crate behind it, and a
+  fix in one of those crates reaches applications only through a new
+  version of `browntls`. The six library crates are versioned together.
+- Its manifest carries the same crates.io metadata as the two crates above
+  and it stays `publish = false` with them. The manifests of
+  `browntls-core`, `browntls-crypto` and `browntls-pki` do not carry that
+  metadata yet (see the [roadmap](Roadmap.md#governance-gaps)).
+
 ### Fuzzing
 
 [`fuzz/`](../fuzz/README.md) holds cargo-fuzz targets for the handshake
 message codecs, the record deframer, certificate decompression, PEM, X.509
 path validation, CRLs and the client and server connections, and API-sequence
 targets grouped by topic of the public API, which together must reach every public function
-of the library crates other than `browntls-ktls` (checked in CI by `scripts/fuzz/api_coverage.py`; the
+of the library crates other than `browntls-ktls` (and other than the facade `browntls`, which defines none; checked in CI by `scripts/fuzz/api_coverage.py`; the
 few exemptions are listed with their reasons in
 `fuzz/api-coverage-exemptions.txt`). CI builds the harnesses with the pinned
 stable toolchain and runs them over generated seeds; the Fuzz workflow fuzzes
@@ -180,7 +209,13 @@ to commit or push source.
 Before the first release:
 
 1. Establish versioning, package ownership, supported targets, feature coverage,
-   and the crate publication/artifact verification process.
+   and the crate publication/artifact verification process. A crate can be
+   published only after the crates it depends on, so the order is
+   `browntls-crypto` and `browntls-pki`, then `browntls-core`, then
+   `browntls-tokio`, then `browntls-ktls` (its `tokio` feature depends on
+   `browntls-tokio`), and the facade `browntls` last. With the exact version
+   pins between them, a new version of one crate reaches applications only
+   through new versions of the crates above it.
 2. Add a changelog and compatibility or migration notes, including rollback
    limits. Record API, protocol, provider, feature, MSRV, and kernel requirements.
 3. Validate the exact candidate revision with all applicable checks and security

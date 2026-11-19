@@ -79,7 +79,7 @@ impl KeyType {
                 static RSA_KEY: OnceLock<Vec<u8>> = OnceLock::new();
                 let der = RSA_KEY.get_or_init(|| {
                     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
-                    let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+                    let key = rsa::PrivateKey::new(&mut rng, 2048).expect("rsa keygen");
                     key.to_pkcs8_der().expect("pkcs8").as_bytes().to_vec()
                 });
                 KeyPair::from_pkcs8_der_and_sign_algo(

@@ -71,7 +71,7 @@ ed25519-dalek = { version = "3", default-features = false, features = ["pkcs8", 
 ml-kem = { version = "0.3", default-features = false, features = ["zeroize", "alloc"], optional = true }
 # Verification only: the RustCrypto provider never signs with `rsa` (releases
 # before 0.10.0 are affected by RUSTSEC-2023-0071, Marvin, in private-key operations).
-rsa = { version = "0.10.0", default-features = false, features = ["encoding"], optional = true }
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "pkcs1v15"], optional = true }
 getrandom = { version = "0.4", default-features = false, optional = true }
 signature = { version = "3", default-features = false, optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"], optional = true }
@@ -83,7 +83,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # certificate compressors to interoperate with.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging", "brotli", "zlib"] }
 rustls-pki-types = "1"
-rsa = { version = "0.10.0", default-features = false, features = ["std", "encoding", "getrandom"] }
+rsa = { version = "0.10.0", default-features = false, features = ["std", "encoding", "getrandom", "pkcs1v15"] }
 rand_core = "0.10"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 env_logger = { version = "0.11", default-features = false }

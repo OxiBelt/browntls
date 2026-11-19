@@ -29,7 +29,7 @@ browntls-ktls       Linux kernel TLS offload of browntls connections
 | `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, HPKE, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
-| `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Denied crate-wide (workspace lint); none used |
+| `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
 | `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`: the kernel TLS socket options, `sendmsg`/`recvmsg` control messages, `sendfile` and the other system calls listed under [Linux kernel TLS](#linux-kernel-tls-browntls-ktls) |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
@@ -1375,10 +1375,9 @@ stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, `ioctl(SIOCOUTQ)`, `uname`, `clock_gettime` for the calling thread's CPU
-time, `sendfile` (whose only pointer is to the
-offset) with `fstat` and the calling thread's signal mask around it, plain
-`send`, and `sendmsg`/`recvmsg` with one control message. Its
+without waiting, `ioctl(SIOCOUTQ)`, `uname`, `sendfile` (whose only pointer is to the
+offset) with `fstat` and the calling thread's signal mask around it, and
+`sendmsg`/`recvmsg` with one control message. Its
 invariants are listed at its top: borrowed descriptors,
 pointers only into live values with their lengths, the thread's signal mask
 left as it was, control messages built and
@@ -2227,14 +2226,11 @@ entropy from the optional `getrandom` crate feature.
 - Rust 1.100.0 is pinned in `rust-toolchain.toml` and is the MSRV
   (`rust-version`). Toolchain upgrades are explicit changes.
 - `Cargo.lock` is committed and CI builds with `--locked`.
-- Runtime dependencies: none for `browntls-pki`; `getrandom` (optional) for
-  `browntls-crypto`; `log`
+- Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`
   (optional), the RustCrypto crates (only with `rustcrypto`) and the
   pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
-  with `zlib`, `brotli`, `zstd`) for `browntls`; `tokio` (I/O traits, plus
-  `rt` with the default `coop` feature and `time` with `ocsp`) for
-  `browntls-tokio`; `libc` (Linux), and with its `tokio` feature `tokio`
-  (`net`) and `browntls-tokio`, for `browntls-ktls`. Independent implementations (RustCrypto, rustls with
+  with `zlib`, `brotli`, `zstd`) for `browntls`; `tokio` (I/O traits only)
+  for `browntls-tokio`. Independent implementations (RustCrypto, rustls with
   ring, tokio-rustls, rcgen) are dev-dependencies used as test oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.
@@ -2248,8 +2244,8 @@ entropy from the optional `getrandom` crate feature.
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
 | TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
-| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
-| End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8, browntls itself and Go `crypto/tls` (Encrypted Client Hello only), for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
+| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and one API-sequence target per topic that together reach every public function ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and daily |
+| End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8 and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are
 committed. Successful CI is evidence for the tested configurations only and

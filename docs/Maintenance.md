@@ -3,7 +3,7 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
-`browntls-tokio`, `browntls-ktls`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
+`browntls-tokio`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
@@ -100,8 +100,7 @@ but adds no dependency. Either build of `tokio` pulls in
 contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
 `browntls-tokio` alone, with no `cargo vet` audit yet. The test-only
-features (`rt`, `rt-multi-thread`, `macros`, `net`, `io-util`, `time`,
-`test-util`, adding `mio`, `socket2`,
+features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
 are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
 `browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which

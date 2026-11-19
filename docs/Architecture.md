@@ -2049,11 +2049,15 @@ stream, with two channels, the kernel (the primary) and userspace (its one
 alternate), run by the controller described above. Two things differ because
 a connection is placed as a whole and stays where it was put:
 
-- While the kernel is probed, every new connection stays in userspace until
-  four of its writes were timed, then one in eight. A probe that waited for
-  one placement in eight would often run out first (it is given up after 64
-  timed writes of the primary), since connections can be rare next to
-  writes.
+- While the kernel is probed, the first 64 new connections all stay in
+  userspace until four of its writes were timed, then one in eight. A probe
+  that waited for one placement in eight would often run out first (it is
+  given up after 64 timed writes of the primary), since connections can be
+  rare next to writes.
+- A probe is also given up after 4096 new connections. Samples alone cannot
+  be counted on to end it: the connections kept in userspace may make no
+  write long enough to time, and so may the kernel's once those it had are
+  done.
 - A shifted share is a share of the new connections. Connections the kernel
   has stay with it, and those in userspace stay there, so a shift acts as
   fast as connections come and go.
@@ -2061,8 +2065,8 @@ a connection is placed as a whole and stays where it was put:
 The crypto crate does not see the socket, so the driver reports the costs
 (`kernel::sample`, `Sample::done`): for one write in sixteen of at least
 4096 bytes (every such write of a userspace connection while the kernel is
-probed), the bytes of application data the socket accepted and what that
-took. Both places are measured alike, from the plaintext to the bytes TCP
+probed, until four were timed), the bytes of application data the socket
+accepted and what that took. Both places are measured alike, from the plaintext to the bytes TCP
 has taken: for the kernel that is the `send` that encrypts
 (`Engine::write`, so `KtlsStream` and `AsyncKtlsStream` however they were
 made), for userspace the encryption by a backend and the `send`
@@ -2081,10 +2085,16 @@ the negotiated suite's record work, and returns the connection as a
 `KtlsStream` or, in userspace, as a `UserspaceStream` (a
 `browntls::Stream` that reports its writes). A connection that was placed
 with the kernel and that the kernel cannot take (no `tls` module, a suite
-or a configuration without a kernel form) stays in userspace with the
-refusal recorded, and the application data a refused handover had taken is
-read first; I/O failures and `WouldBlock` are returned as `KtlsStream::new`
-returns them. `AsyncRoutedStream::from_client` and `from_server` do the
+or a configuration without a kernel form, a cipher the running kernel
+lacks) stays in userspace with the refusal recorded, and the application
+data a refused handover had taken is read first; I/O failures and
+`WouldBlock` are returned as `KtlsStream::new` returns them. A kernel
+with the `tls` module can still lack a cipher (built without it, or
+restricted to approved algorithms), and it says so only when it is given
+keys, after the connection's secrets were extracted. So the kernel is
+asked once per cipher and protocol version, with keys of zeros on a
+loopback socket that carries no data, before the first such connection is
+handed over. `AsyncRoutedStream::from_client` and `from_server` do the
 same for `browntls-tokio` streams, whose handshake is done before they are
 placed, except for a stream returned early for 0-RTT data: a server has its
 suite by then and is placed by it, and a client, which has none yet,
@@ -2097,9 +2107,10 @@ Limits, beyond those of the routing as a whole:
 - Only new connections move. A process with a few long-lived connections
   is never rebalanced.
 - Userspace is measured by the connections that are there: those kept back
-  to measure it and those the kernel refused. If none of them writes while
-  the kernel is probed, the probe ends without a comparison and the
-  kernel's present cost is accepted as its baseline.
+  to measure it and those the kernel refused. If none of them makes a
+  write long enough to time while the kernel is probed, the probe ends
+  without a comparison and the kernel's present cost is accepted as its
+  baseline.
 - Only writes are timed; a connection is placed for both directions by what
   sending costs.
 - The costs include the kernel's network stack for both places. Load on it
@@ -2112,6 +2123,17 @@ Limits, beyond those of the routing as a whole:
   no part of a cost per byte written. An application that depends on it
   hands its connections over with `KtlsStream::new` and does not ask the
   routing.
+- 0-RTT data that a server accepted and had not read when it asked the
+  routing is delivered differently by place on the synchronous path: with
+  the kernel it is the first data the stream returns, not told from the
+  rest (as with `KtlsStream::new`), in userspace it stays in the
+  connection's `early_data()`. Such a server reads it before it asks. The
+  Tokio streams report how much of what they return first is 0-RTT data
+  (`early_data_len`).
+- A kernel refusal that comes after the handover took application data out
+  of the connection (a peer's `record_size_limit` on a kernel before 6.19)
+  is covered by unit tests of the streams' reads only; no test provokes it
+  through a kernel.
 - A userspace write that found no room in a non-blocking socket (a
   `UserspaceStream` on such a socket, a poll of an `AsyncUserspaceStream`)
   encrypts without sending all of it and is reported cheaper than it is;

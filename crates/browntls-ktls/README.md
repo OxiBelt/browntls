@@ -184,13 +184,21 @@ match &tls {
 `routing::activate` asks the running kernel whether it attaches the `tls`
 upper layer protocol and, if so, puts kernel TLS at the head of the order.
 `RoutedStream::new` then hands each connection to the kernel, unless the
-kernel cannot take it (it stays in userspace, with the refusal recorded)
+kernel cannot take it (it stays in userspace, with the refusal recorded;
+whether the kernel has the connection's cipher is asked once, with keys of
+zeros on a loopback socket)
 or, with `accel::load` enabled, the routing keeps it in userspace: while
 writes to the kernel cost more than they usually do and userspace measures
 cheaper, a growing share of the new connections stays there until the
 kernel has recovered. While kernel TLS is not active every connection
 stays in userspace. `AsyncRoutedStream::from_client` and `from_server`
 (feature `tokio`) do the same for `browntls-tokio` streams.
+
+A server that accepts 0-RTT data should read `early_data()` before it
+calls `RoutedStream::new`: what is left unread comes in-band and unmarked
+with the kernel, as with `KtlsStream::new`, and stays in `early_data()` in
+userspace. The Tokio streams tell how much of what they return first is
+0-RTT data (`early_data_len`).
 
 A connection keeps its place for life, so only new connections move. Both
 kinds of stream report what one write in sixteen of at least 4096 bytes

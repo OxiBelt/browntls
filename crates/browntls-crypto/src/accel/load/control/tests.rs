@@ -594,10 +594,10 @@ fn placed_work_follows_the_share_and_is_timed_where_it_is() {
     }
     s.release();
 
-    // Probing: every placement goes to the alternate until it has its
-    // samples, then one in eight. Its long calls are all timed, as
-    // nothing else would measure it, and the primary is timed more often
-    // than when steady.
+    // Probing: the first placements all go to the alternate until it has
+    // its samples, then one in eight. Until then its long calls are all
+    // timed, as nothing else would measure it, and the primary is timed
+    // more often than when steady.
     for _ in 0..500 {
         observe(0, 100);
     }
@@ -605,7 +605,8 @@ fn placed_work_follows_the_share_and_is_timed_where_it_is() {
         observe(0, 200);
     }
     assert_eq!((ctl(&s).phase, ctl(&s).alt), (Phase::Probing, 1));
-    assert_eq!(placed(&s, 1000), 1000);
+    assert_eq!(placed(&s, u64::from(PLACED_PROBES)), PLACED_PROBES as usize);
+    assert!(placed(&s, 800).abs_diff(100) < 40);
     assert_eq!(timed(&s, LEN, 1), 16_000);
     assert_eq!(timed(&s, 4095, 1), 0);
     assert!(timed(&s, LEN, 0).abs_diff(4000) < 300);
@@ -613,7 +614,8 @@ fn placed_work_follows_the_share_and_is_timed_where_it_is() {
         observe(1, 120);
     }
     assert_eq!(ctl(&s).phase, Phase::Probing);
-    assert!(placed(&s, 8000).abs_diff(1000) < 150);
+    assert!(timed(&s, LEN, 1).abs_diff(4000) < 300);
+    assert!(placed(&s, 1600).abs_diff(200) < 60);
 
     // The alternate measured cheaper: the share of the placements grows
     // to the limit and comes back when the primary has recovered.
@@ -664,4 +666,46 @@ fn concurrent_observers_keep_the_state_in_range() {
             });
         }
     });
+}
+
+#[test]
+fn a_probe_of_placed_work_ends_without_samples() {
+    const ONE: u8 = 0b10;
+    const LEN: usize = 16384;
+    for alternate_timed in [false, true] {
+        let s = Stream::bulk("test");
+        let mut calls = Calls(0);
+        let observe = |slot, ps: u64| s.observe(slot, LEN, ps * LEN as u64 / 1000, 0, ONE, PARAMS);
+        for _ in 0..500 {
+            observe(0, 100);
+        }
+        while ctl(&s).phase == Phase::Steady {
+            observe(0, 200);
+        }
+        if alternate_timed {
+            for _ in 0..PROBES {
+                observe(1, 50);
+            }
+        }
+        let accepted = s.snapshot().channels[0].1;
+
+        // The work the primary had is done, and what is placed from now
+        // on makes no call long enough to time: no sample ends the probe.
+        // The alternate gets its first placements and then one in eight.
+        let kept = (0..PLACE_PATIENCE)
+            .filter(|_| s.place(calls.next(), 0, ONE) == 1)
+            .count();
+        assert_eq!(ctl(&s).phase, Phase::Probing);
+        let forced = if alternate_timed { 0 } else { PLACED_PROBES };
+        let expected = (forced + (PLACE_PATIENCE - forced) / 8) as usize;
+        assert!(kept.abs_diff(expected) < 100, "{kept}, not {expected}");
+
+        // The placements end it: the primary's level is accepted and the
+        // stream pauses, everything on the primary.
+        assert_eq!(s.place(calls.next(), 0, ONE), 0);
+        let c = ctl(&s);
+        assert_eq!((c.phase, c.share), (Phase::Steady, 0));
+        assert!(s.snapshot().channels[0].1 > accepted);
+        assert!((0..1000).all(|_| s.place(calls.next(), 0, ONE) == 0));
+    }
 }

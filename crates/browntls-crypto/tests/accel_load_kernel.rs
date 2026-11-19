@@ -174,6 +174,35 @@ fn kernel_tls_heads_the_routing_order() {
     );
     assert_eq!(connections(200, 300, 360), 0);
 
+    // Slow again, and the connections that are to measure userspace write
+    // too little at a time to be timed: after the first 64 of them one
+    // new connection in eight stays there, and when the kernel's writes
+    // stop too the probe ends by the number of connections placed.
+    for _ in 0..10_000 {
+        if status().phase != Phase::Steady {
+            break;
+        }
+        write(RECORDS, Place::Kernel, 600);
+    }
+    let s = status();
+    assert_eq!((s.phase, s.alternate), (Phase::Probing, Some("userspace")));
+    let placed = |n: usize| {
+        (0..n)
+            .filter(|_| kernel::place(RECORDS) == Place::Userspace)
+            .inspect(|_| assert!(kernel::sample(RECORDS, Place::Userspace, 4095).is_none()))
+            .count()
+    };
+    assert_eq!(placed(64), 64);
+    let kept = placed(4032);
+    assert!(kept.abs_diff(504) < 100, "{kept} of 4032");
+    assert_eq!(status().phase, Phase::Probing);
+    assert_eq!(placed(1000), 0);
+    let s = status();
+    assert_eq!((s.phase, s.alternate), (Phase::Steady, None));
+    // The kernel is back at its usual cost.
+    connections(3000, 300, 360);
+    assert_eq!(status().phase, Phase::Steady);
+
     // Slow again, but userspace is slower still: a few connections
     // measure it, nothing is shifted, and the level is accepted.
     let kept = connections(1500, 600, 900);
@@ -219,12 +248,17 @@ fn kernel_tls_heads_the_routing_order() {
     assert_eq!(connections(100, 600, 900), 0);
     assert_eq!(status(), s);
 
-    // Deactivating takes the kernel out of the order and forgets as well.
+    // Deactivating takes the kernel out of the order and forgets as well,
+    // and a write that was being timed is not reported afterwards.
     load::enable(Config::DEFAULT).unwrap();
     kernel::set_fixed(RECORDS, 0).unwrap();
     connections(100, 300, 360);
     assert!(status().primary_cost.is_some());
+    let late = (0..1000)
+        .find_map(|_| kernel::sample(RECORDS, Place::Kernel, WRITE))
+        .unwrap();
     kernel::deactivate();
+    late.done(WRITE, 5000);
     assert!(!kernel::is_active());
     assert_eq!(kernel::place(RECORDS), Place::Userspace);
     assert_eq!(kernel::status(RECORDS), None);

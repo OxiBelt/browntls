@@ -27,11 +27,11 @@
 //! work has a stream of its own here, with two channels, the kernel (the
 //! primary) and userspace (its one alternate), and the controller of the
 //! other streams: while writes to the kernel cost more than they usually
-//! do, new connections stay in userspace to measure it (all of them until
-//! four of their writes were timed, then one in eight), and if it measures
-//! cheaper a growing share of the new connections stays there, until the
-//! kernel has recovered. With routing disabled every connection is placed
-//! with the kernel while it is active.
+//! do, new connections stay in userspace to measure it (the first 64 of
+//! them until four of their writes were timed, then one in eight), and if
+//! it measures cheaper a growing share of the new connections stays there,
+//! until the kernel has recovered. With routing disabled every connection
+//! is placed with the kernel while it is active.
 //!
 //! # What is measured
 //!
@@ -52,9 +52,11 @@
 //!   few long-lived connections is never rebalanced.
 //! * Userspace is measured by the connections that are there: those kept
 //!   back for it, and those the kernel refused. While the kernel is probed
-//!   and no such connection writes, the probe ends without a comparison
-//!   and the kernel's present cost is accepted, as for a backend nobody
-//!   holds a key for.
+//!   and no such connection makes a write long enough to time, the probe
+//!   ends without a comparison, after 64 timed writes to the kernel or
+//!   after 4096 new connections if the kernel's writes stop as well, and
+//!   the kernel's present cost is accepted, as for a backend nobody holds
+//!   a key for.
 //! * Only writes are timed. A connection is placed for both directions by
 //!   what sending costs.
 //! * Writes shorter than 4096 bytes are too short to time, as for the
@@ -281,9 +283,13 @@ impl Sample {
     /// the socket in `nanos` nanoseconds, measured from the plaintext to
     /// the bytes accepted and without time spent waiting (see the
     /// [module documentation](self)). A write that failed is simply not
-    /// reported; one that was cut too short to time is ignored.
+    /// reported; one that was cut too short to time is ignored, and so is
+    /// one that ends after kernel TLS was [deactivated](deactivate) or
+    /// routing disabled.
     pub fn done(self, bytes: usize, nanos: u64) {
-        if self.stream.measurable(bytes) {
+        // (A report that races with either on another thread can still
+        // leave its one sample behind; nothing is placed by it.)
+        if routing().is_some() && self.stream.measurable(bytes) {
             self.stream
                 .observe(self.slot, bytes, nanos, KERNEL, ALTERNATES, self.params);
         }

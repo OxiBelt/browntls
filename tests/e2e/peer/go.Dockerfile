@@ -8,7 +8,7 @@ COPY go/go.mod go/main.go ./
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -trimpath -o /out/go-peer . \
  && go version > /out/go-version
 
-FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl \
  && rm -rf /var/lib/apt/lists/*

@@ -16,9 +16,20 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  # Base images of the Docker end-to-end peers (pinned by digest).
+  # Base images of the Docker end-to-end peers and of the Kubernetes
+  # revocation test (pinned by digest).
   - package-ecosystem: docker
-    directory: /tests/e2e/peer
+    directories:
+      - /tests/e2e/peer
+      - /tests/kubernetes
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # The Ubuntu peers pin LTS releases (24.04 for its OpenSSL 3.0, and
+      # 26.04; tests/e2e/README.md); only their digests are updated, and a
+      # new LTS release is added by hand.
+      - dependency-name: ubuntu
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor

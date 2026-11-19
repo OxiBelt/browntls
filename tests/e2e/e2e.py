@@ -151,6 +151,11 @@ class Suite:
     # "browntls-ech-client": the scenarios whose client must be browntls
     # (GREASE and random configuration identifiers in split mode).
     features: frozenset[str]
+    # Architectures (`Arch.name`) whose runner cannot run the peer image.
+    skip_arches: frozenset[str] = frozenset()
+
+    def runs_on(self, arch: Arch) -> bool:
+        return arch.name not in self.skip_arches
 
 
 SUITES: dict[str, Suite] = {
@@ -169,6 +174,16 @@ SUITES: dict[str, Suite] = {
             "openssl",
             "ubuntu",
             frozenset({"etm-toggle"}),
+        ),
+        # The current Ubuntu LTS release. Its riscv64 image requires RVA23,
+        # which the native riscv64 runner lacks (peers run natively).
+        Suite(
+            "openssl-ubuntu-26.04",
+            "OpenSSL 3.5 (Ubuntu 26.04)",
+            "openssl",
+            "ubuntu-26.04",
+            frozenset({"mlkem", "etm-toggle"}),
+            skip_arches=frozenset({"riscv64"}),
         ),
         Suite(
             "gnutls",
@@ -1421,6 +1436,7 @@ def matrix(kind: str) -> dict:
             }
             for a in ARCHES.values()
             for s in SUITES.values()
+            if s.runs_on(a)
         ]
     return {"include": include}
 
@@ -1528,6 +1544,8 @@ def write_summary(arch: Arch, suite: Suite, info: list[dict], peer_versions: str
 def cmd_run(args: argparse.Namespace) -> int:
     arch = ARCHES[args.arch]
     suite = SUITES[args.suite]
+    if not suite.runs_on(arch):
+        raise SystemExit(f"suite {suite.name} does not run on {arch.name}")
     image = args.image or image_tag(arch.name)
     chosen = select(suite, args.scenario)
     if not image_exists(image):

@@ -26,7 +26,8 @@ Each CI job pairs one architecture with one peer suite.
 | Suite | Peer |
 |---|---|
 | `openssl` | OpenSSL 3.5 or later from Alpine 3.24 ([`peer/alpine.Dockerfile`](peer/alpine.Dockerfile)), with X25519MLKEM768 |
-| `openssl-3.0` | OpenSSL 3.0 from Ubuntu 24.04 ([`peer/ubuntu.Dockerfile`](peer/ubuntu.Dockerfile)), without post-quantum groups |
+| `openssl-3.0` | OpenSSL 3.0 from Ubuntu 24.04 LTS ([`peer/ubuntu.Dockerfile`](peer/ubuntu.Dockerfile)), without post-quantum groups |
+| `openssl-ubuntu-26.04` | OpenSSL 3.5 from Ubuntu 26.04 LTS ([`peer/ubuntu-26.04.Dockerfile`](peer/ubuntu-26.04.Dockerfile)), with X25519MLKEM768; not on `riscv64`, whose runner lacks the RVA23 profile Ubuntu 26.04's riscv64 image requires |
 | `gnutls` | GnuTLS 3.8 from Alpine 3.24 |
 | `browntls` | browntls client and server in separate containers |
 | `go` | Go 1.27 `crypto/tls` ([`peer/go.Dockerfile`](peer/go.Dockerfile), the program in [`peer/go/`](peer/go/main.go)): Encrypted Client Hello scenarios only |

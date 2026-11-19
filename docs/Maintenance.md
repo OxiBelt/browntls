@@ -135,10 +135,13 @@ explicitly. Longer campaigns are still run by hand and recorded with the
 change they support: revision, toolchain, targets, duration and outcome. A
 crash is handled as a potential vulnerability under
 [SECURITY.md](../SECURITY.md); inputs and reports go to the private evidence
-repository below, never to public issues, logs or CI artifacts, which is why
-a failing CI job prints only the target, the kind of finding and the input's
-hash, and saves no corpus to the Actions cache, which pull requests can read
-(the failing input may be a corpus entry).
+repository below, never to public issues, logs or CI artifacts in plaintext,
+which is why a failing CI job prints only the target, the kind of finding and
+the input's hash, uploads its findings only encrypted to the maintainers'
+recipient certificate (`FUZZ_FINDINGS_RECIPIENT`, see
+[fuzz/README.md](../fuzz/README.md#continuous-fuzzing)), and saves no corpus
+to the Actions cache, which pull requests can read (the failing input may be
+a corpus entry).
 
 The original prerequisites, which remain the bar for each new crate or
 boundary:

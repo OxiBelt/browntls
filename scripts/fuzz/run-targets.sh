@@ -58,6 +58,7 @@ echo "::endgroup::"
 cpu_model="unknown CPU"
 if [[ -r /proc/cpuinfo ]]; then
   cpu_model="$(sed -n '/^model name/{s/^model name[[:space:]]*: //p;q}' /proc/cpuinfo)"
+  cpu_model="${cpu_model:-unknown CPU}"
   cpu_flags="$(sed -n '/^flags/{s/^flags[[:space:]]*: //p;q}' /proc/cpuinfo)"
   echo "CPU: ${cpu_model} ($(nproc) logical CPUs)"
   echo "CPU flags (crypto-relevant): $(tr ' ' '\n' <<< "${cpu_flags}" \

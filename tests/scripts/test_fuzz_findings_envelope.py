@@ -72,6 +72,39 @@ class EnvelopeTests(unittest.TestCase):
         )
         self.assertFalse(list(opened.glob(".findings.tar.gz")))
 
+    def test_key_agreement_uses_a_sha384_kdf(self):
+        self.assertEqual(self.seal().returncode, 0)
+        printed = subprocess.run(
+            ["openssl", "cms", "-cmsout", "-print", "-inform", "DER", "-in", str(self.sealed)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("authEnvelopedData", printed)
+        self.assertIn("sha384kdf", printed)
+
+    def test_unsafe_archive_is_refused_and_nothing_is_kept(self):
+        # Anyone can encrypt to the public certificate: an archive with a
+        # member outside the target must leave nothing behind.
+        payload = self.root / "payload"
+        payload.mkdir()
+        (payload / "ok").write_bytes(b"ok")
+        archive = self.root / "evil.tar.gz"
+        subprocess.run(
+            ["tar", "-C", str(payload), "-czf", str(archive), "ok", "--transform", "s,^ok,../escape,"],
+            check=True, capture_output=True,
+        )
+        evil = self.root / "evil.cms"
+        subprocess.run(
+            ["openssl", "cms", "-encrypt", "-binary", "-aes-256-gcm", "-recip", str(self.cert),
+             "-in", str(archive), "-outform", "DER", "-out", str(evil)],
+            check=True, capture_output=True,
+        )
+        opened = self.root / "sub" / "opened"
+        opened.parent.mkdir()
+        result = envelope("open", str(self.key), str(self.cert), str(evil), str(opened))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(opened.exists())
+        self.assertFalse((self.root / "sub" / "escape").exists())
+
     def test_modified_file_is_refused_and_nothing_is_unpacked(self):
         self.assertEqual(self.seal().returncode, 0)
         data = bytearray(self.sealed.read_bytes())

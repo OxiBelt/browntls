@@ -571,7 +571,9 @@ impl World {
     /// 64-step `drive` to read them, and stopping earlier would report
     /// data the receiver simply had not processed yet as lost. The bound
     /// covers the most records an input can queue (64 operations of 64
-    /// steps, each encrypting at most 255 bytes) with room to spare.
+    /// steps, each encrypting at most 255 bytes) with room to spare, so
+    /// running out of rounds means the connections never settle (a
+    /// livelock), which is reported as such rather than as lost data.
     fn pump(&mut self) {
         let args = StepArgs {
             flags: RETRY,
@@ -584,9 +586,10 @@ impl World {
                 moved |= self.deliver(side, usize::MAX);
             }
             if !moved {
-                break;
+                return;
             }
         }
+        panic!("connections did not settle after 1024 pump rounds");
     }
 
     fn commons(&self) -> [Option<&CommonState>; 2] {

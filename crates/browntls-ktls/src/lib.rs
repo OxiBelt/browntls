@@ -13,7 +13,8 @@
 //!
 //! Supported: TLS 1.2 and TLS 1.3 with AES-128-GCM, AES-256-GCM and
 //! ChaCha20-Poly1305, TLS 1.3 AES-128-CCM. TLS 1.3 key updates need Linux
-//! 6.14; a peer's `record_size_limit` below the protocol maximum needs
+//! 6.14; records smaller than the protocol maximum (a peer's
+//! `record_size_limit`, or the configured `max_fragment_size`) need
 //! Linux 6.19 (`TLS_TX_MAX_PAYLOAD_LEN`). The `tls` kernel module must be
 //! available (`modprobe tls`).
 //!
@@ -34,10 +35,15 @@
 //! # }
 //! ```
 //!
-//! Without the `tls` module, or with a cipher suite the kernel cannot
-//! take, [`KtlsStream::new`] returns the connection and the socket
+//! Without the `tls` module, or with a cipher suite that has no kernel
+//! form, [`KtlsStream::new`] returns the connection and the socket
 //! unharmed ([`HandoffError::Refused`]), so the caller can go on in
-//! userspace.
+//! userspace. A running kernel that lacks the suite's cipher (built
+//! without it, or restricted to approved algorithms) says so only once it
+//! is given keys, after the secrets were taken out of the connection: that
+//! is [`HandoffError::Failed`], and the connection is lost. The
+//! [load-aware routing](routing) asks the kernel about each cipher on a
+//! loopback socket first; a direct caller can do the same.
 //!
 //! # Load-aware routing
 //!

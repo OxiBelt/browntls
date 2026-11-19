@@ -2,9 +2,10 @@
 //!
 //! A server staples the response of its certificate's responder to its
 //! handshakes, and has to replace it before it expires.
-//! [`ServerStapleResolver`] knows which responses are due and verifies
-//! each new one before it staples it; [`StapleRefresh`] is the loop around
-//! it, for the application to spawn:
+//! [`ServerStapleResolver`] says what to ask the responder for and
+//! verifies each new response before it staples it; [`StapleRefresh`] is
+//! the loop around it, for the application to spawn, and decides when to
+//! ask:
 //!
 //! ```no_run
 //! use std::io;
@@ -63,8 +64,9 @@ pub struct StapleRefreshed {
     /// certificate needs replacing.
     pub revoked: usize,
     /// The shortest time left to any response installed in this round,
-    /// zero for one that had expired already. The loop refreshes after
-    /// half of it.
+    /// zero for one that had expired already; when nothing was installed
+    /// because the response was obsolete, the time left to the staple in
+    /// use. The loop refreshes after half of it.
     pub shortest_lifetime: Option<Duration>,
 }
 

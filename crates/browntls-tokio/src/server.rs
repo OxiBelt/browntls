@@ -178,6 +178,8 @@ impl fmt::Debug for TlsAcceptor {
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData` and wraps
 /// the [`browntls::Error`], which `get_ref` and `downcast_ref` recover.
+/// Creating the connection can fail too, before any I/O: that error has
+/// kind `Other` and wraps the [`browntls::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
 pub struct Accept<IO>(MidHandshake<TlsStream<IO>>);
 

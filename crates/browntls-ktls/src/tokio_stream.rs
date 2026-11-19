@@ -43,7 +43,7 @@ pub enum StreamHandoffError<S> {
     ///
     /// The stream goes on in userspace when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded,
-    /// or the peer's `record_size_limit` needs a newer kernel), when it is
+    /// or its smaller records need a newer kernel), when it is
     /// the kernel's refusal to attach the `tls` upper layer protocol,
     /// which comes with an operating system error code (no `tls` module:
     /// `ENOENT`; a peer that has already closed TCP: `ENOTCONN`, since the
@@ -247,7 +247,10 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// `received` is the application data taken out of it, which the
     /// stream returns before anything the kernel delivers. Otherwise, and
     /// when the kernel lacks TLS support, everything comes back in
-    /// [`HandoffError::Refused`].
+    /// [`HandoffError::Refused`]. A running kernel that lacks the suite's
+    /// cipher refuses the keys only after they were taken out of the
+    /// connection: that is [`HandoffError::Failed`], and the connection is
+    /// lost.
     ///
     /// [`from_client`](AsyncKtlsStream::from_client) and
     /// [`from_server`](AsyncKtlsStream::from_server) do all of this for a

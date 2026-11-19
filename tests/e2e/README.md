@@ -33,6 +33,11 @@ Each CI job pairs one architecture with one peer suite.
 
 Peer containers run natively on the runner; only the browntls containers use
 the target platform, so in the emulated job the peers are not slowed down.
+CI keeps each peer image in the Actions cache per runner label for an ISO week
+and until `peer/` changes: runs on `main` save it, every other run restores
+it, and a job builds the image (`build-peer`) only when the cache has none. The
+distribution archives the peer images install from have been slow enough from
+the x86-64 runners to time a build out.
 Before the scenarios run, the harness records which acceleration backend
 `browntls-e2e info` reports for each algorithm family and fails if an
 architecture's expected accelerated families (AES-NI, PCLMULQDQ, AVX2 and
@@ -112,7 +117,8 @@ python3 -B -m unittest discover -s tests/e2e -p 'test_*.py'
 ```
 
 `run` builds the suite's peer image first (`--skip-peer-build` uses an existing
-one) and writes per-scenario logs, `results.json` and `summary.md` to
+one, for example one built by `build-peer --suite S`, which can also `--save`
+it) and writes per-scenario logs, `results.json` and `summary.md` to
 `--artifact-dir` when given. The harness creates one network, one volume and
 short-lived containers per run, all labelled
 `org.oxibelt.browntls-e2e.run=<run id>`, and removes exactly those resources
@@ -126,7 +132,8 @@ works with a remote Docker daemon.
   QEMU, whose `riscv_hwprobe` does not report the vector crypto extensions (the
   `riscv64-zvk` image therefore asserts them at build time).
 - Peer package versions follow the pinned base images' distribution
-  repositories at build time; the job summary records the versions used.
+  repositories at build time, which in CI can be up to a week before the run
+  (see the cache above); the job summary records the versions used.
 - The scenarios cover the default and selected explicit configurations, not
   every suite and group combination; the in-process suites cover those.
 - Encrypted Client Hello in split mode has browntls on both server sides:

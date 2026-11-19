@@ -18,6 +18,7 @@ Commands (run from the repository root; see tests/e2e/README.md):
     python3 tests/e2e/e2e.py matrix images|e2e     GitHub Actions matrix JSON
     python3 tests/e2e/e2e.py list [--suite S]      scenarios
     python3 tests/e2e/e2e.py build --arch A [--save TAR]
+    python3 tests/e2e/e2e.py build-peer --suite S [--save TAR]
     python3 tests/e2e/e2e.py run --arch A --suite S [--scenario N]...
 
 Only resources labelled with the run's identifier are created and removed.
@@ -768,8 +769,24 @@ class DockerError(RuntimeError):
     pass
 
 
+# Lines of a timed-out command's output kept in its error.
+TIMEOUT_TAIL_LINES = 60
+
+
+def output_tail(*streams: str | bytes | None, lines: int = TIMEOUT_TAIL_LINES) -> str:
+    """The last `lines` lines of what a command wrote before it was stopped."""
+    text = "".join(
+        s.decode("utf-8", "replace") if isinstance(s, bytes) else s for s in streams if s
+    )
+    return "\n".join(text.rstrip().splitlines()[-lines:])
+
+
 def docker(
-    *args: str, timeout: float | None = 120, check: bool = True, stdin: str | None = None
+    *args: str,
+    timeout: float | None = 120,
+    check: bool = True,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         proc = subprocess.run(
@@ -780,9 +797,16 @@ def docker(
             text=True,
             timeout=timeout,
             check=False,
+            env=None if env is None else {**os.environ, **env},
         )
     except subprocess.TimeoutExpired as e:
-        raise DockerError(f"docker {args[0]} timed out after {timeout}s") from e
+        # What the command wrote so far says where it stalled (for a build,
+        # the step it was in and how long the earlier ones took).
+        tail = output_tail(e.stdout, e.stderr)
+        raise DockerError(
+            f"docker {args[0]} timed out after {timeout}s"
+            + (f"; its last output:\n{tail}" if tail else "")
+        ) from e
     if check and proc.returncode != 0:
         raise DockerError(f"docker {shlex.join(args)} failed:\n{proc.stderr.strip()}")
     return proc
@@ -798,7 +822,9 @@ def image_exists(tag: str) -> bool:
 
 def build_peer_image(peer_image: str) -> None:
     dockerfile = E2E_DIR / "peer" / f"{peer_image}.Dockerfile"
-    print(f"building {peer_image_tag(peer_image)} from {dockerfile.relative_to(REPO_ROOT)}")
+    print(f"building {peer_image_tag(peer_image)} from {dockerfile.relative_to(REPO_ROOT)}",
+          flush=True)
+    started = time.monotonic()
     docker(
         "build",
         "--pull",
@@ -808,7 +834,11 @@ def build_peer_image(peer_image: str) -> None:
         str(dockerfile),
         str(E2E_DIR / "peer"),
         timeout=1800,
+        # Plain progress lines name each step with its duration, which the
+        # error of a timed-out build quotes.
+        env={"BUILDKIT_PROGRESS": "plain"},
     )
+    print(f"built {peer_image_tag(peer_image)} in {time.monotonic() - started:.0f}s", flush=True)
 
 
 @dataclasses.dataclass
@@ -1386,6 +1416,7 @@ def matrix(kind: str) -> dict:
                 "runner": a.runner,
                 "suite": s.name,
                 "description": s.description,
+                "peer_image": s.peer_image,
                 "emulated": a.qemu_cpu is not None,
             }
             for a in ARCHES.values()
@@ -1439,6 +1470,16 @@ def cmd_build(args: argparse.Namespace) -> int:
         print("+ docker", shlex.join(build + [ctx]), flush=True)
         docker(*build, ctx, timeout=600)
     print(f"built {tag} ({arch.platform}, {arch.label})")
+    if args.save:
+        Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+        docker("save", "-o", args.save, tag, timeout=600)
+        print(f"saved {tag} to {args.save}")
+    return 0
+
+
+def cmd_build_peer(args: argparse.Namespace) -> int:
+    tag = peer_image_tag(SUITES[args.suite].peer_image)
+    build_peer_image(SUITES[args.suite].peer_image)
     if args.save:
         Path(args.save).parent.mkdir(parents=True, exist_ok=True)
         docker("save", "-o", args.save, tag, timeout=600)
@@ -1576,6 +1617,11 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--tag", help=f"image tag (default {image_tag('<arch>')})")
     b.add_argument("--save", metavar="TAR", help="also write the image to TAR")
     b.set_defaults(func=cmd_build)
+
+    bp = sub.add_parser("build-peer", help="build a suite's peer image")
+    bp.add_argument("--suite", required=True, choices=sorted(SUITES))
+    bp.add_argument("--save", metavar="TAR", help="also write the image to TAR")
+    bp.set_defaults(func=cmd_build_peer)
 
     r = sub.add_parser("run", help="run a suite's scenarios")
     r.add_argument("--arch", required=True, choices=sorted(ARCHES))

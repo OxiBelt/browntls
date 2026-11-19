@@ -7,9 +7,11 @@ derives from them.
 
 import importlib.util
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location("e2e", Path(__file__).with_name("e2e.py"))
 e2e = importlib.util.module_from_spec(_SPEC)
@@ -37,6 +39,12 @@ class MatrixTest(unittest.TestCase):
         self.assertEqual(pairs, {(a, s) for a in e2e.ARCHES for s in e2e.SUITES})
         for m in include:
             self.assertEqual(m["runner"], e2e.ARCHES[m["arch"]].runner)
+
+    def test_e2e_matrix_names_the_peer_image_for_the_cache_key(self):
+        for m in e2e.matrix("e2e")["include"]:
+            peer_image = e2e.SUITES[m["suite"]].peer_image
+            self.assertEqual(m["peer_image"], peer_image)
+            self.assertTrue((e2e.E2E_DIR / "peer" / f"{peer_image}.Dockerfile").is_file())
 
     def test_image_matrix_has_one_entry_per_arch(self):
         include = e2e.matrix("images")["include"]
@@ -357,6 +365,47 @@ class EchTest(unittest.TestCase):
         self.assertEqual(
             len(e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, outer), 1, 0, 0)), 1
         )
+
+
+class DockerTest(unittest.TestCase):
+    def test_timeout_reports_the_last_output(self):
+        lines = [f"#{i} step {i}".encode() for i in range(100)]
+        expired = subprocess.TimeoutExpired(
+            ["docker", "build"], 1800, output=b"", stderr=b"\n".join(lines) + b"\n"
+        )
+        with mock.patch.object(e2e.subprocess, "run", side_effect=expired):
+            with self.assertRaises(e2e.DockerError) as raised:
+                e2e.docker("build", ".", timeout=1800)
+        message = str(raised.exception)
+        self.assertIn("docker build timed out after 1800s", message)
+        self.assertIn("#99 step 99", message)
+        self.assertIn(f"#{100 - e2e.TIMEOUT_TAIL_LINES} step", message)
+        self.assertNotIn(f"#{99 - e2e.TIMEOUT_TAIL_LINES} step", message)
+
+    def test_timeout_without_output(self):
+        expired = subprocess.TimeoutExpired(["docker", "build"], 5)
+        with mock.patch.object(e2e.subprocess, "run", side_effect=expired):
+            with self.assertRaises(e2e.DockerError) as raised:
+                e2e.docker("build", ".", timeout=5)
+        self.assertEqual(str(raised.exception), "docker build timed out after 5s")
+
+    def test_peer_build_uses_plain_progress_and_can_be_saved(self):
+        calls = []
+
+        def fake_docker(*args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+        args = e2e.parser().parse_args(["build-peer", "--suite", "go", "--save", "/nonexistent/peer.tar"])
+        with mock.patch.object(e2e, "docker", side_effect=fake_docker), \
+                mock.patch.object(e2e.Path, "mkdir"), \
+                mock.patch("builtins.print"):
+            self.assertEqual(args.func(args), 0)
+        (build, build_kwargs), (save, _) = calls
+        self.assertEqual(build[0], "build")
+        self.assertIn("browntls-e2e-peer:go", build)
+        self.assertEqual(build_kwargs["env"], {"BUILDKIT_PROGRESS": "plain"})
+        self.assertEqual(save, ("save", "-o", "/nonexistent/peer.tar", "browntls-e2e-peer:go"))
 
 
 if __name__ == "__main__":

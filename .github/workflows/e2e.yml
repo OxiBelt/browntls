@@ -118,11 +118,51 @@ jobs:
       - name: Load image
         run: docker load --input "${RUNNER_TEMP}/browntls-e2e-image/browntls-e2e-${{ matrix.arch }}.tar"
 
+      # A peer image installs its packages from the distribution's archive.
+      # From the x86-64 runners that has been slow enough to take a build that
+      # usually needs less than a minute past 30 minutes, failing the job.
+      # Each peer image is therefore kept in the cache per runner label for an
+      # ISO week (so its packages still follow the archive weekly) and until
+      # tests/e2e/peer/ changes. Only runs on main (pushes, the weekly schedule)
+      # save it, and every branch and pull request restores those, so most jobs
+      # build no peer image at all.
+      - name: Peer image cache key
+        id: peer-key
+        run: echo "week=$(date -u +%G-W%V)" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore peer image
+        id: peer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/browntls-e2e-peer.tar
+          key: browntls-e2e-peer-${{ matrix.peer_image }}-${{ matrix.runner }}-${{ hashFiles('tests/e2e/peer/**') }}-${{ steps.peer-key.outputs.week }}
+
+      - name: Load peer image
+        if: steps.peer-cache.outputs.cache-hit == 'true'
+        run: docker load --input "${RUNNER_TEMP}/browntls-e2e-peer.tar"
+
+      - name: Build peer image
+        if: steps.peer-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -B tests/e2e/e2e.py build-peer \
+            --suite "${{ matrix.suite }}" \
+            --save "${RUNNER_TEMP}/browntls-e2e-peer.tar"
+
+      # Saved before the scenarios run, so that a failing scenario does not
+      # keep the next runs building the image again.
+      - name: Save peer image
+        if: steps.peer-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/browntls-e2e-peer.tar
+          key: ${{ steps.peer-cache.outputs.cache-primary-key }}
+
       - name: Run scenarios
         run: |
           python3 -B tests/e2e/e2e.py run \
             --arch "${{ matrix.arch }}" \
             --suite "${{ matrix.suite }}" \
+            --skip-peer-build \
             --artifact-dir "${RUNNER_TEMP}/browntls-e2e-logs"
 
       - name: Upload diagnostics

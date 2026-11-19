@@ -309,9 +309,9 @@ pub mod kx_group {
 /// The RFC 9846 optional groups follow as a non-preferred tier, behind every
 /// other group: X448 (RFC 7748), then the RFC 7919 finite-field groups,
 /// usable for TLS 1.3 only (RFC 10015 §3). A client never sends their key
-/// shares first; a server selects one only when the client sent no key share
-/// for an earlier group and either sent one for the optional group or
-/// supports no earlier group.
+/// shares first; a server selects one only when the client supports no
+/// earlier group (a key share for an optional group is answered with a
+/// HelloRetryRequest for a preferred group the client supports).
 ///
 /// FFDHE6144 and FFDHE8192 are left out of the defaults (they remain in
 /// [`ALL_KX_GROUPS`]): a server spends about 10 and 20 ms per handshake on

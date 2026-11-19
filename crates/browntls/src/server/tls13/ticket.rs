@@ -1,5 +1,5 @@
-//! TLS 1.3 session tickets: their lifetime and NewSessionTicket (RFC 8446
-//! §4.6.1).
+//! TLS 1.3 session tickets: their lifetime and NewSessionTicket (RFC 9846
+//! §4.7.1).
 
 use browntls_pki::UnixTime;
 
@@ -18,7 +18,6 @@ use crate::server::server_conn::ServerConfig;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::KeyScheduleTraffic;
 
-/// Issues one NewSessionTicket.
 /// How long a TLS 1.3 session record stays usable, in seconds, when the
 /// session cache rather than a ticketer holds it.
 const STATEFUL_TICKET_LIFETIME: u32 = 24 * 60 * 60;
@@ -50,6 +49,7 @@ fn bound_ticket_lifetime_by_delegated_credential(
     configured_lifetime.min(u32::try_from(remaining).unwrap_or(u32::MAX))
 }
 
+/// Issues one NewSessionTicket.
 pub(super) fn emit_ticket(
     transcript: &HandshakeHash,
     suite: &'static Tls13CipherSuite,

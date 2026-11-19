@@ -35,7 +35,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.process_new_packets().map(|_| ())
     }
 
-    /// Derives keying material bound to this session (RFC 5705, RFC 8446 §7.5).
+    /// Derives keying material bound to this session (RFC 5705, RFC 9846 §7.5).
     pub fn export_keying_material<T: AsMut<[u8]>>(
         &self,
         mut output: T,
@@ -177,7 +177,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// Reads TLS bytes from `rd` into the connection. Returns the number of
     /// bytes read; zero means the transport reached end of file.
     ///
-    /// Fails if received plaintext is waiting for the application, or if the
+    /// Fails if more received plaintext than the 16 KiB buffer limit is
+    /// waiting for the application, or if the
     /// handshake is over and too many control records (KeyUpdate answers,
     /// post-handshake authentication responses, alerts) wait to be written,
     /// so that a peer cannot force unbounded buffering in either direction.
@@ -358,8 +359,7 @@ impl<'a> Reader<'a> {
         if self.common.has_seen_eof {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "peer closed connection without sending TLS close_notify: \
-                 https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof",
+                "peer closed connection without sending TLS close_notify",
             ));
         }
         Err(std::io::ErrorKind::WouldBlock.into())

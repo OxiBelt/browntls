@@ -1,5 +1,6 @@
 //! Memory bound of the built-in certificate decompressors (RFC 8879) on
-//! streams of a few hundred bytes that announce megabytes of output.
+//! short streams (a few hundred bytes, about 52 KB for zlib) that announce
+//! megabytes of output.
 //!
 //! The decoders allocate through the global allocator, so the bound is
 //! observed from outside: the peak resident set size the kernel records for
@@ -48,7 +49,7 @@ fn zstd_rle_frame(window_descriptor: u8, blocks: u32) -> Vec<u8> {
 }
 
 /// A zlib stream of stored blocks holding 8 MiB would be 8 MiB long; a run
-/// of zeros compresses to a few kilobytes instead. Built with fixed-Huffman
+/// of zeros compresses to about 52 KB instead. Built with fixed-Huffman
 /// blocks by hand to keep the compressor's own memory out of the picture:
 /// one literal zero, then length-258 distance-1 matches.
 #[cfg(feature = "zlib")]

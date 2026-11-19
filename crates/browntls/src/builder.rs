@@ -45,7 +45,9 @@ impl<Side: ConfigSide, State: fmt::Debug> fmt::Debug for ConfigBuilder<Side, Sta
 pub struct WantsVersions {}
 
 impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
-    /// Enables every version the provider has suites for.
+    /// Enables every protocol version this build supports (TLS 1.3, and
+    /// TLS 1.2 with the `tls12` feature), even one the provider has no
+    /// suites for; fails only when no enabled version has a suite.
     pub fn with_safe_default_protocol_versions(
         self,
     ) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {

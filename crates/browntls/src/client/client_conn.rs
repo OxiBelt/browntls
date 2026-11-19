@@ -266,8 +266,9 @@ impl ClientConfig {
     ///
     /// # Panics
     ///
-    /// Panics if no default provider is available; use
-    /// [`Self::builder_with_provider`] to avoid that.
+    /// Panics if no default provider is available, or if the provider has no
+    /// usable cipher suites or key exchange groups for `versions` (an empty
+    /// `versions` included); use [`Self::builder_with_provider`] to avoid that.
     #[cfg(feature = "std")]
     #[allow(clippy::panic)] // documented: no fallible API exists for this constructor
     pub fn builder_with_protocol_versions(
@@ -275,7 +276,6 @@ impl ClientConfig {
     ) -> ConfigBuilder<Self, crate::WantsVerifier> {
         let provider = CryptoProvider::get_default_or_install_from_crate_features()
             .unwrap_or_else(|err| panic!("{err}"));
-        // The default provider always has usable suites and groups.
         Self::builder_with_provider(provider)
             .with_protocol_versions(versions)
             .unwrap_or_else(|err| panic!("{err}"))

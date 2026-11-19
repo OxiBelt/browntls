@@ -10,7 +10,8 @@ govern how changes land.
 ## Crates
 
 ```text
-browntls-crypto   primitives; no_std, no alloc; arch backends; no dependencies
+browntls-crypto   primitives; no_std (alloc and std optional); arch backends;
+                  no required dependencies
        ^
        | (feature "native", default)
 browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
@@ -61,7 +62,10 @@ signature, validity period or trust.
   issuer names of an authority key identifier. Both report
   `ExtensionValueInvalid`, and both reject empty `GeneralNames`. Changing the
   parser to reject them up front would have changed which certificates path
-  validation accepts.
+  validation accepts. The revocation code's extensions are decoded by free
+  functions in `browntls_pki::ocsp`: `authorityInfoAccess`
+  (`ocsp_responder_uris`, `ca_issuer_uris`), the TLS Feature extension
+  (`must_staple`) and `id-pkix-ocsp-nocheck` (`has_ocsp_nocheck`).
 - Names: `GeneralName` covers every RFC 5280 choice; the ones the crate does
   not decode keep their tag and contents. `Name` parses an X.501 name (issuer,
   subject, trust anchor subject, `directoryName`, TLS `DistinguishedName`)
@@ -78,8 +82,9 @@ signature, validity period or trust.
 - Signatures: `SignedData` reads the `SEQUENCE { tbs, AlgorithmIdentifier,
   BIT STRING }` of a certificate, CRL or certification request, or takes a raw
   (message, algorithm, signature) triple, and verifies it against a
-  `SubjectPublicKeyInfo` through `verify_signed_data`, the function path
-  validation uses, including the RSASSA-PSS canonical forms. Like path
+  `SubjectPublicKeyInfo` with `SignedData::verify_signature`, which runs the
+  signature check path validation uses, including the RSASSA-PSS canonical
+  forms. Like path
   validation, it takes the key as a complete `SubjectPublicKeyInfo` or as its
   contents (a trust anchor's form); the two cannot be confused.
 
@@ -142,7 +147,8 @@ that existing provider designs map onto it:
   explicit provider.
 - Traits for each capability: hashing, HMAC, HKDF (TLS 1.3), PRF (TLS 1.2),
   record protection (`Tls13AeadAlgorithm`, `Tls12AeadAlgorithm`,
-  `MessageEncrypter`, `MessageDecrypter`), key exchange (`SupportedKxGroup`,
+  `Tls12BlockCipherAlgorithm`, `MessageEncrypter`, `MessageDecrypter`), key
+  exchange (`SupportedKxGroup`,
   `ActiveKeyExchange`, including hybrid post-quantum groups), signing
   (`SigningKey`, `Signer`), randomness and key loading, plus hooks that export
   traffic secrets for kernel TLS offload.
@@ -182,8 +188,10 @@ negotiated when a peer shares nothing earlier.
 | Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
 
 A browntls server applies the same ranking whatever the client's order:
-within each tier it follows the client's order (or its own with
-`ignore_client_order`), but it picks a non-preferred suite or group only when
+within each tier it follows the client's order of suites (or its own with
+`ignore_client_order`) and its own order of groups, taking the first of its
+groups the client sent a key share for, but it picks a non-preferred suite or
+group only when
 no preferred one is mutually supported, and it answers a key share for a
 non-preferred group with a HelloRetryRequest when a preferred group is
 available (`CipherSuite::is_non_preferred`, `NamedGroup::is_non_preferred`).
@@ -210,8 +218,10 @@ a CBC suite the server selected without acknowledging it. The MAC-then-encrypt
 transform is implemented, for the opt-in, in time independent of the padding
 (`browntls_crypto::tls_cbc`): a fixed number of hash compressions per record
 length and a constant-time padding check, the Lucky Thirteen countermeasure.
-SHA-1 exists only as the HMAC of the `*_CBC_SHA` suites; no signature uses it
-(RFC 9155). The explicit per-record IV comes from the operating system.
+In the protocol SHA-1 exists only as the HMAC of the `*_CBC_SHA` suites; no
+signature uses it (RFC 9155). Outside it, revocation checking hashes OCSP
+`CertID`s with SHA-1. The explicit per-record IV comes from the operating
+system.
 
 A TLS 1.2 client also requires the server to acknowledge
 `renegotiation_info` (RFC 5746) unless `require_secure_renegotiation` is
@@ -236,8 +246,8 @@ where they live:
   `unsupported_extension`. This covers ServerHello, HelloRetryRequest,
   EncryptedExtensions, CertificateRequest, CertificateEntry and
   NewSessionTicket.
-- Versions: a ClientHello with `supported_versions` and a TLS 1.3
-  ServerHello or HelloRetryRequest must carry `legacy_version` 0x0303
+- Versions: a ClientHello whose `supported_versions` offers TLS 1.3, and a
+  TLS 1.3 ServerHello or HelloRetryRequest, must carry `legacy_version` 0x0303
   (`protocol_version` otherwise); a `supported_versions` value the client did
   not offer, or below TLS 1.3, is `illegal_parameter`.
 - HelloRetryRequest: the server remembers the cipher suite and group it
@@ -265,7 +275,8 @@ where they live:
   is not 0x01, is `unexpected_message`.
 - Rejected 0-RTT: a server that declines early data skips the client's
   undecryptable records while their plaintext totals at most
-  `max_early_data_size` (§4.2.10); each record is charged its length less
+  `max_early_data_size`, or 16384 bytes when that is zero (§4.3.10); each
+  record is charged its length less
   the suite's tag and content type byte, an upper bound on its plaintext,
   and at least one byte, so the budget also bounds the number of records
   tried (`RecordLayer::doing_trial_decryption`). One byte more fails with
@@ -410,8 +421,9 @@ The connection that sent the HelloRetryRequest keeps its state and requires
 the second ClientHello to echo the cookie byte for byte
 (`missing_extension` if absent, `illegal_parameter` if different). A fresh
 server connection, or an acceptor (`Acceptor`, `UnbufferedAcceptor`), whose
-first ClientHello carries a cookie opens it instead: it must authenticate under the sealer's current or
-previous key, carry the label, parse exactly and be at most 60 seconds old
+first ClientHello carries a cookie opens it instead: it must authenticate
+under the sealer (a `TicketRotator` accepts its current or previous key),
+carry the label, parse exactly and be at most 60 seconds old
 (in either direction, for servers sharing a key); the suite and group must
 still be configured, the hash length must match the suite's, and the
 ClientHello must repeat the session ID and server name. Any failure is
@@ -433,10 +445,13 @@ ClientHello is ignored, as before.
 
 No cookie is sent when the first ClientHello offered 0-RTT: the client's
 early data records would reach a fresh connection ahead of its second
-ClientHello, so that retry stays stateful. Nor when it carried an ECH extension (GREASE
-included): the HPKE context and the HelloRetryRequest's ECH extension
-cannot be rebuilt from a cookie, so a fresh connection refuses a cookie
-whose ClientHello offers ECH (`illegal_parameter`). A cookie can be replayed during
+ClientHello, so that retry stays stateful. Nor, on a server configured for
+ECH (`ServerConfig::ech` or `ech_backend`), when it carried an ECH extension
+(GREASE included): the HPKE context and the HelloRetryRequest's ECH extension
+cannot be rebuilt from a cookie, so such a server's fresh connection refuses a
+cookie whose ClientHello offers ECH (`illegal_parameter`). A server without
+ECH ignores the extension and keeps the retry stateless. A cookie can be
+replayed during
 its lifetime by anyone who saw it; that gives no more than replaying the
 second ClientHello would, since the handshake still needs the client's key
 share and Finished. Cookies are not bound to the client's address: that
@@ -499,8 +514,12 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   PSK or ticket is selected and only its binder is checked, in constant time;
   a wrong binder is `decrypt_error`. An identity whose binder length is not
   that of the key's hash is passed over. A handshake that selects an external
-  PSK sends no certificate; with no PSK selected, a server without a
-  certificate fails with `handshake_failure`. A client that offers TLS 1.3
+  PSK sends no certificate. When a TLS 1.3 client offered a `psk_dhe_ke` PSK
+  and none was selected, a server without a certificate fails with
+  `handshake_failure`; otherwise (no PSK offered, `psk_ke` only, or TLS 1.2)
+  it fails as any server without a certificate does, with `unrecognised_name`
+  when the client sent a server name and `access_denied` otherwise. A client
+  that offers TLS 1.3
   only and a PSK may omit `signature_algorithms` (RFC 9846 §4.3.3); it is
   then served by PSK only. Only servers configured with external PSKs defer
   the missing-certificate failure to after PSK selection.
@@ -624,7 +643,9 @@ RFC 9257 guidance and what browntls enforces:
   like any unknown value and sends none itself (RFC 8701 §4 is optional).
 - `padding` (RFC 7685), client: by default
   (`ClientHelloPadding::AvoidProblematicLengths`) a ClientHello handshake
-  message of 256 to 511 bytes is padded to 512 (RFC 7685 §4);
+  message of 256 to 511 bytes is padded to 512 bytes, or 513 to 515 bytes
+  from 509 to 511 where the four-byte extension header does not fit
+  (RFC 7685 §4);
   `AtLeast(n)` pads to at least `n` bytes first; `Disabled` never pads. The
   extension comes right before `pre_shared_key`, which stays last, and is
   sized with the binders in place. A server ignores its content.
@@ -715,7 +736,7 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   (`ServerConfig::apply_to`), lets `config`'s ECH keys replace the
   ClientHello with the inner one, and hands it to
   `ExpectClientHello::with_certified_key`, then checks that a ClientHello
-  that changed the read key ended its record (RFC 8446 §5.1, the check
+  that changed the read key ended its record (RFC 9846 §5.1, the check
   `ConnectionCore::process_one` makes for every handshake message). The same
   core (deframer, joiner, common state) goes on, so the connection behaves as
   one created with `config` that read the same bytes; an unbuffered one
@@ -1048,7 +1069,7 @@ The kernel decrypts application data for the application and hands every
 other record over, decrypted, with its content type. Those records go to
 `KernelConnection::handle_record`, which runs them through the same state
 machine as in userspace: handshake messages are joined across records and a
-KeyUpdate must end its record (RFC 8446 §5.1), TLS 1.3 KeyUpdate and
+KeyUpdate must end its record (RFC 9846 §5.1), TLS 1.3 KeyUpdate and
 NewSessionTicket (stored in the client's session store), post-handshake client
 authentication in both roles, alerts and `close_notify`, and the TLS 1.2
 HelloRequest. Every record the connection would send (a KeyUpdate, an alert, a
@@ -1398,8 +1419,9 @@ certificate's key sign the credential. A credential is attached to a
 `CertifiedKey` with `with_delegated_credential`, which checks that the
 certificate carries the `DelegationUsage` extension
 (1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
-`digitalSignature` key usage, and that the key matches the credential's
-public key. Credential keys may not be `rsaEncryption` keys (§4): the
+`digitalSignature` key usage, and, when the key exposes its public key, that
+it matches the credential's public key. Credential keys may not be
+`rsaEncryption` keys (§4): the
 `rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
 (`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
 private field (`delegated_credentials()` reads them), so it can no longer
@@ -1709,6 +1731,7 @@ supported.
 | Feature | Default | Effect |
 |---|---|---|
 | `std` | yes | Buffered connections and I/O helpers (`Stream`, `KeyLogFile`), default session caches, system time; the unbuffered API needs only `alloc` |
+| `alloc` | yes (through `std`) | No effect yet: the crate always links `alloc` |
 | `native` | yes | Provider backed by `browntls-crypto` |
 | `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
 | `tls12` | yes | TLS 1.2 support |
@@ -1730,8 +1753,10 @@ features the lists are empty and the extension is neither offered nor
 accepted. Compression applies to TLS 1.3 only, in both directions: a server
 compresses its Certificate with its first compressor the ClientHello offered,
 a client its own with the first one the CertificateRequest offered, and a
-compressed message that would not be smaller is sent uncompressed. Servers
-cache compressed messages (`CompressionCache`).
+built-in compressor sends uncompressed a message that compression would not
+make smaller (a `CertCompressor` of your own decides this itself). With
+`std`, servers and clients cache compressed messages (`CompressionCache`,
+`ServerConfig::cert_compression_cache`, `ClientConfig::cert_compression_cache`).
 
 On receipt (`compress::receive_compressed_certificate`, used by both sides):
 
@@ -1766,8 +1791,9 @@ Certificate message, write single-segment frames whose window is the content
 size, and the built-in encoder declares 128 KiB; a frame from a streaming
 encoder that was not told the size (libzstd then declares at least 512 KiB)
 is refused. `tests/cert_compression_memory.rs` checks, on Linux, that
-refusing streams of a few hundred bytes which announce 8 to 16 MiB does not
-raise the process's peak resident memory by more than 1 MiB. Zstandard
+refusing streams of at most about 52 KB (a few hundred bytes for Brotli and
+Zstandard) which announce 8 to 16 MiB does not raise the process's peak
+resident memory by more than 1 MiB. Zstandard
 compression uses the single level `ruzstd` implements.
 
 ## Primitive backends
@@ -1778,12 +1804,12 @@ reference for testing, plus accelerated backends selected at run time.
 | Family | x86-64 | aarch64 | riscv64 |
 |---|---|---|---|
 | SHA-1 (HMAC-SHA1 for TLS 1.2 `*_CBC_SHA` suites only, never signatures) | SHA-NI | FEAT_SHA1 | Zbb scalar |
-| SHA-2 | SHA-NI | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
-| SHA-3 / SHAKE | AVX2 multi-lane | NEON, FEAT_SHA3 | RVV |
+| SHA-2 | SHA-NI (SHA-256), x86-64-v3 (SHA-256 and SHA-512; no SHA512 extension backend) | FEAT_SHA256, FEAT_SHA512 | Zvknha/Zvknhb, Zknh |
+| SHA-3 / SHAKE | BMI1/BMI2 (one state); AVX2, AVX-512VL (four states) | portable (one state); NEON, FEAT_SHA3 (four states) | Zbb (one state); RVV, RVV + Zvkb (four states) |
 | AES-GCM | AES-NI + PCLMULQDQ, VAES + VPCLMULQDQ (YMM, and ZMM with a fused CTR+GHASH loop) | FEAT_AES + FEAT_PMULL | Zvkned + Zvkg / Zvbc, Zkne + Zbc/Zbkc |
 | AES decryption (CBC) | AES-NI, VAES (YMM) | FEAT_AES | Zvkned, Zknd |
 | ChaCha20-Poly1305 | AVX2, AVX-512 | NEON | RVV |
-| X25519 / Ed25519 | BMI2 + ADX field arithmetic | portable 64-bit | portable 64-bit |
+| X25519 / Ed25519 | BMI2 + ADX field arithmetic (X25519 ladder only; Ed25519 portable) | portable 64-bit | portable 64-bit |
 | X448 / Ed448 | portable 64-bit (Karatsuba field multiplication, precomputed fixed-base comb) | portable 64-bit | portable 64-bit |
 | P-256 / P-384 / P-521 | BMI2 + ADX field arithmetic (per-curve kernels; the same specialised reductions in portable code elsewhere) | portable 64-bit | portable 64-bit |
 | RSA | BMI2 + ADX Montgomery kernel, AVX-512 IFMA exponentiation | portable 64-bit | portable 64-bit |
@@ -2218,7 +2244,8 @@ entropy from the optional `getrandom` crate feature.
 - Rust 1.100.0 is pinned in `rust-toolchain.toml` and is the MSRV
   (`rust-version`). Toolchain upgrades are explicit changes.
 - `Cargo.lock` is committed and CI builds with `--locked`.
-- Runtime dependencies: none for `browntls-crypto` and `browntls-pki`; `log`
+- Runtime dependencies: none for `browntls-pki`; for `browntls-crypto`, only
+  `getrandom` behind its optional `getrandom` feature; `log`
   (optional), the RustCrypto crates (only with `rustcrypto`) and the
   pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
   with `zlib`, `brotli`, `zstd`) for `browntls`; `tokio` (I/O traits only)

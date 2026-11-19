@@ -136,9 +136,9 @@ enum_builder! {
 impl CipherSuite {
     /// Whether the suite belongs to the non-preferred tier: the TLS 1.3
     /// suites RFC 9846 defines beyond those §9.1 makes mandatory or
-    /// recommended, i.e. AES-128-CCM and AES-128-CCM-8. A server ranks them
-    /// after every other mutually supported suite, whatever the client's
-    /// order.
+    /// recommended, i.e. AES-128-CCM and AES-128-CCM-8, and the TLS 1.2
+    /// ECDHE AES-CBC suites. A server ranks them after every other mutually
+    /// supported suite, whatever the client's order.
     pub fn is_non_preferred(self) -> bool {
         matches!(
             self,

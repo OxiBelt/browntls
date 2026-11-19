@@ -3,7 +3,7 @@
 //! ECH (RFC 9849) seals the inner ClientHello with HPKE in base mode. An
 //! [`Hpke`] implementation provides one suite: a KEM, a KDF and an AEAD.
 //! The native provider supplies every suite of `browntls_crypto::hpke` in
-//! [`native::hpke::ALL_SUPPORTED_SUITES`](super::native::hpke::ALL_SUPPORTED_SUITES);
+//! `native::hpke::ALL_SUPPORTED_SUITES` (feature `native`);
 //! other libraries can implement the traits here.
 
 use alloc::boxed::Box;

@@ -277,7 +277,7 @@ impl Debug for Ed25519Signer {
 // Ed448
 
 /// An Ed448 signing key (RFC 8410 `id-Ed448` PKCS #8). It signs with the
-/// `ed448` scheme: PureEdDSA with an empty context (RFC 9846 §4.2.3,
+/// `ed448` scheme: PureEdDSA with an empty context (RFC 9846 §4.3.3,
 /// RFC 8422 §5.10).
 pub struct Ed448SigningKey {
     key: Arc<ed448::SigningKey>,

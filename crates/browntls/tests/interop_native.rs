@@ -3,8 +3,7 @@
 //! rustls validates browntls's run-time generated certificates with its real
 //! web-PKI verifier (the CA is installed as a root), so these tests also check
 //! that the certificates browntls sends are well-formed. browntls pins the
-//! rustls peer's certificate because path validation in `browntls-pki` is not
-//! implemented yet.
+//! rustls peer's certificate instead of validating its path.
 //!
 //! This target runs the cases in `cases/interop.rs` with the native provider;
 //! `interop.rs` runs them with the RustCrypto provider. The cases in

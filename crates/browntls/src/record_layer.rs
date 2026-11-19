@@ -58,7 +58,7 @@ pub(crate) struct RecordLayer {
     decrypt_state: DirectionState,
     confidentiality_limit: u64,
     /// Remaining plaintext bytes of records that may fail decryption
-    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.2.10); each
+    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.3.10); each
     /// skipped record costs at least one byte.
     trial_decryption_len: Option<usize>,
     /// The record size limit we announced (RFC 8449), once negotiated.
@@ -357,7 +357,7 @@ impl RecordLayer {
     /// Charges a skipped record of `requested` ciphertext bytes against the
     /// trial decryption budget; `false` once the budget would be exceeded.
     ///
-    /// RFC 9846 §4.2.10 counts `max_early_data_size` in plaintext bytes
+    /// RFC 9846 §4.3.10 counts `max_early_data_size` in plaintext bytes
     /// (excluding the inner content type and padding), so each record is
     /// charged the most plaintext it can carry: its length minus the
     /// AEAD expansion. TLS 1.3 uses one suite in both directions, so that

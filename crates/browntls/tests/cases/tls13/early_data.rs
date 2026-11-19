@@ -207,7 +207,7 @@ fn reject_early_data_writes(
 #[test]
 fn rejected_early_data_is_skipped_by_its_plaintext_size() {
     init_logging();
-    // RFC 9846 §4.2.10: the server skips rejected 0-RTT records "up to the
+    // RFC 9846 §4.3.10: the server skips rejected 0-RTT records "up to the
     // configured max_early_data_size", which counts plaintext, not the
     // record's tag and content type byte.
     assert_eq!(

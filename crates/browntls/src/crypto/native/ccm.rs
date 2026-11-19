@@ -19,7 +19,7 @@
 //! integrity limit is enforced here. TLS closes the connection on the first
 //! record that fails authentication (RFC 9846 §5.2), but a server that
 //! rejects 0-RTT data skips records that fail to decrypt under the handshake
-//! key, up to `max_early_data_size` bytes (RFC 9846 §4.2.10; 16384 bytes even
+//! key, up to `max_early_data_size` bytes (RFC 9846 §4.3.10; 16384 bytes even
 //! when early data is disabled), each record costing at least one byte,
 //! which alone would allow up to 16384 CCM_8 forgery attempts. Each
 //! decrypter therefore counts the records that fail authentication under

@@ -52,6 +52,14 @@
 //! counter mixed with a per-thread random key, so the calls are spread
 //! evenly and a peer cannot tell in advance where a call will run.
 //!
+//! # Kernel TLS
+//!
+//! The backends are not the only place where records can be protected:
+//! Linux kernel TLS takes whole connections. While it is active, [`kernel`]
+//! puts it at the head of the order (kernel TLS, then the backends as
+//! above) and places each new connection, with a stream per kind of record
+//! work that is controlled like the streams here.
+//!
 //! # What does not change
 //!
 //! * **Results.** Every backend of a family computes the same function, bit
@@ -163,6 +171,7 @@
 //! ```
 
 mod control;
+pub mod kernel;
 
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -349,12 +358,14 @@ pub fn enable(config: Config) -> Result<(), Error> {
 }
 
 /// Turns load-aware routing off: every call runs on the backend its policy
-/// selects. Statistics, shifts and fixed shares are forgotten.
+/// selects, and every new connection goes to kernel TLS while that is
+/// active ([`kernel`]). Statistics, shifts and fixed shares are forgotten.
 pub fn disable() {
     CONFIG.store(0, Relaxed);
     for alg in Algorithm::ALL {
         for_family!(alg, reset_family);
     }
+    kernel::reset();
 }
 
 /// The configuration in force (with its values clamped), or `None` while
@@ -583,7 +594,9 @@ fn route_enabled<B: Backends>(
 pub struct StreamStatus {
     /// The algorithm family.
     pub algorithm: Algorithm,
-    /// The stream's index within the family, as taken by [`status`].
+    /// The stream's index within the family, as taken by [`status`]. In a
+    /// report of [`kernel::status`], the family's stream that routes the
+    /// connections which stay in userspace.
     pub lane: usize,
     /// The kind of work, e.g. `"records"`.
     pub name: &'static str,

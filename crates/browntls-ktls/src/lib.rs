@@ -39,6 +39,13 @@
 //! unharmed ([`HandoffError::Refused`]), so the caller can go on in
 //! userspace.
 //!
+//! # Load-aware routing
+//!
+//! With the `native` feature, the `routing` module makes kernel TLS the
+//! first place for a connection's records under the native provider's
+//! load-aware routing: `routing::RoutedStream::new` hands a connection to
+//! the kernel or leaves it in userspace, as the routing places it.
+//!
 //! # Tokio
 //!
 //! With the `tokio` feature, `AsyncKtlsStream` is the same offload on a
@@ -59,6 +66,8 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
+mod meter;
+#[cfg(target_os = "linux")]
 mod outputs;
 #[cfg(target_os = "linux")]
 mod quiet_close;
@@ -75,6 +84,10 @@ mod sys;
 
 #[cfg(target_os = "linux")]
 pub use stream::{HandoffError, KtlsStream, Offload};
+
+#[cfg(all(target_os = "linux", feature = "native"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+pub mod routing;
 
 #[cfg(all(target_os = "linux", feature = "tokio"))]
 mod drain;

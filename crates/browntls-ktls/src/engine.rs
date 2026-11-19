@@ -23,6 +23,7 @@ use browntls::{
 
 use crate::crypto_info::CryptoInfo;
 use crate::ledger::{Backlog, Ledger};
+use crate::meter::Meter;
 use crate::outputs::Waiting;
 use crate::sys;
 
@@ -75,6 +76,8 @@ pub(crate) struct Engine<Data> {
     /// (`TLS_RX_EXPECT_NO_PAD`): it decrypts into the reader's buffer
     /// before it knows what a record holds.
     rx_no_pad: bool,
+    /// Times the writes the load-aware routing asks for (`native`).
+    meter: Meter,
 }
 
 impl<Data: SideData> Engine<Data> {
@@ -97,6 +100,7 @@ impl<Data: SideData> Engine<Data> {
             failed: None,
             ledger: None,
             rx_no_pad: false,
+            meter: Meter::kernel(&secrets.tx.1),
         };
         engine.install_handover_keys(fd, secrets)?;
         // The keys are in the kernel: an output a full non-blocking socket
@@ -461,7 +465,11 @@ impl<Data: SideData> Engine<Data> {
             return Ok(0);
         };
         let take = buf.len().min(max * RECORDS_PER_WRITE);
+        let timing = self.meter.start(take);
         let sent = sys::send(fd, &buf[..take])?;
+        if let Some(timing) = timing {
+            timing.done(sent);
+        }
         // A plain `send` closes its last record, so `sent` bytes made at
         // most this many (barring the kernel closing records early under
         // memory pressure).

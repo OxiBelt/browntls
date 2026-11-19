@@ -159,16 +159,70 @@ match AsyncKtlsStream::from_client(tls).await {
 `KernelHandoff::into_parts` returns it) and its socket. The feature enables
 Tokio's `net` only; the runtime is the application's.
 
+## Load-aware routing
+
+With the `native` feature, kernel TLS can be the first place for a
+connection's records under the native provider's load-aware routing
+(`browntls::crypto::native::accel::load`), ahead of the provider's
+backends in their usual order:
+
+```rust
+use browntls::crypto::native::accel::load;
+use browntls_ktls::routing::{self, RoutedStream};
+
+// Once per process. Without kernel TLS everything stays in userspace.
+load::enable(load::Config::DEFAULT)?;
+let _ = routing::activate();
+
+let mut tls = RoutedStream::new(conn, tcp).map_err(|e| e.into_io_error())?;
+match &tls {
+    RoutedStream::Kernel(ktls) => { /* a `KtlsStream` */ }
+    RoutedStream::Userspace(stream) => { /* why: `stream.kernel_refusal()` */ }
+}
+```
+
+`routing::activate` asks the running kernel whether it attaches the `tls`
+upper layer protocol and, if so, puts kernel TLS at the head of the order.
+`RoutedStream::new` then hands each connection to the kernel, unless the
+kernel cannot take it (it stays in userspace, with the refusal recorded;
+whether the kernel has the connection's cipher is asked once, with keys of
+zeros on a loopback socket)
+or, with `accel::load` enabled, the routing keeps it in userspace: while
+writes to the kernel cost more than they usually do and userspace measures
+cheaper, a growing share of the new connections stays there until the
+kernel has recovered. While kernel TLS is not active every connection
+stays in userspace. `AsyncRoutedStream::from_client` and `from_server`
+(feature `tokio`) do the same for `browntls-tokio` streams.
+
+A server that accepts 0-RTT data should read `early_data()` before it
+calls `RoutedStream::new`: what is left unread comes in-band and unmarked
+with the kernel, as with `KtlsStream::new`, and stays in `early_data()` in
+userspace. The Tokio streams tell how much of what they return first is
+0-RTT data (`early_data_len`).
+
+A connection keeps its place for life, so only new connections move. Both
+kinds of stream report what one write in sixteen of at least 4096 bytes
+cost, in processor time of the calling thread, which leaves out waiting
+for the peer; `accel::load::kernel::status_all` shows the streams. An
+application that needs what only the kernel does (`sendfile`) should hand
+its connections over with `KtlsStream::new` instead. See
+[Architecture](../../docs/Architecture.md#kernel-tls-at-the-head-of-the-order)
+for the mechanism and its limits; whether a shift away from the kernel
+pays on a given machine is not measured.
+
 `src/sys.rs` holds the crate's only `unsafe` code, the socket options,
-`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS, and the
-thread's signal mask around the latter; see the invariants at its top.
+`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS, the
+thread's signal mask around the latter, and the thread's processor time
+clock; see the invariants at its top.
 
 ## Testing
 
 `cargo test -p browntls-ktls --all-features` runs the handover tests over
 loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
 `tests/sendfile.rs`) and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
-`tests/tokio_zero_copy.rs`, feature `tokio`). They are
+`tests/tokio_zero_copy.rs`, feature `tokio`), and the placement of
+connections by the routing (`tests/routing.rs`, `tests/tokio_routing.rs`).
+Their parts that need the kernel are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).
 

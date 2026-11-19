@@ -49,6 +49,12 @@ const PROBES: u32 = 4;
 const PROBE_PERIOD: u64 = 8;
 /// Primary samples to wait for the probes before giving up on an alternate.
 const PROBE_PATIENCE: u32 = 64;
+/// For work that is placed as a whole: the placements of a probe that all
+/// go to the alternate while it has no [`PROBES`] samples yet.
+const PLACED_PROBES: u32 = 64;
+/// Placements after which a probe is given up, and placements without a
+/// sample of the primary after which a shift is.
+const PLACE_PATIENCE: u32 = 4096;
 /// Change of the shifted share per controller step, in 256ths.
 const STEP: u32 = 16;
 /// An alternate must be this much cheaper than the primary to gain share.
@@ -250,6 +256,9 @@ struct Channel {
     /// sample.
     slow: AtomicU64,
     samples: AtomicU32,
+    /// Work placed ([`Stream::place`]) since this alternate's probe began
+    /// or, while work is shifted to it, since the primary's last sample.
+    placed: AtomicU32,
 }
 
 impl Channel {
@@ -258,6 +267,7 @@ impl Channel {
             fast: AtomicU64::new(0),
             slow: AtomicU64::new(0),
             samples: AtomicU32::new(0),
+            placed: AtomicU32::new(0),
         }
     }
 
@@ -265,6 +275,7 @@ impl Channel {
         self.fast.store(0, Relaxed);
         self.slow.store(0, Relaxed);
         self.samples.store(0, Relaxed);
+        self.placed.store(0, Relaxed);
     }
 }
 
@@ -440,6 +451,78 @@ impl Stream {
         }
     }
 
+    /// Chooses the slot for work that is placed as a whole and stays where
+    /// it was put (a connection's records, see `super::kernel`), with the
+    /// share and the probes of [`Stream::decide`]. Whether its calls are
+    /// timed is decided call by call ([`Stream::timed`]).
+    ///
+    /// A probe cannot wait for one placement in eight: placements may be
+    /// rare next to the calls, and the probe is given up after
+    /// [`PROBE_PATIENCE`] samples of the primary. So until the alternate
+    /// has its [`PROBES`] samples, the first [`PLACED_PROBES`] placements
+    /// of a probe all go to it.
+    ///
+    /// Nor can samples be counted on to end a probe or a shift: what was
+    /// placed may make no call long enough to time, on the alternate and,
+    /// once the work the primary had is done, on the primary. A probe is
+    /// given up after [`PLACE_PATIENCE`] placements, whatever was timed
+    /// by then, as it is after [`PROBE_PATIENCE`] samples of the primary;
+    /// a shift ends after as many placements without a sample of the
+    /// primary, which nothing would tell to have recovered.
+    pub(crate) fn place(&self, word: u64, primary: usize, mask: u8) -> usize {
+        let ctl = Ctl::unpack(self.ctl.load(Relaxed));
+        if matches!(ctl.phase, Phase::Probing | Phase::Shifting)
+            && ctl.primary == primary
+            && mask & (1 << ctl.alt) != 0
+        {
+            let probing = ctl.phase == Phase::Probing;
+            let a = &self.channels.0[ctl.alt];
+            // Added in one step: a count read before a sample of the
+            // primary cleared it must not be stored back after.
+            let placed = a.placed.fetch_add(1, Relaxed);
+            if placed >= PLACE_PATIENCE {
+                let p = &self.channels.0[primary];
+                // The level a probe found is accepted; after a shift the
+                // baseline stays, as when a shift stops helping.
+                let level = probing.then(|| (p.fast.load(Relaxed), p.slow.load(Relaxed)));
+                let (next, effect) = Self::advance(ctl, mask, level);
+                self.commit(ctl, next, effect, primary);
+                return primary;
+            }
+            if probing && placed < PLACED_PROBES && a.samples.load(Relaxed) < PROBES {
+                return ctl.alt;
+            }
+        }
+        self.decide(word, self.min_units, primary, mask).0
+    }
+
+    /// Whether to time a call of `units` units that runs on `slot` whatever
+    /// its word, because its work was placed before ([`Stream::place`]):
+    /// the calls [`Stream::decide`] would time on that slot, and every
+    /// measurable call of an alternate that is probed until it has its
+    /// [`PROBES`] samples, since no call can be sent there for the purpose.
+    pub(crate) fn timed(&self, word: u64, units: usize, slot: usize) -> bool {
+        if units < self.min_units {
+            return false;
+        }
+        let ctl = Ctl::unpack(self.ctl.load(Relaxed));
+        let sampling = word >> 32;
+        match ctl.phase {
+            Phase::Steady | Phase::Fixed => sampling & self.sample_mask == 0,
+            Phase::Probing
+                if slot == ctl.alt && self.channels.0[ctl.alt].samples.load(Relaxed) < PROBES =>
+            {
+                true
+            }
+            Phase::Probing | Phase::Shifting => sampling & self.sample_mask & BUSY_SAMPLE_MASK == 0,
+        }
+    }
+
+    /// Whether a call of `units` units is long enough to time.
+    pub(crate) fn measurable(&self, units: usize) -> bool {
+        units >= self.min_units
+    }
+
     /// Records that `units` units of work took `nanos` nanoseconds on `slot`
     /// and lets the controller react.
     pub(crate) fn observe(
@@ -494,8 +577,21 @@ impl Stream {
             average(&ch.slow, seen, level, weight);
         }
         ch.samples.store(seen.saturating_add(1), Relaxed);
+        if own && ctl.phase == Phase::Shifting {
+            // The primary is heard from: see `Stream::place`.
+            let placed = &self.channels.0[ctl.alt].placed;
+            if placed.load(Relaxed) != 0 {
+                placed.store(0, Relaxed);
+            }
+        }
 
         let (next, effect) = self.step(ctl, slot, slow_sample, tick, primary, mask, params);
+        self.commit(ctl, next, effect, primary);
+    }
+
+    /// Stores the control word `next` that follows `ctl`, with the change
+    /// to the statistics that goes with it.
+    fn commit(&self, ctl: Ctl, next: Ctl, effect: Effect, primary: usize) {
         // Losing the race to another thread's step is fine: that step was
         // computed from the same statistics, and this one changes nothing.
         if next != ctl
@@ -504,6 +600,10 @@ impl Stream {
                 .compare_exchange(ctl.pack(), next.pack(), Relaxed, Relaxed)
                 .is_ok()
         {
+            if next.phase != ctl.phase {
+                // The count of placements belongs to the phase that ended.
+                self.channels.0[ctl.alt].placed.store(0, Relaxed);
+            }
             match effect {
                 Effect::None => {}
                 Effect::Restart(alt) => self.channels.0[alt].reset(),

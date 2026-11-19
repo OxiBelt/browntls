@@ -176,10 +176,9 @@ pub(super) fn keys(input: &mut Input<'_>) {
             assert_eq!(sk.public_key().as_bytes().len(), kem.public_key_len());
             let bytes = private_bytes(&sk);
             if let Some(oracle) = oracle {
-                let (mut their_sk, their_pk) = oracle.derive(ikm);
-                if kem == Kem::DhX25519HkdfSha256 {
-                    clamp_x25519(&mut their_sk);
-                }
+                // `hpke` 0.15 serializes X25519 private keys clamped, as
+                // RFC 9180 §7.1.2 does, so the encodings compare directly.
+                let (their_sk, their_pk) = oracle.derive(ikm);
                 assert_eq!(sk.public_key().as_bytes(), their_pk, "{kem:?} pk");
                 assert_eq!(bytes, their_sk, "{kem:?} sk");
             }

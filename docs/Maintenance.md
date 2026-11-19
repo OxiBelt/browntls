@@ -3,7 +3,7 @@
 ## Current baseline
 
 browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
-`browntls-tokio`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
+`browntls-tokio`, `browntls-ktls`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
 [security policy](../SECURITY.md) owns disclosure and support.
@@ -99,16 +99,22 @@ but adds no dependency. Either build of `tokio` pulls in
 `pin-project-lite` only (MIT, and Apache-2.0 OR MIT); both are pure Rust, and `tokio`
 contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
-`browntls-tokio` alone, with no `cargo vet` audit yet. The test-only
-features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
+`browntls-tokio`, and of `browntls-ktls` with its `tokio` feature (below),
+with no `cargo vet` audit yet. The test-only
+features (`rt`, `rt-multi-thread`, `macros`, `net`, `io-util`, `time`,
+`test-util`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
 are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
 `browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which
 adds `mio` (MIT) and `socket2` (MIT OR Apache-2.0), both on `libc`, as runtime dependencies of
-that feature alone, also without a `cargo vet` audit yet. The crate's manifest carries the
+that feature alone, also without a `cargo vet` audit yet. `browntls-ktls`
+itself depends on `libc` (MIT OR Apache-2.0, Linux only, without default
+features) for its kernel TLS system calls (`src/sys.rs`), a runtime
+dependency whatever its features, also without a `cargo vet` audit yet.
+Each of the two crates' manifests carries the
 metadata a crates.io release needs (description, documentation, readme,
-keywords, categories, an `include` list and the licence file), but it stays
-`publish = false` with the rest of the workspace until the release
+keywords, categories, an `include` list and the licence file), but they
+stay `publish = false` with the rest of the workspace until the release
 prerequisites below are met.
 
 ### Fuzzing

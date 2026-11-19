@@ -49,6 +49,21 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Tokio
+//!
+//! With the `tokio` feature, `AsyncRoutedStream::from_client` and
+//! `AsyncRoutedStream::from_server` place a `browntls-tokio` stream over a
+//! Tokio TCP socket by the same rules. One placed with the kernel is
+//! handed over as by `AsyncKtlsStream`; one that stays in userspace is
+//! kept as it is, in an `AsyncUserspaceStream` that reports what its
+//! writes cost. A write is timed one poll at a time, in processor time of
+//! the thread that runs the poll: the time between two polls is not
+//! counted, and a poll that found the socket without room for all it
+//! encrypted is reported cheaper than it is. The handshake of such a
+//! stream is done before it is placed, except in a 0-RTT phase: a server
+//! that accepted early data is placed by its cipher suite, a client that
+//! has none yet by the order alone.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -62,6 +77,12 @@ pub use browntls::crypto::native::accel::load::kernel::{Place, Records};
 use crate::meter::{Meter, records_of};
 use crate::stream::{HandoffError, KtlsStream, Offload, refused, transient, unsupported};
 use crate::sys;
+
+#[cfg(feature = "tokio")]
+mod async_stream;
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use async_stream::{AsyncOffload, AsyncRoutedStream, AsyncUserspaceStream};
 
 /// Puts kernel TLS at the head of the routing order, if the running
 /// kernel has it: from now on [`RoutedStream::new`] hands connections to

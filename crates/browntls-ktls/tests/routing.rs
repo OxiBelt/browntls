@@ -174,6 +174,9 @@ fn connections_go_where_the_routing_places_them() {
 
     // With load-aware routing the writes are timed where they happen.
     load::enable(Config::DEFAULT).unwrap();
+    // The streams whose kernel side was timed: suites of one key size
+    // share a stream, and fixing a share keeps what was measured.
+    let mut kernel_timed = Vec::new();
     for (suite, records) in &routed {
         // Kept in userspace by the routing: the kernel is not asked.
         kernel::set_fixed(*records, 100).unwrap();
@@ -188,11 +191,18 @@ fn connections_go_where_the_routing_places_them() {
         println!("{s}");
         assert_eq!((s.phase, s.shifted_percent), (Phase::Fixed, 100));
         assert!(s.alternate_cost.is_some_and(|ps| ps > 0), "{s}");
-        assert_eq!(s.primary_cost, None, "{s}");
+        assert_eq!(
+            s.primary_cost.is_some(),
+            kernel_timed.contains(records),
+            "{s}"
+        );
 
         // All with the kernel.
         kernel::set_fixed(*records, 0).unwrap();
         let ends = connection(&pki, *suite, 400, true);
+        if has_kernel_tls {
+            kernel_timed.push(*records);
+        }
         let s = kernel::status(*records).unwrap();
         println!("{s}");
         for end in ends {

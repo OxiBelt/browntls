@@ -181,14 +181,17 @@ fn takes_form(form: Form) -> io::Result<()> {
     let answer = ask(form.crypto_info()?.as_bytes())?;
     let state = match &answer {
         Ok(()) => TAKEN,
-        // No such cipher or version, or no implementation of it: the
-        // kernel will say so again. Anything else (no memory, say) may
-        // pass, and is this one connection's refusal only.
+        // What may pass is this one connection's refusal only. Anything
+        // else the kernel will say again: it has no such cipher or
+        // version, or no implementation of it (the error numbers for
+        // that have varied between kernels).
         Err(error) => match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported => {
-                REFUSED
-            }
-            _ => return answer,
+            io::ErrorKind::OutOfMemory
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ResourceBusy
+            | io::ErrorKind::TimedOut => return answer,
+            _ => REFUSED,
         },
     };
     // The first answer stays, should threads that ask at the same time
@@ -281,9 +284,9 @@ mod tests {
         bytes[2..4].copy_from_slice(&0xffffu16.to_ne_bytes());
         let error = ask(&bytes).unwrap().unwrap_err();
         assert!(
-            matches!(
+            !matches!(
                 error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                io::ErrorKind::OutOfMemory | io::ErrorKind::ResourceBusy
             ),
             "{error}"
         );

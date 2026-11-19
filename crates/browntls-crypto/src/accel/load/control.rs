@@ -477,7 +477,9 @@ impl Stream {
         {
             let probing = ctl.phase == Phase::Probing;
             let a = &self.channels.0[ctl.alt];
-            let placed = a.placed.load(Relaxed);
+            // Added in one step: a count read before a sample of the
+            // primary cleared it must not be stored back after.
+            let placed = a.placed.fetch_add(1, Relaxed);
             if placed >= PLACE_PATIENCE {
                 let p = &self.channels.0[primary];
                 // The level a probe found is accepted; after a shift the
@@ -487,7 +489,6 @@ impl Stream {
                 self.commit(ctl, next, effect, primary);
                 return primary;
             }
-            a.placed.store(placed + 1, Relaxed);
             if probing && placed < PLACED_PROBES && a.samples.load(Relaxed) < PROBES {
                 return ctl.alt;
             }

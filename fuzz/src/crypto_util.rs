@@ -33,10 +33,19 @@
 //!   changes nothing; after every operation each stream's status agrees with
 //!   `lanes`, `status_all`, the acceleration status and the configuration.
 //!   Routing is disabled before `run` returns.
+//! - `accel::load::kernel`: kernel TLS is put at the head of the routing
+//!   order and taken out again, routing is enabled and disabled under it,
+//!   connections are placed, writes of fuzzed lengths and costs are
+//!   reported for either place, and shares are fixed and cleared. Where a
+//!   connection goes, which writes are timed and which calls fail must be
+//!   what the documentation says for the state at that moment, and every
+//!   report must agree with the others and with the backends' streams.
+//!   Kernel TLS is out of the order before `run` returns.
 
 mod cpu_accel;
 mod ct_zeroize_rand;
 mod der;
+mod load_kernel;
 
 use browntls_crypto::accel::{self, Algorithm, Policy};
 use browntls_crypto::der::Reader;
@@ -47,6 +56,10 @@ use self::cpu_accel::{
 };
 use self::ct_zeroize_rand::{ct_op, rand_op, zeroize_op};
 use self::der::{der_write, parse_sequence, walk};
+use self::load_kernel::{
+    KERNEL_ACTIVATE, KERNEL_CLEAR_FIXED, KERNEL_DEACTIVATE, KERNEL_DISABLE, KERNEL_ENABLE,
+    KERNEL_PLACE, KERNEL_SET_FIXED, KERNEL_WRITE, deactivate_kernel, kernel_op,
+};
 use crate::input::{Input, put_field, put_short_field};
 
 /// Operations per input.
@@ -65,7 +78,8 @@ const OP_RAND: u8 = 5;
 const OP_CPU: u8 = 6;
 const OP_ACCEL: u8 = 7;
 const OP_ERROR: u8 = 8;
-const OPS: usize = 9;
+const OP_KERNEL: u8 = 9;
+const OPS: usize = 10;
 
 /// The `crypto_util` fuzz target.
 pub fn run(data: &[u8]) {
@@ -88,11 +102,13 @@ pub fn run(data: &[u8]) {
             OP_RAND => rand_op(&mut input),
             OP_CPU => cpu_op(&mut input),
             OP_ACCEL => accel_op(&mut input),
+            OP_KERNEL => kernel_op(&mut input),
             _ => error_op(),
         }
     }
     accel::set_policy_all(Policy::PREFERRED).expect("PREFERRED is always satisfiable");
     disable_load();
+    deactivate_kernel();
 }
 
 /// Starting inputs for `crypto_util`.
@@ -341,6 +357,85 @@ pub fn seeds() -> Vec<Vec<u8>> {
                 call(alg, 0, 0, 50, LOAD_SET_FIXED),
                 call(alg, 0, 0, 0, LOAD_CLEAR_FIXED),
                 call(alg, 0, 0, 0, LOAD_DISABLE),
+            ]
+            .concat(),
+        );
+    }
+    // accel::load::kernel. One call on the stream of `records`; a write
+    // of `bytes` bytes at `place` (1 for the kernel) of which `sent` were
+    // taken in `nanos` nanoseconds.
+    let kernel = |records: u8, call: u8| vec![OP_KERNEL, records, call];
+    let write = |records: u8, place: u8, bytes: u16, sent: u16, nanos: u64| {
+        let mut op = kernel(records, KERNEL_WRITE);
+        op.push(place);
+        op.extend_from_slice(&bytes.to_be_bytes());
+        op.extend_from_slice(&sent.to_be_bytes());
+        op.extend_from_slice(&nanos.to_be_bytes());
+        op
+    };
+    let fixed =
+        |records: u8, percent: u8| [kernel(records, KERNEL_SET_FIXED), vec![percent]].concat();
+    for records in 0..3u8 {
+        // Each seed stays within `MAX_OPS` operations.
+        seeds.push(
+            [
+                // Not in the order: nothing is placed with the kernel,
+                // timed or fixed, with routing off and on.
+                kernel(records, KERNEL_PLACE),
+                write(records, 1, 16384, 16384, 5000),
+                fixed(records, 50),
+                kernel(records, KERNEL_CLEAR_FIXED),
+                kernel(records, KERNEL_ENABLE),
+                kernel(records, KERNEL_PLACE),
+                write(records, 0, 16384, 16384, 5000),
+                fixed(records, 50),
+                kernel(records, KERNEL_DISABLE),
+                // In the order without routing: the order alone decides.
+                kernel(records, KERNEL_ACTIVATE),
+                kernel(records, KERNEL_ACTIVATE),
+                kernel(records, KERNEL_PLACE),
+                write(records, 1, 16384, 16384, 5000),
+                fixed(records, 50),
+                // With routing: timed writes in both places, short and
+                // cut-short ones, and costs at the ends of the range.
+                kernel(records, KERNEL_ENABLE),
+                kernel(records, KERNEL_PLACE),
+                write(records, 1, 16384, 16384, 5000),
+                write(records, 0, 16384, 16384, 9000),
+                write(records, 1, 4095, 4095, 5000),
+                write(records, 1, 16384, 100, 5000),
+                write(records, 1, 65535, 65535, u64::MAX),
+                write(records, 1, 4096, 4096, 0),
+                kernel(records, KERNEL_DEACTIVATE),
+                kernel(records, KERNEL_PLACE),
+            ]
+            .concat(),
+        );
+        seeds.push(
+            [
+                // Every share, failures, and writes under a share.
+                kernel(records, KERNEL_ACTIVATE),
+                kernel(records, KERNEL_ENABLE),
+                fixed(records, 100),
+                kernel(records, KERNEL_PLACE),
+                write(records, 0, 16384, 16384, 9000),
+                write(records, 1, 16384, 16384, 5000),
+                fixed(records, 0),
+                kernel(records, KERNEL_PLACE),
+                fixed(records, 50),
+                kernel(records, KERNEL_PLACE),
+                fixed(records, 101),
+                kernel(records, KERNEL_ENABLE),
+                kernel(records, KERNEL_CLEAR_FIXED),
+                kernel(records, KERNEL_CLEAR_FIXED),
+                kernel(records, KERNEL_PLACE),
+                // Disabling forgets the share and the statistics; the
+                // order stays.
+                fixed(records, 100),
+                kernel(records, KERNEL_DISABLE),
+                kernel(records, KERNEL_PLACE),
+                kernel(records, KERNEL_ENABLE),
+                write(records, 1, 16384, 16384, 5000),
             ]
             .concat(),
         );

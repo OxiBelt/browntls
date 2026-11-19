@@ -2054,10 +2054,15 @@ a connection is placed as a whole and stays where it was put:
   that waited for one placement in eight would often run out first (it is
   given up after 64 timed writes of the primary), since connections can be
   rare next to writes.
-- A probe is also given up after 4096 new connections. Samples alone cannot
-  be counted on to end it: the connections kept in userspace may make no
-  write long enough to time, and so may the kernel's once those it had are
-  done.
+- Placements end what samples do not. A probe is given up after 4096 new
+  connections, whatever was timed by then, and a shift ends after 4096 new
+  connections without a timed write of the kernel's (the baseline stays,
+  so congestion is looked for again after the pause). The connections kept
+  in userspace may make no write long enough to time, and so may the
+  kernel's once those it had are done; without these bounds such a process
+  would keep its new connections in userspace for good. A process with
+  many connections and few long writes is in effect not routed by load:
+  its connections go to the kernel.
 - A shifted share is a share of the new connections. Connections the kernel
   has stay with it, and those in userspace stay there, so a shift acts as
   fast as connections come and go.

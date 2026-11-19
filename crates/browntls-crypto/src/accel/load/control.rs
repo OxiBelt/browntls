@@ -52,7 +52,8 @@ const PROBE_PATIENCE: u32 = 64;
 /// For work that is placed as a whole: the placements of a probe that all
 /// go to the alternate while it has no [`PROBES`] samples yet.
 const PLACED_PROBES: u32 = 64;
-/// Placements to wait for a probe before giving up on an alternate.
+/// Placements after which a probe is given up, and placements without a
+/// sample of the primary after which a shift is.
 const PLACE_PATIENCE: u32 = 4096;
 /// Change of the shifted share per controller step, in 256ths.
 const STEP: u32 = 16;
@@ -255,7 +256,8 @@ struct Channel {
     /// sample.
     slow: AtomicU64,
     samples: AtomicU32,
-    /// Work placed since this alternate's probe began ([`Stream::place`]).
+    /// Work placed ([`Stream::place`]) since this alternate's probe began
+    /// or, while work is shifted to it, since the primary's last sample.
     placed: AtomicU32,
 }
 
@@ -460,25 +462,33 @@ impl Stream {
     /// has its [`PROBES`] samples, the first [`PLACED_PROBES`] placements
     /// of a probe all go to it.
     ///
-    /// Nor can a probe count on samples to end it: what was placed may
-    /// make no call long enough to time, on the alternate and, once the
-    /// work the primary had is done, on the primary. After
-    /// [`PLACE_PATIENCE`] placements the probe is given up as it is after
-    /// [`PROBE_PATIENCE`] samples.
+    /// Nor can samples be counted on to end a probe or a shift: what was
+    /// placed may make no call long enough to time, on the alternate and,
+    /// once the work the primary had is done, on the primary. A probe is
+    /// given up after [`PLACE_PATIENCE`] placements, whatever was timed
+    /// by then, as it is after [`PROBE_PATIENCE`] samples of the primary;
+    /// a shift ends after as many placements without a sample of the
+    /// primary, which nothing would tell to have recovered.
     pub(crate) fn place(&self, word: u64, primary: usize, mask: u8) -> usize {
         let ctl = Ctl::unpack(self.ctl.load(Relaxed));
-        if ctl.phase == Phase::Probing && ctl.primary == primary && mask & (1 << ctl.alt) != 0 {
+        if matches!(ctl.phase, Phase::Probing | Phase::Shifting)
+            && ctl.primary == primary
+            && mask & (1 << ctl.alt) != 0
+        {
+            let probing = ctl.phase == Phase::Probing;
             let a = &self.channels.0[ctl.alt];
             let placed = a.placed.load(Relaxed);
             if placed >= PLACE_PATIENCE {
                 let p = &self.channels.0[primary];
-                let level = (p.fast.load(Relaxed), p.slow.load(Relaxed));
-                let (next, effect) = Self::advance(ctl, mask, Some(level));
+                // The level a probe found is accepted; after a shift the
+                // baseline stays, as when a shift stops helping.
+                let level = probing.then(|| (p.fast.load(Relaxed), p.slow.load(Relaxed)));
+                let (next, effect) = Self::advance(ctl, mask, level);
                 self.commit(ctl, next, effect, primary);
                 return primary;
             }
             a.placed.store(placed + 1, Relaxed);
-            if placed < PLACED_PROBES && a.samples.load(Relaxed) < PROBES {
+            if probing && placed < PLACED_PROBES && a.samples.load(Relaxed) < PROBES {
                 return ctl.alt;
             }
         }
@@ -566,6 +576,13 @@ impl Stream {
             average(&ch.slow, seen, level, weight);
         }
         ch.samples.store(seen.saturating_add(1), Relaxed);
+        if own && ctl.phase == Phase::Shifting {
+            // The primary is heard from: see `Stream::place`.
+            let placed = &self.channels.0[ctl.alt].placed;
+            if placed.load(Relaxed) != 0 {
+                placed.store(0, Relaxed);
+            }
+        }
 
         let (next, effect) = self.step(ctl, slot, slow_sample, tick, primary, mask, params);
         self.commit(ctl, next, effect, primary);
@@ -582,6 +599,10 @@ impl Stream {
                 .compare_exchange(ctl.pack(), next.pack(), Relaxed, Relaxed)
                 .is_ok()
         {
+            if next.phase != ctl.phase {
+                // The count of placements belongs to the phase that ended.
+                self.channels.0[ctl.alt].placed.store(0, Relaxed);
+            }
             match effect {
                 Effect::None => {}
                 Effect::Restart(alt) => self.channels.0[alt].reset(),

@@ -624,8 +624,8 @@ fn placed_work_follows_the_share_and_is_timed_where_it_is() {
     }
     let c = ctl(&s);
     assert_eq!((c.phase, c.share), (Phase::Shifting, MAX_AUTO_SHARE));
-    let expected = 100 * MAX_AUTO_SHARE as usize;
-    assert!(placed(&s, 25_600).abs_diff(expected) < 300);
+    let expected = 10 * MAX_AUTO_SHARE as usize;
+    assert!(placed(&s, 2560).abs_diff(expected) < 100);
     assert!(timed(&s, LEN, 1).abs_diff(4000) < 300);
     for _ in 0..400 {
         observe(0, 100);
@@ -708,4 +708,57 @@ fn a_probe_of_placed_work_ends_without_samples() {
         assert!(s.snapshot().channels[0].1 > accepted);
         assert!((0..1000).all(|_| s.place(calls.next(), 0, ONE) == 0));
     }
+}
+
+#[test]
+fn a_shift_of_placed_work_ends_when_the_primary_falls_silent() {
+    const ONE: u8 = 0b10;
+    const LEN: usize = 16384;
+    let s = Stream::bulk("test");
+    let mut calls = Calls(0);
+    let mut placed = |s: &Stream, n: u32| {
+        (0..n)
+            .filter(|_| s.place(calls.next(), 0, ONE) == 1)
+            .count()
+    };
+    let observe = |slot, ps: u64| s.observe(slot, LEN, ps * LEN as u64 / 1000, 0, ONE, PARAMS);
+    for _ in 0..500 {
+        observe(0, 100);
+    }
+    while ctl(&s).phase == Phase::Steady {
+        observe(0, 200);
+    }
+    // The probe's own placements do not count against the shift.
+    assert!(placed(&s, 1000).abs_diff(64 + 117) < 40);
+    for _ in 0..PROBES {
+        observe(1, 120);
+    }
+    for _ in 0..400 {
+        observe(0, 200);
+    }
+    let shifted = ctl(&s);
+    assert_eq!(
+        (shifted.phase, shifted.share),
+        (Phase::Shifting, MAX_AUTO_SHARE)
+    );
+    let baseline = s.snapshot().channels[0].1;
+
+    // While the primary is heard from now and then, the shift lasts
+    // however much is placed.
+    for _ in 0..3 {
+        let kept = placed(&s, PLACE_PATIENCE - 1);
+        let expected = ((PLACE_PATIENCE - 1) * MAX_AUTO_SHARE / FULL_SHARE) as usize;
+        assert!(kept.abs_diff(expected) < 150, "{kept}, not {expected}");
+        observe(0, 200);
+        assert_eq!(ctl(&s), shifted);
+    }
+    // Then nothing that is placed makes a call long enough to time, and
+    // the primary's own work is done: the shift ends by the placements,
+    // with the baseline as it was.
+    placed(&s, PLACE_PATIENCE);
+    assert_eq!(ctl(&s), shifted);
+    assert_eq!(placed(&s, 1000), 0);
+    let c = ctl(&s);
+    assert_eq!((c.phase, c.share), (Phase::Steady, 0));
+    assert_eq!(s.snapshot().channels[0].1, baseline);
 }

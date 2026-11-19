@@ -53,10 +53,14 @@
 //! * Userspace is measured by the connections that are there: those kept
 //!   back for it, and those the kernel refused. While the kernel is probed
 //!   and no such connection makes a write long enough to time, the probe
-//!   ends without a comparison, after 64 timed writes to the kernel or
-//!   after 4096 new connections if the kernel's writes stop as well, and
-//!   the kernel's present cost is accepted, as for a backend nobody holds
-//!   a key for.
+//!   ends without a comparison and the kernel's present cost is accepted,
+//!   as for a backend nobody holds a key for.
+//! * Placements end what timed writes do not. A probe is given up after
+//!   64 timed writes to the kernel or 4096 new connections, whichever
+//!   comes first and whatever was measured by then, and a shift ends
+//!   after 4096 new connections without a timed write to the kernel: a
+//!   process whose connections make no write long enough to time is not
+//!   routed by load, and its connections go to the kernel.
 //! * Only writes are timed. A connection is placed for both directions by
 //!   what sending costs.
 //! * Writes shorter than 4096 bytes are too short to time, as for the

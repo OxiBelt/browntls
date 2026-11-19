@@ -425,6 +425,55 @@ fn handoff_waits_for_everything_in_flight() {
     );
 }
 
+/// Secret extraction refuses what is still in flight after our own
+/// `close_notify` too, although the handover reports `Closed` first, and
+/// succeeds once it is drained.
+#[test]
+fn extraction_after_close_notify_still_waits_for_data_in_flight() {
+    use std::io::Write;
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    for suite in kernel_suites() {
+        // Queued records, our close_notify among them.
+        let (mut client, mut server) = pair(suite, &chain);
+        client.writer().write_all(b"queued").unwrap();
+        client.send_close_notify();
+        assert_eq!(
+            client.kernel_handoff_blocker(),
+            Some(KernelHandoffBlocker::Closed)
+        );
+        let err = client.dangerous_extract_secrets().unwrap_err();
+        assert!(
+            matches!(err, Error::General(ref m) if m.contains("written")),
+            "{suite:?}: {err:?}"
+        );
+
+        // Received data not read yet.
+        let (mut client, mut server2) = pair(suite, &chain);
+        client.writer().write_all(b"unread").unwrap();
+        transfer(&mut client, &mut server2);
+        server2.process_new_packets().unwrap();
+        server2.send_close_notify();
+        assert_eq!(
+            server2.kernel_handoff_blocker(),
+            Some(KernelHandoffBlocker::Closed)
+        );
+        let err = server2.dangerous_extract_secrets().unwrap_err();
+        assert!(
+            matches!(err, Error::General(ref m) if m.contains("read")),
+            "{suite:?}: {err:?}"
+        );
+
+        // Drained: the close_notify written, nothing left to read.
+        server.send_close_notify();
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut wire).unwrap();
+        }
+        server.dangerous_extract_secrets().unwrap();
+    }
+}
+
 /// The KeyUpdate message `update_requested` (1) or not (0).
 fn key_update(request: u8) -> Vec<u8> {
     vec![24, 0, 0, 1, request]

@@ -37,6 +37,16 @@ const RECORDS_PER_WRITE: usize = 64;
 /// `ContentType::ApplicationData`.
 const APPLICATION_DATA: u8 = 23;
 
+/// The first Linux release that can be trusted with
+/// `TLS_RX_EXPECT_NO_PAD`. The option makes the kernel decrypt a TLS 1.3
+/// record into the reader's buffer and, when the record turns out to be
+/// padded or not application data, a second time into a buffer of its own
+/// that it copies out. Before this release it does not take back the
+/// reader's position the first attempt advanced, so the copy lands behind
+/// the first attempt's output and the application reads bytes the peer
+/// never sent as data.
+const NO_PAD_SINCE: (u32, u32) = (7, 2);
+
 pub(crate) struct Engine<Data> {
     conn: KernelConnection<Data>,
     /// Plaintext received before the handover, read first.
@@ -55,6 +65,10 @@ pub(crate) struct Engine<Data> {
     /// taken. `None` when the kernel's counters could not be read, or when
     /// the socket was given bytes the engine did not see.
     ledger: Option<Ledger>,
+    /// The kernel was told to expect unpadded records
+    /// (`TLS_RX_EXPECT_NO_PAD`): it decrypts into the reader's buffer
+    /// before it knows what a record holds.
+    rx_no_pad: bool,
 }
 
 impl<Data: SideData> Engine<Data> {
@@ -76,6 +90,7 @@ impl<Data: SideData> Engine<Data> {
             backlog: VecDeque::new(),
             failed: None,
             ledger: None,
+            rx_no_pad: false,
         };
         engine.install_handover_keys(fd, secrets)?;
         // The keys are in the kernel: an output a full non-blocking socket
@@ -153,6 +168,46 @@ impl<Data: SideData> Engine<Data> {
                 io::ErrorKind::Unsupported,
                 "the stream has no count of what the kernel was given to send",
             )),
+        }
+    }
+
+    /// See [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
+    pub(crate) fn set_rx_expect_no_pad(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        expect: bool,
+    ) -> io::Result<()> {
+        if !expect && !self.rx_no_pad {
+            // Never set here: nothing to take back, whatever the kernel
+            // and the protocol version. (An option set on the descriptor
+            // behind the engine's back is not the engine's to know.)
+            return Ok(());
+        }
+        self.tls13_only()?;
+        if expect {
+            no_pad_is_safe(&sys::kernel_release()?)?;
+        }
+        sys::set_rx_expect_no_pad(fd, expect).map_err(option_error)?;
+        self.rx_no_pad = expect;
+        Ok(())
+    }
+
+    /// See [`KtlsStream::rx_expect_no_pad`](crate::KtlsStream::rx_expect_no_pad).
+    pub(crate) fn rx_expect_no_pad(&self, fd: BorrowedFd<'_>) -> io::Result<bool> {
+        self.tls13_only()?;
+        sys::rx_expect_no_pad(fd).map_err(option_error)
+    }
+
+    /// Padding exists in TLS 1.3 records only; the kernel refuses the
+    /// option for TLS 1.2 without saying why.
+    fn tls13_only(&self) -> io::Result<()> {
+        if self.conn.protocol_version() == ProtocolVersion::TLSv1_3 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "TLS 1.2 records have no padding: the kernel needs no promise about it",
+            ))
         }
     }
 
@@ -324,7 +379,18 @@ impl<Data: SideData> Engine<Data> {
             } else {
                 buf
             };
-            let received = match sys::recv(fd, into, false) {
+            let result = sys::recv(fd, into, false);
+            if self.rx_no_pad && continuing.is_none() {
+                // The kernel may have decrypted one more record into `buf`
+                // than it reports: a control record behind the data, a
+                // padded record's padding, or a record that did not
+                // authenticate. None of that stays with the caller.
+                // Before `WouldBlock` too: a padded record without content
+                // is decrypted there and reports nothing.
+                let kept = result.as_ref().map_or(0, |received| received.len);
+                wipe_unreported(buf, kept);
+            }
+            let received = match result {
                 Ok(received) => received,
                 Err(err) if err.raw_os_error() == Some(libc::EKEYEXPIRED) => {
                     // Every new receive key was installed before this read,
@@ -445,6 +511,146 @@ fn install_keys(
     sys::set_crypto_info(fd, receive, info.as_bytes())
 }
 
+/// The error of a kernel TLS option the running kernel does not have.
+pub(crate) fn option_error(err: io::Error) -> io::Error {
+    if err.raw_os_error() == Some(libc::ENOPROTOOPT) {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the running kernel does not have this kernel TLS option",
+        )
+    } else {
+        err
+    }
+}
+
+/// Whether a kernel of this release (as `uname` gives it) can be trusted
+/// with `TLS_RX_EXPECT_NO_PAD`: see [`NO_PAD_SINCE`]. A release that
+/// cannot be read is not trusted, and neither is a release candidate of
+/// the first trusted version: the correction came with 7.2-rc7.
+fn no_pad_is_safe(release: &[u8]) -> io::Result<()> {
+    let trusted = release_version(release).is_some_and(|version| {
+        version > NO_PAD_SINCE || (version == NO_PAD_SINCE && !is_release_candidate(release))
+    });
+    if trusted {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "before Linux 7.2 the kernel misplaces a padded record in the reader's buffer: \
+             unpadded records are not promised to it",
+        ))
+    }
+}
+
+/// The major and minor number of a kernel release such as
+/// `7.2.0-12-generic` or `7.2-rc1`.
+fn release_version(release: &[u8]) -> Option<(u32, u32)> {
+    let digits = |bytes: &[u8]| bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    let major = digits(release);
+    let rest = release.get(major..)?.strip_prefix(b".")?;
+    let number = |bytes: &[u8]| std::str::from_utf8(bytes).ok()?.parse().ok();
+    Some((
+        number(release.get(..major)?)?,
+        number(rest.get(..digits(rest))?)?,
+    ))
+}
+
+/// Whether a kernel release names a release candidate: `rc` and a digit,
+/// not inside a word (`7.2.0-rc3`, `7.2.0-070200rc3-generic`; not
+/// `7.2.1-arch1-1`).
+fn is_release_candidate(release: &[u8]) -> bool {
+    release.windows(3).enumerate().any(|(at, window)| {
+        window.starts_with(b"rc")
+            && window[2].is_ascii_digit()
+            && !at
+                .checked_sub(1)
+                .and_then(|before| release.get(before))
+                .is_some_and(u8::is_ascii_alphabetic)
+    })
+}
+
+/// Zeroes what the kernel may have written into `buf` behind the `kept`
+/// bytes it reported: at most one record's plaintext.
+fn wipe_unreported(buf: &mut [u8], kept: usize) {
+    let end = buf.len().min(kept.saturating_add(MAX_PAYLOAD + 256));
+    if let Some(unreported) = buf.get_mut(kept..end) {
+        unreported.fill(0);
+    }
+}
+
 pub(crate) fn invalid_data(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_releases_are_told_apart() {
+        for (release, version) in [
+            (&b"7.2.0-12-generic"[..], Some((7, 2))),
+            (b"7.2", Some((7, 2))),
+            (b"7.2-rc1", Some((7, 2))),
+            (b"7.10.3", Some((7, 10))),
+            (b"10.0.0", Some((10, 0))),
+            (b"6.18.44-fc-v595", Some((6, 18))),
+            (b"7", None),
+            (b"7.", None),
+            (b".2", None),
+            (b"7.x", None),
+            (b"", None),
+            (b"seven.two", None),
+            (b"99999999999.1", None),
+        ] {
+            assert_eq!(release_version(release), version, "{release:?}");
+        }
+        for release in [
+            &b"7.2.0"[..],
+            b"7.2.1-arch1-1",
+            b"7.2.0-1-aarch64",
+            b"7.2.4-rc",
+            b"7.3.5-070305-generic",
+            b"7.3.0-rc1",
+            b"8.0.0",
+            b"10.1",
+        ] {
+            assert!(no_pad_is_safe(release).is_ok(), "{release:?}");
+        }
+        for release in [
+            &b"7.2.0-rc6"[..],
+            b"7.2.0-rc7",
+            b"7.2-rc1",
+            b"7.2.0-070200rc3-generic",
+            b"7.2.0rc2",
+            b"7.1.9",
+            b"7.0.0-43-generic",
+            b"6.18.1",
+            b"5.19.0",
+            b"junk",
+            b"",
+        ] {
+            let err = no_pad_is_safe(release).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{release:?}");
+        }
+    }
+
+    #[test]
+    fn only_what_the_kernel_may_have_written_is_wiped() {
+        let mut buf = vec![7u8; 40_000];
+        wipe_unreported(&mut buf, 100);
+        let end = 100 + MAX_PAYLOAD + 256;
+        assert!(buf[..100].iter().all(|b| *b == 7));
+        assert!(buf[100..end].iter().all(|b| *b == 0));
+        assert!(buf[end..].iter().all(|b| *b == 7));
+
+        let mut buf = [7u8; 300];
+        wipe_unreported(&mut buf, 0);
+        assert_eq!(buf, [0; 300]);
+        let mut buf = [7u8; 300];
+        wipe_unreported(&mut buf, 300);
+        assert_eq!(buf, [7; 300]);
+        wipe_unreported(&mut buf, usize::MAX);
+        assert_eq!(buf, [7; 300]);
+    }
 }

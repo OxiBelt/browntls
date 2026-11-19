@@ -11,7 +11,7 @@ use browntls::{
     ClientConnection, ConnectionCommon, Error, ExtractedSecrets, ServerConnection, SideData,
 };
 
-use crate::engine::{Engine, invalid_data};
+use crate::engine::{Engine, invalid_data, option_error};
 use crate::sys;
 
 mod sealed {
@@ -297,6 +297,80 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     pub fn unsent(&self) -> io::Result<u64> {
         let backlog = self.engine.backlog(self.socket.as_fd())?;
         Ok(backlog.unsent)
+    }
+
+    /// Tells the kernel whether to expect the peer's TLS 1.3 records to be
+    /// unpadded (`TLS_RX_EXPECT_NO_PAD`; off after the handover). Setting
+    /// it takes Linux 7.2 or later.
+    ///
+    /// A TLS 1.3 record may end in padding, which hides its content type
+    /// and the length of its data until it is decrypted, so the kernel
+    /// decrypts into a buffer of its own and copies the data out. With
+    /// this set it decrypts straight into the buffer of a read that has
+    /// room for the whole record. A record that turns out to be padded, or
+    /// not application data, is decrypted a second time the usual way, so
+    /// the peer decides how often the work is done twice: set it only for
+    /// peers trusted not to exploit that. browntls and the Linux kernel
+    /// never pad the records they send. The kernel counts the second
+    /// decryptions (`TlsDecryptRetry` and `TlsRxNoPadViolation` in
+    /// `/proc/net/tls_stat`).
+    ///
+    /// The kernel has had the option since Linux 6.0, but before 7.2 it
+    /// copies the second decryption to the wrong place in the reader's
+    /// buffer, so that a peer that pads corrupts what the application
+    /// reads. The stream therefore refuses to set it on a kernel whose
+    /// release (as `uname` gives it) is older, including an older kernel
+    /// that was given the correction. The release is all it can go by: a
+    /// kernel built from a 7.2 pre-release source under a release that
+    /// does not say so is taken for 7.2.
+    ///
+    /// While it is set, a read zeroes its buffer for up to a record's
+    /// length behind the bytes it returns, and from the buffer's start
+    /// when the kernel was asked and the read returns an error
+    /// (`WouldBlock` included): the kernel's first attempt may have left
+    /// plaintext there that is not application data.
+    ///
+    /// Setting it fails with [`io::ErrorKind::Unsupported`] on a kernel
+    /// before 7.2 (a release candidate of 7.2 counts as one: the
+    /// correction came with the last of them), and for TLS 1.2, whose
+    /// records have no padding and are decrypted into the reader's buffer
+    /// as they are. Taking it back where this stream did not set it is no
+    /// error and does nothing: the stream knows only of what it set, not
+    /// of an option set on the descriptor behind its back, after which
+    /// its reads zero nothing.
+    pub fn set_rx_expect_no_pad(&mut self, expect: bool) -> io::Result<()> {
+        self.engine
+            .set_rx_expect_no_pad(self.socket.as_fd(), expect)
+    }
+
+    /// Whether the kernel expects unpadded records
+    /// ([`Self::set_rx_expect_no_pad`]). The error is
+    /// [`io::ErrorKind::Unsupported`] for TLS 1.2 and when the kernel
+    /// lacks the option (it came with Linux 6.0).
+    pub fn rx_expect_no_pad(&self) -> io::Result<bool> {
+        self.engine.rx_expect_no_pad(self.socket.as_fd())
+    }
+
+    /// Lets a network device that encrypts the records itself (kernel TLS
+    /// device offload) send the pages of a file given to `sendfile`
+    /// without the kernel copying them first (`TLS_TX_ZEROCOPY_RO`, Linux
+    /// 5.19; off after the handover).
+    ///
+    /// The file must then not change until the peer has acknowledged its
+    /// bytes: a retransmission would carry the changed bytes, and the
+    /// peer, finding a record that does not authenticate, ends the
+    /// connection. Where the kernel encrypts in software (no such device)
+    /// the option is accepted and changes nothing: the ciphertext goes to
+    /// pages of the kernel's own either way. The error is
+    /// [`io::ErrorKind::Unsupported`] when the kernel lacks the option.
+    pub fn set_tx_zerocopy_sendfile(&mut self, enable: bool) -> io::Result<()> {
+        sys::set_tx_zerocopy_ro(self.socket.as_fd(), enable).map_err(option_error)
+    }
+
+    /// Whether `sendfile` may skip the kernel's copy
+    /// ([`Self::set_tx_zerocopy_sendfile`]).
+    pub fn tx_zerocopy_sendfile(&self) -> io::Result<bool> {
+        sys::tx_zerocopy_ro(self.socket.as_fd()).map_err(option_error)
     }
 
     /// Sends `close_notify`; nothing can be written afterwards. The socket

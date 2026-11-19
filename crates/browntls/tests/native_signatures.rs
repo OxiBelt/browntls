@@ -360,9 +360,7 @@ fn rsa_crate_signatures_verify_with_native() {
 
     for key in test_keys().iter().filter(|k| k.kind == Kind::Rsa) {
         let private = match &key.der {
-            PrivateKeyDer::Pkcs8(der) => {
-                rsa::PrivateKey::from_pkcs8_der(der.secret_der()).unwrap()
-            }
+            PrivateKeyDer::Pkcs8(der) => rsa::PrivateKey::from_pkcs8_der(der.secret_der()).unwrap(),
             PrivateKeyDer::Pkcs1(der) => {
                 use rsa::pkcs1::DecodeRsaPrivateKey;
                 rsa::PrivateKey::from_pkcs1_der(der.secret_der()).unwrap()

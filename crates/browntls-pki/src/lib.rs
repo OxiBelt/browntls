@@ -41,6 +41,7 @@ mod der;
 mod error;
 pub mod extensions;
 pub mod name;
+pub mod ocsp;
 mod path;
 pub mod pem;
 mod revocation;

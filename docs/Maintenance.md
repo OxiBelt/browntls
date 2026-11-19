@@ -101,7 +101,8 @@ contains `unsafe` code (none of it reached by browntls data parsing, which
 stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
 `browntls-tokio`, and of `browntls-ktls` with its `tokio` feature (below),
 with no `cargo vet` audit yet. The test-only
-features (`rt`, `macros`, `net`, `io-util`, `time`, adding `mio`, `socket2`,
+features (`rt`, `rt-multi-thread`, `macros`, `net`, `io-util`, `time`,
+`test-util`, adding `mio`, `socket2`,
 `bytes` and `tokio-macros`) and `tokio-rustls` with rustls's `ring` provider
 are dev-dependencies (`safe-to-run`). The optional `tokio` feature of
 `browntls-ktls` (`AsyncKtlsStream`, Linux only) enables Tokio's `net`, which

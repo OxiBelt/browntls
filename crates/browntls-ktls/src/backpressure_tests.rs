@@ -8,9 +8,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-#[path = "../tests/common/mod.rs"]
-mod common;
-
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::AsFd;
@@ -24,8 +21,8 @@ use browntls::{
     ClientConnection, ProtocolVersion, ServerConfig, ServerConnection, SupportedCipherSuite,
 };
 
+use crate::common::{Pki, kernel_tls, localhost, offloadable_suites, tcp_pair};
 use crate::{CryptoInfo, KtlsStream, sys};
-use common::{Pki, kernel_tls, localhost, offloadable_suites, tcp_pair};
 
 /// The most KeyUpdate requests the peer sends, each followed by one byte
 /// of data (which renews the server's budget of requests). A socket that

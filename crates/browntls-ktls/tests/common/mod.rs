@@ -8,14 +8,23 @@
     clippy::panic
 )]
 
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use browntls::crypto::CryptoProvider;
+use browntls::crypto::cipher::{
+    AeadKey, Iv, MessageDecrypter, MessageEncrypter, OutboundChunks, OutboundOpaqueMessage,
+    OutboundPlainMessage, Tls13AeadAlgorithm, UnsupportedOperationError,
+};
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::{ClientConfig, RootCertStore, ServerConfig, SupportedCipherSuite};
+use browntls::{
+    ClientConfig, ConnectionTrafficSecrets, ContentType, Error, RootCertStore, ServerConfig,
+    SupportedCipherSuite, Tls13CipherSuite,
+};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
@@ -57,6 +66,172 @@ pub fn kernel_tls() -> bool {
         eprintln!("skipped: no kernel TLS (sudo modprobe tls)");
     }
     loaded
+}
+
+/// Whether the running kernel is one the streams promise unpadded records
+/// to (`TLS_RX_EXPECT_NO_PAD`): Linux 7.2 or later and not a release
+/// candidate of 7.2, since older kernels misplace a padded record in the
+/// reader's buffer. On another kernel the tests of the promise are
+/// skipped, unless `BROWNTLS_KTLS_NO_PAD_REQUIRED=1` makes that a failure.
+pub fn no_pad_kernel() -> bool {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
+    let release = release.trim();
+    let mut numbers = release
+        .split(|c: char| !c.is_ascii_digit())
+        .map(str::parse::<u32>);
+    let bytes = release.as_bytes();
+    // `rc` and a digit, not inside a word such as `arch1`.
+    let candidate = bytes.windows(3).enumerate().any(|(at, window)| {
+        window.starts_with(b"rc")
+            && window[2].is_ascii_digit()
+            && !(at > 0 && bytes[at - 1].is_ascii_alphabetic())
+    });
+    let fixed = match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => {
+            (major, minor) > (7, 2) || ((major, minor) == (7, 2) && !candidate)
+        }
+        _ => false,
+    };
+    if !fixed {
+        assert!(
+            std::env::var_os("BROWNTLS_KTLS_NO_PAD_REQUIRED").is_none_or(|v| v != "1"),
+            "BROWNTLS_KTLS_NO_PAD_REQUIRED=1 but Linux {release} cannot be promised unpadded records"
+        );
+        eprintln!("Linux {release}: unpadded records cannot be promised");
+    }
+    fixed
+}
+
+/// The kernel's count `name` in `/proc/net/tls_stat` (all connections of
+/// the network namespace; it only grows).
+pub fn tls_stat(name: &str) -> u64 {
+    let stat = std::fs::read_to_string("/proc/net/tls_stat").unwrap();
+    stat.lines()
+        .find_map(|line| {
+            let (key, count) = line.split_once(char::is_whitespace)?;
+            (key == name).then(|| count.trim().parse().unwrap())
+        })
+        .unwrap()
+}
+
+/// The most padding [`padding_suite`] adds to a record.
+pub const MAX_PADDING: usize = 300;
+
+/// The one byte of application data that [`padding_suite`] sends as a
+/// record without content: its type and [`CONTENTLESS_PADDING`] zero bytes.
+pub const CONTENTLESS: u8 = 0xee;
+
+/// The padding of the record sent for [`CONTENTLESS`].
+pub const CONTENTLESS_PADDING: usize = 200;
+
+/// The TLS 1.3 `suite` with an encrypter that pads what it sends (RFC 9846
+/// §5.4): two records of three get 1 to [`MAX_PADDING`] zero bytes behind
+/// their content type, where the record has room, and a write of the one
+/// byte [`CONTENTLESS`] becomes a padded record without content. browntls
+/// itself never pads.
+pub fn padding_suite(suite: SupportedCipherSuite) -> SupportedCipherSuite {
+    let inner = tls13_suite(suite);
+    let aead_alg = Box::leak(Box::new(PaddingAead(inner.aead_alg)));
+    tls13_variant(inner, aead_alg, inner.common.confidentiality_limit)
+}
+
+/// The TLS 1.3 `suite` with keys that last for `limit` records only.
+pub fn limited_suite(suite: SupportedCipherSuite, limit: u64) -> SupportedCipherSuite {
+    let inner = tls13_suite(suite);
+    tls13_variant(inner, inner.aead_alg, limit)
+}
+
+// Without `tls12` the suite can only be a TLS 1.3 one.
+#[allow(clippy::infallible_destructuring_match)]
+fn tls13_suite(suite: SupportedCipherSuite) -> &'static Tls13CipherSuite {
+    match suite {
+        SupportedCipherSuite::Tls13(inner) => inner,
+        #[cfg(feature = "tls12")]
+        SupportedCipherSuite::Tls12(_) => panic!("not a TLS 1.3 suite"),
+    }
+}
+
+fn tls13_variant(
+    suite: &'static Tls13CipherSuite,
+    aead_alg: &'static dyn Tls13AeadAlgorithm,
+    confidentiality_limit: u64,
+) -> SupportedCipherSuite {
+    SupportedCipherSuite::Tls13(Box::leak(Box::new(Tls13CipherSuite {
+        common: browntls::CipherSuiteCommon {
+            suite: suite.common.suite,
+            hash_provider: suite.common.hash_provider,
+            confidentiality_limit,
+        },
+        hkdf_provider: suite.hkdf_provider,
+        aead_alg,
+        quic: suite.quic,
+    })))
+}
+
+struct PaddingAead(&'static dyn Tls13AeadAlgorithm);
+
+impl Tls13AeadAlgorithm for PaddingAead {
+    fn encrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageEncrypter> {
+        Box::new(Padder(self.0.encrypter(key, iv)))
+    }
+
+    fn decrypter(&self, key: AeadKey, iv: Iv) -> Box<dyn MessageDecrypter> {
+        self.0.decrypter(key, iv)
+    }
+
+    fn key_len(&self) -> usize {
+        self.0.key_len()
+    }
+
+    fn extract_keys(
+        &self,
+        key: AeadKey,
+        iv: Iv,
+    ) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError> {
+        self.0.extract_keys(key, iv)
+    }
+}
+
+struct Padder(Box<dyn MessageEncrypter>);
+
+impl MessageEncrypter for Padder {
+    fn encrypt(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        let contentless =
+            msg.typ == ContentType::ApplicationData && msg.payload.to_vec() == [CONTENTLESS];
+        let padding = match seq % 3 {
+            _ if contentless => CONTENTLESS_PADDING,
+            0 => 0,
+            _ => 1 + (seq as usize * 37) % MAX_PADDING,
+        };
+        if padding == 0 || msg.payload.len() + padding > 16384 {
+            return self.0.encrypt(msg, seq);
+        }
+        // The content, its type and all but one byte of the padding, as
+        // the content of a record of type zero: the inner encrypter adds
+        // that type as the last zero.
+        let mut inner = match contentless {
+            true => Vec::new(),
+            false => msg.payload.to_vec(),
+        };
+        inner.push(msg.typ.into());
+        inner.resize(inner.len() + padding - 1, 0);
+        self.0.encrypt(
+            OutboundPlainMessage {
+                typ: ContentType::from(0),
+                version: msg.version,
+                payload: OutboundChunks::Single(&inner),
+            },
+            seq,
+        )
+    }
+
+    fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        self.0.encrypted_payload_len(payload_len + MAX_PADDING)
+    }
 }
 
 /// A CA and a `localhost` server certificate it issued (ECDSA P-256).
@@ -231,4 +406,25 @@ pub fn read_n(r: &mut impl Read, n: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0; n];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// A file holding `contents`, open for reading. Its name is removed from
+/// the temporary directory before this returns, so nothing is left behind
+/// however the test ends.
+pub fn temp_file(contents: &[u8]) -> File {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "browntls-ktls-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    file.write_all(contents).unwrap();
+    file
 }

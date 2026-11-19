@@ -15,10 +15,10 @@ use crate::crypto::KeyExchangeAlgorithm;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, KeyBlockShape, MessageDecrypter,
     MessageEncrypter, NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage,
-    PrefixedPayload, Tls12AeadAlgorithm, Tls12RecordProtection, UnsupportedOperationError,
-    make_tls12_aad,
+    Tls12AeadAlgorithm, Tls12RecordProtection, UnsupportedOperationError, make_tls12_aad,
+    seal_record, seal_record_into,
 };
-use crate::enums::CipherSuite;
+use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::message::MAX_PLAINTEXT_LEN;
 use crate::suites::{CipherSuiteCommon, ConnectionTrafficSecrets, SupportedCipherSuite};
@@ -197,26 +197,71 @@ struct GcmEncrypter<A> {
     iv: Iv,
 }
 
+impl<A: Aead> GcmEncrypter<A> {
+    /// Seals a record body: the explicit nonce, the plaintext, the tag.
+    fn seal(
+        &self,
+        typ: ContentType,
+        version: ProtocolVersion,
+        seq: u64,
+        body: &mut [u8],
+    ) -> Result<(), Error> {
+        let nonce = Nonce::tls12_explicit(&self.iv, seq);
+        let plain_len = body
+            .len()
+            .checked_sub(GCM_EXPLICIT_NONCE_LEN + TAG_LEN)
+            .ok_or(Error::EncryptError)?;
+        let (explicit, rest) = body
+            .split_at_mut_checked(GCM_EXPLICIT_NONCE_LEN)
+            .ok_or(Error::EncryptError)?;
+        explicit.copy_from_slice(&nonce.0[GCM_FIXED_IV_LEN..]);
+        let (text, tag_out) = rest
+            .split_at_mut_checked(plain_len)
+            .ok_or(Error::EncryptError)?;
+
+        let aad = make_tls12_aad(seq, typ, version, plain_len);
+        let tag = self
+            .cipher
+            .seal_in_place(&nonce.0, &aad, text)
+            .map_err(|_| Error::EncryptError)?;
+        tag_out.copy_from_slice(&tag);
+        Ok(())
+    }
+}
+
 impl<A: Aead> MessageEncrypter for GcmEncrypter<A> {
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        let nonce = Nonce::tls12_explicit(&self.iv, seq);
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = PrefixedPayload::with_capacity(total_len);
-        payload.extend_from_slice(&nonce.0[GCM_FIXED_IV_LEN..]);
-        payload.extend_from_chunks(&msg.payload);
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record(
+            msg.typ,
+            msg.version,
+            &msg.payload,
+            GCM_EXPLICIT_NONCE_LEN,
+            body_len,
+            |body| self.seal(msg.typ, msg.version, seq, body),
+        )
+    }
 
-        let aad = make_tls12_aad(seq, msg.typ, msg.version, msg.payload.len());
-        let body = &mut payload.as_mut()[GCM_EXPLICIT_NONCE_LEN..];
-        let tag = self
-            .cipher
-            .seal_in_place(&nonce.0, &aad, body)
-            .map_err(|_| Error::EncryptError)?;
-        payload.extend_from_slice(&tag);
-        Ok(OutboundOpaqueMessage::new(msg.typ, msg.version, payload))
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record_into(
+            msg.typ,
+            msg.version,
+            &msg.payload,
+            GCM_EXPLICIT_NONCE_LEN,
+            body_len,
+            out,
+            |body| self.seal(msg.typ, msg.version, seq, body),
+        )
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -318,23 +363,58 @@ struct ChaChaEncrypter {
     iv: Iv,
 }
 
+impl ChaChaEncrypter {
+    /// Seals a record body: the plaintext, then the tag.
+    fn seal(
+        &self,
+        typ: ContentType,
+        version: ProtocolVersion,
+        seq: u64,
+        body: &mut [u8],
+    ) -> Result<(), Error> {
+        let nonce = Nonce::new(&self.iv, seq);
+        let plain_len = body.len().checked_sub(TAG_LEN).ok_or(Error::EncryptError)?;
+        let (text, tag_out) = body
+            .split_at_mut_checked(plain_len)
+            .ok_or(Error::EncryptError)?;
+        let aad = make_tls12_aad(seq, typ, version, plain_len);
+        let tag = self
+            .cipher
+            .seal_in_place(&nonce.0, &aad, text)
+            .map_err(|_| Error::EncryptError)?;
+        tag_out.copy_from_slice(&tag);
+        Ok(())
+    }
+}
+
 impl MessageEncrypter for ChaChaEncrypter {
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        let nonce = Nonce::new(&self.iv, seq);
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = PrefixedPayload::with_capacity(total_len);
-        payload.extend_from_chunks(&msg.payload);
-        let aad = make_tls12_aad(seq, msg.typ, msg.version, msg.payload.len());
-        let tag = self
-            .cipher
-            .seal_in_place(&nonce.0, &aad, payload.as_mut())
-            .map_err(|_| Error::EncryptError)?;
-        payload.extend_from_slice(&tag);
-        Ok(OutboundOpaqueMessage::new(msg.typ, msg.version, payload))
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record(msg.typ, msg.version, &msg.payload, 0, body_len, |body| {
+            self.seal(msg.typ, msg.version, seq, body)
+        })
+    }
+
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record_into(
+            msg.typ,
+            msg.version,
+            &msg.payload,
+            0,
+            body_len,
+            out,
+            |body| self.seal(msg.typ, msg.version, seq, body),
+        )
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
@@ -375,7 +455,6 @@ impl MessageDecrypter for ChaChaDecrypter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enums::{ContentType, ProtocolVersion};
     use crate::msgs::message::OutboundChunks;
 
     fn inbound(typ: ContentType, wire: &mut [u8]) -> InboundOpaqueMessage<'_> {

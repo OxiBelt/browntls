@@ -21,10 +21,15 @@
 //!   one handshake message being reassembled. Both are bounded by the
 //!   protocol, not by the amount of application data.
 //!
-//! The record layer still allocates one temporary vector per record it
-//! encrypts (the [`MessageEncrypter`](crate::crypto::cipher::MessageEncrypter)
-//! interface returns an owned record); nothing is kept once the record has
-//! been copied out.
+//! Application data and 0-RTT data records are built in place in the
+//! output buffer
+//! ([`MessageEncrypter::encrypt_into`](crate::crypto::cipher::MessageEncrypter::encrypt_into)):
+//! the plaintext is copied once, behind the record header, and sealed
+//! there. The built-in providers allocate nothing per record on that path.
+//! A third-party encrypter that does not override `encrypt_into` allocates
+//! one temporary record per call and copies it out. Handshake messages,
+//! alerts and KeyUpdates are encrypted into a temporary vector each and
+//! queued as described above.
 //!
 //! # Driving a connection
 //!
@@ -308,7 +313,8 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// straight into `outgoing`; returns the bytes written.
     ///
     /// Everything is decided and the size checked before anything changes:
-    /// on error nothing of `payload` was taken and no state was touched. A
+    /// on error nothing of `payload` was taken, and no state was touched
+    /// unless the error is `Failed`, which finishes the connection. A
     /// KeyUpdate that is due (an answer to the peer, or a refresh for the
     /// confidentiality limit, RFC 9846 §5.5) goes out first, in the same
     /// buffer; one that this write makes due follows it.
@@ -400,6 +406,11 @@ impl<Data: SideData> ConnectionCore<Data> {
             self.maybe_send_key_update()
                 .map_err(|_| EncryptError::Failed)?;
         }
+        if self.common_state.encrypt_failed {
+            // The KeyUpdate was not encrypted, but the key is the next one
+            // already: data under it would follow no KeyUpdate.
+            return Err(EncryptError::Failed);
+        }
         // Anything queued (the KeyUpdate just made) precedes the data. If it
         // does not fit after all (a provider understating its record
         // length), it stays queued and no data is taken.
@@ -412,14 +423,26 @@ impl<Data: SideData> ConnectionCore<Data> {
                 version: ProtocolVersion::TLSv1_2,
                 payload: chunk.into(),
             };
-            let record = match self.common_state.record_layer.encrypt_outgoing(plain) {
-                Ok(record) => record.encode(),
-                Err(_) => {
+            // The record is built in place in `outgoing`. Any failure has
+            // used the record's sequence number (an `outgoing` too short
+            // means the provider's `encrypted_payload_len` was wrong), so
+            // the stream cannot continue consistently. What the provider
+            // reports must be one record within `out`, or it is a failure
+            // too; and whatever a failing provider left in `out` (the
+            // plaintext, for one that copies it there first) is wiped.
+            let out = outgoing.get_mut(written..).unwrap_or_default();
+            match self
+                .common_state
+                .record_layer
+                .encrypt_outgoing_into(plain, out)
+            {
+                Ok(len) if is_one_record(out, len) => written += len,
+                _ => {
+                    crate::crypto::zeroize_slice(out);
                     self.common_state.encrypt_failed = true;
                     return Err(EncryptError::Failed);
                 }
-            };
-            written += self.copy_record(&record, &mut outgoing[written..])?;
+            }
         }
 
         if rekey_after || refresh_later {
@@ -432,7 +455,9 @@ impl<Data: SideData> ConnectionCore<Data> {
             // The data records are already sequenced and in `outgoing`: a
             // KeyUpdate that does not fit after all stays queued for
             // `EncodeTlsData` (and goes before any later write) rather than
-            // failing the call.
+            // failing the call. Nor does one that failed to encrypt: the
+            // data before it is good and reported, and the connection is
+            // finished for everything after it (`encrypt_failed`).
             written += self
                 .drain_queued_into(&mut outgoing[written..])
                 .unwrap_or(0);
@@ -446,6 +471,12 @@ impl<Data: SideData> ConnectionCore<Data> {
         let common = &self.common_state;
         if common.has_sent_close_notify() || common.sent_fatal_alert {
             return Ok(0);
+        }
+        if common.encrypt_failed {
+            // A record is missing from the stream, and after a KeyUpdate
+            // that was lost the key has moved on without the peer, who
+            // could not read the alert. It is not made, nor marked as sent.
+            return Err(EncryptError::Failed);
         }
         let required = common.sendable_tls.len()
             + HEADER_SIZE
@@ -476,23 +507,16 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
         Ok(self.common_state.sendable_tls.read(outgoing))
     }
+}
 
-    /// Copies one encrypted record into `outgoing`.
-    fn copy_record(&mut self, record: &[u8], outgoing: &mut [u8]) -> Result<usize, EncryptError> {
-        match outgoing.get_mut(..record.len()) {
-            Some(out) => {
-                out.copy_from_slice(record);
-                Ok(record.len())
-            }
-            None => {
-                // The provider's `encrypted_payload_len` was wrong and the
-                // record has used its sequence number: the stream cannot
-                // continue consistently.
-                self.common_state.encrypt_failed = true;
-                Err(EncryptError::Failed)
-            }
-        }
-    }
+/// Whether the first `len` bytes of `out` are framed as one application
+/// data record: its header, and a body of the length the header states.
+fn is_one_record(out: &[u8], len: usize) -> bool {
+    out.get(..len).is_some_and(|record| {
+        record.len() >= HEADER_SIZE
+            && record[0] == u8::from(ContentType::ApplicationData)
+            && usize::from(u16::from_be_bytes([record[3], record[4]])) + HEADER_SIZE == record.len()
+    })
 }
 
 /// What [`UnbufferedConnectionCommon::advance`] found.
@@ -777,6 +801,14 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
     /// On error nothing of `application_data` was sent. A KeyUpdate that is
     /// due (RFC 9846 §4.7.3, §5.5) is written into the same buffer, before or
     /// after the data, and counted in the size required.
+    ///
+    /// The records are built in `outgoing_tls` itself. After
+    /// [`EncryptError::Failed`] nothing the call wrote there is to be sent;
+    /// from a data record that failed, the buffer is zeroed to its end. A
+    /// KeyUpdate before the data that cannot be encrypted fails the call
+    /// like that, with no data taken. One after the data does not: the
+    /// call reports the data it wrote, which is good to send, and the
+    /// calls after it fail.
     pub fn encrypt(
         &mut self,
         application_data: &[u8],
@@ -789,7 +821,9 @@ impl<Data: SideData> WriteTraffic<'_, Data> {
 
     /// Writes a `close_notify` alert into `outgoing_tls` and returns the
     /// bytes written (zero if it was already sent). No application data can
-    /// be sent afterwards (RFC 9846 §6.1).
+    /// be sent afterwards (RFC 9846 §6.1). After a record failed to encrypt
+    /// ([`EncryptError::Failed`]) no alert is made either: the peer could
+    /// not read it.
     pub fn queue_close_notify(&mut self, outgoing_tls: &mut [u8]) -> Result<usize, EncryptError> {
         self.conn.core.close_notify_into(outgoing_tls)
     }
@@ -822,7 +856,9 @@ impl MayEncryptEarlyData<'_> {
 
     /// Encrypts all of `early_data` under the early traffic key into
     /// `outgoing_tls` and returns the bytes written. Fails, sending nothing,
-    /// when it exceeds [`Self::bytes_left`].
+    /// when it exceeds [`Self::bytes_left`]. The records are built in
+    /// `outgoing_tls` itself, as by [`WriteTraffic::encrypt`]: after an
+    /// encryption failure nothing the call wrote there is to be sent.
     pub fn encrypt(
         &mut self,
         early_data: &[u8],
@@ -899,7 +935,8 @@ pub enum EncryptError {
     /// Our `close_notify` (or a fatal alert) was already sent, or the
     /// connection has failed.
     AlreadyClosed,
-    /// Record protection failed; the connection is unusable.
+    /// Record protection failed; the connection is unusable, and what the
+    /// call wrote to the output buffer must not be sent.
     Failed,
 }
 

@@ -4,7 +4,10 @@ These tests run browntls against other TLS implementations over a real
 network: every peer runs in its own container on a run-specific Docker network,
 and the browntls side is the release build of
 [`browntls-e2e`](../../crates/browntls-e2e/src/main.rs), a small command-line
-client and server, statically linked for the target architecture.
+client and server, statically linked for the target architecture. It depends
+on the [`browntls`](../../crates/browntls/README.md) facade crate alone, with
+the `tokio` feature and without `ktls`, so the matrix runs the library
+through the paths an application uses.
 [`e2e.py`](e2e.py) defines the matrix, the scenarios and the checks, and
 [`.github/workflows/e2e.yml`](../../.github/workflows/e2e.yml) runs them in CI.
 
@@ -71,8 +74,9 @@ allows it, with browntls as server against the peer's client:
   implementing it (GnuTLS) must respect, and, as a browntls client, GREASE
   values (RFC 8701), `ticket_request` (RFC 9149) and a ClientHello padded to
   1024 bytes (RFC 7685);
-- the asynchronous streams of `browntls-tokio` (`browntls-e2e --async`, a
-  single-threaded Tokio runtime, confirmed by `"io":"async"` in the output):
+- the asynchronous streams of `browntls-tokio`, reached as `browntls::tokio`
+  (`browntls-e2e --async`, a single-threaded Tokio runtime, confirmed by
+  `"io":"async"` in the output):
   TLS 1.3 with client authentication and TLS 1.2 in both roles, and TLS 1.3
   resumption as a client;
 - Encrypted Client Hello (RFC 9849, suites `browntls` and `go`), with keys

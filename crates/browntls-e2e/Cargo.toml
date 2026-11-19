@@ -13,8 +13,9 @@ name = "browntls-e2e"
 path = "src/main.rs"
 
 [dependencies]
-browntls-core = { path = "../browntls-core", default-features = false, features = ["std", "native", "tls12", "prefer-post-quantum"] }
-browntls-tokio = { path = "../browntls-tokio", default-features = false, features = ["native", "tls12", "prefer-post-quantum", "coop"] }
+# The facade only, as an application depends on it: `browntls::tokio` is
+# `browntls-tokio`. `logging` is off: the peer installs no logger.
+browntls = { path = "../browntls", default-features = false, features = ["std", "native", "tls12", "prefer-post-quantum", "tokio", "coop"] }
 # `--async`: a single-threaded runtime with TCP and timers.
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util"] }
 

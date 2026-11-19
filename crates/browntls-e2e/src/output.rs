@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 use std::io::Write;
 
-use browntls_core::crypto::native;
-use browntls_core::{AlertDescription, CommonState, ConnectionCommon, Error, SideData};
+use browntls::crypto::native;
+use browntls::{AlertDescription, CommonState, ConnectionCommon, Error, SideData};
 
 /// A JSON value for [`emit`].
 #[derive(Debug)]

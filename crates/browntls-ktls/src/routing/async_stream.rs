@@ -19,7 +19,6 @@ use tokio::net::TcpStream;
 
 use crate::meter::{Meter, records_of};
 use crate::stream::unsupported;
-use crate::sys;
 use crate::tokio_stream::{AsyncKtlsStream, StreamHandoffError, permanent};
 
 mod sealed {
@@ -123,7 +122,7 @@ impl<T: AsyncOffload> AsyncRoutedStream<T> {
             Some(blocker) if permanent(blocker, conn.is_handshaking()) => Err(unsupported(blocker)),
             // A client in its 0-RTT phase has no suite yet: the kernel
             // must take every cipher it could end up with.
-            _ => sys::set_ulp_tls(socket.as_fd()).and_then(|()| super::probe::takes(suite)),
+            _ => super::probe::ready(suite, socket.as_fd()),
         };
         if let Err(error) = ready {
             return userspace(stream, Vec::new(), 0, Some(error));

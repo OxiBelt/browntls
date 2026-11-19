@@ -75,7 +75,6 @@ pub use browntls::crypto::native::accel::load::kernel::{Place, Records};
 
 use crate::meter::{Meter, records_of};
 use crate::stream::{HandoffError, KtlsStream, Offload, refused, transient, unsupported};
-use crate::sys;
 
 #[cfg(feature = "tokio")]
 mod async_stream;
@@ -196,6 +195,9 @@ where
                 return Err(refused(conn, socket, Vec::new(), error));
             }
         }
+        if let Err(error) = socket.flush() {
+            return Err(refused(conn, socket, Vec::new(), error));
+        }
         let suite = conn.negotiated_cipher_suite();
         let records = suite.and_then(records_of);
         let place = match records {
@@ -225,8 +227,7 @@ where
         {
             return userspace(conn, socket, Vec::new(), Some(unsupported(blocker)));
         }
-        let ready = sys::set_ulp_tls(socket.as_fd()).and_then(|()| probe::takes(suite));
-        if let Err(error) = ready {
+        if let Err(error) = probe::ready(suite, socket.as_fd()) {
             return userspace(conn, socket, Vec::new(), Some(error));
         }
         match KtlsStream::new(conn, socket) {

@@ -10,7 +10,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use browntls::crypto::cipher::{AeadKey, Iv};
@@ -32,11 +32,16 @@ enum Form {
 }
 
 impl Form {
-    const ALL: [Self; 7] = [
+    /// The forms of TLS 1.3, the version of a connection that sends or
+    /// accepts 0-RTT data.
+    const TLS13: [Self; 4] = [
         Self::Tls13Aes128Gcm,
         Self::Tls13Aes256Gcm,
         Self::Tls13ChaCha20Poly1305,
         Self::Tls13Aes128Ccm,
+    ];
+    #[cfg(test)]
+    const TLS12: [Self; 3] = [
         Self::Tls12Aes128Gcm,
         Self::Tls12Aes256Gcm,
         Self::Tls12ChaCha20Poly1305,
@@ -150,53 +155,86 @@ fn ask(info: &[u8]) -> io::Result<io::Result<()>> {
         .and_then(|()| sys::set_crypto_info(socket.as_fd(), true, info)))
 }
 
-fn refusal(error: &io::Error) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("the kernel does not take keys of the connection's cipher: {error}"),
-    )
+/// The kernel's refusal of keys, as the reason a connection stays in
+/// userspace.
+fn refusal(error: Option<&io::Error>) -> io::Error {
+    let what = "the kernel does not take keys of the connection's cipher";
+    match error {
+        Some(error) => io::Error::new(io::ErrorKind::Unsupported, format!("{what}: {error}")),
+        None => io::Error::new(io::ErrorKind::Unsupported, what),
+    }
 }
 
+/// What is known about `form`: zero, `TAKEN` or `REFUSED`.
+fn known(form: Form) -> u32 {
+    (KNOWN.load(Relaxed) >> (2 * form as u32)) & 3
+}
+
+/// Whether the kernel takes keys of `form`, asking it if that is not
+/// known yet.
 fn takes_form(form: Form) -> io::Result<()> {
-    let shift = 2 * form as u32;
-    match (KNOWN.load(Relaxed) >> shift) & 3 {
+    match known(form) {
         TAKEN => return Ok(()),
-        REFUSED => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the kernel does not take keys of the connection's cipher",
-            ));
-        }
+        REFUSED => return Err(refusal(None)),
         _ => {}
     }
     let answer = ask(form.crypto_info()?.as_bytes())?;
-    let state = if answer.is_ok() { TAKEN } else { REFUSED };
-    // Threads that ask at the same time store the same answer.
-    KNOWN.fetch_or(state << shift, Relaxed);
-    answer.map_err(|error| refusal(&error))
+    let state = match &answer {
+        Ok(()) => TAKEN,
+        // No such cipher or version, or no implementation of it: the
+        // kernel will say so again. Anything else (no memory, say) may
+        // pass, and is this one connection's refusal only.
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported => {
+                REFUSED
+            }
+            _ => return answer,
+        },
+    };
+    // The first answer stays, should threads that ask at the same time
+    // ever get different ones.
+    let shift = 2 * form as u32;
+    let _ = KNOWN.try_update(Relaxed, Relaxed, |known| {
+        ((known >> shift) & 3 == 0).then_some(known | (state << shift))
+    });
+    answer.map_err(|error| refusal(Some(&error)))
 }
 
-/// Whether the kernel takes keys of the record protection of `suite`, or
-/// of every one it has a form for when the connection has no suite yet (a
-/// client in its 0-RTT phase).
+/// The forms a connection with `suite` can have: its own or, while it has
+/// no suite yet (a client in its 0-RTT phase), those of TLS 1.3. A suite
+/// without a form here is left to the handover, which refuses what has no
+/// kernel form before it takes anything.
+fn forms(suite: Option<SupportedCipherSuite>) -> impl Iterator<Item = Form> {
+    let (own, any) = match suite {
+        Some(suite) => (Form::of(suite), &[][..]),
+        None => (None, &Form::TLS13[..]),
+    };
+    own.into_iter().chain(any.iter().copied())
+}
+
+/// Readies `socket` for the handover of a connection with `suite`:
+/// attaches the `tls` upper layer protocol and makes sure that the kernel
+/// takes keys of the connection's record protection. A cipher known to be
+/// refused leaves the socket untouched.
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::Unsupported`] when the kernel refused such keys;
-/// another error when it could not be asked.
-pub(super) fn takes(suite: Option<SupportedCipherSuite>) -> io::Result<()> {
-    match suite {
-        Some(suite) => Form::of(suite).map_or(Ok(()), takes_form),
-        None => Form::ALL.into_iter().try_for_each(takes_form),
+/// What the kernel answered: the connection stays in userspace.
+/// [`io::ErrorKind::Unsupported`] when it refused such keys.
+pub(super) fn ready(suite: Option<SupportedCipherSuite>, socket: BorrowedFd<'_>) -> io::Result<()> {
+    if forms(suite).any(|form| known(form) == REFUSED) {
+        return Err(refusal(None));
     }
+    sys::set_ulp_tls(socket)?;
+    forms(suite).try_for_each(takes_form)
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use crate::common::{kernel_tls, offloadable_suites};
+    use crate::common::{kernel_tls, offloadable_suites, tcp_pair};
 
     /// Every suite the tests hand over has a form, the forms make option
     /// values the kernel is given, and a kernel with the `tls` module
@@ -204,46 +242,65 @@ mod tests {
     #[test]
     fn the_kernel_is_asked_for_each_form() {
         for suite in offloadable_suites() {
-            assert!(Form::of(suite).is_some(), "{suite:?}");
+            assert_eq!(forms(Some(suite)).count(), 1, "{suite:?}");
         }
-        let mut lens: Vec<usize> = Form::ALL
-            .iter()
+        assert!(forms(None).eq(Form::TLS13));
+        let all = || Form::TLS13.into_iter().chain(Form::TLS12);
+        let mut lens: Vec<usize> = all()
             .map(|form| form.crypto_info().unwrap().as_bytes().len())
             .collect();
         lens.dedup();
         assert!(lens.len() > 1, "{lens:?}");
 
-        if !kernel_tls() {
-            // Without the upper layer protocol nothing can be asked.
-            let error = takes(None).unwrap_err();
+        let (socket, _peer) = tcp_pair();
+        forget();
+        if !kernel_tls()
+            && let Err(error) = ready(None, socket.as_fd())
+        {
+            // Without the upper layer protocol nothing can be asked, and
+            // nothing is concluded. (A process that may load the module
+            // gets it loaded by asking.)
             assert_ne!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+            assert_eq!(KNOWN.load(Relaxed), 0);
             return;
         }
-        forget();
-        for form in Form::ALL {
+        for form in all() {
             takes_form(form).unwrap_or_else(|error| panic!("{form:?}: {error}"));
             // The answer is kept.
-            assert_eq!((KNOWN.load(Relaxed) >> (2 * form as u32)) & 3, TAKEN);
+            assert_eq!(known(form), TAKEN);
             takes_form(form).unwrap();
         }
-        takes(None).unwrap();
+        ready(None, socket.as_fd()).unwrap();
         for suite in offloadable_suites() {
-            takes(Some(suite)).unwrap();
+            ready(Some(suite), socket.as_fd()).unwrap();
         }
 
-        // A cipher type no kernel has.
+        // A cipher type no kernel has is refused as unsupported.
         let info = Form::Tls13Aes128Gcm.crypto_info().unwrap();
         let mut bytes = info.as_bytes().to_vec();
         bytes[2..4].copy_from_slice(&0xffffu16.to_ne_bytes());
         let error = ask(&bytes).unwrap().unwrap_err();
-        assert_eq!(refusal(&error).kind(), io::ErrorKind::Unsupported);
-        // A refusal that was kept is reported without asking.
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ),
+            "{error}"
+        );
+
+        // A refusal that was kept is reported without asking and is not
+        // replaced by a later answer.
+        let (untouched, _peer) = tcp_pair();
         let shift = 2 * Form::Tls13Aes128Ccm as u32;
         forget();
         KNOWN.fetch_or(REFUSED << shift, Relaxed);
         let error = takes_form(Form::Tls13Aes128Ccm).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(takes(None).unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let error = ready(None, untouched.as_fd()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        takes_form(Form::Tls13Aes128Gcm).unwrap();
+        assert_eq!(known(Form::Tls13Aes128Ccm), REFUSED);
+        assert_eq!(known(Form::Tls13Aes128Gcm), TAKEN);
         forget();
     }
 }

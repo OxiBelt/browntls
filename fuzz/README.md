@@ -203,9 +203,11 @@ certificates differ), so the workflow keeps a failing job's findings
 directory (crash inputs, libFuzzer logs and the quarantined corpus) for the
 maintainers, encrypted: `scripts/fuzz/findings-envelope.sh seal` packs it and
 encrypts it as CMS AuthEnvelopedData (ECDH P-384, AES-256-GCM) to the
-recipient certificate in the repository variable `FUZZ_FINDINGS_RECIPIENT`
-(PEM), and only the sealed file is uploaded, as the artifact
-`fuzz-findings-sealed-<job>-<attempt>`, kept for 14 days. Anyone signed in
+recipient certificate in the Actions variable `FUZZ_FINDINGS_RECIPIENT`
+(PEM; an organization variable at present, which GitHub does not pass to
+workflows of pull requests from forks), and only the sealed file is
+uploaded, as the artifact `fuzz-findings-sealed-<job>-<attempt>`, kept for
+14 days. Anyone signed in
 can download it; only the private key opens it. The job log shows the
 certificate's SHA-256 fingerprint. Without the variable, or in a run that
 does not receive it, nothing is uploaded and the findings are lost with the

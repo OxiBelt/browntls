@@ -188,7 +188,7 @@ jobs:
       #
       # The next two steps seal the findings directory (inputs, logs and the
       # quarantined corpus) to the maintainers' recipient certificate, kept
-      # as PEM in the repository variable FUZZ_FINDINGS_RECIPIENT (CMS, ECDH
+      # as PEM in the Actions variable FUZZ_FINDINGS_RECIPIENT (CMS, ECDH
       # P-384 + AES-256-GCM), and upload only the sealed file, which any
       # signed-in user can download but only the private key opens
       # (fuzz/README.md, Continuous fuzzing). The log shows the certificate's

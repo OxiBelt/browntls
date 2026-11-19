@@ -78,7 +78,7 @@ fn p256_sha384(key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     ) else {
         return false;
     };
-    let digest = <sha2v11::Sha384 as sha2v11::Digest>::digest(msg);
+    let digest = sha2::Sha384::digest(msg);
     vk.verify_prehash(&digest, &sig).is_ok()
 }
 
@@ -101,7 +101,7 @@ fn p384_sha256(key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     ) else {
         return false;
     };
-    let digest = <sha2v11::Sha256 as sha2v11::Digest>::digest(msg);
+    let digest = sha2::Sha256::digest(msg);
     vk.verify_prehash(&digest, &sig).is_ok()
 }
 
@@ -123,7 +123,7 @@ where
     D: sha2::Digest + rsa::pkcs8::AssociatedOid,
 {
     let (Ok(pk), Ok(sig)) = (
-        rsa::RsaPublicKey::from_pkcs1_der(key),
+        rsa::PublicKey::from_pkcs1_der(key),
         rsa::pkcs1v15::Signature::try_from(sig),
     ) else {
         return false;
@@ -135,7 +135,7 @@ where
 
 fn rsa_pss_sha256(key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     let (Ok(pk), Ok(sig)) = (
-        rsa::RsaPublicKey::from_pkcs1_der(key),
+        rsa::PublicKey::from_pkcs1_der(key),
         rsa::pss::Signature::try_from(sig),
     ) else {
         return false;
@@ -255,9 +255,9 @@ pub fn at(secs: u64) -> time::OffsetDateTime {
 // Keys and parameters
 // ---------------------------------------------------------------------------
 
-fn rsa_private_key() -> &'static rsa::RsaPrivateKey {
-    static KEY: OnceLock<rsa::RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap())
+fn rsa_private_key() -> &'static rsa::PrivateKey {
+    static KEY: OnceLock<rsa::PrivateKey> = OnceLock::new();
+    KEY.get_or_init(|| rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap())
 }
 
 /// A fresh key pair for `alg`. RSA keys are generated with the `rsa` crate
@@ -278,7 +278,7 @@ pub fn key_for(alg: &'static rcgen::SignatureAlgorithm) -> KeyPair {
 /// Signs `msg` with the shared RSA key using RSASSA-PSS/SHA-256.
 pub fn rsa_pss_sign(msg: &[u8]) -> Vec<u8> {
     let signing = rsa::pss::SigningKey::<sha2::Sha256>::new(rsa_private_key().clone());
-    let sig: rsa::pss::Signature = signing.sign_with_rng(&mut rand::thread_rng(), msg);
+    let sig: rsa::pss::Signature = signing.sign_with_rng(&mut rand::rng(), msg);
     rsa::signature::SignatureEncoding::to_vec(&sig)
 }
 

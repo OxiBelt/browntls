@@ -222,7 +222,7 @@ impl fmt::Debug for Ed25519Verify {
 }
 
 /// Ed448 (RFC 8032 §5.2 PureEdDSA with an empty context, RFC 8410 keys and
-/// signatures, RFC 9846 §4.2.3 / RFC 8422 §5.10). Both identifiers are
+/// signatures, RFC 9846 §4.3.3 / RFC 8422 §5.10). Both identifiers are
 /// `id-Ed448` without parameters (RFC 8410 §3, §6).
 ///
 /// Verification follows `browntls_crypto::curve448::ed448`: strict point

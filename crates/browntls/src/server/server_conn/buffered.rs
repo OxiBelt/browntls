@@ -83,7 +83,8 @@ impl ServerConnection {
     /// A reader for the client's 0-RTT ("early") data, if any was accepted.
     ///
     /// Early data is enabled by a non-zero [`ServerConfig::max_early_data_size`]
-    /// with stateful (non-ticket) resumption. It is **replayable** by an
+    /// with stateful (non-ticket) resumption, or under an external PSK
+    /// created with `ExternalPsk::with_early_data`. It is **replayable** by an
     /// attacker: the application must only act on it when a replay is
     /// harmless, and the library offers no anti-replay store. Returns `None`
     /// until the ClientHello has been processed, or if early data was not

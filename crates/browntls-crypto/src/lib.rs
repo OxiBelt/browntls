@@ -26,10 +26,12 @@
 //! [`hpke`] implements Hybrid Public Key Encryption (RFC 9180, base mode)
 //! from the primitives above.
 //!
-//! The crate is `no_std` and allocation-free by default; `std` adds runtime
-//! feature detection on aarch64. Unsafe code is denied crate-wide and allowed
-//! only in architecture backend modules, CPU detection and the system-call
-//! trampoline, each with documented safety invariants.
+//! The crate is `no_std`, and allocation-free without its default features;
+//! `alloc` adds the allocating APIs (HPKE `seal`/`open`) and `std` (the
+//! default) adds runtime feature detection on aarch64 and load-aware
+//! routing, which allocates per-backend key copies. Unsafe code is denied
+//! crate-wide and allowed only in architecture backend modules, CPU detection
+//! and the system-call trampoline, each with documented safety invariants.
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_op_in_unsafe_fn)]

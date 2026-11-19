@@ -234,7 +234,7 @@ impl ExpectClientHello {
             ));
         }
 
-        // RFC 9846 §4.5: message_hash(Hash(ClientHello1)), then the
+        // RFC 9846 §4.1: message_hash(Hash(ClientHello1)), then the
         // HelloRetryRequest exactly as sent (it is rebuilt from the cookie).
         let mut transcript = HandshakeHashBuffer::new().start_hash(suite.common.hash_provider);
         transcript.add(

@@ -624,7 +624,7 @@ pub(crate) struct OfferedPsk {
 ///
 /// `suites` are the offered TLS 1.3 suites in preference order; after a
 /// HelloRetryRequest, `committed` is the suite it selected, and only PSKs
-/// usable with it remain (RFC 9846 §4.1.2).
+/// usable with it remain (RFC 9846 §4.2.2).
 pub(crate) fn client_external_offers(
     psks: &[Arc<ExternalPsk>],
     suites: &[SupportedCipherSuite],

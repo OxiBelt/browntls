@@ -85,10 +85,11 @@ pub static TLS13_AES_128_CCM_SHA256: SupportedCipherSuite =
 /// `TLS13_AES_128_CCM_8_SHA256` (RFC 9846 Appendix B.4).
 ///
 /// Its 64-bit tag tolerates only 2^7 failed decryptions per key at the usual
-/// TLS 1.3 margin (RFC 9147 Appendix B.3), so it is not in
-/// [`DEFAULT_CIPHER_SUITES`](super::DEFAULT_CIPHER_SUITES); enable it
-/// explicitly, for constrained peers that support nothing else. Its keys
-/// cannot be extracted for kernel TLS offload.
+/// TLS 1.3 margin (RFC 9147 Appendix B.3), so it comes last in
+/// [`DEFAULT_CIPHER_SUITES`](super::DEFAULT_CIPHER_SUITES), in the
+/// non-preferred tier a browntls server picks only when the client shares
+/// no other suite; remove it from the provider's `cipher_suites` to rule it
+/// out. Its keys cannot be extracted for kernel TLS offload.
 pub static TLS13_AES_128_CCM_8_SHA256: SupportedCipherSuite =
     SupportedCipherSuite::Tls13(&Tls13CipherSuite {
         common: CipherSuiteCommon {

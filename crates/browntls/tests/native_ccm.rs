@@ -618,7 +618,7 @@ fn secret_extraction_maps_ccm_and_refuses_ccm_8() {
 
 /// Resumes with 0-RTT data that the server no longer accepts, injecting
 /// `forgeries` forged application-data records after the client's first
-/// flight. The server skips them (RFC 9846 §4.2.10) while trying the client
+/// flight. The server skips them (RFC 9846 §4.3.10) while trying the client
 /// handshake key on each, as it does on the client's one early-data record.
 /// Returns whether the handshake completed, or the server's error.
 fn rejected_early_data_with_forgeries(

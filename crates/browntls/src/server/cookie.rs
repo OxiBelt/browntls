@@ -4,7 +4,7 @@
 //! HelloRetryRequest carries a cookie holding what the server must remember
 //! to continue the handshake from the second ClientHello: the hash of the
 //! first ClientHello (which the transcript keeps as a `message_hash`
-//! message, RFC 9846 §4.5) and the cipher suite and group the
+//! message, RFC 9846 §4.1) and the cipher suite and group the
 //! HelloRetryRequest selected, plus the legacy session ID and server name
 //! the second ClientHello must repeat. The record is sealed (encrypted and
 //! authenticated) by the configured [`ProducesTickets`] under its own key.

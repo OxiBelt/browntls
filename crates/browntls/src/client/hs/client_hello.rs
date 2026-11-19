@@ -752,7 +752,7 @@ const HANDSHAKE_HEADER_LEN: usize = 4;
 
 /// Puts the GREASE values (RFC 8701 §3) into the ClientHello, each first in
 /// its list. After a HelloRetryRequest that names a group, the key share
-/// list must hold exactly one share for that group (RFC 9846 §4.1.2), so no
+/// list must hold exactly one share for that group (RFC 9846 §4.2.2), so no
 /// GREASE share goes into that second ClientHello.
 fn add_grease(
     grease: &GreaseValues,

@@ -177,7 +177,9 @@ pub struct ServerConfig {
     /// Whether `dangerous_extract_secrets` is allowed.
     pub enable_secret_extraction: bool,
 
-    /// How much 0-RTT data to accept; zero disables early data.
+    /// How much 0-RTT data to accept under resumption; zero disables it.
+    /// Early data under an external PSK is governed by that PSK's own limit
+    /// (`ExternalPsk::with_early_data`) instead, whatever this value.
     ///
     /// It also bounds the rejected 0-RTT records skipped during the
     /// handshake: their plaintext, and their number, since each costs at
@@ -327,8 +329,9 @@ impl ServerConfig {
     ///
     /// # Panics
     ///
-    /// Panics if no default provider is available; use
-    /// [`Self::builder_with_provider`] to avoid that.
+    /// Panics if no default provider is available, or if the provider has no
+    /// usable cipher suites or key exchange groups for `versions` (an empty
+    /// `versions` included); use [`Self::builder_with_provider`] to avoid that.
     #[cfg(feature = "std")]
     #[allow(clippy::panic)] // documented: no fallible API exists for this constructor
     pub fn builder_with_protocol_versions(
@@ -387,9 +390,6 @@ impl ServerConfig {
             .find(|s| s.suite() == suite)
     }
 
-    /// Refuses a configuration whose HelloRetryRequest cookie sealer is
-    /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
-    /// leaves the cookie format to the server; the key split is ours).
     /// The part this configuration plays in ECH (RFC 9849 §7).
     pub(crate) fn ech_role(&self) -> crate::ech::server::Role<'_> {
         use crate::ech::server::Role;
@@ -422,6 +422,9 @@ impl ServerConfig {
         Ok(())
     }
 
+    /// Refuses a configuration whose HelloRetryRequest cookie sealer is
+    /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
+    /// leaves the cookie format to the server; the key split is ours).
     pub(super) fn check_cookie_sealer(&self) -> Result<(), Error> {
         match &self.hello_retry_cookies {
             Some(sealer) if Arc::ptr_eq(sealer, &self.ticketer) => Err(Error::General(
@@ -780,7 +783,7 @@ impl UnbufferedServerConnection {
     ///
     /// Effective only before the ClientHello has been processed; once early
     /// data was accepted this does nothing (the client is already sending
-    /// it under the early traffic key, RFC 9846 §4.2.10).
+    /// it under the early traffic key, RFC 9846 §4.3.10).
     pub fn reject_early_data(&mut self) {
         let early_data = &mut self.inner.core.data.early_data;
         if !early_data.was_accepted() {

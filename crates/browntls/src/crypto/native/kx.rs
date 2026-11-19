@@ -108,7 +108,7 @@ pub static X448: &dyn SupportedKxGroup = &X448_GROUP;
 
 pub(crate) static X448_GROUP: X448Group = X448Group;
 
-/// X448 (RFC 7748 §6.2, RFC 9846 §4.2.8.2 and §7.4.2, RFC 8422 §5.10-5.11):
+/// X448 (RFC 7748 §6.2, RFC 9846 §4.3.8.2 and §7.4.2, RFC 8422 §5.10-5.11):
 /// 56-byte shares in both directions and a 56-byte shared secret, used as
 /// the TLS 1.2 premaster secret unchanged.
 pub(crate) struct X448Group;

@@ -76,13 +76,16 @@ mod cache {
         }
     }
 
-    /// An in-memory session store bounded to a number of servers.
+    /// An in-memory session store, bounded by a number of sessions spread
+    /// over servers.
     pub struct ClientSessionMemoryCache {
         servers: Mutex<LimitedCache<ServerName<'static>, ServerData>>,
     }
 
     impl ClientSessionMemoryCache {
-        /// Remembers sessions for up to `size` servers.
+        /// Remembers about `size` sessions: up to `size / 8` servers
+        /// (rounded up, at least one), each with up to eight TLS 1.3
+        /// tickets.
         pub fn new(size: usize) -> Self {
             let max_servers = size.saturating_add(MAX_TLS13_TICKETS_PER_SERVER - 1)
                 / MAX_TLS13_TICKETS_PER_SERVER;

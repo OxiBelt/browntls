@@ -91,23 +91,6 @@ pub enum KernelHandoffBlocker {
     FragmentTooSmall,
 }
 
-impl KernelHandoffBlocker {
-    /// Something in flight that extracted secrets could not account for,
-    /// as opposed to a reason extraction itself fails (which
-    /// `dangerous_extract_secrets` reports with its own errors).
-    pub(crate) fn is_in_flight(self) -> bool {
-        matches!(
-            self,
-            Self::UnreadPlaintext
-                | Self::UnprocessedInput
-                | Self::UnsentRecords
-                | Self::UnsentPlaintext
-                | Self::KeyUpdatePending
-                | Self::RevocationPending
-        )
-    }
-}
-
 impl fmt::Display for KernelHandoffBlocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -220,6 +203,29 @@ impl<Data: SideData> ConnectionCore<Data> {
             }
             Err(_) => return Some(KernelHandoffBlocker::UnsupportedCipherSuite),
         }
+        if let Some(blocker) = self.in_flight_blocker() {
+            return Some(blocker);
+        }
+        // `TLS_MIN_RECORD_SIZE_LIM` of net/tls, less the TLS 1.3 content type.
+        let floor = if common.is_tls13() { 63 } else { 64 };
+        if common.max_tx_payload_len().is_some_and(|len| len < floor) {
+            return Some(KernelHandoffBlocker::FragmentTooSmall);
+        }
+        None
+    }
+
+    /// Something in flight that extracted secrets could not account for,
+    /// apart from input buffered outside the core: pending revocation
+    /// evidence, unread plaintext, queued records or plaintext, or a KeyUpdate
+    /// still to be sent. Unlike [`Self::kernel_handoff_blocker`], it is
+    /// reported whatever else blocks the handover, so that
+    /// `dangerous_extract_secrets` refuses it after `close_notify` or an
+    /// encryption failure too.
+    pub(crate) fn in_flight_blocker(&self) -> Option<KernelHandoffBlocker> {
+        let common = &self.common_state;
+        if common.pending_revocation.is_some() || common.revocation_auth_outstanding {
+            return Some(KernelHandoffBlocker::RevocationPending);
+        }
         if !common.received_plaintext.is_empty() || self.data.has_unread_early_data() {
             return Some(KernelHandoffBlocker::UnreadPlaintext);
         }
@@ -231,11 +237,6 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
         if common.key_update_owed || common.refresh_traffic_keys_pending {
             return Some(KernelHandoffBlocker::KeyUpdatePending);
-        }
-        // `TLS_MIN_RECORD_SIZE_LIM` of net/tls, less the TLS 1.3 content type.
-        let floor = if common.is_tls13() { 63 } else { 64 };
-        if common.max_tx_payload_len().is_some_and(|len| len < floor) {
-            return Some(KernelHandoffBlocker::FragmentTooSmall);
         }
         None
     }

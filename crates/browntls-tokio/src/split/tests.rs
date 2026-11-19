@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -15,13 +16,15 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{ReuniteError, Shared, Side, split};
 
-/// A point in `Shared::poll_lock`, after it found the stream taken.
+/// A point in `Shared`'s locking path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Point {
     /// Before the half leaves its waker.
     BeforeWaiting,
     /// After it left the waker, before it looks at the stream again.
     BeforeSecondLook,
+    /// A poisoned acquisition holds the stream guard before releasing it.
+    PoisonedAcquired,
 }
 
 /// Something to do at a point.
@@ -212,6 +215,59 @@ fn a_panic_in_one_halfs_poll_fails_the_other_half_instead_of_hanging_it() {
         Pin::new(&mut write).poll_shutdown(&mut cx),
         Poll::Ready(Err(_))
     ));
+}
+
+#[test]
+fn a_poisoned_acquisition_wakes_either_waiting_half() {
+    for (holder_side, waiting_side) in [(Side::Read, Side::Write), (Side::Write, Side::Read)] {
+        let (stream, entered, release_panic) = slow();
+        let (mut read, mut write) = split(stream);
+        release_panic.send(Then::Panic).unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| read_once(&mut read))).is_err());
+        entered.recv().unwrap();
+
+        let shared = read.shared.clone();
+        let holder_shared = shared.clone();
+        let (acquired, acquired_rx) = channel();
+        let (release, release_rx) = channel();
+        let holder = thread::spawn(move || {
+            AT.with(|at| {
+                *at.borrow_mut() = Some((
+                    Point::PoisonedAcquired,
+                    Box::new(move || {
+                        acquired.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }),
+                ));
+            });
+            let poll =
+                holder_shared.poll_lock(holder_side, &mut Context::from_waker(Waker::noop()));
+            assert!(matches!(poll, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Other));
+            assert!(AT.with(|at| at.borrow().is_none()));
+        });
+        acquired_rx.recv().unwrap();
+
+        let probe = Arc::new(Probe {
+            shared: shared.clone(),
+            free: Mutex::default(),
+        });
+        let waker = Waker::from(probe.clone());
+        let poll = shared.poll_lock(waiting_side, &mut Context::from_waker(&waker));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(poll.is_pending(), "the competing half did not wait");
+        assert_eq!(*probe.free.lock().unwrap(), [true]);
+
+        let poll = shared.poll_lock(waiting_side, &mut Context::from_waker(&waker));
+        assert!(matches!(poll, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Other));
+        assert!(
+            matches!(read_once(&mut read), Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Other)
+        );
+        assert!(matches!(
+            Pin::new(&mut write).poll_write(&mut Context::from_waker(&waker), b"w"),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Other
+        ));
+    }
 }
 
 #[test]

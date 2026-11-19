@@ -13,13 +13,18 @@ handled by `browntls::kernel::KernelConnection`.
 |---|---|
 | Protocols | TLS 1.2, TLS 1.3 |
 | Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, TLS 1.3 AES-128-CCM |
-| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for a peer `record_size_limit` below 16384; 7.2 for `set_rx_expect_no_pad` |
+| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for records below 16384 bytes (a peer `record_size_limit` or a local `max_fragment_size`); 7.2 for `set_rx_expect_no_pad` |
 
 The configuration must set `enable_secret_extraction`. When the kernel or
 the connection cannot be offloaded, the connection and the socket come back
 unharmed in `HandoffError::Refused`. That includes a peer that has already
 closed TCP: the kernel attaches the `tls` upper layer protocol to an
-established connection only (`ENOTCONN`).
+established connection only (`ENOTCONN`). One case is found too late for
+that: a kernel that lacks the suite's cipher (built without it, or
+restricted to approved algorithms) refuses the keys only after they were
+taken out of the connection, which is then lost (`HandoffError::Failed`).
+The load-aware routing below asks the kernel about each cipher on a
+loopback socket before it hands a connection over.
 
 On a non-blocking socket Linux reports a write as done once the record is
 encrypted, even when TCP had no room for all of it, and sends the rest when
@@ -27,8 +32,9 @@ room appears. Closing the socket or its write side before then truncates the
 stream for the peer. The streams therefore keep count: `unsent()` sets the
 records the kernel has made (its transmit record sequence number) against
 the bytes TCP has taken, and tells how much the kernel still holds.
-`AsyncKtlsStream`'s `shutdown` shuts the write side only when that is zero,
-so call it, and let it finish, before dropping a stream that has written;
+`AsyncKtlsStream`'s `shutdown` shuts the write side only when that is zero
+(or, where `unsent()` cannot count, once the socket has room again), so
+call it, and let it finish, before dropping a stream that has written;
 with a `KtlsStream` on a non-blocking socket, wait for `unsent()` to be zero
 before closing. Blocking sockets without a send timeout are not affected.
 
@@ -217,19 +223,22 @@ pays on a given machine is not measured.
 
 `src/sys.rs` holds the crate's only `unsafe` code, the socket options,
 `sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS, the
-thread's signal mask around the latter, and the thread's processor time
-clock; see the invariants at its top.
+thread's signal mask around the latter, `poll`, `ioctl(SIOCOUTQ)`,
+`getsockopt(TCP_INFO)`, `uname`, `fstat`, plain `send`, and the thread's
+processor time clock; see the invariants at its top.
 
 ## Testing
 
 `cargo test -p browntls-ktls --all-features` runs the handover tests over
 loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
 `tests/sendfile.rs`) and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
-`tests/tokio_zero_copy.rs`, feature `tokio`), and the placement of
-connections by the routing (`tests/routing.rs`, `tests/tokio_routing.rs`).
-Their parts that need the kernel are
-skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
-is set (CI sets it after `sudo modprobe tls`).
+`tests/tokio_zero_copy.rs`, `tests/tokio_fairness.rs`, feature `tokio`),
+and the placement of connections by the routing (`tests/routing.rs`,
+`tests/tokio_routing.rs`); unit tests in `src/backpressure_tests.rs` and
+`src/sigpipe_tests.rs` use the kernel too. Their parts that need the kernel
+are skipped when the `tls` upper layer protocol is not loaded (it is not
+listed in `/proc/sys/net/ipv4/tcp_available_ulp`), unless
+`BROWNTLS_KTLS_REQUIRED=1` is set (CI sets it after `sudo modprobe tls`).
 
 The tests of `set_rx_expect_no_pad` with a peer that pads need Linux 7.2;
 on an older kernel they check the refusal only and skip the rest, unless

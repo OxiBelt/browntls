@@ -335,9 +335,10 @@ impl<T> AsyncUserspaceStream<T> {
 
     /// Why the kernel did not take the stream, when the routing had
     /// placed its connection there: the kernel did not attach the `tls`
-    /// upper layer protocol, or the connection has no kernel form
-    /// ([`io::ErrorKind::Unsupported`]). `None` for a stream the routing
-    /// kept in userspace.
+    /// upper layer protocol, or the connection has no kernel form, a
+    /// cipher the running kernel does not take, or smaller records than
+    /// the kernel can be told to make ([`io::ErrorKind::Unsupported`]).
+    /// `None` for a stream the routing kept in userspace.
     pub fn kernel_refusal(&self) -> Option<&io::Error> {
         self.refusal.as_ref()
     }

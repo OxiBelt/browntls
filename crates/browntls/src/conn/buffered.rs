@@ -89,17 +89,16 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// records may be protected by this library afterwards.
     ///
     /// Fails when anything is still in flight that the extracted secrets
-    /// could not account for (see [`Self::kernel_handoff_blocker`]), or
-    /// when part of a handshake message is buffered.
+    /// could not account for (see [`Self::kernel_handoff_blocker`]), also
+    /// after `close_notify` was queued, or when part of a handshake message
+    /// is buffered.
     pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
         if self.deframer_buffer.has_pending() || self.core.deframer.has_buffered_handshake() {
             return Err(Error::general(
                 "cannot extract secrets with unprocessed received data",
             ));
         }
-        if let Some(blocker) = self.kernel_handoff_blocker()
-            && blocker.is_in_flight()
-        {
+        if let Some(blocker) = self.core.in_flight_blocker() {
             return Err(Error::General(alloc::format!(
                 "cannot extract secrets: {blocker}"
             )));

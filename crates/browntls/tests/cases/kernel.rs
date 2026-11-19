@@ -466,8 +466,10 @@ fn extraction_after_close_notify_still_waits_for_data_in_flight() {
 
         // Drained: the close_notify written, nothing left to read.
         server.send_close_notify();
-        transfer(&mut server, &mut client);
-        assert!(!server.wants_write());
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server.write_tls(&mut wire).unwrap();
+        }
         server.dangerous_extract_secrets().unwrap();
     }
 }

@@ -1079,14 +1079,16 @@ start at a record boundary), queued records or plaintext, a KeyUpdate still
 owed, or revocation evidence still pending. After our `close_notify`, a fatal
 alert or an encryption failure it refuses for good (`Closed`).
 `kernel_handoff_blocker` reports which, so a driver can drain it first;
-`dangerous_extract_secrets` applies the same checks. Secret extraction must be
+`dangerous_extract_secrets` refuses the same things in flight. Secret extraction must be
 enabled, QUIC connections and suites without a kernel form (TLS 1.2 AES-CBC,
 AES-128-CCM-8) are refused, and so is a configured `max_fragment_size` below
 the smallest payload limit Linux takes (64 bytes, 63 for TLS 1.3).
-`dangerous_extract_secrets` keeps its own errors for disabled extraction and
-unsupported suites and adds only the in-flight checks, which it applies even
-after our `close_notify` or an encryption failure, where
-`kernel_handoff_blocker` reports `Closed` first. A partly received
+`dangerous_extract_secrets` refuses disabled extraction and unsupported suites
+with its own errors and otherwise adds only the in-flight checks, which take
+precedence when something is in flight and apply even after our
+`close_notify`, a fatal alert, an encryption failure or a `FragmentTooSmall`
+refusal, where `kernel_handoff_blocker` reports another reason first. A
+partly received
 handshake message is carried over and completed from the kernel's records.
 
 The library's limits stay in force. The driver reports the application data

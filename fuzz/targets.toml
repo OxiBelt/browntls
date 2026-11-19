@@ -135,7 +135,18 @@ sources = ["crates/browntls-pki/**"]
 
 [targets.pki_revocation]
 topic = "pki"
-sources = ["crates/browntls-pki/**", "crates/browntls/src/revocation*"]
+sources = [
+  "crates/browntls-pki/**",
+  "crates/browntls/src/revocation.rs",
+  "crates/browntls/src/revocation/**",
+  "crates/browntls/src/common_state.rs",
+  "crates/browntls/src/conn/buffered.rs",
+  "crates/browntls/src/crypto/signer.rs",
+  "crates/browntls/src/quic/**",
+  "crates/browntls/src/unbuffered.rs",
+  "crates/browntls/src/webpki/**",
+  "crates/browntls-tokio/src/**",
+]
 
 [targets.crypto_hash]
 topic = "crypto-symmetric"

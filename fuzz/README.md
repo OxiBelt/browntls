@@ -51,7 +51,7 @@ and re-encoding stability.
 | `crypto_hpke` | crypto-asymmetric | HPKE identifiers, keys and sessions (seal, open, export, sequence numbers) byte for byte against the `hpke` oracle; the TLS-side HPKE provider |
 | `crypto_util` | crypto-util | The DER reader and writer against a reference TLV parser, constant-time helpers, zeroization, random sources, CPU feature detection, acceleration policies and the load-aware routing controls (`accel::load`: configurations, stream status, fixed shares) |
 | `pki_api` | pki | Server names and IP addresses against `std::net`, times, algorithm identifiers, RSASSA-PSS parameters, DER containers, PEM, certificates and path validation against a model, signatures and CRLs with real providers, certificate extensions, alternative names and X.501 names against an independent DER reading and a model of the `Name` parsing rules, `SignedData` against the algorithm model, path validation and `RawPublicKeyEntity` |
-| `pki_revocation` | pki | OCSP verification, SCT lists, Clubcard decoding and lookup, and OCSP pause and resume after a genuine TLS certificate flight |
+| `pki_revocation` | pki | Signed OCSP and SCT evidence, Clubcard snapshots and ordered deltas, revocation pause and resume over buffered TLS and QUIC, and in-memory Tokio connections over both TLS drivers with live lookup, response caching, and staple refresh |
 | `tls_config` | tls-config | Client and server configuration builders, providers and cipher suites, signers, verifiers and root stores, ticketers, certificate compression, key logs, session caches and certificate resolvers |
 | `tls_conn` | tls-connection | An in-process client and server driven by API calls: transfers with damaged bytes, reader and writer, early data, close_notify, key updates, exporters, `complete_io`, `Stream`, `Acceptor`, accessors, secret extraction |
 | `tls_tokio` | tls-connection | `browntls-tokio`: connector entry points, acceptor, lazy acceptor (including refusals and `take_io`), fallible futures, client and server streams and their accessors, split halves and their reunion, 0-RTT on resumed connections (read by the server after the handshake, or before its end from a stream returned early, with 0.5-RTT answers), the kernel handoff of a stream (a ready stream has no blocker and its connection's handover succeeds; the plaintext set aside continues what was read, with a server's unread 0-RTT data counted in front; a server's stream returned early has its handshake completed first; refused, abandoned and turned-back streams carry on), over an in-memory transport with fuzzed chunk sizes, `Pending` patterns, damaged, inserted and ended bytes |
@@ -157,6 +157,10 @@ Coverage counts everything the tests run, seed generation included, and the
 seeds contain certificates with fresh random keys, so a function reached only
 through a mutated seed could pass in one run and fail in the next; no such
 case is known.
+
+The revocation seeds exercise signed evidence generated once per process,
+using a fixed verification time and process-local keys. The Tokio cases run
+with the `ocsp` feature, a paused timer, and an in-memory responder.
 
 ## Continuous fuzzing
 

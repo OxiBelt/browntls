@@ -19,10 +19,10 @@ cargo-fuzz = true
 browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
 browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
-browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12"] }
-# Only the I/O traits the `tls_tokio` harnesses poll directly (no runtime).
+browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp"] }
+# The revocation harness uses in-memory I/O and a paused timer.
 # The same lower bound as the workspace's (`[workspace.dependencies]`).
-tokio = { version = "1.53", default-features = false }
+tokio = { version = "1.53", default-features = false, features = ["io-util", "test-util"] }
 libfuzzer-sys = "0.4"
 # Independent implementations used only as differential oracles by the
 # crypto targets (the same set as `browntls-crypto`'s dev-dependencies).

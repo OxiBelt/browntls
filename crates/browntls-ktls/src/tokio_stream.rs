@@ -25,6 +25,7 @@ use tokio::net::TcpStream;
 
 use crate::drain::{Drain, Outcome, Room};
 use crate::engine::Engine;
+use crate::quiet_close::QuietClose;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
 
@@ -194,6 +195,9 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 pub struct AsyncKtlsStream<Data> {
     socket: TcpStream,
+    /// Right behind `socket`, which must be dropped first and nothing else
+    /// while the signal is held: see [`QuietClose`].
+    quiet_close: QuietClose,
     engine: Engine<Data>,
     /// The waker of the last write, flush or shutdown that returned
     /// `Pending`. A read that sends what the connection owes takes over
@@ -213,6 +217,12 @@ pub struct AsyncKtlsStream<Data> {
     drain: Drain,
     /// See [`early_data_len`](Self::early_data_len).
     early_data_len: usize,
+}
+
+impl<Data> Drop for AsyncKtlsStream<Data> {
+    fn drop(&mut self) {
+        self.quiet_close.closing();
+    }
 }
 
 /// Nothing in the stream is pinned: the socket and the connection state
@@ -266,6 +276,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
             drained: false,
             drain: Drain::new(),
             early_data_len: 0,
+            quiet_close: QuietClose::default(),
         }
     }
 
@@ -289,10 +300,11 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
 
     /// The socket.
     ///
-    /// Bytes sent on it directly (for example with `sendfile`) become
+    /// Bytes sent on it directly (for example with `splice`) become
     /// application data records the stream did not count: report them with
-    /// [`Self::records_sent`]. Reading from it directly loses the records
-    /// that are not application data.
+    /// [`Self::records_sent`]. For a file, [`Self::sendfile`] does the
+    /// counting. Reading from it directly loses the records that are not
+    /// application data.
     pub fn get_ref(&self) -> &TcpStream {
         &self.socket
     }
@@ -557,10 +569,11 @@ macro_rules! from_stream {
                 }
                 let (socket, conn, received) = handoff.into_parts();
                 match install(conn, socket.as_fd(), received) {
-                    Ok(engine) => Ok(Self {
-                        early_data_len,
-                        ..Self::with_engine(socket, engine)
-                    }),
+                    Ok(engine) => {
+                        let mut stream = Self::with_engine(socket, engine);
+                        stream.early_data_len = early_data_len;
+                        Ok(stream)
+                    }
                     Err(error) => Err(StreamHandoffError::Failed(error)),
                 }
             }

@@ -4,14 +4,21 @@
 //! "Security requirements"): the socket options and the `sendmsg`/`recvmsg`
 //! control messages of kernel TLS have no safe wrapper in the standard
 //! library, nor has asking the kernel whether a socket has room to send
-//! (`poll`), how many bytes TCP holds unacknowledged (`ioctl`) or which
-//! release it is (`uname`). Every function here keeps these invariants:
+//! (`poll`), how many bytes TCP holds unacknowledged (`ioctl`), which
+//! release it is (`uname`), or sending a file's pages without reading them
+//! into userspace (`sendfile`, with `fstat` for the file's length and the
+//! thread's signal mask to hold `SIGPIPE` back). Every function here keeps
+//! these invariants:
 //!
-//! * the descriptor is a [`BorrowedFd`], open for the whole call;
-//! * every pointer passed to the kernel points into a live Rust value
-//!   (slice, `iovec`, `msghdr`, control buffer, `utsname`) that outlives the call, with
-//!   the length given next to it, and the kernel writes only into buffers
-//!   borrowed mutably here;
+//! * every descriptor is a [`BorrowedFd`], open for the whole call;
+//! * every pointer passed to the kernel or to libc points into a live Rust
+//!   value (slice, `iovec`, `msghdr`, control buffer, `utsname`, `stat`,
+//!   signal set, `timespec`, or one integer such as `sendfile`'s offset)
+//!   that outlives the call, with its length given next to it where the
+//!   call takes one, and only values borrowed mutably here are written;
+//!   a null pointer is passed only where the call takes one to mean that
+//!   it shall return nothing there (`sigtimedwait`, `pthread_sigmask`) or,
+//!   in the tests, change nothing (`pthread_sigmask` reading the mask);
 //! * control messages are built and read only through the libc `CMSG_*`
 //!   functions, within a buffer aligned for `cmsghdr` and sized with
 //!   `CMSG_SPACE`, and a received control message is read only when its
@@ -21,13 +28,21 @@
 //!   reported;
 //! * a buffer the kernel wrote key material into (`TLS_TX` read back) is
 //!   wiped before the function returns;
-//! * the descriptor's flags are never changed.
+//! * the descriptors' flags are never changed;
+//! * no signal's disposition is changed (but by the tests, which count
+//!   `SIGPIPE` with a handler of their own), and the calling thread's
+//!   signal mask is changed only to hold `SIGPIPE` back for as long as a
+//!   [`HeldSigpipe`] lives (the length of a `sendfile`, or of the close of
+//!   a socket that sent files), after which `SIGPIPE` is blocked or not as
+//!   it was before. Only a `SIGPIPE` that became pending in that time is
+//!   taken, whatever raised it.
 
 #![allow(unsafe_code)]
 
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::ptr;
 
 use libc::{c_int, c_void};
 
@@ -39,7 +54,7 @@ const TLS_RX: c_int = 2;
 const TLS_TX_ZEROCOPY_RO: c_int = 3;
 /// `TLS_RX_EXPECT_NO_PAD` (Linux 6.0).
 const TLS_RX_EXPECT_NO_PAD: c_int = 4;
-/// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18).
+/// `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.19).
 const TLS_TX_MAX_PAYLOAD_LEN: c_int = 5;
 /// `TLS_SET_RECORD_TYPE`: the control message giving a sent record's type.
 const TLS_SET_RECORD_TYPE: c_int = 1;
@@ -135,7 +150,7 @@ pub(crate) fn set_ulp_tls(fd: BorrowedFd<'_>) -> io::Result<()> {
     }
 }
 
-/// Whether the kernel knows `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.18), asked
+/// Whether the kernel knows `TLS_TX_MAX_PAYLOAD_LEN` (Linux 6.19), asked
 /// after the upper layer protocol is attached and before any key is set.
 pub(crate) fn has_tx_max_payload_len(fd: BorrowedFd<'_>) -> io::Result<bool> {
     let mut value = [0u8; 2];
@@ -439,6 +454,160 @@ pub(crate) fn send(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     }
 }
 
+/// The length of `file` if it is a regular file; `None` for anything else
+/// (a directory, a device, a pipe, a socket).
+pub(crate) fn regular_file_len(file: BorrowedFd<'_>) -> io::Result<Option<u64>> {
+    // SAFETY: `stat` is a struct of integers, for which all zero bytes are
+    // a valid value.
+    let mut stat: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: `stat` is a live `stat`, which the kernel writes within
+    // during the call only; `file` is open for the call.
+    let rc = unsafe { libc::fstat(file.as_raw_fd(), &mut stat) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(None);
+    }
+    Ok(Some(u64::try_from(stat.st_size).unwrap_or(0)))
+}
+
+/// One `sendfile` of at most `count` bytes of `file`, from `offset`, to
+/// the socket: the kernel makes records of the file's pages without the
+/// bytes passing through userspace. Returns the bytes sent, zero at the
+/// end of the file. The file's own position is neither used nor moved.
+///
+/// The kernel closes the last record when it has sent all of `count`. When
+/// it finds the end of the file first, having sent something, it sends
+/// what it holds without `MSG_DONTWAIT` (`tls_sw_splice_eof`): `count`
+/// must not reach past the end of the file on a non-blocking socket.
+///
+/// Unlike `send`, `sendfile` cannot ask for no `SIGPIPE` on a connection
+/// that is closed for sending, and kernel TLS raises the signal even for a
+/// call that it reports as having sent something. The signal is held back
+/// for the calling thread while the call runs ([`HeldSigpipe`]).
+pub(crate) fn sendfile(
+    fd: BorrowedFd<'_>,
+    file: BorrowedFd<'_>,
+    offset: u64,
+    count: usize,
+) -> io::Result<usize> {
+    let offset =
+        libc::off_t::try_from(offset).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let _held = HeldSigpipe::hold()?;
+    loop {
+        // The kernel writes back where it stopped: each attempt starts
+        // from the caller's offset.
+        let mut position = offset;
+        // SAFETY: `position` is a live `off_t`, which the kernel reads and
+        // writes during the call only; no other memory of this process is
+        // involved (the bytes go from the file's pages to the socket);
+        // both descriptors are open for the call.
+        let sent =
+            unsafe { libc::sendfile(fd.as_raw_fd(), file.as_raw_fd(), &mut position, count) };
+        if sent >= 0 {
+            return Ok(sent as usize);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// `SIGPIPE` held back for the calling thread, until this is dropped (in
+/// the same thread). Dropping it takes a `SIGPIPE` that became pending in
+/// the meantime, whatever raised it, and unblocks the signal again unless
+/// the caller had blocked it; the rest of the thread's mask is not touched.
+/// A `SIGPIPE` that was pending before stays pending; one raised in the
+/// meantime is then left with it.
+///
+/// The kernel sends a socket's `SIGPIPE` to the thread that made the call,
+/// and a signal held back for a thread is taken from that thread's own
+/// before the process's.
+pub(crate) struct HeldSigpipe {
+    /// The set holding `SIGPIPE` alone.
+    sigpipe: libc::sigset_t,
+    /// The caller had blocked the signal itself: the mask stays as it is.
+    was_blocked: bool,
+    /// A `SIGPIPE` was pending already: it is not ours to take.
+    was_pending: bool,
+}
+
+impl HeldSigpipe {
+    pub(crate) fn hold() -> io::Result<Self> {
+        let (mut sigpipe, mut before) = (empty_sigset(), empty_sigset());
+        // SAFETY: `sigpipe` is a live signal set, written during the call
+        // only; `SIGPIPE` is a valid signal number.
+        unsafe { libc::sigaddset(&mut sigpipe, libc::SIGPIPE) };
+        // SAFETY: both sets are live for the call, which reads the first
+        // and writes the second; only the calling thread's mask changes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &sigpipe, &mut before) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        Ok(Self {
+            sigpipe,
+            was_blocked: has_sigpipe(&before),
+            // Asked once the signal is held back, so that none arrives
+            // between the answer and the hold.
+            was_pending: sigpipe_pending(),
+        })
+    }
+}
+
+impl Drop for HeldSigpipe {
+    fn drop(&mut self) {
+        if !self.was_pending && sigpipe_pending() {
+            // SAFETY: all zero bytes are a valid `timespec`: no waiting.
+            let no_wait: libc::timespec = unsafe { mem::zeroed() };
+            loop {
+                // SAFETY: the set and the time are live for the call, which
+                // reads them; a null `siginfo_t` pointer asks for none.
+                let rc = unsafe { libc::sigtimedwait(&self.sigpipe, ptr::null_mut(), &no_wait) };
+                let interrupted =
+                    rc < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+                if !interrupted {
+                    break;
+                }
+            }
+        }
+        if !self.was_blocked {
+            // SAFETY: the set is live for the call, which reads it (a null
+            // pointer asks for no old mask); only the calling thread's
+            // mask changes, and of it only `SIGPIPE`, which the hold
+            // blocked: what else the thread changed meanwhile stays.
+            unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &self.sigpipe, ptr::null_mut()) };
+        }
+    }
+}
+
+/// Whether a `SIGPIPE` is pending for the calling thread or the process.
+fn sigpipe_pending() -> bool {
+    let mut pending = empty_sigset();
+    // SAFETY: `pending` is a live signal set, written during the call only.
+    let rc = unsafe { libc::sigpending(&mut pending) };
+    rc == 0 && has_sigpipe(&pending)
+}
+
+/// A signal set holding no signal.
+fn empty_sigset() -> libc::sigset_t {
+    // SAFETY: a signal set is plain data, for which all zero bytes are a
+    // valid value.
+    let mut set: libc::sigset_t = unsafe { mem::zeroed() };
+    // SAFETY: `set` is a live signal set, written during the call only.
+    unsafe { libc::sigemptyset(&mut set) };
+    set
+}
+
+/// Whether `set` holds `SIGPIPE`.
+fn has_sigpipe(set: &libc::sigset_t) -> bool {
+    // SAFETY: `set` is a live signal set that the call reads; `SIGPIPE` is
+    // a valid signal number.
+    let member = unsafe { libc::sigismember(set, libc::SIGPIPE) };
+    member == 1
+}
+
 /// What one `recvmsg` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Received {
@@ -500,4 +669,200 @@ pub(crate) fn recv(fd: BorrowedFd<'_>, buf: &mut [u8], nonblocking: bool) -> io:
         record_type,
         end_of_record: msg.msg_flags & libc::MSG_EOR != 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsFd;
+
+    use super::*;
+
+    /// A file holding `contents`, whose name is removed at once.
+    fn temp_file(contents: &[u8]) -> File {
+        static FILES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "browntls-ktls-sys-{}-{}",
+            std::process::id(),
+            FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file.write_all(contents).unwrap();
+        file
+    }
+
+    /// `sendfile` on plain TCP: the bytes asked for, from the offset asked
+    /// for, nothing at or past the end of the file, the file's position
+    /// left alone, and `WouldBlock` from a full non-blocking socket.
+    #[test]
+    fn sendfile_sends_the_bytes_asked_for() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut receiver, _) = listener.accept().unwrap();
+        let contents: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let mut file = temp_file(&contents);
+        let (fd, input) = (sender.as_fd(), file.as_fd());
+
+        assert_eq!(sendfile(fd, input, 10, 5000).unwrap(), 5000);
+        let mut got = vec![0; 5000];
+        receiver.read_exact(&mut got).unwrap();
+        assert_eq!(got, contents[10..5010]);
+
+        // Past the end: what is left, then nothing.
+        assert_eq!(sendfile(fd, input, 99_000, 5000).unwrap(), 1000);
+        receiver.read_exact(&mut got[..1000]).unwrap();
+        assert_eq!(got[..1000], contents[99_000..]);
+        assert_eq!(sendfile(fd, input, 100_000, 5000).unwrap(), 0);
+        assert_eq!(sendfile(fd, input, 1 << 40, 5000).unwrap(), 0);
+        assert_eq!(sendfile(fd, input, 0, 0).unwrap(), 0);
+        let err = sendfile(fd, input, u64::MAX, 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // The file was written to its end and stays there.
+        let mut rest = Vec::new();
+        file.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+
+        sender.set_nonblocking(true).unwrap();
+        let mut sent = 0;
+        let err = loop {
+            match sendfile(sender.as_fd(), file.as_fd(), 0, contents.len()) {
+                Ok(n) => sent += n,
+                Err(err) => break err,
+            }
+            assert!(sent < 1 << 30, "the socket never filled");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// Only a regular file has a length.
+    #[test]
+    fn only_a_regular_file_has_a_length() {
+        let file = temp_file(&[1; 12_345]);
+        assert_eq!(regular_file_len(file.as_fd()).unwrap(), Some(12_345));
+        assert_eq!(regular_file_len(temp_file(&[]).as_fd()).unwrap(), Some(0));
+        let directory = File::open(std::env::temp_dir()).unwrap();
+        assert_eq!(regular_file_len(directory.as_fd()).unwrap(), None);
+        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+        assert_eq!(regular_file_len(socket.as_fd()).unwrap(), None);
+        let device = File::open("/dev/null").unwrap();
+        assert_eq!(regular_file_len(device.as_fd()).unwrap(), None);
+    }
+
+    /// The thread's signal mask.
+    fn signal_mask() -> libc::sigset_t {
+        let mut mask = empty_sigset();
+        // SAFETY: a null set changes nothing; `mask` is a live signal set
+        // the call writes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::null(), &mut mask) };
+        assert_eq!(rc, 0);
+        mask
+    }
+
+    /// `sendfile` on a connection that is closed for sending fails with
+    /// `EPIPE` and no `SIGPIPE` reaches the process; none stays pending,
+    /// and the thread's mask is as before. A caller that had blocked the
+    /// signal keeps it blocked, and one that was pending for it stays
+    /// pending.
+    #[test]
+    fn sendfile_raises_no_sigpipe() {
+        let delivered = test_signals::sigpipes_delivered();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_receiver, _) = listener.accept().unwrap();
+        let file = temp_file(&[7; 5000]);
+        sender.shutdown(std::net::Shutdown::Write).unwrap();
+
+        assert!(!has_sigpipe(&signal_mask()));
+        for _ in 0..3 {
+            let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+            assert!(!sigpipe_pending());
+            assert!(!has_sigpipe(&signal_mask()));
+        }
+
+        // Blocked by the caller: its signal stays its own.
+        let held = HeldSigpipe::hold().unwrap();
+        assert!(has_sigpipe(&signal_mask()));
+        let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+        assert!(has_sigpipe(&signal_mask()));
+        assert!(!sigpipe_pending());
+        // One raised by something else and left pending is not taken by
+        // the call, but by the hold it became pending under.
+        // SAFETY: raises a signal this thread has blocked.
+        unsafe { libc::raise(libc::SIGPIPE) };
+        assert!(sigpipe_pending());
+        let err = sendfile(sender.as_fd(), file.as_fd(), 0, 5000).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
+        assert!(sigpipe_pending());
+        drop(held);
+        assert!(!sigpipe_pending());
+        assert!(!has_sigpipe(&signal_mask()));
+        assert_eq!(test_signals::sigpipes_delivered(), delivered);
+    }
+
+    /// The end of a hold lets `SIGPIPE` through again and leaves alone
+    /// what else the thread blocked in the meantime.
+    #[test]
+    fn a_hold_gives_back_only_sigpipe() {
+        let mut other = empty_sigset();
+        // SAFETY: `other` is a live signal set, written during the call
+        // only; `SIGUSR2` is a valid signal number.
+        unsafe { libc::sigaddset(&mut other, libc::SIGUSR2) };
+        // SAFETY: the mask is a live signal set, which the call reads.
+        let blocks_other = || unsafe { libc::sigismember(&signal_mask(), libc::SIGUSR2) } == 1;
+        assert!(!blocks_other());
+
+        let held = HeldSigpipe::hold().unwrap();
+        // SAFETY: `other` is live for the call, which reads it; a null
+        // pointer asks for no old mask. Only this thread's mask changes.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &other, ptr::null_mut()) };
+        assert_eq!(rc, 0);
+        drop(held);
+        assert!(!has_sigpipe(&signal_mask()));
+        assert!(blocks_other());
+    }
+}
+
+/// Counting the `SIGPIPE`s that reach the process, for the tests.
+#[cfg(test)]
+pub(crate) mod test_signals {
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DELIVERED: AtomicUsize = AtomicUsize::new(0);
+    static COUNTING: Once = Once::new();
+
+    extern "C" fn count(_signal: libc::c_int) {
+        DELIVERED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many `SIGPIPE`s were delivered to the process since the first
+    /// call. That call puts a counting handler in the place of the test
+    /// harness's ignoring the signal, for the rest of the test binary.
+    pub(crate) fn sigpipes_delivered() -> usize {
+        COUNTING.call_once(|| {
+            let handler = count as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            // SAFETY: the handler only adds to an atomic counter, which a
+            // signal handler may do; it stays valid for the process's life.
+            unsafe { libc::signal(libc::SIGPIPE, handler) };
+        });
+        DELIVERED.load(Ordering::SeqCst)
+    }
+
+    /// Whether a `SIGPIPE` is pending for the calling thread or the process.
+    pub(crate) fn sigpipe_pending() -> bool {
+        super::sigpipe_pending()
+    }
 }

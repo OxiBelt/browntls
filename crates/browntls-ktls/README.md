@@ -13,7 +13,7 @@ handled by `browntls::kernel::KernelConnection`.
 |---|---|
 | Protocols | TLS 1.2, TLS 1.3 |
 | Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, TLS 1.3 AES-128-CCM |
-| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.18 for a peer `record_size_limit` below 16384; 7.2 for `set_rx_expect_no_pad` |
+| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for a peer `record_size_limit` below 16384; 7.2 for `set_rx_expect_no_pad` |
 
 The configuration must set `enable_secret_extraction`. When the kernel or
 the connection cannot be offloaded, the connection and the socket come back
@@ -33,6 +33,59 @@ with a `KtlsStream` on a non-blocking socket, wait for `unsent()` to be zero
 before closing. Blocking sockets without a send timeout are not affected.
 
 ## Zero copy
+
+`sendfile` on either stream sends part of a regular file as application
+data with `sendfile(2)`: the kernel makes the records from the file's pages,
+and the bytes never pass through userspace. Like a write it first sends what
+the stream holds, counts the records against the confidentiality limit (by
+the kernel's own record count) and keeps `unsent()` right; `sendfile` on the
+socket itself (`get_ref`) does none of that. One call sends at most 64
+records' worth, so call it until the file is sent:
+
+```rust
+let file = std::fs::File::open("index.html")?;
+let len = file.metadata()?.len();
+let mut offset = 0;
+while offset < len {
+    let rest = usize::try_from(len - offset).unwrap_or(usize::MAX);
+    match tls.sendfile(&file, offset, rest)? {
+        0 => break, // the file was cut short meanwhile
+        n => offset += n as u64,
+    }
+}
+```
+
+A call that was cut short (no room on a non-blocking socket, a signal on a
+blocking one) may leave its last bytes in a record the kernel has not
+closed. They go out with what is sent next, `unsent()` counts them until
+then, and they are lost if the stream is dropped first.
+
+The streams never ask the kernel for more than the file holds: finding the
+end of a file before the count it was given, the kernel waits for TCP to
+take the last record even on a non-blocking socket. A file that holds less
+than the size it reports (cut short while it is sent, for one) can still
+cause that wait.
+
+`sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection that is
+closed for sending, and kernel TLS raises it even for a call that reports
+bytes as sent, and again when the socket is closed with records of a file
+still in the kernel. The call holds the signal back for its thread and takes
+one that became pending meanwhile, and dropping a stream that sent files
+does the same around the close of its socket, so neither raises `SIGPIPE`
+whatever the process does with the signal. That holds for a socket which the
+stream owns and nothing else holds: the kernel sends those records when the
+last holder lets go, so a borrowed, shared or duplicated socket closed
+elsewhere is not covered, nor is a descriptor that a child process inherited
+(a command spawned while the stream lives closes a close-on-exec socket at
+`exec`, and any other when it pleases, after the parent may have dropped
+the stream, and receives the signal). A `SIGPIPE`
+that something else sends to the process during the hold may be taken along.
+On a connection that has failed the kernel may go on reporting bytes as
+sent; `unsent()` and the reads tell.
+
+`AsyncKtlsStream::sendfile` waits for room on the socket; where the kernel
+must read the file from its storage first, the call blocks the thread for
+that long.
 
 `set_tx_zerocopy_sendfile` on either stream sets the kernel's
 `TLS_TX_ZEROCOPY_RO` option (Linux 5.19; off after the handover): a network
@@ -97,15 +150,15 @@ match AsyncKtlsStream::from_client(tls).await {
 `KernelHandoff::into_parts` returns it) and its socket. The feature enables
 Tokio's `net` only; the runtime is the application's.
 
-`src/sys.rs` holds the crate's only `unsafe` code, the socket options and
-`sendmsg`/`recvmsg` control messages of kernel TLS; see the invariants at its
-top.
+`src/sys.rs` holds the crate's only `unsafe` code, the socket options,
+`sendmsg`/`recvmsg` control messages and `sendfile` of kernel TLS, and the
+thread's signal mask around the latter; see the invariants at its top.
 
 ## Testing
 
 `cargo test -p browntls-ktls --all-features` runs the handover tests over
-loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`)
-and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
+loopback TCP, for `KtlsStream` (`tests/offload.rs`, `tests/zero_copy.rs`,
+`tests/sendfile.rs`) and for `AsyncKtlsStream` (`tests/tokio_offload.rs`,
 `tests/tokio_zero_copy.rs`, feature `tokio`). They are
 skipped when the `tls` module is missing, unless `BROWNTLS_KTLS_REQUIRED=1`
 is set (CI sets it after `sudo modprobe tls`).

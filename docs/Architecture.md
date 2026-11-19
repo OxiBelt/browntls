@@ -29,7 +29,7 @@ browntls-ktls       Linux kernel TLS offload of browntls connections
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
 | `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
-| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options and `sendmsg`/`recvmsg` control messages |
+| `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`, the kernel TLS socket options, `sendmsg`/`recvmsg` control messages and `sendfile` |
 
 `browntls-pki` performs no cryptography: signatures are checked through the
 `SignatureVerificationAlgorithm` trait supplied by the active provider. This
@@ -1025,7 +1025,7 @@ authentication requests are bounded per application data received, which the
 driver reports (`application_data_received`). `max_tx_payload_len` gives the
 fragment length the peer's `record_size_limit` or the configured
 `max_fragment_size` asks for, which the kernel must be told
-(`TLS_TX_MAX_PAYLOAD_LEN`, Linux 6.18). The kernel does not pad TLS 1.3
+(`TLS_TX_MAX_PAYLOAD_LEN`, Linux 6.19). The kernel does not pad TLS 1.3
 records or enforce the record size limit we announced on what it receives.
 
 Tests drive a `KernelConnection` against a userspace stand-in for the kernel
@@ -1075,11 +1075,12 @@ so `n` bytes make at most `n.div_ceil(max)` records (unless the kernel closes
 records early under memory pressure); that bound is reported with
 `records_sent`, and a write takes at most 64 records so the confidentiality
 limit is met in steps (it can be passed by fewer than 64 records). Bytes sent
-on the socket directly (`sendfile`) must be reported with
-`KtlsStream::records_sent`. TCP closing without `close_notify` is
+on the socket directly (`splice`) must be reported with
+`KtlsStream::records_sent`; a file is sent with `sendfile` (below), which
+counts for itself. TCP closing without `close_notify` is
 `UnexpectedEof`, as is every later call. A refused handover can be retried on
 the same socket (an attached `tls` ULP is accepted), and a peer
-`record_size_limit` the kernel cannot honour (before Linux 6.18) is refused
+`record_size_limit` the kernel cannot honour (before Linux 6.19) is refused
 before any key is installed. Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
@@ -1124,6 +1125,66 @@ the handover, or bytes were sent on the socket directly
 (`records_sent`), there is no ledger and `unsent()` says so
 (`Unsupported`). A FIN takes a sequence number, so the count no longer fits
 once the write side is shut.
+
+`sendfile` on either stream sends part of a regular file as application data
+with `sendfile(2)`, the kernel making the records from the file's pages. It
+goes through the engine like a write (the outputs that wait first, at most 64
+records' worth a call, the plaintext entered in the ledger), with three
+differences.
+
+The engine never asks for more than the file holds behind the offset
+(`fstat`; anything but a regular file is refused). Asked for what is there or
+less, the kernel closes the last record like a write. When it finds the end of
+the file before the count, having sent something, it sends what it holds
+without `MSG_DONTWAIT` (`tls_sw_splice_eof`), and the call waits for TCP to
+take all of it, on a non-blocking socket too. A file that holds less than the
+size it reports (cut short between the two calls, or on a file system that
+reports sizes it does not have) can still bring that about.
+
+The records are counted by the kernel's record sequence number, read on both
+sides of the call, plus one. A call cut short (no room on a non-blocking
+socket, a signal on a blocking one) leaves its last bytes in a record that a
+later call closes, and the kernel may close a record early (too many pieces of
+pages in it, or memory pressure), so the bytes sent do not bound the records
+made. The bytes of an open record go out with whatever is sent next, are in
+`unsent()` until then, and are lost if the stream is dropped first. Without the
+kernel's counters the engine reports a record for every 4096 bytes on top of
+those the bytes alone make.
+
+`sendfile(2)` has no flag against `SIGPIPE`, which a peer could otherwise
+bring upon a process that does not ignore the signal by resetting the
+connection. Kernel TLS raises it in two places: during a `sendfile` on a
+connection closed for sending, even when the call reports bytes as sent
+(`tls_sw_sendmsg_locked` returns what it copied and raises the signal for the
+error behind it), and when the socket is closed, where the records the kernel
+still holds are sent with the flags of the calls that made them. Both are
+answered with `sys::HeldSigpipe`, which blocks the signal for the calling
+thread and, when dropped, takes a `SIGPIPE` that became pending meanwhile
+(`sigtimedwait`) before it unblocks the signal again, if the caller had not
+blocked it; one that was pending before is left alone, and one sent to the
+process by something else meanwhile cannot be told from the kernel's and is
+taken too. `sys::sendfile` holds it for the length of the call. A stream that
+sent a file holds it while it is dropped (`src/quiet_close.rs`): the stream's
+`Drop` takes the hold, and the field that keeps it is declared right behind
+the socket, so that the socket, and nothing else, is dropped under the hold.
+The kernel sends the held records when the last reference to the socket goes,
+in whichever task drops it. A socket the stream does not own (a borrowed or
+shared one), a duplicate, and a descriptor inherited by a child process (which
+closes it at `exec` if it is close-on-exec, and whenever it does otherwise,
+possibly after the parent dropped the stream) are closed elsewhere, and that
+closer has to see to the signal itself:
+nothing in userspace can discard the records.
+
+`AsyncKtlsStream::sendfile` runs the same call when Tokio reports the socket
+writable; only the socket is waited for, not the file's storage. The tests
+(`tests/sendfile.rs`, `tests/tokio_zero_copy.rs`, and unit tests in
+`src/sys.rs` and `src/sigpipe_tests.rs`) count the records on the wire, drive
+KeyUpdates with a suite whose keys last for 100 records, fill a non-blocking
+socket, and show that a count past the end of the file does not wait for a
+peer that is not reading. A handler counts the `SIGPIPE`s delivered to the
+test process: none from `sendfile` on plain TCP and on kernel TLS sockets of
+both streams whose write side was closed, and none from dropping those
+streams.
 
 `set_tx_zerocopy_sendfile` on either stream sets `TLS_TX_ZEROCOPY_RO` (Linux
 5.19; off after the handover), which lets a network device that encrypts the
@@ -1230,10 +1291,12 @@ stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, `ioctl(SIOCOUTQ)`, and `sendmsg`/`recvmsg` with one control
-message. Its
+without waiting, `ioctl(SIOCOUTQ)`, `uname`, `sendfile` (whose only pointer is to the
+offset) with `fstat` and the calling thread's signal mask around it, and
+`sendmsg`/`recvmsg` with one control message. Its
 invariants are listed at its top: borrowed descriptors,
-pointers only into live values with their lengths, control messages built and
+pointers only into live values with their lengths, the thread's signal mask
+left as it was, control messages built and
 read through the libc `CMSG_*` functions within a `cmsghdr`-aligned buffer
 sized with `CMSG_SPACE`, and no value created from kernel output but plain
 integers. The tests (`crates/browntls-ktls/tests/offload.rs`) run over

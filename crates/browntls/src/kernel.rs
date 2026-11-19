@@ -294,7 +294,7 @@ impl<Data: SideData> KernelConnection<Data> {
     /// asks for less than the protocol maximum of 16384 bytes; `None`
     /// otherwise.
     ///
-    /// The kernel must then be told (Linux 6.18 and later:
+    /// The kernel must then be told (Linux 6.19 and later:
     /// `TLS_TX_MAX_PAYLOAD_LEN`), or its full-size records overflow the
     /// peer's limit. The TLS 1.3 content type byte is not included.
     pub fn max_tx_payload_len(&self) -> Option<u16> {

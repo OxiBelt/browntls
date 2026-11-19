@@ -12,6 +12,7 @@ use browntls::{
 };
 
 use crate::engine::{Engine, invalid_data, option_error};
+use crate::quiet_close::QuietClose;
 use crate::sys;
 
 mod sealed {
@@ -172,7 +173,16 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// (`EKEYEXPIRED` from the kernel) and the connection is lost.
 pub struct KtlsStream<S, Data> {
     socket: S,
+    /// Right behind `socket`, which must be dropped first and nothing else
+    /// while the signal is held: see [`QuietClose`].
+    quiet_close: QuietClose,
     engine: Engine<Data>,
+}
+
+impl<S, Data> Drop for KtlsStream<S, Data> {
+    fn drop(&mut self) {
+        self.quiet_close.closing();
+    }
 }
 
 impl<S, Data> KtlsStream<S, Data>
@@ -226,7 +236,11 @@ where
             return Err(refused(conn, socket, pending, error));
         }
         match install(conn, socket.as_fd(), pending) {
-            Ok(engine) => Ok(Self { socket, engine }),
+            Ok(engine) => Ok(Self {
+                socket,
+                engine,
+                quiet_close: QuietClose::default(),
+            }),
             Err(error) => Err(HandoffError::Failed(error)),
         }
     }
@@ -240,11 +254,94 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
 
     /// The socket.
     ///
-    /// Bytes sent on it directly (for example with `sendfile`) become
+    /// Bytes sent on it directly (for example with `splice`) become
     /// application data records the stream did not count: report them with
-    /// [`Self::records_sent`].
+    /// [`Self::records_sent`]. For a file, [`Self::sendfile`] does the
+    /// counting.
     pub fn get_ref(&self) -> &S {
         &self.socket
+    }
+
+    /// Sends up to `count` bytes of the regular file `file`, starting at
+    /// `offset`, as application data with `sendfile(2)`: the kernel makes
+    /// the records from the file's pages, and the bytes never pass through
+    /// userspace. Returns how many bytes were sent, which is zero only at
+    /// or behind the end of the file (or for a `count` of zero) and may be
+    /// less than `count`: call again with the offset moved on, as with
+    /// [`Write::write`]. One call sends at most 64 records' worth (a
+    /// mebibyte, unless the peer asked for smaller records). The file's
+    /// own position is neither used nor moved.
+    ///
+    /// Like a write, the call first sends what the stream holds, counts
+    /// the records against the cipher suite's confidentiality limit and
+    /// refreshes the keys at it, and keeps [`Self::unsent`] right, which
+    /// `sendfile` on [`Self::get_ref`] would not.
+    ///
+    /// ```no_run
+    /// # fn send<S: std::os::fd::AsFd, D: browntls::SideData>(
+    /// #     tls: &mut browntls_ktls::KtlsStream<S, D>,
+    /// # ) -> std::io::Result<()> {
+    /// let file = std::fs::File::open("index.html")?;
+    /// let len = file.metadata()?.len();
+    /// let mut offset = 0;
+    /// while offset < len {
+    ///     let rest = usize::try_from(len - offset).unwrap_or(usize::MAX);
+    ///     match tls.sendfile(&file, offset, rest)? {
+    ///         0 => break, // the file was cut short meanwhile
+    ///         n => offset += n as u64,
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// On a non-blocking socket `WouldBlock` means no room, as for a
+    /// write. A call that was cut short (no room on a non-blocking socket,
+    /// a signal on a blocking one) may leave its last bytes in a record
+    /// the kernel has not closed: they go out with what is sent next (more
+    /// of the file, a write, `close_notify`), [`Self::unsent`] counts them
+    /// until then, and they are lost if the stream is dropped first.
+    ///
+    /// The call never asks the kernel for more than the file holds behind
+    /// `offset`, whatever `count` is: finding the end of a file before the
+    /// count it was given, the kernel waits for TCP to take the last
+    /// record even on a non-blocking socket. A file that holds less than
+    /// the size it reports (cut short while it is sent, for one) can
+    /// still cause that wait.
+    ///
+    /// `sendfile(2)` cannot be told not to raise `SIGPIPE` on a connection
+    /// that is closed for sending, as this stream's writes are, and the
+    /// kernel raises it even for a call that reports bytes as sent. The
+    /// call holds the signal back for its thread and takes one that became
+    /// pending meanwhile, so that it raises none whatever the process does
+    /// with the signal; a `SIGPIPE` that was pending for the thread before
+    /// stays pending, and one that something else sent to the process
+    /// meanwhile may be taken along. Dropping the stream does the same
+    /// around the close of its socket, when the kernel sends the records
+    /// of files it still holds.
+    ///
+    /// That covers a socket which the stream owns and nothing else holds.
+    /// The kernel sends those records when the last holder of the socket
+    /// lets go of it, in that holder's thread: a borrowed, shared or
+    /// duplicated socket that is closed elsewhere after sending files can
+    /// raise the signal there, and so can a child process that inherited
+    /// the descriptor and closes it after the stream was dropped (between
+    /// `fork` and `exec` too, where close-on-exec closes it in the new
+    /// program, whose `SIGPIPE` a spawned command usually has reset to
+    /// terminate it). The signal is then that closer's to ignore or hold
+    /// back; a process that spawns children while it sends files to peers
+    /// it does not trust is better served by writes.
+    ///
+    /// On a connection that has failed the kernel may go on reporting
+    /// bytes as sent; [`Self::unsent`] and the reads tell.
+    ///
+    /// The error is [`io::ErrorKind::InvalidInput`] for a `file` that is
+    /// not a regular file. Where the platform's file offsets have 32 bits,
+    /// a file or an `offset` of 2 GiB or more is an error as well.
+    pub fn sendfile(&mut self, file: &impl AsFd, offset: u64, count: usize) -> io::Result<usize> {
+        self.quiet_close.sent_file();
+        self.engine
+            .sendfile(self.socket.as_fd(), file.as_fd(), offset, count)
     }
 
     /// Reports `records` application data records sent on the socket
@@ -414,7 +511,7 @@ impl<S, Data> fmt::Debug for KtlsStream<S, Data> {
 }
 
 /// Refuses a connection whose peer asked for smaller records than the
-/// kernel can be told to make: `TLS_TX_MAX_PAYLOAD_LEN` needs Linux 6.18.
+/// kernel can be told to make: `TLS_TX_MAX_PAYLOAD_LEN` needs Linux 6.19.
 /// Asked with the upper layer protocol attached and before any key is set,
 /// while a refusal still leaves the connection usable.
 pub(crate) fn check_record_size<Data: SideData>(
@@ -426,7 +523,7 @@ pub(crate) fn check_record_size<Data: SideData>(
     }
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "the peer's record_size_limit needs TLS_TX_MAX_PAYLOAD_LEN (Linux 6.18)",
+        "the peer's record_size_limit needs TLS_TX_MAX_PAYLOAD_LEN (Linux 6.19)",
     ))
 }
 

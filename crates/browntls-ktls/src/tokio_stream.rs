@@ -604,7 +604,7 @@ from_stream!(
 );
 
 /// Whether driving a stream on cannot clear `blocker`.
-fn permanent(blocker: KernelHandoffBlocker, handshaking: bool) -> bool {
+pub(crate) fn permanent(blocker: KernelHandoffBlocker, handshaking: bool) -> bool {
     match blocker {
         KernelHandoffBlocker::HandshakeIncomplete => !handshaking,
         KernelHandoffBlocker::SecretExtractionDisabled

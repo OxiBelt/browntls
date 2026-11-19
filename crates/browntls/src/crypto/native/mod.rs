@@ -100,6 +100,10 @@
 //! # }
 //! ```
 //!
+//! Linux kernel TLS can be the first place for a connection's records,
+//! ahead of the backends: see [`accel::load::kernel`] and the `routing`
+//! module of the `browntls-ktls` crate, which places connections by it.
+//!
 //! Whether routing helps depends on the machine: work only moves to a
 //! backend that measures faster than the congested one at that moment.
 //! See [`accel::load`] for the mechanism, its security considerations and

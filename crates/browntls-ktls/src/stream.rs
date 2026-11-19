@@ -554,7 +554,7 @@ pub(crate) fn install<C: Offload>(
 }
 
 /// Whether driving the connection on can clear `blocker`.
-fn transient<C: Offload>(blocker: KernelHandoffBlocker, conn: &C) -> bool {
+pub(crate) fn transient<C: Offload>(blocker: KernelHandoffBlocker, conn: &C) -> bool {
     match blocker {
         KernelHandoffBlocker::HandshakeIncomplete => conn.is_handshaking(),
         KernelHandoffBlocker::UnreadPlaintext

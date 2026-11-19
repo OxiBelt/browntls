@@ -27,8 +27,7 @@ pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>
     }
     if matches!(der, PrivateKeyDer::Pkcs1(_)) || looks_like_rsa_pkcs8(der.secret_der()) {
         return Err(Error::general(
-            "RSA signing is not supported by the rustcrypto provider \
-             (RUSTSEC-2023-0071: Marvin attack on private-key operations)",
+            "RSA signing is not supported by the rustcrypto provider",
         ));
     }
     Err(Error::general(

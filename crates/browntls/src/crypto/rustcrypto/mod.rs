@@ -3,10 +3,10 @@
 //! This provider exists to exercise the provider interface and to drive the
 //! test-suite; it is not the default (`native`) provider. Its limits:
 //!
-//! * RSA keys can be used for *verification* only. Every published `rsa`
-//!   release is affected by RUSTSEC-2023-0071 (the Marvin timing attack on
-//!   private-key operations), so [`KeyProvider::load_private_key`] rejects
-//!   RSA keys.
+//! * RSA keys can be used for *verification* only:
+//!   [`KeyProvider::load_private_key`] rejects RSA keys. The rule dates from
+//!   `rsa` releases before 0.10.0, which are affected by RUSTSEC-2023-0071
+//!   (the Marvin timing attack on private-key operations).
 //! * Nothing here claims FIPS validation.
 
 use browntls_pki::PrivateKeyDer;

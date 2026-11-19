@@ -608,12 +608,13 @@ pub(super) fn emit_client_hello_for_retry(
         .filter(|_| !quic)
         .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
     // RFC 9149: a TLS 1.3 extension only.
+    let ticket_limit = u8::try_from(config.max_tls13_tickets_per_connection).unwrap_or(u8::MAX);
     exts.ticket_request = config
         .tls13_ticket_request
         .filter(|_| supports_tls13)
         .map(|request| ClientTicketRequest {
-            new_session_count: request.new_session_count,
-            resumption_count: request.resumption_count,
+            new_session_count: request.new_session_count.min(ticket_limit),
+            resumption_count: request.resumption_count.min(ticket_limit),
         });
 
     let mut cipher_suites: Vec<CipherSuite> = config

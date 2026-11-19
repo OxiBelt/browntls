@@ -130,6 +130,11 @@ option to rule out.
 
 The `tokio` feature adds `AsyncKtlsStream`, the same offload on a
 `tokio::net::TcpStream` with `AsyncRead` and `AsyncWrite`.
+An async read processes at most eight successful kernel receives per poll
+when control records yield no application data. It then reschedules itself
+without losing socket readiness, so continuously arriving control records
+cannot hold one Tokio worker in that read indefinitely. The blocking stream
+keeps reading until data, closure or an I/O result is available.
 `AsyncKtlsStream::from_client` and `from_server` take a
 [browntls-tokio](../browntls-tokio/README.md) stream: they ready it with
 `into_kernel_handoff` (handshake and 0-RTT phase completed, queued records

@@ -659,8 +659,8 @@ impl<Data: SideData> KernelConnection<Data> {
 }
 
 impl KernelConnection<crate::client::ClientConnectionData> {
-    /// How many TLS 1.3 NewSessionTickets the server has sent, before and
-    /// after the handover (each is stored in the configured session store).
+    /// How many valid TLS 1.3 tickets this connection accepted for storage,
+    /// before and after the handover.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.core.data.tls13_tickets_received
     }

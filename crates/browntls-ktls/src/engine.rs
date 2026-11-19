@@ -44,6 +44,13 @@ const SMALLEST_PAGE: usize = 4096;
 /// `ContentType::ApplicationData`.
 const APPLICATION_DATA: u8 = 23;
 
+/// A read either produced application data (or EOF), or used its receive
+/// budget while handling records that produced no application data.
+pub(crate) enum ReadResult {
+    Bytes(usize),
+    Yield,
+}
+
 /// The first Linux release that can be trusted with
 /// `TLS_RX_EXPECT_NO_PAD`. The option makes the kernel decrypt a TLS 1.3
 /// record into the reader's buffer and, when the record turns out to be
@@ -372,16 +379,41 @@ impl<Data: SideData> Engine<Data> {
     /// what the kernel decrypts. Records of other types are handled on the
     /// way. `Ok(0)` (for a non-empty `buf`) is the peer's `close_notify`.
     pub(crate) fn read(&mut self, fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
+        match self.read_inner(fd, buf, None)? {
+            ReadResult::Bytes(n) => Ok(n),
+            // An unbudgeted read cannot yield.
+            ReadResult::Yield => Err(io::Error::other("unexpected read budget exhaustion")),
+        }
+    }
+
+    /// As above, but limits successful kernel receives within one caller
+    /// poll. The caller retains `remaining` across readiness retries.
+    #[cfg(feature = "tokio")]
+    pub(crate) fn read_bounded(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8],
+        remaining: &mut usize,
+    ) -> io::Result<ReadResult> {
+        self.read_inner(fd, buf, Some(remaining))
+    }
+
+    fn read_inner(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8],
+        mut remaining: Option<&mut usize>,
+    ) -> io::Result<ReadResult> {
         if buf.is_empty() {
-            return Ok(0);
+            return Ok(ReadResult::Bytes(0));
         }
         if let Some(n) = self.read_pending(buf) {
-            return Ok(n);
+            return Ok(ReadResult::Bytes(n));
         }
         loop {
             self.check()?;
             if self.conn.peer_has_closed() {
-                return Ok(0);
+                return Ok(ReadResult::Bytes(0));
             }
             // Keys to install come before the next record; answers owed are
             // sent when there is room (or by the next write or flush).
@@ -389,6 +421,9 @@ impl<Data: SideData> Engine<Data> {
             if self.reading_paused() {
                 // Nothing more is read until the socket takes what waits.
                 return Err(io::ErrorKind::WouldBlock.into());
+            }
+            if remaining.as_deref() == Some(&0) {
+                return Ok(ReadResult::Yield);
             }
             let continuing = self.control.as_ref().map(|(typ, _)| *typ);
             let into: &mut [u8] = if continuing.is_some() {
@@ -420,6 +455,9 @@ impl<Data: SideData> Engine<Data> {
                 }
                 Err(err) => return Err(err),
             };
+            if let Some(left) = remaining.as_deref_mut() {
+                *left -= 1;
+            }
             let Some(typ) = received.record_type else {
                 // No record: the peer closed TCP.
                 if received.len == 0 {
@@ -438,7 +476,7 @@ impl<Data: SideData> Engine<Data> {
                     continue;
                 }
                 self.conn.application_data_received();
-                return Ok(received.len);
+                return Ok(ReadResult::Bytes(received.len));
             }
             let (_, bytes) = self.control.get_or_insert_with(|| (typ, Vec::new()));
             if continuing.is_some() {

@@ -199,6 +199,12 @@ pub struct ClientConfig {
     /// number of tickets.
     pub tls13_ticket_request: Option<TicketRequest>,
 
+    /// The most valid TLS 1.3 tickets accepted for storage on one
+    /// connection, including after kernel handoff. Later tickets are
+    /// ignored; zero accepts none. Defaults to 8, and values above 255
+    /// make connection creation fail with [`Error::BadTls13TicketLimit`].
+    pub max_tls13_tickets_per_connection: usize,
+
     /// Whether to send GREASE values (RFC 8701) in the ClientHello: in the
     /// cipher suites, `supported_groups`, `key_share` (with a one-byte
     /// share), `supported_versions`, `signature_algorithms` and
@@ -707,6 +713,9 @@ impl ConnectionCore<ClientConnectionData> {
         alpn_protocols: Vec<Vec<u8>>,
         quic: Option<crate::quic::Quic>,
     ) -> Result<Self, Error> {
+        if config.max_tls13_tickets_per_connection > 255 {
+            return Err(Error::BadTls13TicketLimit);
+        }
         let mut common_state = CommonState::new(Side::Client);
         common_state.quic = quic.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
@@ -754,7 +763,7 @@ impl UnbufferedClientConnection {
         })
     }
 
-    /// How many TLS 1.3 tickets the server has sent so far.
+    /// How many valid TLS 1.3 tickets this connection accepted for storage.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.core.data.tls13_tickets_received
     }

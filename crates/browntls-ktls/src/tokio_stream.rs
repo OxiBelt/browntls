@@ -24,12 +24,15 @@ use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 use tokio::net::TcpStream;
 
 use crate::drain::{Drain, Outcome, Room};
-use crate::engine::Engine;
+use crate::engine::{Engine, ReadResult};
 use crate::quiet_close::QuietClose;
 use crate::stream::{HandoffError, Offload, check_record_size, install, refused, unsupported};
 use crate::sys;
 
 mod zero_copy;
+
+/// Limits peer-driven control-record work done by one async read poll.
+const READ_RECEIVES_PER_POLL: usize = 8;
 
 /// Why a `browntls-tokio` stream was not handed to the kernel
 /// ([`AsyncKtlsStream::from_client`], [`AsyncKtlsStream::from_server`]).
@@ -123,8 +126,10 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// Reads return the application data the kernel decrypted; records of
 /// other types are handled on the way (a TLS 1.3 KeyUpdate is answered and
 /// the new keys installed, tickets are stored, `close_notify` is end of
-/// file). Writes give the bytes to the kernel and count the records it
-/// makes of them against the cipher suite's confidentiality limit,
+/// file). A read yields after eight kernel receives without application
+/// data, then resumes with the socket's read readiness retained. Writes
+/// give the bytes to the kernel and count the records it makes against
+/// the cipher suite's confidentiality limit,
 /// refreshing the TLS 1.3 keys when it is reached.
 /// [`shutdown`](AsyncWrite::poll_shutdown) sends `close_notify` and shuts
 /// the socket's write side; writes then fail with `BrokenPipe`.
@@ -626,6 +631,7 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
+        let mut remaining = READ_RECEIVES_PER_POLL;
         loop {
             // Plaintext from before the handover, the peer's closure and a
             // failure are reported without asking the kernel.
@@ -647,14 +653,16 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
             let Self { socket, engine, .. } = &mut *this;
             let fd = socket.as_fd();
             let result = if direct {
-                engine.read(fd, buf.initialize_unfilled()).map(Some)
+                engine
+                    .read(fd, buf.initialize_unfilled())
+                    .map(|n| Some(ReadResult::Bytes(n)))
             } else {
                 // Fails with `WouldBlock` only when the kernel has no
                 // record to give. Reading that stopped for the outputs
                 // that wait (`None`) leaves the read readiness alone: the
                 // records the kernel holds are read once there is room.
                 socket.try_io(Interest::READABLE, || {
-                    match engine.read(fd, buf.initialize_unfilled()) {
+                    match engine.read_bounded(fd, buf.initialize_unfilled(), &mut remaining) {
                         Err(err)
                             if err.kind() == io::ErrorKind::WouldBlock
                                 && engine.reading_paused() =>
@@ -666,9 +674,15 @@ impl<Data: SideData> AsyncRead for AsyncKtlsStream<Data> {
                 })
             };
             match result {
-                Ok(Some(n)) => {
+                Ok(Some(ReadResult::Bytes(n))) => {
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
+                }
+                Ok(Some(ReadResult::Yield)) => {
+                    // `try_io` saw success, so it retained read readiness.
+                    // Schedule another poll after other runnable tasks.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
                 }
                 Ok(None) => {}
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}

@@ -35,7 +35,7 @@ impl ClientConnection {
         })
     }
 
-    /// How many TLS 1.3 tickets the server has sent so far.
+    /// How many valid TLS 1.3 tickets this connection accepted for storage.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.core.data.tls13_tickets_received
     }

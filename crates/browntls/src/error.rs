@@ -85,6 +85,9 @@ pub enum Error {
     /// A configured `record_size_limit` is below 64 (RFC 8449 §4).
     BadRecordSizeLimit,
 
+    /// The configured TLS 1.3 ticket limit exceeds 255.
+    BadTls13TicketLimit,
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -673,6 +676,9 @@ impl fmt::Display for Error {
             }
             Self::BadRecordSizeLimit => {
                 f.write_str("the supplied record_size_limit was smaller than 64")
+            }
+            Self::BadTls13TicketLimit => {
+                f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
             }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),

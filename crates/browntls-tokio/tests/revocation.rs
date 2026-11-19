@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::revocation::{RevocationCheck, RevocationQuery, RevocationResponse};
+use browntls_core::revocation::{RevocationCheck, RevocationQuery, RevocationResponse};
 use browntls_tokio::revocation::{FetchLimits, RevocationFetcher, RevocationFetcherBuilder};
 use tokio::time::Instant;
 
@@ -364,13 +364,13 @@ mod common;
 
 #[cfg(any(feature = "native", feature = "rustcrypto"))]
 mod streams {
-    use browntls::client::WebPkiServerVerifier;
-    use browntls::client::danger::{
+    use browntls_core::client::WebPkiServerVerifier;
+    use browntls_core::client::danger::{
         HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
     };
-    use browntls::pki_types::{CertificateDer, ServerName, UnixTime};
-    use browntls::revocation::{PeerEvidence, RevocationStatus};
-    use browntls::{
+    use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
+    use browntls_core::revocation::{PeerEvidence, RevocationStatus};
+    use browntls_core::{
         CertificateError, ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
         SupportedProtocolVersion,
     };
@@ -667,7 +667,7 @@ mod streams {
 
     #[tokio::test(start_paused = true)]
     async fn dropping_the_handshake_drops_its_fetch() {
-        let version = &browntls::version::TLS13;
+        let version = &browntls_core::version::TLS13;
         let pki = Pki::new();
         let probe = Arc::new(Probe::default());
         let fetcher = probed(&probe, Duration::from_secs(3600), |_| Ok(GOOD.to_vec()))

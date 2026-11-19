@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use browntls::crypto::CryptoProvider;
-use browntls::crypto::cipher::{
+use browntls_core::crypto::CryptoProvider;
+use browntls_core::crypto::cipher::{
     AeadKey, Iv, MessageDecrypter, MessageEncrypter, OutboundChunks, OutboundOpaqueMessage,
     OutboundPlainMessage, Tls13AeadAlgorithm, UnsupportedOperationError,
 };
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::{
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::{
     ClientConfig, ConnectionTrafficSecrets, ContentType, Error, RootCertStore, ServerConfig,
     SupportedCipherSuite, Tls13CipherSuite,
 };
@@ -33,9 +33,9 @@ use rcgen::{
 /// The provider under test: the native one when built, else RustCrypto.
 pub fn provider() -> CryptoProvider {
     #[cfg(feature = "native")]
-    let provider = browntls::crypto::native::default_provider();
+    let provider = browntls_core::crypto::native::default_provider();
     #[cfg(not(feature = "native"))]
-    let provider = browntls::crypto::rustcrypto::default_provider();
+    let provider = browntls_core::crypto::rustcrypto::default_provider();
     provider
 }
 
@@ -157,7 +157,7 @@ fn tls13_variant(
     confidentiality_limit: u64,
 ) -> SupportedCipherSuite {
     SupportedCipherSuite::Tls13(Box::leak(Box::new(Tls13CipherSuite {
-        common: browntls::CipherSuiteCommon {
+        common: browntls_core::CipherSuiteCommon {
             suite: suite.common.suite,
             hash_provider: suite.common.hash_provider,
             confidentiality_limit,

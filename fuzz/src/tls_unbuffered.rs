@@ -33,14 +33,16 @@ mod seeds;
 
 use std::sync::Arc;
 
-use browntls::client::{ClientConnectionData, UnbufferedClientConnection};
-use browntls::ech::EchStatus;
-use browntls::server::{PostHandshakeAuthStatus, ServerConnectionData, UnbufferedServerConnection};
-use browntls::unbuffered::{
+use browntls_core::client::{ClientConnectionData, UnbufferedClientConnection};
+use browntls_core::ech::EchStatus;
+use browntls_core::server::{
+    PostHandshakeAuthStatus, ServerConnectionData, UnbufferedServerConnection,
+};
+use browntls_core::unbuffered::{
     ConnectionState, EarlyDataError, EncodeError, EncryptError, InsufficientSizeError,
     TransmitTlsData, UnbufferedConnectionCommon,
 };
-use browntls::{ClientConfig, CommonState, ServerConfig, SideData};
+use browntls_core::{ClientConfig, CommonState, ServerConfig, SideData};
 
 use crate::input::{Input, put_short_field};
 use crate::tls_conn::setup::{Knobs, Pki, assert_prefix, assert_same_secrets, server_name};
@@ -269,7 +271,7 @@ impl EarlyData for ClientConnectionData {
 
 /// Encrypts `args.data` as application data through `encrypt`.
 fn send_app_data<D: SideData>(
-    write: &mut browntls::unbuffered::WriteTraffic<'_, D>,
+    write: &mut browntls_core::unbuffered::WriteTraffic<'_, D>,
     args: &StepArgs<'_>,
     io: &mut SideIo<'_>,
 ) {

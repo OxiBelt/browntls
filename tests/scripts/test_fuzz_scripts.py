@@ -56,8 +56,8 @@ class PlanTests(unittest.TestCase):
 
     def test_revocation_changes_select_the_revocation_harness(self):
         for path in (
-            "crates/browntls/src/revocation/policy/data.rs",
-            "crates/browntls/src/quic/connection.rs",
+            "crates/browntls-core/src/revocation/policy/data.rs",
+            "crates/browntls-core/src/quic/connection.rs",
             "crates/browntls-tokio/src/revocation/staple.rs",
             "fuzz/src/pki_revocation/fixtures.rs",
         ):

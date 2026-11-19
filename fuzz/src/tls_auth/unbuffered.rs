@@ -5,15 +5,15 @@
 
 use std::ops::DerefMut;
 
-use browntls::client::UnbufferedClientConnection;
-use browntls::exported_authenticator::AuthenticatorRequestExtensions;
-use browntls::pki_types::CertificateDer;
-use browntls::server::UnbufferedServerConnection;
-use browntls::sign::CertifiedKey;
-use browntls::unbuffered::{
+use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::exported_authenticator::AuthenticatorRequestExtensions;
+use browntls_core::pki_types::CertificateDer;
+use browntls_core::server::UnbufferedServerConnection;
+use browntls_core::sign::CertifiedKey;
+use browntls_core::unbuffered::{
     ConnectionState, EncodeError, InsufficientSizeError, UnbufferedConnectionCommon,
 };
-use browntls::{ClientConnection, ConnectionCommon, Error, ServerConnection, SideData};
+use browntls_core::{ClientConnection, ConnectionCommon, Error, ServerConnection, SideData};
 
 /// One end of an in-memory connection.
 pub(super) enum End<B, U> {

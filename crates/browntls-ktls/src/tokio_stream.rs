@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker, ready};
 use std::time::Instant;
 
-use browntls::SideData;
-use browntls::client::ClientConnectionData;
-use browntls::kernel::{KernelConnection, KernelHandoffBlocker};
-use browntls::server::ServerConnectionData;
+use browntls_core::SideData;
+use browntls_core::client::ClientConnectionData;
+use browntls_core::kernel::{KernelConnection, KernelHandoffBlocker};
+use browntls_core::server::ServerConnectionData;
 use browntls_tokio::{client, server};
 use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 use tokio::net::TcpStream;
@@ -143,7 +143,7 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 /// before it reads on. A TCP connection that ends
 /// without `close_notify` fails the read with `UnexpectedEof`. Errors from
 /// the connection are [`io::ErrorKind::InvalidData`] with the
-/// [`browntls::Error`] inside; the stream has then failed for good.
+/// [`browntls_core::Error`] inside; the stream has then failed for good.
 /// `shutdown` sends its alert; `flush` reports the failure, after sending
 /// the alert if the socket has room for it.
 ///
@@ -181,7 +181,7 @@ impl<S> std::error::Error for StreamHandoffError<S> {
 ///
 /// ```no_run
 /// # async fn run(
-/// #     config: std::sync::Arc<browntls::ClientConfig>,
+/// #     config: std::sync::Arc<browntls_core::ClientConfig>,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// use tokio::io::{AsyncReadExt, AsyncWriteExt};
 ///

@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::mem::size_of;
 
-use browntls::kernel::KernelOutput;
+use browntls_core::kernel::KernelOutput;
 
 /// The most the waiting outputs may cost before reading stops: the
 /// userspace connection's cap on unwritten control records
@@ -74,9 +74,9 @@ fn cost(output: &KernelOutput) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use browntls::crypto::cipher::{AeadKey, Iv};
-    use browntls::kernel::KernelOutput;
-    use browntls::{ConnectionTrafficSecrets, ContentType};
+    use browntls_core::crypto::cipher::{AeadKey, Iv};
+    use browntls_core::kernel::KernelOutput;
+    use browntls_core::{ConnectionTrafficSecrets, ContentType};
 
     use super::{BUDGET, Waiting, cost};
 

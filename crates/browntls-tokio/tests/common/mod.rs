@@ -13,9 +13,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::crypto::CryptoProvider;
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion};
+use browntls_core::crypto::CryptoProvider;
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -28,18 +28,18 @@ pub mod server_early;
 /// The provider under test: the native one when built, else RustCrypto.
 pub fn provider() -> Arc<CryptoProvider> {
     #[cfg(feature = "native")]
-    let provider = browntls::crypto::native::default_provider();
+    let provider = browntls_core::crypto::native::default_provider();
     #[cfg(not(feature = "native"))]
-    let provider = browntls::crypto::rustcrypto::default_provider();
+    let provider = browntls_core::crypto::rustcrypto::default_provider();
     Arc::new(provider)
 }
 
 /// The protocol versions to run each case under.
 pub fn versions() -> Vec<&'static SupportedProtocolVersion> {
     vec![
-        &browntls::version::TLS13,
+        &browntls_core::version::TLS13,
         #[cfg(feature = "tls12")]
-        &browntls::version::TLS12,
+        &browntls_core::version::TLS12,
     ]
 }
 
@@ -115,7 +115,7 @@ impl Pki {
         &self,
         version: &'static SupportedProtocolVersion,
     ) -> ServerConfig {
-        let verifier = browntls::server::WebPkiClientVerifier::builder_with_provider(
+        let verifier = browntls_core::server::WebPkiClientVerifier::builder_with_provider(
             Arc::new(self.roots()),
             provider(),
         )
@@ -178,8 +178,8 @@ pub fn localhost() -> ServerName<'static> {
     ServerName::try_from("localhost").unwrap()
 }
 
-/// The `browntls::Error` inside an `io::Error`, if any.
-pub fn tls_error(err: &io::Error) -> Option<&browntls::Error> {
+/// The `browntls_core::Error` inside an `io::Error`, if any.
+pub fn tls_error(err: &io::Error) -> Option<&browntls_core::Error> {
     err.get_ref()?.downcast_ref()
 }
 

@@ -1,5 +1,5 @@
 //! The polling core shared by the client and server streams: moving TLS
-//! records between a `browntls` connection and an `AsyncRead + AsyncWrite`
+//! records between a `browntls-core` connection and an `AsyncRead + AsyncWrite`
 //! transport without blocking.
 //!
 //! Adapted from tokio-rustls (`src/common/mod.rs`, Copyright (c) 2017
@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use browntls::{ConnectionCommon, SideData};
+use browntls_core::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 mod coalesce;
@@ -910,7 +910,7 @@ where
 /// that caused the alert, not the transport's.
 pub(crate) fn poll_send_alert<IO: AsyncWrite + Unpin>(
     io: &mut IO,
-    alert: &mut browntls::server::AcceptedAlert,
+    alert: &mut browntls_core::server::AcceptedAlert,
     cx: &mut Context<'_>,
 ) -> Poll<()> {
     loop {
@@ -924,7 +924,7 @@ pub(crate) fn poll_send_alert<IO: AsyncWrite + Unpin>(
     Pin::new(io).poll_flush(cx).map(|_| ())
 }
 
-/// Gives `browntls`'s blocking `read_tls` an [`AsyncRead`], turning
+/// Gives `browntls-core`'s blocking `read_tls` an [`AsyncRead`], turning
 /// `Pending` into `WouldBlock`.
 pub(crate) struct SyncReadAdapter<'a, 'b, T> {
     pub(crate) io: &'a mut T,
@@ -942,7 +942,7 @@ impl<T: AsyncRead + Unpin> Read for SyncReadAdapter<'_, '_, T> {
     }
 }
 
-/// Gives `browntls`'s blocking `write_tls` an [`AsyncWrite`], turning
+/// Gives `browntls-core`'s blocking `write_tls` an [`AsyncWrite`], turning
 /// `Pending` into `WouldBlock`. The records `write_tls` offers go to a
 /// transport with a vectored write as they are, and to any other gathered
 /// into one write (see [`coalesce`]).

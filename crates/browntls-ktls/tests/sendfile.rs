@@ -20,9 +20,9 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use browntls::client::ClientConnectionData;
-use browntls::server::ServerConnectionData;
-use browntls::{
+use browntls_core::client::ClientConnectionData;
+use browntls_core::server::ServerConnectionData;
+use browntls_core::{
     ClientConnection, ProtocolVersion, ServerConnection, SideData, StreamOwned,
     SupportedCipherSuite,
 };

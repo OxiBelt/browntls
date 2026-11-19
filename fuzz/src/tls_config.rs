@@ -1,4 +1,4 @@
-//! `browntls` configuration and provider APIs (`fuzz_targets/tls_config.rs`).
+//! `browntls-core` configuration and provider APIs (`fuzz_targets/tls_config.rs`).
 //!
 //! Reaches the configuration builders (`builder.rs`, `client/builder.rs`,
 //! `server/builder.rs`), cipher suites (`suites.rs`, `tls12/`, `tls13/`),
@@ -40,9 +40,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::SignatureScheme;
-use browntls::crypto::{CryptoProvider, native, rustcrypto};
-use browntls::pki_types::UnixTime;
+use browntls_core::SignatureScheme;
+use browntls_core::crypto::{CryptoProvider, native, rustcrypto};
+use browntls_core::pki_types::UnixTime;
 
 use crate::input::{Input, put_field, put_short_field};
 

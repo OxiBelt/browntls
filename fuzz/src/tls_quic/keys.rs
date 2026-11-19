@@ -2,10 +2,10 @@
 //! from fuzzed traffic secrets with key updates, the Retry Integrity Tag and
 //! CRYPTO_ERROR codes.
 
-use browntls::crypto::cipher::{Iv, NONCE_LEN};
-use browntls::crypto::tls13::OkmBlock;
-use browntls::quic::{self, Keys, Secrets, Side, Version};
-use browntls::{AlertDescription, CipherSuite};
+use browntls_core::crypto::cipher::{Iv, NONCE_LEN};
+use browntls_core::crypto::tls13::OkmBlock;
+use browntls_core::quic::{self, Keys, Secrets, Side, Version};
+use browntls_core::{AlertDescription, CipherSuite};
 
 use super::{check_keys, check_packet_keys, other, packet, provider, suite};
 use crate::input::Input;

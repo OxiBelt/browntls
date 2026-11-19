@@ -19,9 +19,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::client::ClientConnectionData;
-use browntls::server::ServerConnectionData;
-use browntls::{ProtocolVersion, SideData, SupportedCipherSuite};
+use browntls_core::client::ClientConnectionData;
+use browntls_core::server::ServerConnectionData;
+use browntls_core::{ProtocolVersion, SideData, SupportedCipherSuite};
 use browntls_ktls::AsyncKtlsStream;
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;

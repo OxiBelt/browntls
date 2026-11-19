@@ -6,7 +6,7 @@ use std::io;
 use std::os::fd::AsFd;
 use std::task::{Context, Poll};
 
-use browntls::SideData;
+use browntls_core::SideData;
 
 use super::AsyncKtlsStream;
 use crate::engine::option_error;
@@ -84,7 +84,7 @@ impl<Data: SideData> AsyncKtlsStream<Data> {
     /// sent, for one) can still cause that wait.
     ///
     /// ```no_run
-    /// # async fn send<D: browntls::SideData>(
+    /// # async fn send<D: browntls_core::SideData>(
     /// #     tls: &mut browntls_ktls::AsyncKtlsStream<D>,
     /// # ) -> std::io::Result<()> {
     /// let file = std::fs::File::open("index.html")?;

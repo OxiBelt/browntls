@@ -94,7 +94,7 @@
 //! [`staple`] has the server's side: keeping its own stapled response
 //! fresh.
 //!
-//! [`CommonState::pending_revocation`]: browntls::CommonState::pending_revocation
+//! [`CommonState::pending_revocation`]: browntls_core::CommonState::pending_revocation
 
 use std::fmt;
 use std::future::Future;
@@ -104,7 +104,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use browntls::revocation::{RevocationQuery, RevocationResponse};
+use browntls_core::revocation::{RevocationQuery, RevocationResponse};
 
 mod flight;
 pub mod staple;

@@ -20,19 +20,19 @@ use tokio::time::timeout;
 const LIMIT: Duration = Duration::from_secs(30);
 
 fn rustls_versions(
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> &'static [&'static rustls::SupportedProtocolVersion] {
     static TLS13: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS13];
     static TLS12: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS12];
     match version.version {
-        browntls::ProtocolVersion::TLSv1_3 => &TLS13,
+        browntls_core::ProtocolVersion::TLSv1_3 => &TLS13,
         _ => &TLS12,
     }
 }
 
 fn rustls_server(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> tokio_rustls::TlsAcceptor {
     let chain = pki
         .server_chain
@@ -52,7 +52,7 @@ fn rustls_server(
 
 fn rustls_client(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> tokio_rustls::TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     roots
@@ -144,7 +144,7 @@ async fn tokio_rustls_client_to_browntls_tokio_server() {
 #[tokio::test]
 async fn tokio_rustls_sees_a_truncation_when_browntls_drops_the_transport() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = tcp_pair().await;
     let name = rpki::ServerName::try_from("localhost").unwrap();
     let (client, server) = tokio::join!(

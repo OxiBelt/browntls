@@ -1,5 +1,5 @@
 //! `into_kernel_handoff`: a stream is handed to a simulated kernel (the
-//! stand-in the `browntls` kernel tests use, keyed with the extracted
+//! stand-in the `browntls-core` kernel tests use, keyed with the extracted
 //! secrets) without losing a byte in either direction, whatever was in
 //! flight: unread plaintext, part of a record, records not yet written, a
 //! KeyUpdate to answer, an unfinished 0-RTT phase.
@@ -9,7 +9,7 @@
 
 mod common;
 #[allow(dead_code)]
-#[path = "../../browntls/tests/cases/kernel/sim.rs"]
+#[path = "../../browntls-core/tests/cases/kernel/sim.rs"]
 mod sim;
 
 use std::future::poll_fn;
@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use browntls::kernel::KernelHandoffBlocker;
-use browntls::server::{ServerSessionMemoryCache, StoresServerSessions};
-use browntls::{ClientConfig, ServerConfig, SideData, SupportedProtocolVersion};
+use browntls_core::kernel::KernelHandoffBlocker;
+use browntls_core::server::{ServerSessionMemoryCache, StoresServerSessions};
+use browntls_core::{ClientConfig, ServerConfig, SideData, SupportedProtocolVersion};
 use browntls_tokio::client::EarlyDataNotResent;
 use browntls_tokio::kernel::KernelHandoffError;
 use browntls_tokio::{TlsAcceptor, TlsConnector, client, server};
@@ -275,7 +275,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin, Data: SideData> Kernel<IO, Data> {
 async fn client_kernel(
     stream: client::TlsStream<Gated>,
 ) -> (
-    Kernel<Gated, browntls::client::ClientConnectionData>,
+    Kernel<Gated, browntls_core::client::ClientConnectionData>,
     Vec<u8>,
 ) {
     let handoff = stream.into_kernel_handoff().await.unwrap();
@@ -436,7 +436,7 @@ async fn a_key_update_in_flight_is_answered_before_the_handover() {
         mut client,
         mut server,
         gate,
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     let down = pattern(5000);
     gate.allow_read(Some(9));
     server.get_mut().1.refresh_traffic_keys().unwrap();
@@ -574,7 +574,7 @@ async fn an_abandoned_handoff_gives_the_stream_back() {
         mut client,
         mut server,
         gate,
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     let down = pattern(9000);
     // The first record whole and eleven bytes of the second, so that the
     // handoff waits for the rest.
@@ -609,7 +609,7 @@ async fn a_transport_that_ends_inside_a_record_fails_the_handoff() {
         mut client,
         mut server,
         gate,
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     let down = pattern(8000);
     gate.allow_read(Some(TLS13_OVERHEAD + 4000 + 11));
     for part in [&down[..4000], &down[4000..]] {
@@ -678,7 +678,7 @@ async fn a_kept_read_error_fails_the_handoff() {
         mut client,
         mut server,
         gate,
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     // The transport delivers one record and then fails: the read below
     // returns the record's plaintext and keeps the error.
     gate.allow_read(Some(TLS13_OVERHEAD + 2));
@@ -705,7 +705,7 @@ async fn a_failed_connection_fails_the_handoff() {
         mut client,
         mut server,
         ..
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     // A record that does not open.
     let (transport, _) = server.get_mut();
     transport.write_all(&[0x17, 3, 3, 0, 1, 0]).await.unwrap();
@@ -730,7 +730,7 @@ impl EarlySetup {
     /// selects the first protocol it supports.
     fn new(alpn: &[&[u8]]) -> Self {
         let pki = Pki::new();
-        let mut config = pki.client_config(&browntls::version::TLS13);
+        let mut config = pki.client_config(&browntls_core::version::TLS13);
         config.enable_early_data = true;
         config.enable_secret_extraction = true;
         config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
@@ -742,7 +742,7 @@ impl EarlySetup {
     }
 
     fn acceptor(&self, max_early_data_size: u32) -> TlsAcceptor {
-        let mut config = self.pki.server_config(&browntls::version::TLS13);
+        let mut config = self.pki.server_config(&browntls_core::version::TLS13);
         config.max_early_data_size = max_early_data_size;
         config.session_storage = self.cache.clone();
         config.enable_secret_extraction = true;
@@ -952,7 +952,7 @@ async fn debug_output_omits_the_received_data() {
         mut client,
         mut server,
         ..
-    } = connect(&browntls::version::TLS13, |_, _| ()).await;
+    } = connect(&browntls_core::version::TLS13, |_, _| ()).await;
     server.write_all(b"\x01secret-plaintext").await.unwrap();
     server.flush().await.unwrap();
     let mut first = [0u8; 1];

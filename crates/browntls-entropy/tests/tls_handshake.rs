@@ -17,12 +17,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use browntls::client::Resumption;
-use browntls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use browntls::pki_types::{
+use browntls_core::client::Resumption;
+use browntls_core::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use browntls_core::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
-use browntls::{
+use browntls_core::{
     ClientConfig, ClientConnection, ConnectionCommon, DigitallySignedStruct, Error, KeyLog,
     ServerConfig, ServerConnection, SideData, SignatureScheme, SupportedProtocolVersion, version,
 };
@@ -116,7 +118,7 @@ struct Setup {
 }
 
 fn setup(server_versions: &[&'static SupportedProtocolVersion]) -> Setup {
-    let provider = Arc::new(browntls::crypto::native::default_provider());
+    let provider = Arc::new(browntls_core::crypto::native::default_provider());
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
     let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
         .unwrap()

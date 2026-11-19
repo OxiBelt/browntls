@@ -62,7 +62,7 @@ async fn gated_server() -> (
     ClientConnection,
 ) {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rpki::CertificateDer::from(pki.ca.as_ref().to_vec()))

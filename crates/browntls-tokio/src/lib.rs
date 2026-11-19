@@ -1,5 +1,5 @@
 //! Asynchronous TLS streams for [Tokio](https://tokio.rs), built on
-//! [`browntls`].
+//! `browntls-core` (re-exported as [`browntls`]).
 //!
 //! [`TlsConnector`] and [`TlsAcceptor`] run a handshake over any transport
 //! that implements Tokio's [`AsyncRead`] and [`AsyncWrite`] (a
@@ -36,7 +36,7 @@
 //! ```
 //!
 //! [`LazyConfigAcceptor`] reads the ClientHello first, so a server can
-//! choose its [`ServerConfig`](browntls::ServerConfig) by server name, ALPN
+//! choose its [`ServerConfig`](browntls_core::ServerConfig) by server name, ALPN
 //! or cipher suites before the handshake goes on.
 //!
 //! [`TlsConnector::early_data`] lets [`TlsConnector::connect`] return
@@ -49,7 +49,7 @@
 //! means for a server that acts on it before the handshake completes.
 //!
 //! The [`unbuffered`] module has the same connector, acceptor and lazy
-//! acceptor over `browntls`'s unbuffered connection API: its streams decrypt
+//! acceptor over `browntls-core`'s unbuffered connection API: its streams decrypt
 //! each record in place in one receive buffer, so [`AsyncBufRead`] lends
 //! the plaintext without a copy and [`AsyncRead`] copies it once. Its
 //! streams have no `into_split` and the `coop` feature does not cover them
@@ -142,7 +142,7 @@
 //!
 //! A verifier that needs a certificate status response the peer did not
 //! staple pauses its connection with a query for the application to
-//! transport (`browntls::revocation`). With the `ocsp` feature, the
+//! transport (`browntls_core::revocation`). With the `ocsp` feature, the
 //! `revocation` module has a `RevocationFetcher` that the connectors and
 //! acceptors take (`revocation_fetcher`): their handshakes, reads and
 //! kernel handoffs then answer such queries through an HTTP callback of
@@ -160,7 +160,7 @@
 //!
 //! Errors are `io::Error`s. A TLS failure (a bad record, an alert from the
 //! peer, a certificate the verifier refused) has kind `InvalidData` and
-//! wraps the [`browntls::Error`]:
+//! wraps the [`browntls_core::Error`]:
 //!
 //! ```
 //! fn tls_error(err: &std::io::Error) -> Option<&browntls_tokio::browntls::Error> {
@@ -172,8 +172,8 @@
 //!
 //! The crypto provider, protocol and compression features (`native`,
 //! `rustcrypto`, `tls12`, `logging`, `prefer-post-quantum`, `zlib`,
-//! `brotli`, `zstd`) are passed through to `browntls`. The default set
-//! matches `browntls`'s, plus `coop`.
+//! `brotli`, `zstd`) are passed through to `browntls-core`. The default set
+//! matches `browntls-core`'s, plus `coop`.
 //!
 //! `coop` (default) enables the cooperative scheduling described above. It
 //! turns on Tokio's `rt` feature, where Tokio keeps the task budget; that
@@ -198,8 +198,9 @@ use std::os::windows::io::{AsRawSocket, AsSocket, BorrowedSocket, RawSocket};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-pub use browntls;
-use browntls::CommonState;
+/// The protocol crate `browntls-core`, re-exported as `browntls`.
+pub use browntls_core as browntls;
+use browntls_core::CommonState;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 macro_rules! ready {

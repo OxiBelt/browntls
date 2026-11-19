@@ -6,8 +6,8 @@ use std::io::{self, Read, Write};
 use std::ops::DerefMut;
 use std::os::fd::{AsFd, BorrowedFd};
 
-use browntls::kernel::{KernelConnection, KernelHandoffBlocker};
-use browntls::{
+use browntls_core::kernel::{KernelConnection, KernelHandoffBlocker};
+use browntls_core::{
     ClientConnection, ConnectionCommon, Error, ExtractedSecrets, ServerConnection, SideData,
 };
 
@@ -17,8 +17,8 @@ use crate::sys;
 
 mod sealed {
     pub trait Sealed {}
-    impl Sealed for browntls::ClientConnection {}
-    impl Sealed for browntls::ServerConnection {}
+    impl Sealed for browntls_core::ClientConnection {}
+    impl Sealed for browntls_core::ServerConnection {}
 }
 
 /// A buffered browntls connection that [`KtlsStream::new`] can hand to the
@@ -39,7 +39,7 @@ pub trait Offload:
 }
 
 impl Offload for ClientConnection {
-    type Data = browntls::client::ClientConnectionData;
+    type Data = browntls_core::client::ClientConnectionData;
 
     fn take_early_data(&mut self, _out: &mut Vec<u8>) -> io::Result<()> {
         Ok(())
@@ -51,7 +51,7 @@ impl Offload for ClientConnection {
 }
 
 impl Offload for ServerConnection {
-    type Data = browntls::server::ServerConnectionData;
+    type Data = browntls_core::server::ServerConnectionData;
 
     fn take_early_data(&mut self, out: &mut Vec<u8>) -> io::Result<()> {
         match self.early_data() {
@@ -146,7 +146,7 @@ impl<C, S> std::error::Error for HandoffError<C, S> {
 /// confidentiality limit, refreshing the TLS 1.3 keys when it is reached.
 ///
 /// Errors from the connection are reported as [`io::ErrorKind::InvalidData`]
-/// with the [`browntls::Error`] inside; the connection has then sent its
+/// with the [`browntls_core::Error`] inside; the connection has then sent its
 /// alert and failed for good.
 ///
 /// The socket may be non-blocking: `WouldBlock` then means "call again when
@@ -295,7 +295,7 @@ impl<S: AsFd, Data: SideData> KtlsStream<S, Data> {
     /// `sendfile` on [`Self::get_ref`] would not.
     ///
     /// ```no_run
-    /// # fn send<S: std::os::fd::AsFd, D: browntls::SideData>(
+    /// # fn send<S: std::os::fd::AsFd, D: browntls_core::SideData>(
     /// #     tls: &mut browntls_ktls::KtlsStream<S, D>,
     /// # ) -> std::io::Result<()> {
     /// let file = std::fs::File::open("index.html")?;

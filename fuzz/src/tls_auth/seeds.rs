@@ -1,7 +1,7 @@
 //! Starting inputs of the `tls_auth` target.
 
-use browntls::delegated_credential::{Credential, DelegatedCredential};
-use browntls::{Side, SignatureScheme};
+use browntls_core::delegated_credential::{Credential, DelegatedCredential};
+use browntls_core::{Side, SignatureScheme};
 
 use super::fixture;
 use crate::input::{put_field, put_short_field};

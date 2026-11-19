@@ -2,13 +2,13 @@
 //! parsing, server keys and server configurations, the SVCB/HTTPS record
 //! helpers and GREASE settings.
 
-use browntls::crypto::hpke::{Hpke, HpkePublicKey};
-use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
-use browntls::ech::svcb::{
+use browntls_core::crypto::hpke::{Hpke, HpkePublicKey};
+use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls_core::ech::svcb::{
     ECH_SVC_PARAM_KEY, ech_config_list_from_presentation, ech_config_list_from_svc_params,
     ech_config_list_from_svcb_rdata,
 };
-use browntls::ech::{EchConfig, EchGreaseConfig, EchServerConfig, EchServerKey};
+use browntls_core::ech::{EchConfig, EchGreaseConfig, EchServerConfig, EchServerKey};
 
 use super::{
     ECH_VERSION, Fields, KEMS, Key, MAX_GENERATIONS, PUBLIC, State, base64, config_list, fixture,

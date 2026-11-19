@@ -44,8 +44,8 @@ pub use self::seeds::seeds;
 use std::io::{BufRead, Read};
 use std::sync::Arc;
 
-use browntls::server::{Acceptor, ServerConnection};
-use browntls::{ClientConfig, ClientConnection, Connection, ServerConfig};
+use browntls_core::server::{Acceptor, ServerConnection};
+use browntls_core::{ClientConfig, ClientConnection, Connection, ServerConfig};
 
 use self::acceptor::check_client_hello;
 use self::setup::{Knobs, assert_prefix, assert_same_secrets, server_name};

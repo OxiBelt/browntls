@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use browntls::ServerConfig;
-use browntls::server::{Accepted, Acceptor};
+use browntls_core::ServerConfig;
+use browntls_core::server::{Accepted, Acceptor};
 
 use super::transport::Limited;
 

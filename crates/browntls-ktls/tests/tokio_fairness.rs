@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::ProtocolVersion;
+use browntls_core::ProtocolVersion;
 use browntls_ktls::AsyncKtlsStream;
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;

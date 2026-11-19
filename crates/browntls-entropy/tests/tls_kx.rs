@@ -11,8 +11,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use browntls::crypto::SupportedKxGroup;
-use browntls::crypto::native::kx_group;
+use browntls_core::crypto::SupportedKxGroup;
+use browntls_core::crypto::native::kx_group;
 use browntls_entropy::{Stream, check, err, sample_count};
 
 /// One component of a share or secret.

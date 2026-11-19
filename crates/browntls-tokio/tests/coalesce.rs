@@ -149,7 +149,7 @@ fn record_count(bytes: &[u8]) -> usize {
 /// A connected client over a [`Recorder`] and its peer.
 async fn recorded_client(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
     vectored: bool,
 ) -> (
     browntls_tokio::client::TlsStream<Recorder>,
@@ -225,7 +225,7 @@ async fn a_handshake_flight_reaches_a_plain_transport_in_one_write() {
 async fn queued_records_share_a_write_on_a_plain_transport() {
     let pki = Pki::new();
     let (mut client, mut server, log) =
-        recorded_client(&pki, &browntls::version::TLS13, false).await;
+        recorded_client(&pki, &browntls_core::version::TLS13, false).await;
     log.take_write_lengths();
 
     // While the transport takes nothing, each write queues a record.
@@ -254,7 +254,7 @@ async fn queued_records_share_a_write_on_a_plain_transport() {
 async fn large_records_reach_a_plain_transport_as_they_are() {
     let pki = Pki::new();
     let (mut client, mut server, log) =
-        recorded_client(&pki, &browntls::version::TLS13, false).await;
+        recorded_client(&pki, &browntls_core::version::TLS13, false).await;
     log.take_write_lengths();
 
     // Full-size records are written one by one, without a copy: gathering
@@ -298,7 +298,7 @@ async fn large_records_reach_a_plain_transport_as_they_are() {
 async fn a_vectored_transport_gets_the_records_as_slices() {
     let pki = Pki::new();
     let (mut client, mut server, log) =
-        recorded_client(&pki, &browntls::version::TLS13, true).await;
+        recorded_client(&pki, &browntls_core::version::TLS13, true).await;
     log.vectored.lock().unwrap().clear();
 
     log.close();

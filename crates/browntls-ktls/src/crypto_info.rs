@@ -3,7 +3,7 @@
 
 use core::fmt;
 
-use browntls::{ConnectionTrafficSecrets, ProtocolVersion};
+use browntls_core::{ConnectionTrafficSecrets, ProtocolVersion};
 
 /// `TLS_CIPHER_AES_GCM_128`.
 const CIPHER_AES_GCM_128: u16 = 51;
@@ -48,7 +48,7 @@ impl CryptoInfo {
     ///
     /// AES-GCM and AES-CCM split the 12-byte IV into the 4-byte salt and an
     /// 8-byte IV; for TLS 1.2 AES-GCM that IV is the explicit nonce of the
-    /// next record, as [`browntls::ExtractedSecrets`] provides it.
+    /// next record, as [`browntls_core::ExtractedSecrets`] provides it.
     /// ChaCha20-Poly1305 takes the whole IV and no salt.
     pub fn new(
         version: ProtocolVersion,
@@ -129,7 +129,7 @@ impl fmt::Debug for CryptoInfo {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use browntls::crypto::cipher::{AeadKey, Iv};
+    use browntls_core::crypto::cipher::{AeadKey, Iv};
 
     use super::*;
 

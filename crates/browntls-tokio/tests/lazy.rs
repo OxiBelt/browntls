@@ -10,8 +10,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::server::Acceptor;
-use browntls::{AlertDescription, Error};
+use browntls_core::server::Acceptor;
+use browntls_core::{AlertDescription, Error};
 use browntls_tokio::{LazyConfigAcceptor, StartHandshake};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
@@ -22,7 +22,7 @@ const LIMIT: Duration = Duration::from_secs(30);
 #[tokio::test]
 async fn the_configuration_follows_the_client_hello() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut h2 = pki.server_config(version);
     h2.alpn_protocols = vec![b"h2".to_vec()];
     let mut http11 = pki.server_config(version);
@@ -108,7 +108,7 @@ async fn eof_before_a_client_hello() {
 #[tokio::test]
 async fn a_client_hello_split_into_single_bytes_is_assembled() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     let connector = pki.connector(version);
     let config = Arc::new(pki.server_config(version));
@@ -133,9 +133,9 @@ async fn a_client_hello_split_into_single_bytes_is_assembled() {
 async fn a_configuration_that_cannot_serve_the_hello_sends_an_alert() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let connector = pki.connector(&browntls::version::TLS13);
+    let connector = pki.connector(&browntls_core::version::TLS13);
     // A TLS 1.2-only configuration cannot serve a TLS 1.3-only client.
-    let config = Arc::new(pki.server_config(&browntls::version::TLS12));
+    let config = Arc::new(pki.server_config(&browntls_core::version::TLS12));
     let server = async {
         let start = LazyConfigAcceptor::new(Acceptor::default(), s).await?;
         start

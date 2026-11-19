@@ -1,7 +1,7 @@
 //! Exercises the public PKI APIs with signed fixtures and arbitrary evidence.
 
-use browntls::crypto::native;
-use browntls::revocation::RevocationDigests;
+use browntls_core::crypto::native;
+use browntls_core::revocation::RevocationDigests;
 use browntls_pki::ocsp::{
     CertId, CertIdHash, CertStatus, OcspIssuer, OcspPolicy, OcspResponse, ResponderId,
     ResponseStatus, ca_issuer_uris, encode_request, has_ocsp_nocheck, must_staple,

@@ -1,4 +1,4 @@
-//! The polling core of the unbuffered streams: running a `browntls`
+//! The polling core of the unbuffered streams: running a `browntls-core`
 //! unbuffered connection against an `AsyncRead + AsyncWrite` transport.
 //!
 //! Every call of `process_tls_records` is made here. Reads pass the received
@@ -19,8 +19,8 @@ use std::ops::{DerefMut, Range};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use browntls::SideData;
-use browntls::unbuffered::{
+use browntls_core::SideData;
+use browntls_core::unbuffered::{
     ConnectionState, EncodeError, EncodeTlsData, EncryptError, InsufficientSizeError,
     UnbufferedConnectionCommon, UnbufferedStatus, WriteTraffic,
 };
@@ -79,7 +79,7 @@ enum Queued {
 }
 
 /// An `InvalidData` error wrapping the TLS failure.
-pub(super) fn tls_error(err: browntls::Error) -> io::Error {
+pub(super) fn tls_error(err: browntls_core::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
@@ -125,7 +125,7 @@ fn encrypt_with(
                 outgoing.reserve(required_size);
             }
             Err(EncryptError::AlreadyClosed) => return Err(write_after_shutdown()),
-            Err(EncryptError::Failed) => return Err(tls_error(browntls::Error::EncryptError)),
+            Err(EncryptError::Failed) => return Err(tls_error(browntls_core::Error::EncryptError)),
             // The write key is spent and cannot be refreshed: the caller
             // closes the connection.
             Err(err) => return Err(io::Error::other(err)),

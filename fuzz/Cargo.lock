@@ -173,7 +173,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "browntls"
+name = "browntls-core"
 version = "0.1.0-dev"
 dependencies = [
  "aes",
@@ -210,7 +210,7 @@ version = "0.0.0"
 dependencies = [
  "aes",
  "aes-gcm",
- "browntls",
+ "browntls-core",
  "browntls-crypto",
  "browntls-pki",
  "browntls-tokio",
@@ -246,7 +246,7 @@ version = "0.1.0-dev"
 name = "browntls-tokio"
 version = "0.1.0-dev"
 dependencies = [
- "browntls",
+ "browntls-core",
  "tokio",
 ]
 

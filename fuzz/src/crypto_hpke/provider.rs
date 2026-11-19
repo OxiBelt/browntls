@@ -1,8 +1,8 @@
 //! The provider operation of the `crypto_hpke` target: the TLS-side HPKE
-//! API (`browntls::crypto::hpke`) of the native provider's suites against
+//! API (`browntls_core::crypto::hpke`) of the native provider's suites against
 //! the crate API underneath.
 
-use browntls::crypto::hpke::{EncapsulatedSecret, Hpke, HpkePrivateKey, HpkePublicKey};
+use browntls_core::crypto::hpke::{EncapsulatedSecret, Hpke, HpkePrivateKey, HpkePublicKey};
 use browntls_crypto::hpke::{Aead, PrivateKey, PublicKey, Suite};
 use browntls_crypto::rand::OsRng;
 
@@ -12,7 +12,7 @@ use crate::input::Input;
 
 /// The TLS-side provider API on one of the native suites.
 pub(super) fn provider(input: &mut Input<'_>) {
-    let all = browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+    let all = browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
     let hpke: &dyn Hpke = *input.pick(all);
     let tls = hpke.suite();
     let suite = Suite::from_ids(tls.kem.0, tls.sym.kdf_id.0, tls.sym.aead_id.0)

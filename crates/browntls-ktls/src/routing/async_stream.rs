@@ -9,10 +9,10 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use browntls::client::ClientConnectionData;
-use browntls::crypto::native::accel::load::kernel::{self, Place};
-use browntls::server::ServerConnectionData;
-use browntls::{ConnectionCommon, SideData};
+use browntls_core::client::ClientConnectionData;
+use browntls_core::crypto::native::accel::load::kernel::{self, Place};
+use browntls_core::server::ServerConnectionData;
+use browntls_core::{ConnectionCommon, SideData};
 use browntls_tokio::{client, server};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -60,7 +60,7 @@ pub trait AsyncOffload: sealed::Sealed + AsyncRead + AsyncWrite + Unpin + Sized 
 ///
 /// ```no_run
 /// # async fn run(
-/// #     config: std::sync::Arc<browntls::ClientConfig>,
+/// #     config: std::sync::Arc<browntls_core::ClientConfig>,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// use browntls_ktls::routing::AsyncRoutedStream;
 /// use tokio::io::AsyncWriteExt;

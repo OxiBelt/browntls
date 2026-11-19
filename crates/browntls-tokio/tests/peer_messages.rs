@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::server::PostHandshakeAuthStatus;
-use browntls::{HandshakeKind, NamedGroup};
+use browntls_core::server::PostHandshakeAuthStatus;
+use browntls_core::{HandshakeKind, NamedGroup};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;
 use tokio::io::{
@@ -33,7 +33,7 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -115,13 +115,13 @@ async fn client_authentication_during_the_handshake() {
 #[tokio::test]
 async fn a_hello_retry_request_over_a_choppy_transport() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut provider = (*provider()).clone();
     provider
         .kx_groups
         .retain(|group| group.name() == NamedGroup::secp256r1);
     assert!(!provider.kx_groups.is_empty());
-    let server_config = browntls::ServerConfig::builder_with_provider(Arc::new(provider))
+    let server_config = browntls_core::ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[version])
         .unwrap()
         .with_no_client_auth()
@@ -190,7 +190,7 @@ async fn a_small_send_buffer_still_moves_everything() {
 #[tokio::test]
 async fn a_task_polling_both_directions_does_not_spin_while_answering() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -246,7 +246,7 @@ async fn a_parked_writer_of_native_halves_is_woken_after_a_read_took_its_registr
 
 async fn parked_writer_is_woken_after_a_read_took_its_registration(native: bool) {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);

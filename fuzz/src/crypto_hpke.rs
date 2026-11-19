@@ -1,6 +1,6 @@
 //! `browntls-crypto` HPKE (RFC 9180, base mode) and the TLS-side HPKE
-//! provider API (`browntls::crypto::hpke`, implemented by
-//! `browntls::crypto::native::hpke`).
+//! provider API (`browntls_core::crypto::hpke`, implemented by
+//! `browntls_core::crypto::native::hpke`).
 //!
 //! The input is a program of up to [`MAX_OPS`] operations, each an op byte
 //! followed by its arguments:
@@ -232,7 +232,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
         put_field(&mut rounds, b"client hello inner");
         rounds.extend_from_slice(tamper);
     }
-    let all = browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+    let all = browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
     for index in [0u8, 9, 18, 27, 36, 2, 13, 44] {
         let tls = all[usize::from(index) % all.len()].suite();
         let kem = Kem::from_id(tls.kem.0).expect("crate KEM");

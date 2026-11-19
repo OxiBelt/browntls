@@ -3,15 +3,15 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use browntls::client::WebPkiServerVerifier;
-use browntls::pki_types::ServerName;
-use browntls::revocation::{
+use browntls_core::client::WebPkiServerVerifier;
+use browntls_core::pki_types::ServerName;
+use browntls_core::revocation::{
     CtLogKey, OcspHttpRequest, RevocationData, RevocationDataError, RevocationDataSource,
     RevocationDigests, RevocationPolicy, RevocationQuery, RevocationResponse, RevocationStatus,
     ServerStapleResolver, SharedRevocationData, StapleInstall,
 };
-use browntls::server::WebPkiClientVerifier;
-use browntls::{
+use browntls_core::server::WebPkiClientVerifier;
+use browntls_core::{
     CertificateError, ClientConfig, ClientConnection, Connection, Error, ServerConfig,
     ServerConnection, SupportedProtocolVersion, quic, version,
 };

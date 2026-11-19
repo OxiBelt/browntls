@@ -1,5 +1,5 @@
-//! Streams over `browntls`'s unbuffered connection API
-//! ([`browntls::unbuffered`]): records are decrypted where the transport put
+//! Streams over `browntls-core`'s unbuffered connection API
+//! ([`browntls_core::unbuffered`]): records are decrypted where the transport put
 //! them and encrypted straight into the bytes the transport is given.
 //!
 //! [`TlsConnector`] and [`TlsAcceptor`] here are used like the ones at the
@@ -34,8 +34,8 @@
 //! # What differs from the streams at the crate root
 //!
 //! The streams at the crate root keep each connection's records in the
-//! queues of a buffered [`ClientConnection`](browntls::ClientConnection) or
-//! [`ServerConnection`](browntls::ServerConnection): the plaintext of a
+//! queues of a buffered [`ClientConnection`](browntls_core::ClientConnection) or
+//! [`ServerConnection`](browntls_core::ServerConnection): the plaintext of a
 //! received record is copied out of the connection's receive buffer into
 //! an allocation of its own, which [`AsyncBufRead`] lends and
 //! [`AsyncRead`] copies into the caller's buffer. Here the stream owns two
@@ -81,10 +81,10 @@
 //! yields when its transport does, as Tokio's sockets do.
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
-//! [`process_tls_records`]: browntls::unbuffered::UnbufferedConnectionCommon::process_tls_records
-//! [`ServerConfig::max_early_data_size`]: browntls::ServerConfig::max_early_data_size
-//! [`UnbufferedClientConnection`]: browntls::client::UnbufferedClientConnection
-//! [`UnbufferedServerConnection`]: browntls::server::UnbufferedServerConnection
+//! [`process_tls_records`]: browntls_core::unbuffered::UnbufferedConnectionCommon::process_tls_records
+//! [`ServerConfig::max_early_data_size`]: browntls_core::ServerConfig::max_early_data_size
+//! [`UnbufferedClientConnection`]: browntls_core::client::UnbufferedClientConnection
+//! [`UnbufferedServerConnection`]: browntls_core::server::UnbufferedServerConnection
 
 use std::fmt;
 use std::io;
@@ -92,10 +92,10 @@ use std::ops::DerefMut;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use browntls::SideData;
-use browntls::client::UnbufferedClientConnection;
-use browntls::server::UnbufferedServerConnection;
-use browntls::unbuffered::UnbufferedConnectionCommon;
+use browntls_core::SideData;
+use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::server::UnbufferedServerConnection;
+use browntls_core::unbuffered::UnbufferedConnectionCommon;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{PeerRevocation, TlsState};
@@ -251,7 +251,7 @@ impl<IO> TlsStream<IO, UnbufferedServerConnection> {
     /// reads return for that reason. A server accepts at most
     /// [`ServerConfig::max_early_data_size`] bytes of it (none by default).
     ///
-    /// [`ServerConfig::max_early_data_size`]: browntls::ServerConfig::max_early_data_size
+    /// [`ServerConfig::max_early_data_size`]: browntls_core::ServerConfig::max_early_data_size
     pub fn early_data(&self) -> &[u8] {
         &self.early_data
     }

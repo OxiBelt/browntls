@@ -1,4 +1,4 @@
-//! Kernel TLS offload (`browntls::kernel`): a genuine client and server in
+//! Kernel TLS offload (`browntls_core::kernel`): a genuine client and server in
 //! the same process (real cryptography, both providers), one of them,
 //! buffered or unbuffered, handed over to a userspace stand-in for Linux
 //! kernel TLS (`sim`) that protects its records with the extracted secrets
@@ -49,14 +49,14 @@ pub use seeds::seeds;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use browntls::client::{ClientConnection, UnbufferedClientConnection};
-use browntls::crypto::{CryptoProvider, native, rustcrypto};
-use browntls::kernel::{KernelConnection, KernelHandoffBlocker};
-use browntls::server::{ServerConnection, UnbufferedServerConnection};
-use browntls::unbuffered::{
+use browntls_core::client::{ClientConnection, UnbufferedClientConnection};
+use browntls_core::crypto::{CryptoProvider, native, rustcrypto};
+use browntls_core::kernel::{KernelConnection, KernelHandoffBlocker};
+use browntls_core::server::{ServerConnection, UnbufferedServerConnection};
+use browntls_core::unbuffered::{
     ConnectionState, EncodeError, EncryptError, InsufficientSizeError, UnbufferedConnectionCommon,
 };
-use browntls::{
+use browntls_core::{
     ClientConfig, Connection, Error, ExtractedSecrets, ServerConfig, SideData, SupportedCipherSuite,
 };
 
@@ -695,7 +695,7 @@ impl Pre {
         }
         // A handover needs a record size Linux takes (64 bytes of payload,
         // less the TLS 1.3 content type).
-        let common: &browntls::CommonState = match &self.subject {
+        let common: &browntls_core::CommonState = match &self.subject {
             Subject::Buffered(conn) => conn,
             Subject::Client(conn) => conn,
             Subject::Server(conn) => conn,

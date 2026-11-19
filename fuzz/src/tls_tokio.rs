@@ -44,8 +44,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use browntls::server::Acceptor;
-use browntls::{ClientConfig, ServerConfig};
+use browntls_core::server::Acceptor;
+use browntls_core::{ClientConfig, ServerConfig};
 use browntls_tokio::{
     Accept, Connect, FallibleAccept, FallibleConnect, LazyConfigAcceptor, ReadHalf, ReuniteError,
     StartHandshake, TlsAcceptor, TlsConnector, TlsStream, WriteHalf,

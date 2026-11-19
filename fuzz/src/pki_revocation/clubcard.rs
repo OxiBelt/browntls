@@ -1,6 +1,6 @@
 //! Snapshot construction and reference lookups over bounded Clubcard inputs.
 
-use browntls::revocation::RevocationDigests;
+use browntls_core::revocation::RevocationDigests;
 use browntls_pki::crlite::{
     CrliteDelta, CrliteEncoding, CrliteFilter, CrliteKey, CrliteLayer, CrliteLimits, CrliteSct,
     CrliteSnapshot, CrliteSnapshotSource, CrliteStatus,

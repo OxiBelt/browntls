@@ -2,15 +2,15 @@
 
 use std::sync::Arc;
 
-use browntls::client::danger::ServerCertVerifier;
-use browntls::client::{
+use browntls_core::client::danger::ServerCertVerifier;
+use browntls_core::client::{
     WebPkiServerVerifier, verify_server_cert_signed_by_trust_anchor, verify_server_name,
 };
-use browntls::pki_types::{
+use browntls_core::pki_types::{
     CertificateDer, CertificateRevocationListDer, EndEntityCert, ServerName, UnixTime,
 };
-use browntls::server::{ParsedCertificate, WebPkiClientVerifier};
-use browntls::{DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
+use browntls_core::server::{ParsedCertificate, WebPkiClientVerifier};
+use browntls_core::{DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
 
 use super::fixtures::{self, MISMATCHED, P256, P256_SEC1, P384};
 use super::{NOW, provider};

@@ -5,12 +5,12 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
-use browntls::ech::split::{ClientFacing, ClientFacingDecision};
-use browntls::ech::{
+use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls_core::ech::split::{ClientFacing, ClientFacingDecision};
+use browntls_core::ech::{
     EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey, EchStatus,
 };
-use browntls::{ClientConnection, Error, ServerConfig, ServerConnection};
+use browntls_core::{ClientConnection, Error, ServerConfig, ServerConnection};
 
 use super::handshake::{connect, default_key, server_config};
 use super::{ECH_VERSION, Fields, KEMS, PUBLIC, SECRET, State, config_list, fixture};
@@ -36,7 +36,7 @@ struct SplitRun {
     server_err: Option<Error>,
 }
 
-fn drain<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec<u8> {
+fn drain<S: browntls_core::SideData>(conn: &mut browntls_core::ConnectionCommon<S>) -> Vec<u8> {
     let mut out = Vec::new();
     while conn.wants_write() {
         if conn.write_tls(&mut out).is_err() {
@@ -46,7 +46,10 @@ fn drain<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec
     out
 }
 
-fn feed<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>, mut data: &[u8]) {
+fn feed<S: browntls_core::SideData>(
+    conn: &mut browntls_core::ConnectionCommon<S>,
+    mut data: &[u8],
+) {
     while !data.is_empty() {
         match conn.read_tls(&mut data) {
             Ok(n) if n > 0 => {}

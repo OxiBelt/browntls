@@ -16,7 +16,7 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
+browntls-core = { path = "../crates/browntls-core", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
 browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
 browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp"] }

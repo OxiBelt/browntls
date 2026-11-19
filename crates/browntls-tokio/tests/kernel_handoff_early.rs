@@ -13,7 +13,7 @@ use std::io::{self, Write as _};
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::ClientConnection;
+use browntls_core::ClientConnection;
 use browntls_tokio::{TlsAcceptor, server};
 use common::server_early::*;
 use common::*;
@@ -30,7 +30,7 @@ const REST: &[u8] = b"and the rest";
 /// An acceptor that returns before the handshake for early data, with a
 /// connection that may be handed to the kernel.
 fn acceptor(setup: &Setup, half_rtt: bool) -> TlsAcceptor {
-    let mut config = setup.pki.server_config(&browntls::version::TLS13);
+    let mut config = setup.pki.server_config(&browntls_core::version::TLS13);
     config.max_early_data_size = ALLOWANCE;
     config.send_half_rtt_data = half_rtt;
     config.session_storage = setup.cache.clone();

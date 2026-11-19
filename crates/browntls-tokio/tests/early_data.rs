@@ -10,8 +10,8 @@ use std::io::Read as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::server::{ServerSessionMemoryCache, StoresServerSessions};
-use browntls::{HandshakeKind, ServerConfig};
+use browntls_core::server::{ServerSessionMemoryCache, StoresServerSessions};
+use browntls_core::{HandshakeKind, ServerConfig};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
@@ -33,7 +33,7 @@ impl Setup {
     /// A client offering `alpn`; the server selects the first it supports.
     fn with_alpn(alpn: &[&[u8]]) -> Self {
         let pki = Pki::new();
-        let mut client_config = pki.client_config(&browntls::version::TLS13);
+        let mut client_config = pki.client_config(&browntls_core::version::TLS13);
         client_config.enable_early_data = true;
         client_config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         Self {
@@ -44,7 +44,7 @@ impl Setup {
     }
 
     fn acceptor(&self, max_early_data_size: u32) -> TlsAcceptor {
-        let mut config: ServerConfig = self.pki.server_config(&browntls::version::TLS13);
+        let mut config: ServerConfig = self.pki.server_config(&browntls_core::version::TLS13);
         config.max_early_data_size = max_early_data_size;
         config.session_storage = self.cache.clone();
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

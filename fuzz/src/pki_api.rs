@@ -6,7 +6,7 @@
 //! `alg_id.rs` (with the `id-RSASSA-PSS` canonical forms), the DER and
 //! secret key containers of `types.rs`, the `PemObject` impls of `pem.rs`,
 //! and `verify.rs` and `crl.rs` with the real signature algorithms of both
-//! `browntls` providers.
+//! `browntls-core` providers.
 //!
 //! Input: up to 64 operations, each an operation byte followed by that
 //! operation's arguments (bytes, 16-bit length-prefixed fields, 8-bit

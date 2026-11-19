@@ -5,7 +5,7 @@
 # `PlainMessage` cannot be built or obtained outside the crate: its payload is
 # `pub(crate)`, its only constructor is the crate-private `From<Message>`, and
 # no public function returns one.
-crates/browntls/src/msgs/message.rs PlainMessage::into_unencrypted_opaque  # not reachable from outside the crate
-crates/browntls/src/msgs/message.rs PlainMessage::borrow_outbound  # not reachable from outside the crate
-crates/browntls/src/msgs/message.rs PlainMessage::borrow_inbound  # not reachable from outside the crate
-crates/browntls/src/msgs/message.rs PlainMessage::payload  # not reachable from outside the crate
+crates/browntls-core/src/msgs/message.rs PlainMessage::into_unencrypted_opaque  # not reachable from outside the crate
+crates/browntls-core/src/msgs/message.rs PlainMessage::borrow_outbound  # not reachable from outside the crate
+crates/browntls-core/src/msgs/message.rs PlainMessage::borrow_inbound  # not reachable from outside the crate
+crates/browntls-core/src/msgs/message.rs PlainMessage::payload  # not reachable from outside the crate

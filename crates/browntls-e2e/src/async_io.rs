@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use browntls::pki_types::ServerName;
-use browntls::{ClientConfig, ServerConfig};
+use browntls_core::pki_types::ServerName;
+use browntls_core::{ClientConfig, ServerConfig};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -26,7 +26,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 async fn bounded<T>(what: &str, fut: impl Future<Output = std::io::Result<T>>) -> Result<T> {
     match timeout(IO_TIMEOUT, fut).await {
         Ok(Ok(value)) => Ok(value),
-        // A TLS failure carries the `browntls::Error` (already in `e`'s
+        // A TLS failure carries the `browntls_core::Error` (already in `e`'s
         // message); other failures are transport errors.
         Ok(Err(e)) => Err(format!("{what}: {e}")),
         Err(_) => Err(format!("{what}: timed out")),

@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
-use browntls::server::Acceptor;
+use browntls_core::server::Acceptor;
 use browntls_tokio::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
@@ -91,7 +91,7 @@ async fn the_connection_is_visible_while_the_handshake_runs() {
 #[tokio::test]
 async fn fallible_futures_show_the_transport_and_the_connection() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     let mut connect = pki
         .connector(version)
@@ -124,7 +124,7 @@ async fn fallible_futures_show_the_transport_and_the_connection() {
 #[tokio::test]
 async fn a_future_without_a_connection_shows_only_the_transport() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
 
     // A fragment size the connection refuses: none is created.
     let mut client_config = pki.client_config(version);
@@ -166,7 +166,7 @@ async fn a_refused_client_hello_leaves_no_connection_to_show() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
     let mut connect = pki
-        .connector(&browntls::version::TLS13)
+        .connector(&browntls_core::version::TLS13)
         .connect(localhost(), c);
     assert!(poll_once(&mut connect).await.is_pending());
 
@@ -175,7 +175,7 @@ async fn a_refused_client_hello_leaves_no_connection_to_show() {
     let start = LazyConfigAcceptor::new(Acceptor::default(), s)
         .await
         .unwrap();
-    let config = Arc::new(pki.server_config(&browntls::version::TLS12));
+    let config = Arc::new(pki.server_config(&browntls_core::version::TLS12));
     let mut accept = start.into_stream(config);
     assert!(accept.get_ref().is_some() && accept.get_mut().is_some());
     assert!(accept.connection().is_none() && accept.connection_mut().is_none());

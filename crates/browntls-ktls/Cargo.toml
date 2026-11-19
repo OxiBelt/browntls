@@ -22,17 +22,17 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["native", "tls12", "logging"]
-# Feature pass-through to `browntls`; see its manifest for what each does.
-native = ["browntls/native"]
-rustcrypto = ["browntls/rustcrypto"]
-tls12 = ["browntls/tls12"]
-logging = ["browntls/logging"]
+# Feature pass-through to `browntls-core`; see its manifest for what each does.
+native = ["browntls-core/native"]
+rustcrypto = ["browntls-core/rustcrypto"]
+tls12 = ["browntls-core/tls12"]
+logging = ["browntls-core/logging"]
 # `AsyncKtlsStream`: kernel TLS on a `tokio::net::TcpStream`, and the
 # handover of `browntls-tokio` streams.
 tokio = ["dep:tokio", "dep:browntls-tokio"]
 
 [dependencies]
-browntls = { workspace = true, features = ["std"] }
+browntls-core = { workspace = true, features = ["std"] }
 
 # The socket options and `sendmsg`/`recvmsg` control messages of kernel TLS
 # (`src/sys.rs`, the crate's only unsafe code).

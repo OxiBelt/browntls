@@ -1,7 +1,7 @@
 //! Readying a stream for kernel TLS offload.
 //!
 //! A connection can be handed to the kernel (Linux kernel TLS, see
-//! [`browntls::kernel`]) only when nothing of it is in flight in
+//! [`browntls_core::kernel`]) only when nothing of it is in flight in
 //! userspace: no record waiting to be written, no received record half
 //! read, no plaintext the application has not seen. A stream holds all
 //! three, and some of its own (a 0-RTT phase to finish, a read error kept
@@ -42,8 +42,8 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use browntls::kernel::KernelHandoffBlocker;
-use browntls::{ClientConnection, ConnectionCommon, IoState, ServerConnection, SideData};
+use browntls_core::kernel::KernelHandoffBlocker;
+use browntls_core::{ClientConnection, ConnectionCommon, IoState, ServerConnection, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::common::{self, Stream, StreamState, SyncReadAdapter};
@@ -144,7 +144,7 @@ pub struct KernelHandoffError<S> {
     /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent),
     /// and it can still write and shut down when the error says that data
     /// follows the peer's `close_notify`
-    /// ([`io::ErrorKind::InvalidData`] without a [`browntls::Error`]
+    /// ([`io::ErrorKind::InvalidData`] without a [`browntls_core::Error`]
     /// inside); after any other error it has failed like a stream whose
     /// read or write returned that error (a connection that had failed
     /// before reports its error again).

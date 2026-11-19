@@ -4,8 +4,8 @@
 use std::cell::Cell;
 use std::sync::OnceLock;
 
-use browntls::SignatureScheme;
-use browntls::crypto::{WebPkiSupportedAlgorithms, native, rustcrypto};
+use browntls_core::SignatureScheme;
+use browntls_core::crypto::{WebPkiSupportedAlgorithms, native, rustcrypto};
 use browntls_pki::{
     BorrowedCertRevocationList, CertRevocationList, CertificateDer, CrlsRequired, EndEntityCert,
     Error, ExpirationPolicy, KeyUsage, OwnedCertRevocationList, RawPublicKeyEntity,

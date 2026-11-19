@@ -9,7 +9,7 @@ client and server, statically linked for the target architecture.
 [`.github/workflows/e2e.yml`](../../.github/workflows/e2e.yml) runs them in CI.
 
 They complement, and do not replace, the in-process handshake suites and the
-loopback OpenSSL interop tests in `crates/browntls/tests/`. A passing run is
+loopback OpenSSL interop tests in `crates/browntls-core/tests/`. A passing run is
 evidence for the configurations listed here only.
 
 ## Matrix

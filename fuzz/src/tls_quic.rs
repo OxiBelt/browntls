@@ -1,6 +1,6 @@
 //! QUIC-TLS, RFC 9001 (`fuzz_targets/tls_quic.rs`).
 //!
-//! Reaches every public function of `browntls::quic`: Initial keys from
+//! Reaches every public function of `browntls_core::quic`: Initial keys from
 //! fuzzed connection IDs, keys and secrets built from fuzzed traffic
 //! secrets, packet and header protection with fuzzed packets, key updates,
 //! the Retry Integrity Tag, CRYPTO_ERROR codes, and QUIC handshakes between
@@ -26,11 +26,11 @@
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::client::{ClientSessionMemoryCache, ClientSessionStore, Resumption};
-use browntls::crypto::{CryptoProvider, SupportedKxGroup};
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::quic::{self, Connection, KeyChange, Keys, Secrets, Side, Suite, Version};
-use browntls::{
+use browntls_core::client::{ClientSessionMemoryCache, ClientSessionStore, Resumption};
+use browntls_core::crypto::{CryptoProvider, SupportedKxGroup};
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::quic::{self, Connection, KeyChange, Keys, Secrets, Side, Suite, Version};
+use browntls_core::{
     CipherSuite, ClientConfig, Error, HandshakeKind, RootCertStore, ServerConfig,
     SupportedCipherSuite, Tls13CipherSuite, version,
 };
@@ -92,9 +92,9 @@ pub fn run(data: &[u8]) {
 
 fn provider(input: &mut Input) -> CryptoProvider {
     if input.bool() {
-        browntls::crypto::rustcrypto::default_provider()
+        browntls_core::crypto::rustcrypto::default_provider()
     } else {
-        browntls::crypto::native::default_provider()
+        browntls_core::crypto::native::default_provider()
     }
 }
 
@@ -486,9 +486,9 @@ fn handshake(input: &mut Input) {
     let setup = setup(input);
     let pki = pki();
     let mut provider = if setup.native {
-        browntls::crypto::native::default_provider()
+        browntls_core::crypto::native::default_provider()
     } else {
-        browntls::crypto::rustcrypto::default_provider()
+        browntls_core::crypto::rustcrypto::default_provider()
     };
     // Every TLS 1.3 suite whose bit is set (CCM_8 included, which QUIC
     // never uses).

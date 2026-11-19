@@ -22,15 +22,15 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
 
-use browntls::crypto::cipher::{
+use browntls_core::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter,
     OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload, Tls13AeadAlgorithm,
     UnsupportedOperationError,
 };
-use browntls::crypto::{CryptoProvider, native};
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::server::WebPkiClientVerifier;
-use browntls::{
+use browntls_core::crypto::{CryptoProvider, native};
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::server::WebPkiClientVerifier;
+use browntls_core::{
     ClientConfig, ClientConnection, ConnectionCommon, ConnectionTrafficSecrets, ContentType, Error,
     ProtocolVersion, RootCertStore, ServerConfig, ServerConnection, SideData, SupportedCipherSuite,
     SupportedProtocolVersion, Tls13CipherSuite, version,
@@ -108,7 +108,7 @@ pub(crate) fn provider(plain: bool) -> Arc<CryptoProvider> {
         for suite in &mut provider.cipher_suites {
             if let SupportedCipherSuite::Tls13(real) = *suite {
                 let fake: &'static Tls13CipherSuite = Box::leak(Box::new(Tls13CipherSuite {
-                    common: browntls::crypto::CipherSuiteCommon {
+                    common: browntls_core::crypto::CipherSuiteCommon {
                         suite: real.common.suite,
                         hash_provider: real.common.hash_provider,
                         confidentiality_limit: real.common.confidentiality_limit,
@@ -229,7 +229,7 @@ impl Mode {
         if self.tls12_only {
             &TLS12_ONLY
         } else {
-            browntls::ALL_VERSIONS
+            browntls_core::ALL_VERSIONS
         }
     }
 }

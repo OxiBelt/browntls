@@ -5,12 +5,14 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
-use browntls::ech::{
+use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls_core::ech::{
     EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey, EchStatus,
 };
-use browntls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::{ClientConfig, ClientConnection, Error, ServerConfig, ServerConnection, version};
+use browntls_core::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::{
+    ClientConfig, ClientConnection, Error, ServerConfig, ServerConnection, version,
+};
 
 use super::split::split;
 use super::{ECH_VERSION, Fields, KEMS, PUBLIC, SECRET, State, config_list, fixture};
@@ -19,9 +21,9 @@ use crate::input::Input;
 // --------------------------------------------------------------- handshake
 
 /// Moves everything `from` has to send into `to`, through `edit`.
-fn send<A: browntls::SideData, B: browntls::SideData>(
-    from: &mut browntls::ConnectionCommon<A>,
-    to: &mut browntls::ConnectionCommon<B>,
+fn send<A: browntls_core::SideData, B: browntls_core::SideData>(
+    from: &mut browntls_core::ConnectionCommon<A>,
+    to: &mut browntls_core::ConnectionCommon<B>,
     edit: &mut Option<(usize, u8)>,
 ) {
     let mut buf = Vec::new();
@@ -74,10 +76,10 @@ fn pump(
 
 pub(super) fn server_config(ech: Option<Arc<EchServerConfig>>, hrr: bool) -> Arc<ServerConfig> {
     let fixture = fixture();
-    let mut provider = browntls::crypto::native::default_provider();
+    let mut provider = browntls_core::crypto::native::default_provider();
     if hrr {
         // The client's first key share is not P-256.
-        provider.kx_groups = vec![browntls::crypto::native::kx_group::SECP256R1];
+        provider.kx_groups = vec![browntls_core::crypto::native::kx_group::SECP256R1];
     }
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&version::TLS13])
@@ -100,12 +102,13 @@ pub(super) fn connect(
     server: &Arc<ServerConfig>,
     must: bool,
 ) -> Option<(ClientConnection, ServerConnection)> {
-    let mut config =
-        ClientConfig::builder_with_provider(Arc::new(browntls::crypto::native::default_provider()))
-            .with_protocol_versions(&[&version::TLS13])
-            .expect("versions")
-            .with_root_certificates(fixture().roots.clone())
-            .with_no_client_auth();
+    let mut config = ClientConfig::builder_with_provider(Arc::new(
+        browntls_core::crypto::native::default_provider(),
+    ))
+    .with_protocol_versions(&[&version::TLS13])
+    .expect("versions")
+    .with_root_certificates(fixture().roots.clone())
+    .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec()];
     config.ech_mode = Some(mode);
     let name = ServerName::try_from(SECRET).expect("name");

@@ -2,7 +2,7 @@
 //! records, under the native provider's load-aware routing.
 //!
 //! The native provider can route cryptographic work between its backends
-//! by what they cost at the moment (`browntls::crypto::native::accel::load`).
+//! by what they cost at the moment (`browntls_core::crypto::native::accel::load`).
 //! Its order of places for the records of a connection has kernel TLS in
 //! front (`accel::load::kernel`) once this module has found that the
 //! running kernel takes connections:
@@ -27,10 +27,10 @@
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let config: std::sync::Arc<browntls::ClientConfig> = unimplemented!();
+//! # let config: std::sync::Arc<browntls_core::ClientConfig> = unimplemented!();
 //! use std::io::Write;
 //!
-//! use browntls::crypto::native::accel::load;
+//! use browntls_core::crypto::native::accel::load;
 //! use browntls_ktls::routing::{self, RoutedStream};
 //!
 //! // Once per process: route by load, with kernel TLS first if the
@@ -42,7 +42,7 @@
 //!
 //! // `config` has `enable_secret_extraction` set.
 //! let tcp = std::net::TcpStream::connect("example.com:443")?;
-//! let conn = browntls::ClientConnection::new(config, "example.com".try_into()?)?;
+//! let conn = browntls_core::ClientConnection::new(config, "example.com".try_into()?)?;
 //! let mut tls = RoutedStream::new(conn, tcp).map_err(|e| e.into_io_error())?;
 //! println!("records protected by {}", tls.place());
 //! tls.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")?;
@@ -69,9 +69,9 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 
-use browntls::Stream;
-use browntls::crypto::native::accel::load::kernel;
-pub use browntls::crypto::native::accel::load::kernel::{Place, Records};
+use browntls_core::Stream;
+use browntls_core::crypto::native::accel::load::kernel;
+pub use browntls_core::crypto::native::accel::load::kernel::{Place, Records};
 
 use crate::meter::{Meter, records_of};
 use crate::stream::{HandoffError, KtlsStream, Offload, refused, transient, unsupported};
@@ -312,7 +312,7 @@ impl<C: Offload, S> fmt::Debug for RoutedStream<C, S> {
 }
 
 /// A connection that the routing left in userspace, over its socket: a
-/// [`browntls::StreamOwned`] that reports what its writes cost, and that
+/// [`browntls_core::StreamOwned`] that reports what its writes cost, and that
 /// first returns the application data a refused handover had already
 /// taken from the connection.
 pub struct UserspaceStream<C, S> {
@@ -402,7 +402,7 @@ impl<C: Offload, S: Read + Write> Read for UserspaceStream<C, S> {
 }
 
 impl<C: Offload, S: Read + Write> Write for UserspaceStream<C, S> {
-    /// Encrypts `buf` and writes the records, as [`browntls::Stream`]
+    /// Encrypts `buf` and writes the records, as [`browntls_core::Stream`]
     /// does. The routing times some writes: on a non-blocking socket that
     /// had no room, such a write is reported cheaper than it is.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -435,7 +435,7 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    use browntls::{ClientConnection, ServerConnection};
+    use browntls_core::{ClientConnection, ServerConnection};
 
     use super::*;
     use crate::common::{Pki, localhost, offloadable_suites, tcp_pair};

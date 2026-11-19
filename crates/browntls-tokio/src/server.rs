@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::{ServerConfig, ServerConnection};
+use browntls_core::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
@@ -49,7 +49,7 @@ impl TlsAcceptor {
     /// completes, so the server can read the client's 0-RTT ("early") data
     /// without waiting for the client's Finished. Off by default.
     ///
-    /// It does when the connection accepted early data, which `browntls`
+    /// It does when the connection accepted early data, which `browntls-core`
     /// does in two cases: for a TLS 1.3 session resumed from the server's
     /// [session storage](ServerConfig::session_storage) (never from a
     /// stateless ticket) with a non-zero
@@ -76,14 +76,14 @@ impl TlsAcceptor {
     /// # Replay
     ///
     /// Early data is **replayable**: until the handshake completes
-    /// ([`is_handshaking`](browntls::CommonState::is_handshaking) on the
+    /// ([`is_handshaking`](browntls_core::CommonState::is_handshaking) on the
     /// connection is `false`), nothing shows that the client is taking part
     /// in this connection now, rather than an attacker sending again a
     /// ClientHello and early data it recorded. The same holds for what the
     /// connection reports from the resumed session in this phase (the
     /// client's certificates, the resumption data).
     ///
-    /// What `browntls` does against replay is limited to resumed sessions:
+    /// What `browntls-core` does against replay is limited to resumed sessions:
     /// the session is taken out of the session storage, which makes each
     /// ticket good for one attempt (RFC 9846 §8.1) as long as every server
     /// that honours the ticket shares that storage and its `take` is
@@ -177,9 +177,9 @@ impl fmt::Debug for TlsAcceptor {
 /// early data to read.
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData` and wraps
-/// the [`browntls::Error`], which `get_ref` and `downcast_ref` recover.
+/// the [`browntls_core::Error`], which `get_ref` and `downcast_ref` recover.
 /// Creating the connection can fail too, before any I/O: that error has
-/// kind `Other` and wraps the [`browntls::Error`] the same way.
+/// kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
 pub struct Accept<IO>(MidHandshake<TlsStream<IO>>);
 

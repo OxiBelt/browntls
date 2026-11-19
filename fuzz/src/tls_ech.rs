@@ -1,6 +1,6 @@
 //! Encrypted Client Hello (`fuzz_targets/tls_ech.rs`).
 //!
-//! Reaches every public function of `browntls::ech` and `browntls::ech::svcb`:
+//! Reaches every public function of `browntls_core::ech` and `browntls_core::ech::svcb`:
 //! `ECHConfigList` parsing of fuzzed bytes ([`EchConfig::new`]), server keys
 //! from fuzz-chosen `ECHConfig` fields ([`EchServerKey::new`]) and generated
 //! ones ([`EchServerKey::generate`]), [`EchServerConfig`] lists, GREASE
@@ -31,18 +31,18 @@
 //! Input: up to 32 operations, each an operation byte followed by its
 //! arguments (see [`run`]); at most two handshake operations per input.
 //!
-//! [`EchConfig::new`]: browntls::ech::EchConfig::new
-//! [`EchServerConfig`]: browntls::ech::EchServerConfig
-//! [`ClientFacing`]: browntls::ech::split::ClientFacing
-//! [`ServerConfig::ech_backend`]: browntls::ServerConfig::ech_backend
+//! [`EchConfig::new`]: browntls_core::ech::EchConfig::new
+//! [`EchServerConfig`]: browntls_core::ech::EchServerConfig
+//! [`ClientFacing`]: browntls_core::ech::split::ClientFacing
+//! [`ServerConfig::ech_backend`]: browntls_core::ServerConfig::ech_backend
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::RootCertStore;
-use browntls::crypto::hpke::{Hpke, HpkeKem, HpkePrivateKey, HpkePublicKey};
-use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
-use browntls::ech::{EchGreaseConfig, EchServerKey};
-use browntls::pki_types::{CertificateDer, DnsName};
+use browntls_core::RootCertStore;
+use browntls_core::crypto::hpke::{Hpke, HpkeKem, HpkePrivateKey, HpkePublicKey};
+use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls_core::ech::{EchGreaseConfig, EchServerKey};
+use browntls_core::pki_types::{CertificateDer, DnsName};
 
 use self::config::{config, generate, grease, list, presentation, serve, svcb};
 use self::handshake::handshake;
@@ -431,8 +431,8 @@ impl State {
 ///    fields, an optional edit of the client's first flight, and for split
 ///    mode the variant and the size of the pieces.
 ///
-/// [`EchConfig::new`]: browntls::ech::EchConfig::new
-/// [`EchServerConfig::new`]: browntls::ech::EchServerConfig::new
+/// [`EchConfig::new`]: browntls_core::ech::EchConfig::new
+/// [`EchServerConfig::new`]: browntls_core::ech::EchServerConfig::new
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);

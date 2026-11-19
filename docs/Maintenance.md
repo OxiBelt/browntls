@@ -2,7 +2,7 @@
 
 ## Current baseline
 
-browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls`,
+browntls has a Cargo workspace (`browntls-crypto`, `browntls-pki`, `browntls-core`,
 `browntls-tokio`, `browntls-ktls`, and the unpublished test tools `browntls-e2e` and `browntls-entropy`) described in
 [Architecture](Architecture.md), with no published releases. The
 [contributor guide](../CONTRIBUTING.md) owns workflow and commit rules; the
@@ -69,7 +69,7 @@ locked version of that crate only; the exception is due for review by
 
 ### Optional compression dependencies
 
-The `zlib`, `brotli` and `zstd` features of `browntls` pull in `miniz_oxide`
+The `zlib`, `brotli` and `zstd` features of `browntls-core` pull in `miniz_oxide`
 (with `adler2`), `brotli` (with `brotli-decompressor`, `alloc-no-stdlib`,
 `alloc-stdlib`) and `ruzstd`. All are pure Rust from crates.io, have no build
 script and no native code, and carry licences already on the allow list. As
@@ -101,7 +101,7 @@ for the task budget (`tokio::task::coop`); `rt` compiles the runtime's code
 but adds no dependency. Either build of `tokio` pulls in
 `pin-project-lite` only (MIT, and Apache-2.0 OR MIT); both are pure Rust, and `tokio`
 contains `unsafe` code (none of it reached by browntls data parsing, which
-stays in `browntls`). It is a runtime dependency (`safe-to-deploy`) of
+stays in `browntls-core`). It is a runtime dependency (`safe-to-deploy`) of
 `browntls-tokio`, and of `browntls-ktls` with its `tokio` feature (below),
 with no `cargo vet` audit yet. The test-only
 features (`rt`, `rt-multi-thread`, `macros`, `net`, `io-util`, `time`,

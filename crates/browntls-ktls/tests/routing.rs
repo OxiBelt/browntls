@@ -18,8 +18,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
 
-use browntls::crypto::native::accel::load::{self, Config, Phase, kernel};
-use browntls::{ClientConnection, ServerConnection, SupportedCipherSuite};
+use browntls_core::crypto::native::accel::load::{self, Config, Phase, kernel};
+use browntls_core::{ClientConnection, ServerConnection, SupportedCipherSuite};
 use browntls_ktls::routing::{self, Place, Records, RoutedStream};
 use common::*;
 

@@ -1,16 +1,16 @@
 //! Wire-format helpers and record containers (`fuzz_targets/tls_codec.rs`).
 //!
-//! Reaches the public functions of `browntls::msgs` that the
+//! Reaches the public functions of `browntls_core::msgs` that the
 //! `handshake_message`, `deframer` and `cert_decompress` targets do not: the
 //! codec [`Reader`], [`HandshakeMessagePayload`] and [`ClientHelloPayload`]
-//! through `browntls::internal::msgs`, [`NamedGroup`] and
+//! through `browntls_core::internal::msgs`, [`NamedGroup`] and
 //! [`DistinguishedName`], the record containers of
-//! `browntls::crypto::cipher` ([`OutboundChunks`], [`PrefixedPayload`],
+//! `browntls_core::crypto::cipher` ([`OutboundChunks`], [`PrefixedPayload`],
 //! [`OutboundOpaqueMessage`], [`InboundOpaqueMessage`] and its
 //! `BorrowedPayload`, [`OutboundPlainMessage`]), the stored client session
 //! values (`Tls12ClientSessionValue`, `Tls13ClientSessionValue`, taken from
 //! and put back into a client session store between two real handshakes),
-//! and the `browntls::fuzzing` entry points.
+//! and the `browntls_core::fuzzing` entry points.
 //!
 //! Every container is checked against a plain `Vec<u8>` model, decoders
 //! against re-encoding (encode, decode, encode must be stable), the enums
@@ -23,19 +23,19 @@
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::client::{ClientSessionMemoryCache, ClientSessionStore, Resumption};
-use browntls::crypto::KeyExchangeAlgorithm;
-use browntls::crypto::cipher::{
+use browntls_core::client::{ClientSessionMemoryCache, ClientSessionStore, Resumption};
+use browntls_core::crypto::KeyExchangeAlgorithm;
+use browntls_core::crypto::cipher::{
     InboundOpaqueMessage, OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage,
     PrefixedPayload,
 };
-use browntls::crypto::hash::HashAlgorithm;
-use browntls::fuzzing;
-use browntls::internal::msgs::codec::{Codec, Reader};
-use browntls::internal::msgs::handshake::{ClientHelloPayload, HandshakeMessagePayload};
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::psk::ExternalPsk;
-use browntls::{
+use browntls_core::crypto::hash::HashAlgorithm;
+use browntls_core::fuzzing;
+use browntls_core::internal::msgs::codec::{Codec, Reader};
+use browntls_core::internal::msgs::handshake::{ClientHelloPayload, HandshakeMessagePayload};
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::psk::ExternalPsk;
+use browntls_core::{
     ClientConfig, ClientConnection, ContentType, DistinguishedName, Error, HandshakeKind,
     NamedGroup, ProtocolVersion, RootCertStore, ServerConfig, ServerConnection, version,
 };
@@ -77,7 +77,7 @@ const STATEFUL_TICKET_LIFETIME: u32 = 24 * 60 * 60;
 /// 9. sessions: version, PSK, early data limit and the age to add to the
 ///    stored session between two handshakes;
 ///
-/// and, with the high bit of the operation byte set, a `browntls::fuzzing`
+/// and, with the high bit of the operation byte set, a `browntls_core::fuzzing`
 /// entry point (bit 6: TLS 1.3) with a selector byte and a 16-bit-prefixed
 /// field.
 pub fn run(data: &[u8]) {
@@ -231,7 +231,7 @@ fn fuzzing_entry(op: u8, input: &mut Input) {
             let limits = [
                 64,
                 4096,
-                browntls::compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
+                browntls_core::compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
             ];
             fuzzing::compressed_certificate(limits[usize::from(selector % 3)], data);
         }
@@ -563,9 +563,9 @@ fn pki() -> &'static Pki {
 
 /// Moves everything `from` has to send into `to`. Errors stay with the
 /// connections and show up in `process_new_packets`.
-fn send<A: browntls::SideData, B: browntls::SideData>(
-    from: &mut browntls::ConnectionCommon<A>,
-    to: &mut browntls::ConnectionCommon<B>,
+fn send<A: browntls_core::SideData, B: browntls_core::SideData>(
+    from: &mut browntls_core::ConnectionCommon<A>,
+    to: &mut browntls_core::ConnectionCommon<B>,
 ) {
     let mut buf = Vec::new();
     while from.wants_write() {
@@ -622,12 +622,12 @@ fn sessions(input: &mut Input) {
     };
     let identity = b"fuzz session psk".to_vec();
     let pki = pki();
-    let versions: &[&browntls::SupportedProtocolVersion] = if tls12 {
+    let versions: &[&browntls_core::SupportedProtocolVersion] = if tls12 {
         &[&version::TLS12]
     } else {
         &[&version::TLS13]
     };
-    let provider = Arc::new(browntls::crypto::native::default_provider());
+    let provider = Arc::new(browntls_core::crypto::native::default_provider());
     let new_psk = || {
         Arc::new(
             ExternalPsk::new(identity.clone(), vec![0x42; 32], HashAlgorithm::SHA256).expect("PSK"),
@@ -715,12 +715,13 @@ pub fn seeds() -> Vec<Vec<u8>> {
 
     // A real ClientHello for the decoders.
     let pki = pki();
-    let config =
-        ClientConfig::builder_with_provider(Arc::new(browntls::crypto::native::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("versions")
-            .with_root_certificates(pki.roots.clone())
-            .with_no_client_auth();
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        browntls_core::crypto::native::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("versions")
+    .with_root_certificates(pki.roots.clone())
+    .with_no_client_auth();
     let name = ServerName::try_from("localhost").expect("name");
     let mut client = ClientConnection::new(Arc::new(config), name).expect("client");
     let mut flight = Vec::new();

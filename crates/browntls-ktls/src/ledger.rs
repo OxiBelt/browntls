@@ -164,8 +164,8 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsFd;
 
-    use browntls::crypto::cipher::{AeadKey, Iv};
-    use browntls::{ConnectionTrafficSecrets, ProtocolVersion};
+    use browntls_core::crypto::cipher::{AeadKey, Iv};
+    use browntls_core::{ConnectionTrafficSecrets, ProtocolVersion};
 
     use super::*;
 

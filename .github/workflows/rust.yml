@@ -42,7 +42,7 @@ jobs:
           cargo fmt --all --check
           # Shared test cases are pulled in with `include!`, which cargo fmt
           # does not follow.
-          rustfmt --edition 2024 --check crates/browntls/tests/cases/*.rs crates/browntls/tests/cases/*/*.rs
+          rustfmt --edition 2024 --check crates/browntls-core/tests/cases/*.rs crates/browntls-core/tests/cases/*/*.rs
 
       - name: Clippy (x86-64)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -55,7 +55,7 @@ jobs:
 
       # Every target, tests included, must also build without TLS 1.2.
       - name: Clippy (without tls12)
-        run: cargo clippy -p browntls --all-targets --no-default-features --features std,native,rustcrypto,logging --locked -- -D warnings
+        run: cargo clippy -p browntls-core --all-targets --no-default-features --features std,native,rustcrypto,logging --locked -- -D warnings
 
       - name: Clippy (browntls-tokio without coop)
         run: cargo clippy -p browntls-tokio --all-targets --no-default-features --features native,tls12,logging,prefer-post-quantum --locked -- -D warnings

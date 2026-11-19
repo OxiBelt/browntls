@@ -5,8 +5,8 @@ use std::io::{self, IoSlice};
 use std::ops::DerefMut;
 use std::sync::Arc;
 
-use browntls::SideData;
-use browntls::unbuffered::{
+use browntls_core::SideData;
+use browntls_core::unbuffered::{
     ConnectionState, EncodeError, InsufficientSizeError, UnbufferedConnectionCommon,
     UnbufferedStatus,
 };
@@ -116,7 +116,7 @@ enum Rest {
 /// `plain` (0-RTT data to `early`), records the connection wants sent to
 /// `out`. Returns where the connection came to rest, if it did.
 fn handle<D>(
-    state: Result<ConnectionState<'_, '_, D>, browntls::Error>,
+    state: Result<ConnectionState<'_, '_, D>, browntls_core::Error>,
     out: &mut Vec<u8>,
     plain: &mut Vec<u8>,
     early: &mut Vec<u8>,
@@ -231,7 +231,7 @@ impl World {
                 }
                 let tls = err
                     .get_ref()
-                    .is_some_and(|inner| inner.is::<browntls::Error>());
+                    .is_some_and(|inner| inner.is::<browntls_core::Error>());
                 let final_kind = matches!(
                     err.kind(),
                     io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof

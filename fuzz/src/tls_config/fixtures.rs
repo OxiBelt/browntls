@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use browntls::pki_types::{
+use browntls_core::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
 };
 use browntls_crypto::rsa::{MAX_PKCS8_PRIVATE_KEY_DER_LEN, RsaKeyAlgorithm, RsaPrivateKey};

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use browntls::server::Acceptor;
+use browntls_core::server::Acceptor;
 use browntls_tokio::{LazyConfigAcceptor, client, server};
 use common::{Pki, localhost, pattern};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -118,7 +118,7 @@ impl AsyncWrite for RawPipe {
 /// transport reads return at most `max_read` bytes.
 async fn tls_pair(max_read: usize) -> (client::TlsStream<RawPipe>, server::TlsStream<RawPipe>) {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (client_io, server_io) = raw_pair(max_read);
     let accept = tokio::spawn(pki.acceptor(version).accept(server_io));
     let client = pki
@@ -535,7 +535,7 @@ const SMALL_RECORD: usize = 5 + 1 + 1 + 16;
 async fn a_server_read_of_many_small_records_spends_the_budget() {
     const LEN: usize = 4096;
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (server_io, client_io) = raw_pair(SMALL_RECORD);
     let reads = server_io.reads.clone();
     let accept = tokio::spawn(pki.acceptor(version).accept(server_io));
@@ -588,7 +588,7 @@ async fn a_read_that_needs_many_transport_reads_spends_the_budget() {
 #[tokio::test]
 async fn a_handshake_in_small_pieces_spends_the_budget() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (client_io, server_io) = raw_pair(1);
     let reads = client_io.reads.clone();
     let accept = tokio::spawn(pki.acceptor(version).accept(server_io));
@@ -611,7 +611,7 @@ async fn a_handshake_in_small_pieces_spends_the_budget() {
 #[tokio::test]
 async fn a_client_hello_in_small_pieces_spends_the_budget() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (server_io, client_io) = raw_pair(1);
     let reads = server_io.reads.clone();
 

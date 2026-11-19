@@ -7,7 +7,7 @@
 use std::fmt;
 use std::task::{Context, Poll};
 
-use browntls::revocation::{RevocationQuery, RevocationResponse};
+use browntls_core::revocation::{RevocationQuery, RevocationResponse};
 
 #[cfg(feature = "ocsp")]
 use crate::revocation::{Delivered, PendingResponse, RevocationFetcher};

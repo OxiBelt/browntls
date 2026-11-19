@@ -36,7 +36,15 @@ class MatrixTest(unittest.TestCase):
         include = e2e.matrix("e2e")["include"]
         pairs = {(m["arch"], m["suite"]) for m in include}
         self.assertEqual(len(pairs), len(include))
-        self.assertEqual(pairs, {(a, s) for a in e2e.ARCHES for s in e2e.SUITES})
+        self.assertEqual(
+            pairs,
+            {
+                (a, s)
+                for a in e2e.ARCHES
+                for s in e2e.SUITES
+                if a not in e2e.SUITES[s].skip_arches
+            },
+        )
         for m in include:
             self.assertEqual(m["runner"], e2e.ARCHES[m["arch"]].runner)
 
@@ -45,6 +53,23 @@ class MatrixTest(unittest.TestCase):
             peer_image = e2e.SUITES[m["suite"]].peer_image
             self.assertEqual(m["peer_image"], peer_image)
             self.assertTrue((e2e.E2E_DIR / "peer" / f"{peer_image}.Dockerfile").is_file())
+
+    def test_ubuntu_lts_peers(self):
+        # Ubuntu 24.04 (OpenSSL 3.0) runs everywhere; Ubuntu 26.04's riscv64
+        # image needs RVA23, which the native riscv64 runner lacks.
+        pairs = {(m["arch"], m["suite"]) for m in e2e.matrix("e2e")["include"]}
+        for arch in e2e.ARCHES:
+            self.assertIn((arch, "openssl-3.0"), pairs)
+        self.assertNotIn(("riscv64", "openssl-ubuntu-26.04"), pairs)
+        for arch in ("amd64", "arm64", "riscv64-zvk"):
+            self.assertIn((arch, "openssl-ubuntu-26.04"), pairs)
+        dockerfile = e2e.E2E_DIR / "peer" / "ubuntu-26.04.Dockerfile"
+        self.assertIn("FROM ubuntu:26.04@sha256:", dockerfile.read_text())
+
+    def test_run_refuses_a_skipped_arch(self):
+        args = mock.Mock(arch="riscv64", suite="openssl-ubuntu-26.04")
+        with self.assertRaisesRegex(SystemExit, "does not run on riscv64"):
+            e2e.cmd_run(args)
 
     def test_image_matrix_has_one_entry_per_arch(self):
         include = e2e.matrix("images")["include"]
@@ -86,6 +111,7 @@ class ScenarioTest(unittest.TestCase):
 
         self.assertIn("tls13-x25519mlkem768", names("openssl"))
         self.assertIn("defaults-pq", names("openssl"))
+        self.assertIn("tls13-x25519mlkem768", names("openssl-ubuntu-26.04"))
         self.assertNotIn("tls13-x25519mlkem768", names("openssl-3.0"))
         self.assertIn("defaults-classical", names("openssl-3.0"))
         self.assertNotIn("tls13-x25519mlkem768", names("gnutls"))
@@ -261,7 +287,7 @@ class EchTest(unittest.TestCase):
     def test_suites_and_roles(self):
         go = e2e.SUITES["go"]
         self.assertTrue(all(s.ech is not None for s in e2e.scenarios_for(go)))
-        for suite in ("openssl", "openssl-3.0", "gnutls"):
+        for suite in ("openssl", "openssl-3.0", "openssl-ubuntu-26.04", "gnutls"):
             self.assertFalse(any(n.startswith("ech-") for n in self.names(suite)), suite)
         browntls = self.names("browntls")
         for sc in e2e.SCENARIOS:

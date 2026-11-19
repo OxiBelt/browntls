@@ -18,7 +18,8 @@ Review dependency and GitHub Actions updates weekly. Dependabot covers GitHub
 Actions, the Cargo workspace, and the digest-pinned base images of the
 [Docker end-to-end](../tests/e2e/README.md) peers and of the
 [Kubernetes revocation test](../tests/kubernetes/README.md). The Ubuntu peers
-receive digest updates only: they stay on Ubuntu 24.04 for its OpenSSL 3.0.
+cover the two current LTS releases, 24.04 (for its OpenSSL 3.0) and 26.04, and
+receive digest updates only; a new LTS release is added by hand.
 The end-to-end peers install the distribution's current OpenSSL and GnuTLS packages when built, so their exact
 versions can change between runs; each job summary records them. Review generated changes before merging; there
 is no automatic merge policy.

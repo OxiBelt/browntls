@@ -32,7 +32,7 @@ and the GitHub job summary has a table per topic.
 | --- | --- | --- |
 | duplicates | Equal samples after sorting; any duplicate fails when the free bits make one implausible (expected count below 2^-30) | Entropy below about `2 log2(N)` bits per value (44 bits at `N = 2^22`), cached or replayed keys |
 | bit frequency | `z = (2 ones - N) / sqrt(N)` per free bit, two-sided | Stuck, unfilled or biased bits |
-| byte distribution | Chi-square (255 degrees of freedom, Wilson–Hilferty) and the largest count per byte position | Biased byte values. The two limits are reported as floors on the **Shannon entropy** and the **min-entropy** per byte; at `N = 2^22` they are about 7.99993 and 7.92 bits |
+| byte distribution | Chi-square (255 degrees of freedom, Wilson–Hilferty) and the largest count per byte position (Poisson upper tail, which bounds the binomial one; a normal approximation fails ideal generators far more often than `ALPHA` when samples are few) | Biased byte values. The two limits are reported as floors on the **Shannon entropy** and the **min-entropy** per byte; at `N = 2^22` they are about 7.99993 and 7.92 bits |
 | window collisions | Collisions of 16- to 32-bit windows of free bits across samples against a Poisson law, both tails; reported as the **collision entropy** (Rényi order 2) per window | Values drawn from a small set, low entropy confined to part of a value, counters |
 | window repeats | Equal windows inside one sample (Poisson, upper tail) | Halves or blocks copied within a value |
 | byte lags | Equal bytes at distance 1 to 16 within a sample (normal approximation over pairwise independent indicators) | Periodic or repeated byte patterns |

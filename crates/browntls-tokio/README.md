@@ -285,13 +285,16 @@ reader, writer or I/O methods), and `into_parts` the connection with the
 stream's buffers. The unbuffered connector does not send 0-RTT early data; a
 server's accepted early data is collected during the handshake
 (`TlsStream::early_data`), and the unbuffered acceptors have no
-`early_data` option to return a stream before the handshake completes. While more than 16 KiB of answers to the peer are
-unwritten, reads take no more input.
+`early_data` option to return a stream before the handshake completes.
+While more than 16 KiB of answers to the peer are unwritten, reads take no
+more input.
 
-Two things under Behaviour below are not there for these streams yet: they
-have no `into_split` (`tokio::io::split` splits them), and the `coop` feature
-does not cover them, so they take nothing from the task budget themselves (a
-transport that counts, such as Tokio's sockets, still does).
+Three things under Behaviour below are not there for these streams yet:
+they have no `into_split` (`tokio::io::split` splits them), the `coop`
+feature does not cover them, so they take nothing from the task budget
+themselves (a transport that counts, such as Tokio's sockets, still does),
+and their handshake futures give only the transport (`get_ref`, `get_mut`),
+not the connection.
 
 ## Behaviour
 

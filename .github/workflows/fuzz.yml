@@ -180,13 +180,43 @@ jobs:
           read -r -a targets <<< "${TARGETS}"
           scripts/fuzz/run-targets.sh "${SECONDS_PER_TARGET}" "${targets[@]}"
 
-      # A failing target's input and libFuzzer log are not published: findings
-      # are potential vulnerabilities and must not reach public logs or
-      # artifacts (docs/Maintenance.md). run-targets.sh prints only the target,
-      # the kind of finding, libFuzzer's seed, its statistics and the input's
-      # SHA-256; the input is discarded with the runner, so a finding is a
-      # signal to fuzz that target locally (fuzz/README.md).
+      # A failing target's input and libFuzzer log are not published in
+      # plaintext: findings are potential vulnerabilities and must not reach
+      # public logs or artifacts (docs/Maintenance.md). run-targets.sh prints
+      # only the target, the kind of finding, libFuzzer's seed, its statistics,
+      # the input's SHA-256 and the CPU and crypto backends of the runner.
       #
+      # The next two steps seal the findings directory (inputs, logs and the
+      # quarantined corpus) to the maintainers' recipient certificate, kept
+      # as PEM in the Actions variable FUZZ_FINDINGS_RECIPIENT (CMS, ECDH
+      # P-384 + AES-256-GCM), and upload only the sealed file, which any
+      # signed-in user can download but only the private key opens
+      # (fuzz/README.md, Continuous fuzzing). The log shows the certificate's
+      # fingerprint. Without the variable (also in runs that do not receive
+      # it) nothing is uploaded and the findings are lost with the runner.
+      - name: Seal findings
+        id: seal
+        if: failure() && steps.fuzz.outcome == 'failure' && vars.FUZZ_FINDINGS_RECIPIENT != ''
+        env:
+          FUZZ_FINDINGS: ${{ runner.temp }}/fuzz-findings
+          RECIPIENT: ${{ vars.FUZZ_FINDINGS_RECIPIENT }}
+          SEALED: ${{ runner.temp }}/fuzz-findings-sealed/findings.cms
+        run: |
+          cert="${RUNNER_TEMP}/fuzz-findings-recipient.pem"
+          printf '%s\n' "${RECIPIENT}" > "${cert}"
+          openssl x509 -in "${cert}" -noout -subject -fingerprint -sha256
+          scripts/fuzz/findings-envelope.sh seal "${cert}" "${FUZZ_FINDINGS}" "${SEALED}"
+
+      - name: Upload sealed findings
+        if: failure() && steps.seal.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-findings-sealed-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuzz-findings-sealed/findings.cms
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
       # Pull requests, forks included, restore these caches, so the corpus is
       # saved only when every target of the job ran clean: the failing input
       # can be a corpus entry, and a saved corpus holding it would publish the

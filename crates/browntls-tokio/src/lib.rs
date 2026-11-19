@@ -188,6 +188,7 @@
 //! [`shutdown`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.shutdown
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![forbid(unsafe_code)]
 
 use std::io;
 #[cfg(unix)]

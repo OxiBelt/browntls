@@ -1,0 +1,38 @@
+name: Revocation Kubernetes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revocation-kubernetes:
+    name: Revocation Kubernetes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: scripts/ci/install-rust.sh x86_64-unknown-linux-musl
+
+      - name: Install test tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools openssl
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "${work_dir}"' EXIT
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/kubernetes/minikube/releases/download/v1.39.0/minikube-linux-amd64 \
+            --output "${work_dir}/minikube"
+          printf '%s  %s\n' b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4 "${work_dir}/minikube" | sha256sum --check --strict
+          sudo install -m 755 "${work_dir}/minikube" /usr/local/bin/minikube
+
+      - name: Run the isolated OCSP suite
+        run: python3 -B tests/kubernetes/revocation.py

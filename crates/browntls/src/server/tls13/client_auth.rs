@@ -13,6 +13,8 @@ use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
 use crate::msgs::handshake::{CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{Message, MessagePayload};
+use crate::revocation::{CertificateEvidence, finish_or_pause};
+use crate::server::common::{ClientCertAwaitingProof, client_revocation_enabled};
 use crate::server::hs::{NextStateOrError, ServerContext};
 use crate::server::server_conn::{ServerConfig, ServerConnectionData};
 use crate::sync::Arc;
@@ -82,14 +84,15 @@ impl State<ServerConnectionData> for ExpectCertificate {
 }
 
 /// Checks a client Certificate message against the request it answers
-/// (`context`) and the client certificate verifier. Returns `None` for an
-/// empty certificate list the verifier allows.
+/// (`context`) and the client certificate verifier, which also gets the
+/// OCSP responses and SCT lists stapled to the entries. Returns `None` for
+/// an empty certificate list the verifier allows.
 pub(super) fn check_client_certificate(
     common: &mut CommonState,
     config: &ServerConfig,
     certp: &CertificatePayloadTls13<'_>,
     context: &[u8],
-) -> Result<Option<crate::msgs::handshake::CertificateChain<'static>>, Error> {
+) -> Result<Option<ClientCertAwaitingProof>, Error> {
     // RFC 9846 §4.4.2: the context echoes our request's. The message is
     // well formed, so a mismatch is illegal_parameter.
     if certp.context.0 != context {
@@ -98,22 +101,35 @@ pub(super) fn check_client_certificate(
             PeerMisbehaved::IllegalCertificateRequestContext,
         ));
     }
-    // We never request stapled responses, SCTs or delegated credentials
-    // (RFC 9345 client credentials are not supported) from clients.
-    if certp
-        .entries
-        .iter()
-        .any(|e| e.status.is_some() || e.sct_list.is_some() || e.delegated_credential.is_some())
-    {
+    // RFC 9846 §4.5.1: entry extensions must answer our CertificateRequest.
+    // It asks for stapled responses and SCTs exactly when the verifier
+    // evaluates revocation, and never for delegated credentials (RFC 9345
+    // client credentials are not supported).
+    let evidence_requested = client_revocation_enabled(config);
+    if certp.entries.iter().any(|e| {
+        e.delegated_credential.is_some()
+            || (!evidence_requested && (e.status.is_some() || e.sct_list.is_some()))
+    }) {
         return Err(common.send_fatal_alert(
             AlertDescription::UnsupportedExtension,
             PeerMisbehaved::UnsolicitedCertExtension,
         ));
     }
 
+    // An empty response is no response (`OCSPResponse<1..2^24-1>`).
+    let ocsp = certp.ocsp_responses();
+    let scts = certp.sct_lists();
+    let evidence: Vec<CertificateEvidence<'_>> = ocsp
+        .iter()
+        .zip(&scts)
+        .map(|(ocsp, scts)| CertificateEvidence {
+            ocsp: ocsp.as_deref().filter(|response| !response.is_empty()),
+            scts: scts.as_deref(),
+        })
+        .collect();
     let client_cert = certp.clone().into_certificate_chain().into_owned();
 
-    let Some((end_entity, intermediates)) = client_cert.0.split_first() else {
+    if client_cert.0.is_empty() {
         // RFC 9846 §4.5: an empty Certificate is allowed unless we
         // require one, which is certificate_required.
         if config.verifier.client_auth_mandatory() {
@@ -123,14 +139,9 @@ pub(super) fn check_client_certificate(
             ));
         }
         return Ok(None);
-    };
+    }
 
-    let now = config.current_time()?;
-    config
-        .verifier
-        .verify_client_cert(end_entity, intermediates, now)
-        .map_err(|err| crate::client::tls13::send_cert_path_error_alert(common, err))?;
-    Ok(Some(client_cert))
+    crate::server::common::verify_client_cert(common, config, client_cert, &evidence).map(Some)
 }
 
 /// Verifies a client CertificateVerify over `transcript` (RFC 9846 §4.5)
@@ -178,7 +189,7 @@ struct ExpectCertificateVerify {
     transcript: HandshakeHash,
     suite: &'static Tls13CipherSuite,
     key_schedule: KeyScheduleTrafficWithClientFinishedPending,
-    client_cert: crate::msgs::handshake::CertificateChain<'static>,
+    client_cert: ClientCertAwaitingProof,
     send_tickets: usize,
     offered_sigschemes: Vec<SignatureScheme>,
 }
@@ -195,21 +206,28 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
             cx.common,
             &self.config,
             &self.transcript,
-            &self.client_cert,
+            &self.client_cert.chain,
             &self.offered_sigschemes,
             sig,
         )?;
 
         trace!("client CertificateVerify OK");
-        cx.common.peer_certificates = Some(self.client_cert);
         self.transcript.add_message(&m);
 
-        Ok(Box::new(ExpectFinished {
-            config: self.config,
-            transcript: self.transcript,
-            suite: self.suite,
-            key_schedule: self.key_schedule,
-            send_tickets: self.send_tickets,
-        }))
+        // The client holds the key: a status lookup, if the verifier needs
+        // one, may start now. Its Finished is read once that completes.
+        let st = *self;
+        let ClientCertAwaitingProof { chain, revocation } = st.client_cert;
+        finish_or_pause(cx, revocation, move |cx, status| {
+            cx.common.peer_certificates = Some(chain);
+            cx.common.peer_revocation_status = status;
+            Ok(Box::new(ExpectFinished {
+                config: st.config,
+                transcript: st.transcript,
+                suite: st.suite,
+                key_schedule: st.key_schedule,
+                send_tickets: st.send_tickets,
+            }))
+        })
     }
 }

@@ -1,11 +1,15 @@
 //! The TLS 1.2 server handshake (RFC 5246 §7.3, RFC 8422, RFC 7627, RFC 5077,
 //! RFC 5746).
 
+mod client_auth;
+
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::common::ActiveCertifiedKey;
+use client_auth::{ExpectCertificate, ExpectCertificateVerify};
+
+use super::common::{ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled};
 use super::hs::{self, NextStateOrError, ServerContext};
 use super::server_conn::{ServerConfig, ServerConnectionData};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
@@ -105,7 +109,9 @@ impl CompleteClientHelloHandling {
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
-        if let Some(ClientSessionTicket::Offer(ticket)) = &client_hello.extensions.session_ticket
+        if !client_revocation_enabled(&self.config)
+            && let Some(ClientSessionTicket::Offer(ticket)) =
+                &client_hello.extensions.session_ticket
             && let Some(resume) = self
                 .config
                 .ticketer
@@ -122,7 +128,8 @@ impl CompleteClientHelloHandling {
             );
         }
 
-        if !client_hello.session_id.is_empty()
+        if !client_revocation_enabled(&self.config)
+            && !client_hello.session_id.is_empty()
             && let Some(resume) = self
                 .config
                 .session_storage
@@ -145,13 +152,16 @@ impl CompleteClientHelloHandling {
             );
         }
 
-        // Full handshake.
-        self.send_ticket = ticket_requested && self.config.ticketer.enabled();
-        self.session_id = if !self.send_ticket && self.config.session_storage.can_cache() {
-            SessionId::random(self.config.provider.secure_random)?
-        } else {
-            SessionId::empty()
-        };
+        // A session created without client authentication would also
+        // bypass a verifier that requires fresh authentication later.
+        let storable = !client_revocation_enabled(&self.config);
+        self.send_ticket = storable && ticket_requested && self.config.ticketer.enabled();
+        self.session_id =
+            if storable && !self.send_ticket && self.config.session_storage.can_cache() {
+                SessionId::random(self.config.provider.secure_random)?
+            } else {
+                SessionId::empty()
+            };
         cx.common.handshake_kind = Some(HandshakeKind::Full);
 
         let ocsp = client_hello
@@ -159,12 +169,18 @@ impl CompleteClientHelloHandling {
             .certificate_status_request
             .as_ref()
             .and_then(|_| server_key.get_ocsp());
+        // RFC 6962 §3.3.1: the SCT list only answers a client's request.
+        let sct_list = client_hello
+            .extensions
+            .sct_request
+            .and_then(|()| server_key.get_sct_list());
 
         self.emit_server_hello(
             cx,
             client_hello,
             client_supports_secure_renegotiation,
             ocsp.is_some(),
+            sct_list,
             false,
         );
         emit_certificate(&mut self.transcript, cx.common, server_key.get_cert());
@@ -241,6 +257,7 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             false,
+            None,
             true,
         );
 
@@ -285,6 +302,7 @@ impl CompleteClientHelloHandling {
         client_hello: &ClientHelloPayload,
         secure_renegotiation: bool,
         staple_ocsp: bool,
+        sct_list: Option<&[u8]>,
         resuming: bool,
     ) {
         let extensions = ServerExtensions {
@@ -301,6 +319,7 @@ impl CompleteClientHelloHandling {
                 .map(|_| vec![ECPointFormat::Uncompressed]),
             session_ticket_ack: self.send_ticket.then_some(()),
             status_request_ack: staple_ocsp.then_some(()),
+            sct_list: sct_list.map(|list| Payload::new(list.to_vec())),
             client_certificate_type: self.cert_types.client,
             server_certificate_type: self.cert_types.server,
             alpn: cx
@@ -538,71 +557,6 @@ fn emit_empty_ticket(
     Ok(())
 }
 
-struct ExpectCertificate {
-    config: Arc<ServerConfig>,
-    transcript: HandshakeHash,
-    randoms: ConnectionRandoms,
-    session_id: SessionId,
-    suite: &'static Tls12CipherSuite,
-    using_ems: bool,
-    using_etm: bool,
-    server_kx: Box<dyn ActiveKeyExchange>,
-    send_ticket: bool,
-}
-
-impl State<ServerConnectionData> for ExpectCertificate {
-    fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
-        let cert_chain =
-            require_handshake_msg!(m, HandshakeType::Certificate, HandshakePayload::Certificate)?;
-        self.transcript.add_message(&m);
-        let cert_chain = cert_chain.clone().into_owned();
-
-        let Some((end_entity, intermediates)) = cert_chain.0.split_first() else {
-            // RFC 5246 §7.4.6: an empty list is allowed unless we insist.
-            if self.config.verifier.client_auth_mandatory() {
-                // RFC 5246 §7.4.6: a missing mandatory certificate is a
-                // handshake_failure (certificate_required is TLS 1.3 only).
-                return Err(cx.common.send_fatal_alert(
-                    AlertDescription::HandshakeFailure,
-                    Error::NoCertificatesPresented,
-                ));
-            }
-            debug!("client auth requested but no certificate supplied");
-            return Ok(Box::new(ExpectClientKx {
-                config: self.config,
-                transcript: self.transcript,
-                randoms: self.randoms,
-                session_id: self.session_id,
-                suite: self.suite,
-                using_ems: self.using_ems,
-                using_etm: self.using_etm,
-                server_kx: self.server_kx,
-                client_cert: None,
-                send_ticket: self.send_ticket,
-            }));
-        };
-
-        let now = self.config.current_time()?;
-        self.config
-            .verifier
-            .verify_client_cert(end_entity, intermediates, now)
-            .map_err(|err| crate::client::tls13::send_cert_path_error_alert(cx.common, err))?;
-
-        Ok(Box::new(ExpectClientKx {
-            config: self.config,
-            transcript: self.transcript,
-            randoms: self.randoms,
-            session_id: self.session_id,
-            suite: self.suite,
-            using_ems: self.using_ems,
-            using_etm: self.using_etm,
-            server_kx: self.server_kx,
-            client_cert: Some(cert_chain),
-            send_ticket: self.send_ticket,
-        }))
-    }
-}
-
 struct ExpectClientKx {
     config: Arc<ServerConfig>,
     transcript: HandshakeHash,
@@ -612,7 +566,7 @@ struct ExpectClientKx {
     using_ems: bool,
     using_etm: bool,
     server_kx: Box<dyn ActiveKeyExchange>,
-    client_cert: Option<CertificateChain<'static>>,
+    client_cert: Option<ClientCertAwaitingProof>,
     send_ticket: bool,
 }
 
@@ -676,70 +630,6 @@ impl State<ServerConnectionData> for ExpectClientKx {
                 send_ticket: st.send_ticket,
             })),
         }
-    }
-}
-
-struct ExpectCertificateVerify {
-    config: Arc<ServerConfig>,
-    secrets: ConnectionSecrets,
-    transcript: HandshakeHash,
-    session_id: SessionId,
-    using_ems: bool,
-    client_cert: CertificateChain<'static>,
-    send_ticket: bool,
-}
-
-impl State<ServerConnectionData> for ExpectCertificateVerify {
-    fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
-        let sig = require_handshake_msg!(
-            m,
-            HandshakeType::CertificateVerify,
-            HandshakePayload::CertificateVerify
-        )?;
-
-        if !self
-            .config
-            .verifier
-            .supported_verify_schemes()
-            .contains(&sig.scheme)
-        {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
-            ));
-        }
-
-        // RFC 5246 §7.4.8: the signature covers every handshake message so far.
-        let Some(handshake_msgs) = self.transcript.take_handshake_buf() else {
-            return Err(cx.common.send_fatal_alert(
-                AlertDescription::InternalError,
-                Error::general("TLS 1.2 client authentication needs the raw transcript"),
-            ));
-        };
-        let end_entity = self.client_cert.0.first().ok_or_else(|| {
-            cx.common.send_fatal_alert(
-                AlertDescription::DecodeError,
-                Error::NoCertificatesPresented,
-            )
-        })?;
-        self.config
-            .verifier
-            .verify_tls12_signature(&handshake_msgs, end_entity, sig)
-            .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(cx.common, err))?;
-
-        trace!("client CertificateVerify OK");
-        cx.common.peer_certificates = Some(self.client_cert);
-        self.transcript.add_message(&m);
-
-        Ok(Box::new(ExpectCcs {
-            config: self.config,
-            secrets: self.secrets,
-            transcript: self.transcript,
-            session_id: self.session_id,
-            using_ems: self.using_ems,
-            resuming: false,
-            send_ticket: self.send_ticket,
-        }))
     }
 }
 

@@ -175,7 +175,7 @@ where
                     returned_early = true;
                     break;
                 }
-                try_poll!(tls_stream.handshake(cx));
+                try_poll!(tls_stream.handshake(cx, &mut st.revocation));
             }
             if returned_early {
                 st.need_flush = false;

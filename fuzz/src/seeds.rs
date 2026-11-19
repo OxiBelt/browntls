@@ -67,6 +67,11 @@ pub const TARGETS: &[Target] = &[
     ),
     ("pki_api", crate::pki_api::run, crate::pki_api::seeds),
     (
+        "pki_revocation",
+        crate::pki_revocation::run,
+        crate::pki_revocation::seeds,
+    ),
+    (
         "tls_config",
         crate::tls_config::run,
         crate::tls_config::seeds,

@@ -57,7 +57,8 @@ class PlanTests(unittest.TestCase):
     def test_crate_manifest_selects_that_crates_targets(self):
         include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None)["include"]
         self.assertEqual(
-            {e["targets"] for e in include}, {"pki_cert", "pki_pem", "pki_crl", "pki_api"}
+            {e["targets"] for e in include},
+            {"pki_cert", "pki_pem", "pki_crl", "pki_api", "pki_revocation"},
         )
 
     def test_shared_infrastructure_selects_everything(self):

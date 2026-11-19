@@ -26,6 +26,11 @@ default = ["native", "tls12", "logging", "prefer-post-quantum", "coop"]
 # Tokio offers with its `rt` feature only. `rt` adds no dependency, and any
 # application that runs a Tokio runtime enables it already.
 coop = ["tokio/rt"]
+# Fetch certificate status (OCSP) responses for connections that wait for
+# one, through an HTTP callback of the application, and keep a server's
+# stapled response fresh (the `revocation` module). The deadlines need
+# Tokio's `time` feature, which adds no dependency.
+ocsp = ["tokio/time"]
 # Feature pass-through to `browntls`; see its manifest for what each does.
 native = ["browntls/native"]
 rustcrypto = ["browntls/rustcrypto"]
@@ -44,13 +49,17 @@ browntls = { workspace = true, features = ["std"] }
 tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
 # Certificates generated at test run time (no committed private keys).
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # Interoperability oracle: tokio-rustls over rustls with the ring provider.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = "1"
+
+[[test]]
+name = "revocation"
+required-features = ["ocsp"]
 
 [lints]
 workspace = true

@@ -138,6 +138,24 @@
 //! input read exactly up to a record boundary, the received plaintext set
 //! aside. See [`kernel`].
 //!
+//! # Certificate status (OCSP)
+//!
+//! A verifier that needs a certificate status response the peer did not
+//! staple pauses its connection with a query for the application to
+//! transport (`browntls::revocation`). With the `ocsp` feature, the
+//! `revocation` module has a `RevocationFetcher` that the connectors and
+//! acceptors take (`revocation_fetcher`): their handshakes, reads and
+//! kernel handoffs then answer such queries through an HTTP callback of
+//! the application, with a deadline, one fetch per request at a time, and
+//! a bounded cache. The connection's verifier judges every answer; nothing
+//! in this crate does. Its `revocation::staple` module has the loop that
+//! keeps a server's own stapled response fresh.
+//!
+//! A connection with no fetcher (always so without the feature) has its
+//! queries answered as unavailable at once, which its verifier's policy
+//! accepts or refuses. To answer them by hand instead, drive the
+//! connection without these streams.
+//!
 //! # Errors
 //!
 //! Errors are `io::Error`s. A TLS failure (a bad record, an alert from the
@@ -161,6 +179,10 @@
 //! turns on Tokio's `rt` feature, where Tokio keeps the task budget; that
 //! adds no dependency, and an application that runs a Tokio runtime has it
 //! enabled already. Without `coop` the crate needs Tokio's I/O traits only.
+//!
+//! `ocsp` enables the fetching of certificate status responses described
+//! above. It turns on Tokio's `time` feature for the deadlines, which adds
+//! no dependency; the runtime needs its time driver enabled.
 //!
 //! [`flush`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.flush
 //! [`shutdown`]: https://docs.rs/tokio/1/tokio/io/trait.AsyncWriteExt.html#method.shutdown
@@ -191,6 +213,8 @@ macro_rules! ready {
 pub mod client;
 mod common;
 pub mod kernel;
+#[cfg(feature = "ocsp")]
+pub mod revocation;
 pub mod server;
 mod split;
 pub mod unbuffered;

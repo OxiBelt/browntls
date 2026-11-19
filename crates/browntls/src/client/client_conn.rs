@@ -356,6 +356,10 @@ impl ClientConfig {
     pub(crate) fn verifier(&self) -> &dyn ServerCertVerifier {
         &*self.verifier
     }
+
+    pub(crate) fn revocation_enabled(&self) -> bool {
+        self.verifier.revocation_enabled() && !self.verifier.requires_raw_public_keys()
+    }
 }
 
 /// A clock for builds without `std`; configurations must replace it.

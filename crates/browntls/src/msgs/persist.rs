@@ -392,6 +392,8 @@ pub(crate) struct ServerSessionValue {
     /// The absolute expiry of the server delegated credential that
     /// authenticated the original TLS 1.3 full handshake.
     pub(crate) delegated_credential_expiry: Option<UnixTime>,
+    /// The original handshake authenticated with only an external PSK.
+    pub(crate) certificate_free: bool,
 }
 
 impl ServerSessionValue {
@@ -421,6 +423,7 @@ impl ServerSessionValue {
             freshness: None,
             external_psk: None,
             delegated_credential_expiry: None,
+            certificate_free: false,
         }
     }
 
@@ -539,6 +542,9 @@ impl Codec<'_> for ServerSessionValue {
                 expiry.as_secs().encode(bytes);
             }
         }
+        if self.certificate_free {
+            1u8.encode(bytes);
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -607,6 +613,21 @@ impl Codec<'_> for ServerSessionValue {
         if delegated_credential_expiry.is_some() && version != ProtocolVersion::TLSv1_3 {
             return Err(InvalidMessage::IllegalEmptyValue);
         }
+        let certificate_free = if r.any_left() {
+            if u8::read(r)? != 1
+                || version != ProtocolVersion::TLSv1_3
+                || external_psk.is_none()
+                || client_cert_chain.is_some()
+                || delegated_credential_expiry.is_some()
+            {
+                return Err(InvalidMessage::IllegalEmptyValue);
+            }
+            true
+        } else {
+            // Tickets issued before the marker existed cannot establish
+            // that the original handshake was certificate-free.
+            false
+        };
         Ok(Self {
             sni,
             version,
@@ -621,6 +642,7 @@ impl Codec<'_> for ServerSessionValue {
             freshness: None,
             external_psk,
             delegated_credential_expiry,
+            certificate_free,
         })
     }
 }

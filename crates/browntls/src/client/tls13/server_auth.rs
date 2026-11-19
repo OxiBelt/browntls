@@ -8,7 +8,7 @@ use browntls_pki::ServerName;
 
 use super::super::ClientConfig;
 use super::super::client_conn::ClientConnectionData;
-use super::super::common::{ClientAuthDetails, ServerCertDetails};
+use super::super::common::{ClientAuthDetails, ClientCertificateExtensions, ServerCertDetails};
 use super::super::hs::{ClientContext, NextStateOrError};
 use super::finished::ExpectFinished;
 use super::{
@@ -25,6 +25,7 @@ use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
 use crate::msgs::handshake::{CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{Message, MessagePayload};
+use crate::revocation::{RevocationCheck, finish_or_pause, require_local};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::KeyScheduleHandshake;
@@ -57,6 +58,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 client_auth: None,
+                client_cert_extensions: ClientCertificateExtensions::default(),
                 client_cert_compression: Vec::new(),
                 offered_sigschemes: self.offered_sigschemes,
             })
@@ -146,6 +148,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             transcript: self.transcript,
             key_schedule: self.key_schedule,
             client_auth: Some(client_auth),
+            client_cert_extensions: (&certreq.extensions).into(),
             client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
         }))
@@ -160,6 +163,7 @@ struct ExpectCertificate {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     client_auth: Option<ClientAuthDetails>,
+    client_cert_extensions: ClientCertificateExtensions,
     /// The compression algorithms the server's CertificateRequest accepts
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
@@ -207,10 +211,11 @@ impl State<ClientConnectionData> for ExpectCertificate {
                 Error::NoCertificatesPresented,
             ));
         }
-        // We offer status_request, so OCSP responses may come with any entry
-        // (only the end entity's is used). We never offer SCTs, so none may
-        // be sent (RFC 9846 §4.5.1: extensions MUST correspond to ours).
-        if cert_chain.entries.iter().any(|e| e.sct_list.is_some()) {
+        // RFC 9846 §4.5.1: CertificateEntry extensions must correspond to
+        // our offer. OCSP was offered; SCTs are offered with revocation.
+        if !self.config.revocation_enabled()
+            && cert_chain.entries.iter().any(|e| e.sct_list.is_some())
+        {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,
                 PeerMisbehaved::UnsolicitedSctList,
@@ -237,11 +242,11 @@ impl State<ClientConnectionData> for ExpectCertificate {
             ));
         }
 
-        let end_entity_ocsp = cert_chain.end_entity_ocsp();
-        let server_cert = ServerCertDetails::new(
-            cert_chain.into_certificate_chain().into_owned(),
-            end_entity_ocsp,
-        );
+        let server_cert = ServerCertDetails {
+            ocsp: cert_chain.ocsp_responses(),
+            scts: cert_chain.sct_lists(),
+            cert_chain: cert_chain.into_certificate_chain().into_owned(),
+        };
 
         Ok(Box::new(ExpectCertificateVerify {
             config: self.config,
@@ -252,6 +257,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             key_schedule: self.key_schedule,
             server_cert,
             client_auth: self.client_auth,
+            client_cert_extensions: self.client_cert_extensions,
             client_cert_compression: self.client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
             delegated_credential,
@@ -268,6 +274,7 @@ struct ExpectCertificateVerify {
     key_schedule: KeyScheduleHandshake,
     server_cert: ServerCertDetails,
     client_auth: Option<ClientAuthDetails>,
+    client_cert_extensions: ClientCertificateExtensions,
     /// The compression algorithms the server's CertificateRequest accepts
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
@@ -303,14 +310,14 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
         }
 
         let now = self.config.current_time()?;
-        let cert_verified = self
+        let check = self
             .config
             .verifier()
-            .verify_server_cert(
+            .verify_server_cert_with_evidence(
                 end_entity,
                 intermediates,
                 &self.server_name,
-                &self.server_cert.ocsp_response,
+                &self.server_cert.evidence(),
                 now,
             )
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
@@ -357,23 +364,35 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                 (verified, Some(expiry))
             }
         };
-        cx.data.delegated_credential = self.delegated_credential;
-        cx.data.delegated_credential_expiry = delegated_credential_expiry;
-
-        cx.common.peer_certificates = Some(self.server_cert.cert_chain);
         self.transcript.add_message(&m);
 
-        Ok(Box::new(ExpectFinished {
-            config: self.config,
-            server_name: self.server_name,
-            randoms: self.randoms,
-            suite: self.suite,
-            transcript: self.transcript,
-            key_schedule: self.key_schedule,
-            client_auth: self.client_auth,
-            client_cert_compression: self.client_cert_compression,
-            cert_verified,
-            sig_verified,
-        }))
+        // An outer ECH handshake only authenticates the rejection. Avoid an
+        // outbound lookup as a side effect of that fallback.
+        let check = if cx.data.ech_status == EchStatus::Rejected {
+            RevocationCheck::Complete(
+                require_local(check).map_err(|err| send_cert_path_error_alert(cx.common, err))?,
+            )
+        } else {
+            check
+        };
+        finish_or_pause(cx, check, move |cx, status| {
+            cx.data.delegated_credential = self.delegated_credential;
+            cx.data.delegated_credential_expiry = delegated_credential_expiry;
+            cx.common.peer_certificates = Some(self.server_cert.cert_chain);
+            cx.common.peer_revocation_status = status;
+            Ok(Box::new(ExpectFinished {
+                config: self.config,
+                server_name: self.server_name,
+                randoms: self.randoms,
+                suite: self.suite,
+                transcript: self.transcript,
+                key_schedule: self.key_schedule,
+                client_auth: self.client_auth,
+                client_cert_extensions: self.client_cert_extensions,
+                client_cert_compression: self.client_cert_compression,
+                cert_verified: crate::verify::ServerCertVerified::assertion(),
+                sig_verified,
+            }))
+        })
     }
 }

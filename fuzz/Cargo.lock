@@ -192,6 +192,7 @@ dependencies = [
  "p521",
  "rsa",
  "ruzstd",
+ "sha1",
  "sha2",
  "signature",
  "x25519-dalek",

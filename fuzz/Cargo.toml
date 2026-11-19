@@ -67,6 +67,13 @@ path = "src/lib.rs"
 debug = "line-tables-only"
 
 [[bin]]
+name = "pki_revocation"
+path = "fuzz_targets/pki_revocation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "handshake_message"
 path = "fuzz_targets/handshake_message.rs"
 test = false

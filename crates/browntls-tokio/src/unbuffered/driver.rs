@@ -9,6 +9,10 @@
 //! messages, alerts, KeyUpdates) is encoded into the one outgoing buffer at
 //! once, in the order the connection sequenced it, ahead of or behind the
 //! application data records encrypted into the same buffer.
+//!
+//! A connection that waits on a certificate status query
+//! (`ConnectionState::PendingRevocation`) is answered by the operation
+//! that met it, through the stream's fetcher, and takes no input meanwhile.
 
 use std::io::{self, IoSlice};
 use std::ops::{DerefMut, Range};
@@ -59,6 +63,19 @@ enum Step {
     NeedInput,
     /// The peer sent `close_notify`, or the connection is closed.
     PeerClosed,
+    /// The connection waits on a certificate status query.
+    Revocation,
+}
+
+/// What a call without input came to; see `TlsStream::write_step`.
+enum Queued {
+    /// The connection offered to write, and `write` was called.
+    Written,
+    /// The connection is closed.
+    Closed,
+    /// The connection waits on a certificate status query, and offers
+    /// nothing until it is answered.
+    Revocation,
 }
 
 /// An `InvalidData` error wrapping the TLS failure.
@@ -173,6 +190,7 @@ where
             }
             ConnectionState::BlockedHandshake | ConnectionState::WriteTraffic(_) => Step::NeedInput,
             ConnectionState::PeerClosed | ConnectionState::Closed => Step::PeerClosed,
+            ConnectionState::PendingRevocation => Step::Revocation,
             _ => {
                 failure = Some(internal("unexpected TLS connection state"));
                 Step::Progress
@@ -187,12 +205,12 @@ where
 
     /// Lets the connection encode what it has queued, without input, until
     /// it offers to write; `write` then encrypts into the outgoing buffer.
-    /// Returns `None`, without calling `write`, when the connection is
-    /// closed.
+    /// `write` is not called when the connection is closed, or waits on a
+    /// certificate status query.
     fn write_step<R>(
         &mut self,
         write: impl FnOnce(&mut WriteTraffic<'_, D>, &mut Outgoing) -> io::Result<R>,
-    ) -> io::Result<Option<R>> {
+    ) -> io::Result<Queued> {
         loop {
             let status = self.conn.process_tls_records(&mut []);
             match status.state.map_err(tls_error)? {
@@ -202,13 +220,15 @@ where
                 }
                 ConnectionState::TransmitTlsData(transmit) => transmit.done(),
                 ConnectionState::WriteTraffic(mut writer) => {
-                    return write(&mut writer, &mut self.outgoing).map(Some);
+                    write(&mut writer, &mut self.outgoing)?;
+                    return Ok(Queued::Written);
                 }
                 ConnectionState::PeerClosed => self.peer_closed(),
                 ConnectionState::Closed => {
                     self.peer_closed();
-                    return Ok(None);
+                    return Ok(Queued::Closed);
                 }
+                ConnectionState::PendingRevocation => return Ok(Queued::Revocation),
                 ConnectionState::BlockedHandshake => {
                     return Err(internal("TLS handshake is not complete"));
                 }
@@ -226,33 +246,41 @@ where
     }
 
     /// Encodes whatever the connection has queued (a KeyUpdate or a
-    /// CertificateRequest asked for through `get_mut`, say).
+    /// CertificateRequest asked for through `get_mut`, say). What a
+    /// connection that waits on a certificate status query has queued is
+    /// encoded too; what it queues once answered is not there yet.
     fn encode_queued(&mut self) -> io::Result<()> {
         self.write_step(|_, _| Ok(())).map(|_| ())
     }
 
-    /// Encrypts `data` behind everything encoded so far.
-    fn encrypt(&mut self, data: &[u8]) -> io::Result<()> {
+    /// Encrypts `data` behind everything encoded so far. `Ok(false)`,
+    /// with nothing encrypted, when the connection waits on a certificate
+    /// status query.
+    fn encrypt(&mut self, data: &[u8]) -> io::Result<bool> {
         let written = self.write_step(|writer, outgoing| {
             encrypt_with(outgoing, |room| writer.encrypt(data, room))
         })?;
         match written {
-            Some(_) => {
+            Queued::Written => {
                 // Records the reads owed the peer are ahead of this data
                 // now; what reads encode from here on is counted afresh.
                 self.control_bytes = 0;
-                Ok(())
+                Ok(true)
             }
-            None => Err(write_after_shutdown()),
+            Queued::Closed => Err(write_after_shutdown()),
+            Queued::Revocation => Ok(false),
         }
     }
 
     /// Queues `close_notify` behind everything encoded so far. Nothing is
-    /// queued on a connection that has failed or is closed.
-    fn close_notify(&mut self) {
-        let _ = self.write_step(|writer, outgoing| {
+    /// queued on a connection that has failed or is closed. `false`, with
+    /// nothing queued, when the connection waits on a certificate status
+    /// query.
+    fn close_notify(&mut self) -> bool {
+        let queued = self.write_step(|writer, outgoing| {
             encrypt_with(outgoing, |room| writer.queue_close_notify(room))
         });
+        !matches!(queued, Ok(Queued::Revocation))
     }
 
     /// The unwritten bytes of records that reads encoded for the peer.
@@ -312,6 +340,37 @@ where
         Poll::Ready(Ok(n))
     }
 
+    /// Fetches the answer to the certificate status query the connection
+    /// waits on and hands it over; `Pending` while it is fetched, the
+    /// fetch then waking `cx`.
+    ///
+    /// What came of the answer (the next query, the rest of the flight, or
+    /// the failure with its alert) is what the connection reports next.
+    fn poll_revocation(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(query) = self.conn.pending_revocation() else {
+            // Returning as if answered would poll the connection for ever.
+            return Poll::Ready(Err(internal(
+                "TLS connection awaits a certificate status it did not ask for",
+            )));
+        };
+        let id = query.id();
+        let response = ready!(self.revocation.poll_response(cx, query));
+        let accepted = self.conn.resolve_peer_revocation(id, response).is_ok();
+        self.revocation.settled(accepted);
+        Poll::Ready(Ok(()))
+    }
+
+    /// [`Self::poll_revocation`] for a write-side poll, which cannot send
+    /// before the connection has its answer and may be the only operation
+    /// in progress. A read that waited for the answer goes on.
+    fn poll_revocation_for_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        ready!(self.poll_revocation(cx))?;
+        if let Some(waker) = self.read_waker.take() {
+            waker.wake();
+        }
+        Poll::Ready(Ok(()))
+    }
+
     /// Drives the handshake to completion. A TLS failure is reported once
     /// its alert is written, or the transport refused it.
     pub(super) fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -364,6 +423,13 @@ where
                             "peer closed connection during handshake",
                         )));
                     }
+                }
+                Ok(Step::Revocation) => {
+                    // Our flight goes out while the answer is fetched.
+                    if self.poll_write_out(cx)?.is_ready() {
+                        let _ = self.poll_flush_io(cx)?;
+                    }
+                    ready!(self.poll_revocation(cx))?;
                 }
                 Ok(Step::PeerClosed) => {
                     return Poll::Ready(Err(io::Error::new(
@@ -419,6 +485,18 @@ where
                             io::ErrorKind::UnexpectedEof,
                             "peer closed connection without sending TLS close_notify",
                         )));
+                    }
+                }
+                Ok(Step::Revocation) => {
+                    // A write-side poll may take the wait over (it needs
+                    // the answer too): each registers both tasks.
+                    let joint = joint_waker(cx.waker(), self.write_waker.as_ref());
+                    let poll = self.poll_revocation(&mut Context::from_waker(&joint));
+                    self.park_reader(cx, poll.is_pending() || self.answering);
+                    ready!(poll)?;
+                    // The writer may have waited for the answer as well.
+                    if let Some(waker) = self.write_waker.take() {
+                        waker.wake();
                     }
                 }
                 Ok(Step::PeerClosed) => self.state.shutdown_read(),
@@ -555,7 +633,9 @@ where
         }
         ready!(self.poll_write_out(cx))?;
         let taken = buf.len().min(MAX_WRITE);
-        self.encrypt(&buf[..taken])?;
+        while !self.encrypt(&buf[..taken])? {
+            ready!(self.poll_revocation_for_write(cx))?;
+        }
         match self.poll_write_out(cx) {
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             _ => Poll::Ready(Ok(taken)),
@@ -589,24 +669,30 @@ where
         if !self.state.writeable() {
             return Poll::Ready(Err(write_after_shutdown()));
         }
-        ready!(self.poll_write_out(cx))?;
-        let mut gathered = std::mem::take(&mut self.gather);
-        gathered.clear();
-        for buf in bufs {
-            let room = MAX_GATHER - gathered.len();
-            gathered.extend_from_slice(&buf[..buf.len().min(room)]);
-            if gathered.len() == MAX_GATHER {
-                break;
+        let taken = loop {
+            ready!(self.poll_write_out(cx))?;
+            let mut gathered = std::mem::take(&mut self.gather);
+            gathered.clear();
+            for buf in bufs {
+                let room = MAX_GATHER - gathered.len();
+                gathered.extend_from_slice(&buf[..buf.len().min(room)]);
+                if gathered.len() == MAX_GATHER {
+                    break;
+                }
             }
-        }
-        let taken = gathered.len();
-        let result = self.encrypt(&gathered);
-        // The scratch buffer held application plaintext: keep the
-        // allocation, not the bytes.
-        gathered.fill(0);
-        gathered.clear();
-        self.gather = gathered;
-        result?;
+            let taken = gathered.len();
+            let result = self.encrypt(&gathered);
+            // The scratch buffer held application plaintext: keep the
+            // allocation, not the bytes.
+            gathered.fill(0);
+            gathered.clear();
+            self.gather = gathered;
+            if result? {
+                break taken;
+            }
+            // Gathered again once the connection has its answer.
+            ready!(self.poll_revocation_for_write(cx))?;
+        };
         match self.poll_write_out(cx) {
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             _ => Poll::Ready(Ok(taken)),
@@ -638,7 +724,11 @@ where
 
     fn shutdown_all(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.state.writeable() {
-            self.close_notify();
+            while !self.close_notify() {
+                // `close_notify` cannot be queued before the connection
+                // has the answer it waits on.
+                ready!(self.poll_revocation_for_write(cx))?;
+            }
             self.state.shutdown_write();
         }
         ready!(self.poll_write_out(cx))?;

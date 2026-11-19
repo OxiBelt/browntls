@@ -200,6 +200,50 @@ Taking a stream apart with `into_inner` instead drops what only the stream
 holds (an unfinished 0-RTT phase, a read error kept for the next read), and
 the connection then refuses the handover while anything is in flight.
 
+## Certificate status (OCSP)
+
+A browntls verifier that needs a certificate status response the peer did
+not staple pauses its connection with a query for the application to
+transport. With the `ocsp` feature, `browntls_tokio::revocation` answers
+such queries for the streams of this crate:
+
+- The application supplies the HTTP request as a callback
+  (`FetchRevocation`, which closures implement). This crate has no HTTP
+  client and adds no dependency. The responder URLs come from the peer's
+  certificate, so the callback decides which responder may be asked for
+  which issuer, checks the address it dials, follows no redirects and
+  bounds the answer.
+- A `RevocationFetcher` wraps the callback with a deadline, one fetch per
+  request at a time (connections that ask for the same request share it
+  and drive it from their own polls; it is dropped when none waits any
+  more), a bounded cache, and bounds on the response size and on the
+  fetches running at once.
+- `revocation_fetcher` attaches it, in an `Arc`, to `TlsConnector`,
+  `TlsAcceptor`, `LazyConfigAcceptor` and `StartHandshake`, buffered and
+  unbuffered. Handshakes (those finished inside a stream returned early for
+  0-RTT data included), reads that meet a certificate after the handshake,
+  and `into_kernel_handoff` then answer the queries they meet. On an
+  unbuffered stream a write or shutdown that finds the connection waiting
+  fetches the answer too.
+- Every answer goes to the connection, whose verifier authenticates it.
+  Nothing in this crate parses a response or decides whether a certificate
+  is good. A cached response that a connection refuses is forgotten.
+
+A connection with no fetcher attached, or built without the feature, has
+its queries answered as unavailable at once; the verifier's policy then
+accepts or refuses the certificate. While a connection waits for an answer
+it reads nothing from its transport, so a peer that goes away is noticed
+only afterwards: the deadline bounds that wait. Deadlines use
+`tokio::time`, so the runtime needs its time driver.
+
+`revocation::staple::StapleRefresh` is the loop a server spawns to keep
+its own stapled responses fresh. It asks browntls's `ServerStapleResolver`
+which response is due, fetches it through the same application callback
+(with a deadline, a size bound and a backoff after failures), and hands it
+to the resolver's `install`, which staples it only after verifying it for
+the server's certificate. The next refresh comes after half the lifetime
+the installed response has left, within a configurable interval.
+
 ## Unbuffered streams
 
 `browntls_tokio::unbuffered` has the same connector, acceptor and lazy
@@ -312,6 +356,9 @@ keeps the task budget; `rt` adds no dependency, and an application that runs
 a Tokio runtime has it enabled already. Without `coop` the crate uses Tokio's
 I/O traits only and takes nothing from the budget itself (a transport that
 counts still does).
+
+`ocsp` enables `browntls_tokio::revocation` (see above). It enables Tokio's
+`time` feature for the deadlines, which adds no dependency.
 
 ## Minimum supported Rust and Tokio versions
 

@@ -9,7 +9,7 @@ use browntls_pki::ServerName;
 
 use super::super::ClientConfig;
 use super::super::client_conn::ClientConnectionData;
-use super::super::common::ClientAuthDetails;
+use super::super::common::{ClientAuthDetails, ClientCertificateExtensions};
 use super::super::hs::{ClientContext, NextStateOrError};
 use super::{certificate_request_sigschemes, construct_client_verify_message};
 use crate::common_state::{CommonState, ConnectionRandoms, Side};
@@ -56,11 +56,15 @@ fn emit_certificate_tls13(
     certkey: Option<&CertifiedKey>,
     auth_context: Option<Vec<u8>>,
     compression: &[CertificateCompressionAlgorithm],
+    extensions: &ClientCertificateExtensions,
     common: &mut CommonState,
 ) {
-    let certs: &[browntls_pki::CertificateDer<'static>] =
-        certkey.map(|ck| ck.cert.as_slice()).unwrap_or(&[]);
-    let mut cert_payload = CertificatePayloadTls13::new(certs.iter(), None);
+    let mut cert_payload = match certkey {
+        Some(key) => {
+            CertificatePayloadTls13::from_certified_key(key, extensions.ocsp, extensions.sct)
+        }
+        None => CertificatePayloadTls13::new(core::iter::empty(), None),
+    };
     cert_payload.context = PayloadU8::new(auth_context.unwrap_or_default());
 
     // RFC 8879 §4: compress when the CertificateRequest named an algorithm
@@ -146,6 +150,7 @@ pub(super) struct ExpectFinished {
     pub(super) transcript: HandshakeHash,
     pub(super) key_schedule: KeyScheduleHandshake,
     pub(super) client_auth: Option<ClientAuthDetails>,
+    pub(super) client_cert_extensions: ClientCertificateExtensions,
     /// The compression algorithms the server's CertificateRequest accepts
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     pub(super) client_cert_compression: Vec<CertificateCompressionAlgorithm>,
@@ -216,6 +221,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         None,
                         auth_context_tls13,
                         &st.client_cert_compression,
+                        &st.client_cert_extensions,
                         cx.common,
                     );
                 }
@@ -230,6 +236,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         Some(&certkey),
                         auth_context_tls13,
                         &st.client_cert_compression,
+                        &st.client_cert_extensions,
                         cx.common,
                     );
                     emit_certverify_tls13(&mut st.transcript, &*signer, cx.common)?;
@@ -338,6 +345,11 @@ impl ExpectTraffic {
         // discarded immediately.
         if nst.lifetime == 0 {
             debug!("Discarding NewSessionTicket with zero lifetime");
+            return Ok(());
+        }
+        if self.config.revocation_enabled()
+            && (cx.common.peer_certificates.is_some() || cx.common.external_psk.is_none())
+        {
             return Ok(());
         }
 
@@ -450,6 +462,7 @@ impl ExpectTraffic {
             .certificate_compression
             .clone()
             .unwrap_or_default();
+        let extensions = (&certreq.extensions).into();
         match client_auth {
             ClientAuthDetails::Empty { auth_context_tls13 } => {
                 emit_certificate_tls13(
@@ -458,6 +471,7 @@ impl ExpectTraffic {
                     None,
                     auth_context_tls13,
                     &compression,
+                    &extensions,
                     cx.common,
                 );
             }
@@ -472,6 +486,7 @@ impl ExpectTraffic {
                     Some(&certkey),
                     auth_context_tls13,
                     &compression,
+                    &extensions,
                     cx.common,
                 );
                 emit_certverify_tls13(&mut transcript, &*signer, cx.common)?;

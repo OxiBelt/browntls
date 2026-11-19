@@ -20,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::buffers::{Incoming, Outgoing};
 use super::lazy::poll_send_alert;
 use super::{ClientTlsStream, ServerTlsStream, TlsStream};
+use crate::common::RevocationSource;
 
 /// A handshake in progress, or how it ended.
 pub(super) enum MidHandshake<IO, C> {
@@ -105,9 +106,23 @@ where
 #[derive(Clone)]
 pub struct TlsConnector {
     inner: Arc<ClientConfig>,
+    revocation: RevocationSource,
 }
 
 impl TlsConnector {
+    /// Answers the certificate status (OCSP) queries of this connector's
+    /// connections with `fetcher`: during the handshake, and in the
+    /// operations after it. Without one, such a query is answered as
+    /// unavailable at once. See [`crate::revocation`].
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
+    }
+
     /// Connects over `stream` to the server named `domain`.
     ///
     /// `domain` is checked against the server's certificate and sent as SNI
@@ -163,6 +178,7 @@ impl TlsConnector {
                     stream,
                     conn,
                     Incoming::new(),
+                    self.revocation.for_stream(),
                 )))
             }
             Err(error) => Connect(MidHandshake::Error {
@@ -175,13 +191,18 @@ impl TlsConnector {
 
 impl From<Arc<ClientConfig>> for TlsConnector {
     fn from(inner: Arc<ClientConfig>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            revocation: RevocationSource::default(),
+        }
     }
 }
 
 impl fmt::Debug for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsConnector").finish_non_exhaustive()
+        f.debug_struct("TlsConnector")
+            .field("revocation", &self.revocation)
+            .finish_non_exhaustive()
     }
 }
 
@@ -228,9 +249,24 @@ impl fmt::Debug for TlsConnectorWithAlpn<'_> {
 #[derive(Clone)]
 pub struct TlsAcceptor {
     inner: Arc<ServerConfig>,
+    revocation: RevocationSource,
 }
 
 impl TlsAcceptor {
+    /// Answers the certificate status (OCSP) queries of this acceptor's
+    /// connections (about client certificates) with `fetcher`: during the
+    /// handshake, and in the operations after it (post-handshake
+    /// authentication). Without one, such a query is answered as
+    /// unavailable at once. See [`crate::revocation`].
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
+    }
+
     /// Accepts a TLS connection over `stream`. The returned future resolves
     /// once the handshake completes.
     ///
@@ -260,6 +296,7 @@ impl TlsAcceptor {
                     stream,
                     conn,
                     Incoming::new(),
+                    self.revocation.for_stream(),
                 )))
             }
             Err(error) => Accept(MidHandshake::Error {
@@ -277,13 +314,18 @@ impl TlsAcceptor {
 
 impl From<Arc<ServerConfig>> for TlsAcceptor {
     fn from(inner: Arc<ServerConfig>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            revocation: RevocationSource::default(),
+        }
     }
 }
 
 impl fmt::Debug for TlsAcceptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsAcceptor").finish_non_exhaustive()
+        f.debug_struct("TlsAcceptor")
+            .field("revocation", &self.revocation)
+            .finish_non_exhaustive()
     }
 }
 

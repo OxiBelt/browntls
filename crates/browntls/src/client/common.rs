@@ -8,20 +8,40 @@ use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::log::{debug, trace};
 use crate::msgs::enums::{ClientCertificateType, ExtensionType};
 use crate::msgs::handshake::{CertificateChain, DistinguishedName};
+use crate::revocation::CertificateEvidence;
 use crate::sign::{CertifiedKey, Signer};
 use crate::sync::Arc;
 
 /// What the server presented to authenticate itself.
 pub(super) struct ServerCertDetails {
     pub(super) cert_chain: CertificateChain<'static>,
-    pub(super) ocsp_response: Vec<u8>,
+    pub(super) ocsp: Vec<Option<Vec<u8>>>,
+    pub(super) scts: Vec<Option<Vec<u8>>>,
 }
 
 impl ServerCertDetails {
-    pub(super) fn new(cert_chain: CertificateChain<'static>, ocsp_response: Vec<u8>) -> Self {
+    pub(super) fn evidence(&self) -> Vec<CertificateEvidence<'_>> {
+        (0..self.ocsp.len().max(self.scts.len()))
+            .map(|index| CertificateEvidence {
+                ocsp: self.ocsp.get(index).and_then(|value| value.as_deref()),
+                scts: self.scts.get(index).and_then(|value| value.as_deref()),
+            })
+            .collect()
+    }
+}
+
+/// Evidence requested by the server alongside a TLS 1.3 client certificate.
+#[derive(Default)]
+pub(super) struct ClientCertificateExtensions {
+    pub(super) ocsp: bool,
+    pub(super) sct: bool,
+}
+
+impl From<&crate::msgs::handshake::CertificateRequestExtensions> for ClientCertificateExtensions {
+    fn from(exts: &crate::msgs::handshake::CertificateRequestExtensions) -> Self {
         Self {
-            cert_chain,
-            ocsp_response,
+            ocsp: exts.status_request.is_some(),
+            sct: exts.sct_request.is_some(),
         }
     }
 }

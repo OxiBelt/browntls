@@ -24,6 +24,7 @@ use crate::msgs::deframer::{Deframed, DeframerBuffer, DeframerVecBuffer, Message
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
+use crate::revocation::{RevocationCheck, RevocationResponse, RevocationStatus};
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 
 /// One position in the handshake state machine.
@@ -34,6 +35,15 @@ pub(crate) trait State<Data>: Send + Sync {
         cx: &mut Context<'_, Data>,
         message: Message<'_>,
     ) -> Result<Box<dyn State<Data>>, Error>;
+
+    /// Continues authentication after the final pending OCSP response.
+    fn resume_revocation(
+        self: Box<Self>,
+        _cx: &mut Context<'_, Data>,
+        _status: Option<RevocationStatus>,
+    ) -> Result<Box<dyn State<Data>>, Error> {
+        Err(Error::general("no revocation continuation"))
+    }
 
     /// RFC 5705 / RFC 8446 §7.5 keying material export.
     fn export_keying_material(
@@ -166,7 +176,9 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
 
         loop {
-            if self.common_state.has_received_close_notify {
+            if self.common_state.has_received_close_notify
+                || self.common_state.pending_revocation.is_some()
+            {
                 // RFC 8446 §6.1: everything after close_notify is ignored.
                 break;
             }
@@ -180,7 +192,9 @@ impl<Data: SideData> ConnectionCore<Data> {
 
         self.state = Ok(state);
 
-        self.maybe_send_key_update()?;
+        if self.common_state.pending_revocation.is_none() {
+            self.maybe_send_key_update()?;
+        }
 
         Ok(self.common_state.current_io_state())
     }
@@ -213,7 +227,9 @@ impl<Data: SideData> ConnectionCore<Data> {
             }
 
             let mut progressed = false;
-            while let Some(len) = self.deframer.joiner.complete_message_len() {
+            while self.common_state.pending_revocation.is_none()
+                && let Some(len) = self.deframer.joiner.complete_message_len()
+            {
                 progressed = true;
                 let read_level = self.common_state.quic.as_ref().map(|q| q.read_level);
                 let version = self
@@ -272,6 +288,52 @@ impl<Data: SideData> ConnectionCore<Data> {
 
         self.state = Ok(state);
         Ok(())
+    }
+
+    pub(crate) fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: RevocationResponse,
+    ) -> Result<(), Error> {
+        if self
+            .common_state
+            .pending_revocation()
+            .map(|query| query.id())
+            != Some(id)
+        {
+            return Err(Error::general("no matching pending revocation request"));
+        }
+        let Some(pending) = self.common_state.pending_revocation.take() else {
+            return Err(Error::general("no pending revocation request"));
+        };
+        let result = match pending.resolve(response) {
+            Ok(RevocationCheck::Pending(next)) => {
+                self.common_state.pending_revocation = Some(next);
+                return Ok(());
+            }
+            Ok(RevocationCheck::Complete(status)) => {
+                let state = self.take_state()?;
+                state.resume_revocation(
+                    &mut Context {
+                        common: &mut self.common_state,
+                        data: &mut self.data,
+                    },
+                    status,
+                )
+            }
+            Err(err) => Err(err),
+        };
+        match result {
+            Ok(state) => {
+                self.state = Ok(state);
+                Ok(())
+            }
+            Err(err) => {
+                let err =
+                    crate::client::tls13::send_cert_path_error_alert(&mut self.common_state, err);
+                Err(self.fail(err))
+            }
+        }
     }
 
     /// Takes the state machine out of `self.state` for processing, or
@@ -422,6 +484,7 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// Records `err` as the connection's final state and lets the side data
     /// forget any session the failed connection was using.
     pub(crate) fn fail(&mut self, err: Error) -> Error {
+        self.common_state.pending_revocation = None;
         self.data
             .on_fatal_error(self.common_state.negotiated_version);
         self.state = Err(err.clone());

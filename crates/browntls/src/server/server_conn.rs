@@ -563,6 +563,8 @@ pub struct ServerConnectionData {
     /// The absolute expiry of the server delegated credential that
     /// authenticated this TLS 1.3 connection or its resumed ancestor.
     pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The original handshake authenticated with an external PSK alone.
+    pub(super) certificate_free: bool,
     /// The session cache entry this TLS 1.2 connection resumed or created,
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).

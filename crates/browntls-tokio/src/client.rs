@@ -11,7 +11,7 @@ use browntls::pki_types::ServerName;
 use browntls::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
+use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
 use crate::kernel::IntoKernelHandoff;
 use crate::split::{self, ReadHalf, WriteHalf};
 
@@ -26,9 +26,23 @@ pub use early::EarlyDataNotResent;
 pub struct TlsConnector {
     inner: Arc<ClientConfig>,
     early_data: bool,
+    revocation: RevocationSource,
 }
 
 impl TlsConnector {
+    /// Answers the certificate status (OCSP) queries of this connector's
+    /// connections with `fetcher`: during the handshake, and in reads
+    /// after it. Without one, such a query is answered as unavailable at
+    /// once. See [`crate::revocation`].
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
+    }
+
     /// Whether [`connect`](Self::connect) may return before the handshake,
     /// to send 0-RTT ("early") data. Off by default.
     ///
@@ -116,7 +130,7 @@ impl TlsConnector {
         Connect(MidHandshake::Handshaking(TlsStream {
             io: stream,
             session,
-            st: StreamState::new(),
+            st: StreamState::new(self.revocation.for_stream()),
             early,
         }))
     }
@@ -127,6 +141,7 @@ impl From<Arc<ClientConfig>> for TlsConnector {
         Self {
             inner,
             early_data: false,
+            revocation: RevocationSource::default(),
         }
     }
 }
@@ -135,6 +150,7 @@ impl fmt::Debug for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsConnector")
             .field("early_data", &self.early_data)
+            .field("revocation", &self.revocation)
             .finish_non_exhaustive()
     }
 }

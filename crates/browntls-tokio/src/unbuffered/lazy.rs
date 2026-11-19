@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use super::TlsStream;
 use super::buffers::{Incoming, Outgoing};
 use super::handshake::{Accept, MidHandshake};
+use crate::common::RevocationSource;
 
 /// How often the buffer is grown for one record of an alert.
 const MAX_GROW_ATTEMPTS: usize = 4;
@@ -96,6 +97,8 @@ pub struct LazyConfigAcceptor<IO> {
     alert: Option<(browntls::Error, Outgoing)>,
     /// The future already failed (and keeps the transport for `take_io`).
     failed: bool,
+    /// Handed on to the [`StartHandshake`].
+    revocation: RevocationSource,
 }
 
 impl<IO> LazyConfigAcceptor<IO>
@@ -110,7 +113,20 @@ where
             incoming: Incoming::new(),
             alert: None,
             failed: false,
+            revocation: RevocationSource::default(),
         }
+    }
+
+    /// Answers the certificate status (OCSP) queries of the connection
+    /// with `fetcher`: the [`StartHandshake`] this future returns keeps
+    /// it. See [`TlsAcceptor::revocation_fetcher`](super::TlsAcceptor::revocation_fetcher).
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
     }
 
     /// Takes the transport back, abandoning the handshake. `None` once the
@@ -162,6 +178,7 @@ where
                             accepted,
                             io,
                             incoming: std::mem::replace(&mut this.incoming, Incoming::new()),
+                            revocation: this.revocation.clone(),
                         }));
                     }
                 }
@@ -195,6 +212,7 @@ impl<IO> fmt::Debug for LazyConfigAcceptor<IO> {
             .field("acceptor", &self.acceptor)
             .field("has_io", &self.io.is_some())
             .field("refused", &self.alert.as_ref().map(|(error, _)| error))
+            .field("revocation", &self.revocation)
             .finish()
     }
 }
@@ -206,6 +224,7 @@ pub struct StartHandshake<IO> {
     accepted: UnbufferedAccepted,
     io: IO,
     incoming: Incoming,
+    revocation: RevocationSource,
 }
 
 impl<IO> StartHandshake<IO>
@@ -223,7 +242,20 @@ where
             accepted,
             io,
             incoming: Incoming::with_received(incoming_tls),
+            revocation: RevocationSource::default(),
         }
+    }
+
+    /// Answers the certificate status (OCSP) queries of the connection
+    /// with `fetcher`; see
+    /// [`TlsAcceptor::revocation_fetcher`](super::TlsAcceptor::revocation_fetcher).
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
     }
 
     /// The ClientHello.
@@ -252,6 +284,7 @@ where
                     self.io,
                     conn,
                     self.incoming,
+                    self.revocation.for_stream(),
                 )))
             }
             Err((error, alert)) => Accept(MidHandshake::SendAlert {

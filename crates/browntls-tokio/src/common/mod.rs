@@ -6,8 +6,9 @@
 //! quininer kel, MIT OR Apache-2.0), used here under Apache-2.0. Changes:
 //! browntls types, writes that cannot spin on a connection that takes no
 //! plaintext, a handshake exit when no progress is possible, reads that
-//! send the answers the peer waits for, and reads that wait for those
-//! answers to be written before they take more input.
+//! send the answers the peer waits for, reads that wait for those answers
+//! to be written before they take more input, and the answers to the
+//! connection's certificate status queries.
 
 use std::io::{self, BufRead as _, IoSlice, Read, Write};
 use std::ops::{Deref, DerefMut};
@@ -21,7 +22,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 mod coalesce;
 pub(crate) mod coop;
 mod handshake;
+mod revocation;
 pub(crate) use handshake::{HandshakeFailure, IoSession, MidHandshake};
+pub(crate) use revocation::{PeerRevocation, RevocationSource};
 
 /// Which directions of a stream are still open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,10 +90,12 @@ pub(crate) struct StreamState {
     /// reads take from the task's cooperative budget, whichever [`Stream`]
     /// of the poll makes them (`begin_poll` clears it).
     pub(crate) read_before: bool,
+    /// The answers to the connection's certificate status queries.
+    pub(crate) revocation: PeerRevocation,
 }
 
 impl StreamState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(revocation: PeerRevocation) -> Self {
         Self {
             state: TlsState::Stream,
             need_flush: false,
@@ -99,6 +104,7 @@ impl StreamState {
             read_waker: None,
             answering: false,
             read_before: false,
+            revocation,
         }
     }
 
@@ -294,15 +300,50 @@ where
         }
     }
 
+    /// Answers the certificate status queries the connection waits on
+    /// (one after another, when a chain needs several): `Ready(Ok(()))`
+    /// once it waits on none, `Pending` while an answer is fetched, the
+    /// fetch then waking `cx`.
+    ///
+    /// The connection goes on with the input it had buffered as it takes
+    /// an answer. When it fails over one, its alert is written if the
+    /// transport takes it now, as after a failed read.
+    pub(crate) fn poll_revocation(
+        &mut self,
+        cx: &mut Context<'_>,
+        revocation: &mut PeerRevocation,
+    ) -> Poll<io::Result<()>> {
+        while let Some(query) = self.session.pending_revocation() {
+            let id = query.id();
+            let response = ready!(revocation.poll_response(cx, query));
+            let result = self.session.resolve_peer_revocation(id, response);
+            revocation.settled(result.is_ok());
+            if let Err(err) = result {
+                let _ = self.write_io(cx);
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, err)));
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
     /// Makes as much handshake progress as the transport allows. Returns the
     /// TLS bytes `(read, written)`; `Pending` only when nothing moved.
-    pub(crate) fn handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<(usize, usize)>> {
+    ///
+    /// A certificate status query the connection waits on is answered
+    /// through `revocation`, once our own flight is out. Nothing is read
+    /// while its answer is fetched.
+    pub(crate) fn handshake(
+        &mut self,
+        cx: &mut Context<'_>,
+        revocation: &mut PeerRevocation,
+    ) -> Poll<io::Result<(usize, usize)>> {
         let mut wrlen = 0;
         let mut rdlen = 0;
 
         loop {
             let mut write_would_block = false;
             let mut read_would_block = false;
+            let mut revocation_pending = false;
 
             while self.session.wants_write() {
                 match self.write_io(cx) {
@@ -332,7 +373,18 @@ where
                 }
             }
 
-            while !self.eof && self.session.wants_read() {
+            loop {
+                match self.poll_revocation(cx, revocation) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Pending => {
+                        revocation_pending = true;
+                        break;
+                    }
+                }
+                if self.eof || !self.session.wants_read() {
+                    break;
+                }
                 match self.read_io(cx) {
                     Poll::Ready(Ok(0)) => self.eof = true,
                     Poll::Ready(Ok(n)) => rdlen += n,
@@ -353,7 +405,7 @@ where
                     "peer closed connection during handshake",
                 )));
             }
-            if write_would_block || read_would_block {
+            if write_would_block || read_would_block || revocation_pending {
                 return if rdlen != 0 || wrlen != 0 {
                     Poll::Ready(Ok((rdlen, wrlen)))
                 } else {
@@ -384,6 +436,10 @@ where
     /// writer, whose registration it may have replaced. When the connection
     /// stops reading until its queued records are written, the read writes
     /// them itself and waits for writability rather than taking more input.
+    ///
+    /// A certificate the records bring (post-handshake authentication) may
+    /// leave the connection waiting on a certificate status query: the read
+    /// answers it through `st` and takes no more input meanwhile.
     pub(crate) fn poll_fill_buf(
         mut self,
         cx: &mut Context<'_>,
@@ -396,7 +452,22 @@ where
         let mut io_pending = false;
         let mut error = None;
 
-        while !self.eof && self.session.wants_read() {
+        loop {
+            match self.poll_revocation(cx, &mut st.revocation) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(err)) => {
+                    error = Some(err);
+                    break;
+                }
+                Poll::Pending => {
+                    // The fetch wakes this read, as the transport would.
+                    io_pending = true;
+                    break;
+                }
+            }
+            if self.eof || !self.session.wants_read() {
+                break;
+            }
             match self.read_io(cx) {
                 Poll::Ready(Ok(0)) => break,
                 Poll::Ready(Ok(_)) => {}

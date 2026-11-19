@@ -24,7 +24,7 @@ use flight::{
 use ticket::tls13_ticket_lifetime;
 use traffic::ExpectFinished;
 
-use super::common::ActiveCertifiedKey;
+use super::common::{ActiveCertifiedKey, client_revocation_enabled};
 use super::cookie::RetryCookie;
 use super::hs::{self, HandshakeHashOrBuffer, NextStateOrError, ServerContext};
 use super::server_conn::ServerConfig;
@@ -288,6 +288,11 @@ impl CompleteClientHelloHandling {
                     else {
                         continue;
                     };
+                    // Even a previous connection without a client
+                    // certificate could bypass client authentication now.
+                    if client_revocation_enabled(&self.config) && !resume.certificate_free {
+                        continue;
+                    }
                     let Some(prev_suite) = self
                         .config
                         .find_cipher_suite(resume.cipher_suite)
@@ -421,6 +426,10 @@ impl CompleteClientHelloHandling {
             }
             _ => None,
         };
+        cx.data.certificate_free = (external.is_some() && server_key.is_none())
+            || resumedata
+                .as_ref()
+                .is_some_and(|resume| resume.certificate_free);
 
         self.transcript.add_message(chm);
 
@@ -560,10 +569,23 @@ impl CompleteClientHelloHandling {
             && most_preferred_mutual != Some(selected_kxg.name()))
         .then(|| our_groups.iter().map(|g| g.name()).collect());
 
+        // RFC 9846 §4.3.6: the client is willing to authenticate later.
+        // RFC 9001 §4.4: QUIC has no post-handshake client authentication,
+        // so an offer over QUIC is ignored and client auth stays in the
+        // handshake.
+        cx.data.post_handshake_auth_offered =
+            client_hello.extensions.post_handshake_auth.is_some() && !cx.common.is_quic();
+        let defer_client_auth =
+            self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
+
         // RFC 9846 §4.7.1 and RFC 9149: how many tickets follow, announced
         // in EncryptedExtensions when the client sent ticket_request.
-        let (send_tickets, expected_tickets) =
+        let (mut send_tickets, mut expected_tickets) =
             hs::tls13_tickets_to_send(&self.config, client_hello, resumedata.is_some());
+        if client_revocation_enabled(&self.config) && !cx.data.certificate_free {
+            send_tickets = 0;
+            expected_tickets = expected_tickets.map(|_| 0);
+        }
         self.send_tickets = send_tickets;
 
         // RFC 9849 §7.1: a client whose ECH extension did not decrypt gets
@@ -584,15 +606,6 @@ impl CompleteClientHelloHandling {
             expected_tickets,
         );
 
-        // RFC 9846 §4.3.6: the client is willing to authenticate later.
-        // RFC 9001 §4.4: QUIC has no post-handshake client authentication,
-        // so an offer over QUIC is ignored and client auth stays in the
-        // handshake.
-        cx.data.post_handshake_auth_offered =
-            client_hello.extensions.post_handshake_auth.is_some() && !cx.common.is_quic();
-        let defer_client_auth =
-            self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
-
         let doing_client_auth = if let Some(server_key) = server_key {
             let client_auth = !defer_client_auth
                 && emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
@@ -608,7 +621,7 @@ impl CompleteClientHelloHandling {
                 &mut self.transcript,
                 cx.common,
                 &self.config,
-                &server_key,
+                server_key.certified_key(),
                 client_hello,
                 delegated,
             );
@@ -637,7 +650,11 @@ impl CompleteClientHelloHandling {
             &self.config,
         );
 
-        if self.config.send_half_rtt_data {
+        // Not ahead of a client certificate whose revocation status is
+        // still to be evaluated: nothing is sent to that client before.
+        if self.config.send_half_rtt_data
+            && !(doing_client_auth && client_revocation_enabled(&self.config))
+        {
             cx.common.start_outgoing_traffic();
         }
 

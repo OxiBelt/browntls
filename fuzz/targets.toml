@@ -133,6 +133,10 @@ sources = ["crates/browntls-pki/**"]
 topic = "pki"
 sources = ["crates/browntls-pki/**"]
 
+[targets.pki_revocation]
+topic = "pki"
+sources = ["crates/browntls-pki/**", "crates/browntls/src/revocation*"]
+
 [targets.crypto_hash]
 topic = "crypto-symmetric"
 sources = [

@@ -98,7 +98,7 @@ use browntls::server::UnbufferedServerConnection;
 use browntls::unbuffered::UnbufferedConnectionCommon;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::TlsState;
+use crate::common::{PeerRevocation, TlsState};
 
 mod buffers;
 mod driver;
@@ -158,6 +158,8 @@ pub struct TlsStream<IO, C> {
     control_bytes: usize,
     /// The poll in progress wrote TLS bytes to the transport.
     moved: bool,
+    /// The answers to the connection's certificate status queries.
+    revocation: PeerRevocation,
 }
 
 /// A [`TlsStream`] from [`TlsConnector`].
@@ -169,7 +171,7 @@ pub type ServerTlsStream<IO> = TlsStream<IO, UnbufferedServerConnection>;
 impl<IO, C> TlsStream<IO, C> {
     /// A stream about to handshake; `incoming` holds what was received
     /// before the connection existed.
-    fn new(io: IO, conn: C, incoming: Incoming) -> Self {
+    fn new(io: IO, conn: C, incoming: Incoming, revocation: PeerRevocation) -> Self {
         Self {
             io,
             conn,
@@ -186,6 +188,7 @@ impl<IO, C> TlsStream<IO, C> {
             answering: false,
             control_bytes: 0,
             moved: false,
+            revocation,
         }
     }
 

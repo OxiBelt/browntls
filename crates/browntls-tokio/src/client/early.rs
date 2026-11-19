@@ -153,7 +153,7 @@ where
         .set_need_flush(st.need_flush)
         .set_read_before(st.read_before);
     while stream.session.is_handshaking() {
-        let poll = stream.handshake(cx);
+        let poll = stream.handshake(cx, &mut st.revocation);
         st.need_flush = stream.need_flush;
         st.read_before = stream.read_before;
         match poll {

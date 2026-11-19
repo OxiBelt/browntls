@@ -105,7 +105,8 @@ impl<T: AsyncOffload> AsyncRoutedStream<T> {
             }))
         };
         let (socket, conn) = stream.parts();
-        let place = match conn.negotiated_cipher_suite().map(records_of) {
+        let suite = conn.negotiated_cipher_suite();
+        let place = match suite.map(records_of) {
             Some(Some(records)) => kernel::place(records),
             // No stream compares the places of such records (AES-CCM), and
             // a client in its 0-RTT phase has no cipher suite yet: the
@@ -120,7 +121,9 @@ impl<T: AsyncOffload> AsyncRoutedStream<T> {
         // consumed, and is no error here: the next place takes it.
         let ready = match conn.kernel_handoff_blocker() {
             Some(blocker) if permanent(blocker, conn.is_handshaking()) => Err(unsupported(blocker)),
-            _ => sys::set_ulp_tls(socket.as_fd()),
+            // A client in its 0-RTT phase has no suite yet: the kernel
+            // must take every cipher it could end up with.
+            _ => sys::set_ulp_tls(socket.as_fd()).and_then(|()| super::probe::takes(suite)),
         };
         if let Err(error) = ready {
             return userspace(stream, Vec::new(), 0, Some(error));
@@ -179,7 +182,8 @@ macro_rules! routed {
             /// for which the stream's configuration must have
             /// `enable_secret_extraction` set. A stream that the kernel
             /// cannot take (no `tls` module, a cipher suite or a
-            /// configuration without a kernel form, a peer's
+            /// configuration without a kernel form, a cipher the running
+            /// kernel does not have, a peer's
             /// `record_size_limit` that needs a newer kernel) stays in
             /// userspace, and [`AsyncUserspaceStream::kernel_refusal`]
             /// tells why. If the handover had taken application data out

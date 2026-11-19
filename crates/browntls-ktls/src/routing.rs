@@ -67,7 +67,6 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 
 use browntls::Stream;
@@ -80,6 +79,7 @@ use crate::sys;
 
 #[cfg(feature = "tokio")]
 mod async_stream;
+mod probe;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use async_stream::{AsyncOffload, AsyncRoutedStream, AsyncUserspaceStream};
@@ -94,7 +94,8 @@ pub use async_stream::{AsyncOffload, AsyncRoutedStream, AsyncUserspaceStream};
 /// TCP socket (`ENOENT` without the `tls` module), or no loopback
 /// connection could be made to try it on. The order is then unchanged.
 pub fn activate() -> io::Result<()> {
-    probe()?;
+    probe::upper_layer_protocol()?;
+    probe::forget();
     kernel::activate();
     Ok(())
 }
@@ -103,34 +104,13 @@ pub fn activate() -> io::Result<()> {
 /// in userspace. Those the kernel has stay with it.
 pub fn deactivate() {
     kernel::deactivate();
+    probe::forget();
 }
 
 /// Whether kernel TLS is at the head of the routing order.
 #[must_use]
 pub fn is_active() -> bool {
     kernel::is_active()
-}
-
-/// Asks the kernel to attach the `tls` upper layer protocol to one end of
-/// a loopback connection, which it does only for a connected TCP socket.
-fn probe() -> io::Result<()> {
-    let mut last = None;
-    for address in [
-        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
-    ] {
-        // The listener's queue completes the connection; nothing has to
-        // accept it.
-        let connected = TcpListener::bind(address).and_then(|listener| {
-            let socket = TcpStream::connect(listener.local_addr()?)?;
-            Ok((listener, socket))
-        });
-        match connected {
-            Ok((_listener, socket)) => return sys::set_ulp_tls(socket.as_fd()),
-            Err(err) => last = Some(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
 }
 
 /// A connection whose records are protected where the routing placed it:
@@ -154,23 +134,42 @@ where
     C: Offload,
     S: AsFd + Read + Write,
 {
-    /// Completes the handshake of `conn` over `socket` if needed, then
-    /// leaves the connection where the routing places it.
+    /// Completes the handshake of `conn` over `socket` if needed, writes
+    /// the records it left queued, then leaves the connection where the
+    /// routing places it.
     ///
     /// For the kernel, `socket` must be a connected TCP socket and `conn`
     /// must have been made with `enable_secret_extraction` set, as for
     /// [`KtlsStream::new`]. A connection that the kernel cannot take (no
     /// `tls` module, a cipher suite or a configuration without a kernel
-    /// form) stays in userspace, and
-    /// [`UserspaceStream::kernel_refusal`] tells why.
+    /// form, a cipher the running kernel does not have) stays in
+    /// userspace, and [`UserspaceStream::kernel_refusal`] tells why. The
+    /// kernel is asked for the cipher once, with keys of zeros on a
+    /// loopback socket of its own, since its refusal of a connection's
+    /// own keys would come too late for the connection.
+    ///
+    /// # 0-RTT data
+    ///
+    /// A server that accepts 0-RTT data should complete the handshake and
+    /// read `early_data()` before this call. What is left unread then
+    /// comes where the place puts it: with the kernel it is the first
+    /// data the stream returns, as with [`KtlsStream::new`], and nothing
+    /// tells it from data sent after the handshake, although an attacker
+    /// can replay it; in userspace it stays in `early_data()` of
+    /// [`UserspaceStream::connection_mut`], unless a handover that the
+    /// kernel refused had already taken it
+    /// ([`UserspaceStream::received`]).
     ///
     /// # Errors
     ///
     /// [`HandoffError::Refused`] returns the connection and the socket
     /// when I/O failed before anything was given to the kernel (the
     /// handshake, or the records to be written and read before a
-    /// handover; `WouldBlock` on a non-blocking socket, after which the
-    /// call can be made again with what was returned).
+    /// handover; `WouldBlock` on a non-blocking socket). Its `received`
+    /// is application data the handover had already taken from the
+    /// connection: the caller must deliver it before anything else, also
+    /// when it makes the call again with what was returned, since the
+    /// next call does not take it back.
     /// [`HandoffError::Failed`] means the kernel took part of the
     /// connection's state and then failed: the connection is lost.
     pub fn new(mut conn: C, mut socket: S) -> Result<Self, HandoffError<C, S>> {
@@ -184,7 +183,21 @@ where
                 return Err(refused(conn, socket, Vec::new(), error));
             }
         }
-        let records = conn.negotiated_cipher_suite().and_then(records_of);
+        // The handshake's last records (a client's Finished) may still be
+        // queued, and a peer that waits for them would wait for as long as
+        // the caller writes and reads nothing.
+        while conn.wants_write() {
+            let written = match conn.write_tls(&mut socket) {
+                Ok(0) => Err(io::ErrorKind::WriteZero.into()),
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = written {
+                return Err(refused(conn, socket, Vec::new(), error));
+            }
+        }
+        let suite = conn.negotiated_cipher_suite();
+        let records = suite.and_then(records_of);
         let place = match records {
             Some(records) => kernel::place(records),
             // No stream compares the places of such records (AES-CCM):
@@ -212,7 +225,8 @@ where
         {
             return userspace(conn, socket, Vec::new(), Some(unsupported(blocker)));
         }
-        if let Err(error) = sys::set_ulp_tls(socket.as_fd()) {
+        let ready = sys::set_ulp_tls(socket.as_fd()).and_then(|()| probe::takes(suite));
+        if let Err(error) = ready {
             return userspace(conn, socket, Vec::new(), Some(error));
         }
         match KtlsStream::new(conn, socket) {
@@ -335,15 +349,18 @@ impl<C, S> UserspaceStream<C, S> {
 
     /// Why the kernel did not take the connection, when the routing had
     /// placed it there: the kernel did not attach the `tls` upper layer
-    /// protocol, or the connection has no kernel form
-    /// ([`io::ErrorKind::Unsupported`]). `None` for a connection the
-    /// routing kept in userspace.
+    /// protocol, or the connection has no kernel form or a cipher the
+    /// running kernel does not take ([`io::ErrorKind::Unsupported`]).
+    /// `None` for a connection the routing kept in userspace.
     pub fn kernel_refusal(&self) -> Option<&io::Error> {
         self.refusal.as_ref()
     }
 
     /// The application data that the next reads return before anything
     /// from the connection: what a refused handover had taken from it.
+    /// On a server it begins with the 0-RTT data that was accepted and
+    /// not read before [`RoutedStream::new`], which nothing here tells
+    /// from the rest (see there).
     pub fn received(&self) -> &[u8] {
         &self.received[self.taken..]
     }
@@ -407,5 +424,82 @@ impl<C, S> fmt::Debug for UserspaceStream<C, S> {
             .field("received", &(self.received.len() - self.taken))
             .field("kernel_refusal", &self.refusal)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Arc;
+    use std::thread;
+
+    use browntls::{ClientConnection, ServerConnection};
+
+    use super::*;
+    use crate::common::{Pki, localhost, offloadable_suites, tcp_pair};
+
+    /// What a refused handover had taken from the connection is read
+    /// first, in pieces, then what the connection yields.
+    #[test]
+    fn the_data_of_a_refused_handover_is_read_first() {
+        let pki = Pki::new();
+        let suite = offloadable_suites()[0];
+        let (client_tcp, server_tcp) = tcp_pair();
+        let (client, server) = thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let conn = ServerConnection::new(Arc::new(pki.server_config(suite))).unwrap();
+                RoutedStream::new(conn, server_tcp).unwrap()
+            });
+            let config = Arc::new(pki.client_config(suite));
+            let conn = ClientConnection::new(config, localhost()).unwrap();
+            // The client's last handshake records are sent by this call:
+            // the server's returns without the client writing anything.
+            let mut client = RoutedStream::new(conn, client_tcp).unwrap();
+            let server = server.join().unwrap();
+            client.write_all(b", then sent").unwrap();
+            client.flush().unwrap();
+            (client, server)
+        });
+        // No test of this process puts kernel TLS in the order.
+        let (RoutedStream::Userspace(_client), RoutedStream::Userspace(server)) = (client, server)
+        else {
+            panic!("kernel TLS is in the order");
+        };
+        assert!(server.kernel_refusal().is_none());
+        let (conn, socket, received) = server.into_parts();
+        assert!(received.is_empty());
+        let mut server = UserspaceStream {
+            conn,
+            socket,
+            received: b"taken first".to_vec(),
+            taken: 0,
+            meter: Meter::userspace(None),
+            refusal: Some(io::ErrorKind::Unsupported.into()),
+        };
+
+        let mut first = [0u8; 6];
+        assert_eq!(server.read(&mut first).unwrap(), 6);
+        assert_eq!(&first, b"taken ");
+        assert_eq!(server.received(), b"first");
+        // A read with room for more returns what is left of it alone.
+        let mut rest = [0u8; 64];
+        assert_eq!(server.read(&mut rest).unwrap(), 5);
+        assert_eq!(&rest[..5], b"first");
+        assert!(server.received().is_empty());
+        let mut sent = [0u8; 11];
+        server.read_exact(&mut sent).unwrap();
+        assert_eq!(&sent, b", then sent");
+        assert!(format!("{server:?}").contains("received: 0"));
+        assert_eq!(
+            server.kernel_refusal().map(io::Error::kind),
+            Some(io::ErrorKind::Unsupported)
+        );
+
+        // Given up part of the way, the rest comes with the connection.
+        server.received = b"0123456789".to_vec();
+        server.read_exact(&mut [0u8; 4]).unwrap();
+        let (_, _, received) = server.into_parts();
+        assert_eq!(received, b"456789");
     }
 }

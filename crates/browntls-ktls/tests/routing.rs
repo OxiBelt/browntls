@@ -139,15 +139,17 @@ fn connections_go_where_the_routing_places_them() {
     }
     load::disable();
 
-    // Activating asks the running kernel.
-    match routing::activate() {
-        Ok(()) => assert!(has_kernel_tls && routing::is_active()),
+    // Activating asks the running kernel, which may load the `tls` module
+    // for it.
+    let has_kernel_tls = match routing::activate() {
+        Ok(()) => true,
         Err(err) => {
             assert!(!has_kernel_tls && !routing::is_active(), "{err}");
             // Put it in the order all the same: a kernel that refuses.
             kernel::activate();
+            false
         }
-    }
+    };
     assert!(routing::is_active());
 
     // In the order: every connection goes to the kernel, or stays in
@@ -220,7 +222,7 @@ fn connections_go_where_the_routing_places_them() {
         // Half and half: ends in different places talk to each other.
         kernel::set_fixed(*records, 50).unwrap();
         let mut kept = 0;
-        for _ in 0..8 {
+        for _ in 0..16 {
             for end in connection(&pki, *suite, 2, true) {
                 if end.refusal.is_none() && end.place == Place::Userspace {
                     kept += 1;
@@ -229,7 +231,7 @@ fn connections_go_where_the_routing_places_them() {
                 }
             }
         }
-        assert!((1..16).contains(&kept), "{suite:?}: {kept} of 16 ends");
+        assert!((1..32).contains(&kept), "{suite:?}: {kept} of 32 ends");
         kernel::clear_fixed(*records);
     }
     // A suite without a stream follows the order.

@@ -1,57 +1,4 @@
 //! The revocation policy shared by the WebPKI server and client verifiers.
-//!
-//! A [`RevocationPolicy`] decides, for every certificate path the verifier
-//! would otherwise accept, whether the certificates it covers are known not
-//! to be revoked. It combines four sources of evidence:
-//!
-//! 1. the CRLs configured on the verifier, checked during path building as
-//!    before;
-//! 2. OCSP responses the peer stapled to its Certificate message;
-//! 3. a CRLite snapshot installed by the application, whose coverage is
-//!    decided from signed certificate timestamps verified against the CT
-//!    logs installed with it ([`RevocationData`]);
-//! 4. optionally, OCSP responses fetched during the handshake.
-//!
-//! # Decisions
-//!
-//! * The end-entity certificate is always covered. Intermediates are covered
-//!   only with [`RevocationPolicy::check_full_chain`]. Trust anchors never are.
-//! * Every local source is consulted for a covered certificate, and an
-//!   authenticated "revoked" from any of them wins over "good" from another.
-//! * A stapled response for a covered certificate must be well formed,
-//!   authentic and about that certificate. Anything else fails the handshake
-//!   with [`CertificateError::InvalidOcspResponse`], also in best-effort mode.
-//!   A stapled response that is authentic but stale, or that reports the
-//!   status "unknown", is not evidence.
-//! * A certificate with the TLS feature extension for `status_request`
-//!   (RFC 7633, "Must-Staple") must come with a stapled response that
-//!   establishes its status. No other source satisfies that requirement.
-//! * A path whose covered certificates all have fresh local evidence is
-//!   preferred over one that needs a live query.
-//! * Without complete evidence the default is to fail with
-//!   [`CertificateError::UnknownRevocationStatus`]. With
-//!   [`RevocationPolicy::best_effort`] the handshake continues and reports
-//!   [`RevocationStatus::Indeterminate`].
-//!
-//! # Live queries
-//!
-//! [`RevocationPolicy::with_live_ocsp`] lets the verifier suspend certificate
-//! authentication and ask for an OCSP response
-//! ([`RevocationCheck::Pending`]). The policy only names candidate
-//! responders (the certificate's authority information access URLs) and
-//! builds the request. Authorizing a destination and transporting the request
-//! is the caller's job. Nothing reports the certificate as verified while a
-//! query is outstanding. The number of queries per handshake is bounded, and
-//! an answer about a certificate is reused by every path that contains it.
-//!
-//! Responses to live queries are validated at the time read from the clock
-//! given to [`RevocationPolicy::with_live_ocsp`], because the verification time
-//! passed to the verifier predates the query.
-//!
-//! [`CertificateError::InvalidOcspResponse`]: crate::error::CertificateError::InvalidOcspResponse
-//! [`CertificateError::UnknownRevocationStatus`]: crate::error::CertificateError::UnknownRevocationStatus
-//! [`RevocationStatus::Indeterminate`]: super::RevocationStatus::Indeterminate
-//! [`RevocationCheck::Pending`]: super::RevocationCheck::Pending
 
 use core::fmt;
 
@@ -123,7 +70,7 @@ impl fmt::Debug for RevocationDigests {
 ///
 /// The default is strict and covers the end-entity certificate: without
 /// fresh, authenticated evidence that it is not revoked, verification fails.
-/// See the [module documentation](self) for the sources and their order.
+/// See the [revocation module documentation](crate::revocation) for the sources and their order.
 #[derive(Clone, Debug)]
 pub struct RevocationPolicy {
     pub(crate) digests: RevocationDigests,

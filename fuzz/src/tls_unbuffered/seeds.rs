@@ -101,6 +101,18 @@ pub fn seeds() -> Vec<Vec<u8>> {
         .op(Op::Pump, &[])
         .op(Op::Check, &[]);
     seeds.push(seed.0);
+
+    // A backlog of half-RTT records (knob 0x80) longer than one 64-step
+    // drive: the server encrypts on every TransmitTlsData without calling
+    // done(), so each Drive queues 64 records. Check must read them all.
+    let mut seed = Seed::new([0x81, 0x40, 0, 0, 0], &[0])
+        .step(Op::Drive, 0, RETRY, 0, b"")
+        .op(Op::Deliver, &[0, 0, 0, 0, 0, 0]);
+    for _ in 0..4 {
+        seed = seed.step(Op::Drive, 1, RETRY | 4 | 2, 0, &[7; 255]);
+    }
+    seeds.push(seed.op(Op::Check, &[]).0);
+
     let seed = Seed::new([0x41, 0x04, 0, 0, 0], &[0])
         .conversation()
         .op(Op::Extract, &[]);

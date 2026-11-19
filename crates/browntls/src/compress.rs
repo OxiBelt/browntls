@@ -30,7 +30,8 @@
 //! The built-in decompressors also reject trailing input. They do not all
 //! work in the output buffer alone; each documents the memory it can use
 //! besides it, which never depends on what the peer declares beyond these
-//! bounds: nothing for zlib, a window no larger than the expected length
+//! bounds: a fixed decoder state (about 11 KiB) for zlib, a window no larger
+//! than the expected length
 //! rounded up to a power of two for Brotli, and at most 256 KiB for
 //! Zstandard, plus entropy tables whose size the formats fix.
 
@@ -76,6 +77,11 @@ pub trait CertDecompressor: Debug + Send + Sync {
 /// Compresses a `Certificate` message for sending.
 pub trait CertCompressor: Debug + Send + Sync {
     /// Compresses `input` at `level`.
+    ///
+    /// The output is sent as it is returned, even when it is not shorter than
+    /// `input`; return [`CompressionFailed`] to send the message uncompressed
+    /// instead (the built-in compressors do so when compression does not
+    /// help).
     fn compress(
         &self,
         input: Vec<u8>,

@@ -26,6 +26,8 @@ use crate::tls13::Tls13CipherSuite;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SecretKind {
     ResumptionPskBinderKey,
+    ExternalPskBinderKey,
+    ImportedPskBinderKey,
     ClientEarlyTrafficSecret,
     EarlyExporterMasterSecret,
     ClientHandshakeTrafficSecret,
@@ -41,6 +43,8 @@ impl SecretKind {
     fn to_bytes(self) -> &'static [u8] {
         match self {
             Self::ResumptionPskBinderKey => b"res binder",
+            Self::ExternalPskBinderKey => b"ext binder",
+            Self::ImportedPskBinderKey => b"imp binder",
             Self::ClientEarlyTrafficSecret => b"c e traffic",
             Self::EarlyExporterMasterSecret => b"e exp master",
             Self::ClientHandshakeTrafficSecret => b"c hs traffic",
@@ -65,6 +69,45 @@ impl SecretKind {
             _ => return None,
         })
     }
+}
+
+/// Which kind of PSK a binder is for: the label of its `binder_key`
+/// (RFC 9846 §7.1; `imp binder` for imported PSKs, RFC 9258).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinderLabel {
+    /// A resumption PSK from a NewSessionTicket (`res binder`).
+    Resumption,
+    /// An external PSK used directly (`ext binder`).
+    External,
+    /// An external PSK imported with RFC 9258 (`imp binder`).
+    Imported,
+}
+
+impl BinderLabel {
+    fn secret_kind(self) -> SecretKind {
+        match self {
+            Self::Resumption => SecretKind::ResumptionPskBinderKey,
+            Self::External => SecretKind::ExternalPskBinderKey,
+            Self::Imported => SecretKind::ImportedPskBinderKey,
+        }
+    }
+}
+
+/// The imported PSK of RFC 9258: `ipskx = HKDF-Expand-Label(
+/// HKDF-Extract(0, epsk), "derived psk", Hash(ImportedIdentity), L)`, where
+/// HKDF and Hash are those of the EPSK (`epsk_suite`'s) and `L` is the hash
+/// length of the target KDF.
+pub(crate) fn derive_imported_psk(
+    epsk_suite: &Tls13CipherSuite,
+    epsk: &[u8],
+    imported_identity: &[u8],
+    target_len: usize,
+) -> Vec<u8> {
+    let epskx = epsk_suite.hkdf_provider.extract_from_secret(None, epsk);
+    let identity_hash = epsk_suite.common.hash_provider.hash(imported_identity);
+    let mut out = alloc::vec![0u8; target_len];
+    hkdf_expand_label(&*epskx, b"derived psk", identity_hash.as_ref(), &mut out);
+    out
 }
 
 /// The running `HKDF-Extract` chain plus the suite it belongs to.
@@ -147,7 +190,12 @@ impl KeySchedule {
         self.suite.hkdf_provider.hmac_sign(&finished_key, hs_hash)
     }
 
+    /// Installs a record encrypter; QUIC connections have no record layer
+    /// and take their secrets from the stage that derives them.
     fn set_encrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        if common.is_quic() {
+            return;
+        }
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
         common.record_layer.set_message_encrypter(
@@ -157,6 +205,9 @@ impl KeySchedule {
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
+        if common.is_quic() {
+            return;
+        }
         common
             .record_layer
             .set_message_decrypter(self.derive_decrypter(secret));
@@ -264,6 +315,11 @@ impl KeyScheduleEarly {
             key_log,
             client_random,
         );
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the 0-RTT packet keys.
+            quic.set_early_secret(secret, self.ks.suite);
+            return;
+        }
         match common.side {
             Side::Client => self.ks.set_encrypter(&secret, common),
             Side::Server => common
@@ -291,15 +347,12 @@ impl KeyScheduleEarly {
         }
     }
 
-    /// `HMAC(binder_key, hs_hash)` for the `pre_shared_key` binder.
-    pub(crate) fn resumption_psk_binder_key_and_sign_verify_data(
-        &self,
-        hs_hash: &[u8],
-    ) -> hmac::Tag {
+    /// The `pre_shared_key` binder: the Finished computation with
+    /// `binder_key = Derive-Secret(early_secret, label, "")` over `hs_hash`
+    /// (RFC 9846 §4.3.11.2, §7.1).
+    pub(crate) fn psk_binder(&self, label: BinderLabel, hs_hash: &[u8]) -> hmac::Tag {
         let empty_hash = self.ks.suite.common.hash_provider.hash(&[]);
-        let binder_key = self
-            .ks
-            .derive(SecretKind::ResumptionPskBinderKey, empty_hash.as_ref());
+        let binder_key = self.ks.derive(label.secret_kind(), empty_hash.as_ref());
         self.ks.sign_finish(&binder_key, hs_hash)
     }
 
@@ -355,6 +408,10 @@ impl KeyScheduleHandshakeStart {
         common: &mut CommonState,
     ) -> KeyScheduleHandshake {
         let (client_secret, server_secret) = self.derive(hs_hash, key_log, client_random);
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the Handshake packet keys, both directions.
+            quic.set_handshake_secrets(client_secret.clone(), server_secret.clone(), self.ks.suite);
+        }
         // The server starts encrypting immediately; the client starts
         // decrypting with the server's secret.
         match common.side {
@@ -416,6 +473,9 @@ impl KeyScheduleHandshake {
         skip_requested: Option<usize>,
         common: &mut CommonState,
     ) {
+        if common.is_quic() {
+            return;
+        }
         let decrypter = self
             .ks
             .derive_decrypter(&self.client_handshake_traffic_secret);
@@ -444,6 +504,16 @@ impl KeyScheduleHandshake {
     ) -> KeyScheduleTrafficWithClientFinishedPending {
         self.ks.input_empty();
         let traffic = KeyScheduleTraffic::new(self.ks, hs_hash, key_log, client_random);
+        let side = common.side;
+        if let Some(quic) = &mut common.quic {
+            // RFC 9001 §5.1: the 1-RTT packet keys, both directions.
+            quic.set_traffic_secrets(
+                traffic.current_client_traffic_secret.clone(),
+                traffic.current_server_traffic_secret.clone(),
+                traffic.ks.suite,
+                side,
+            );
+        }
         if common.side == Side::Server {
             traffic
                 .ks
@@ -472,6 +542,13 @@ impl KeyScheduleTrafficWithClientFinishedPending {
     }
 
     pub(crate) fn into_traffic(self, common: &mut CommonState) -> KeyScheduleTraffic {
+        let side = common.side;
+        if let Some(quic) = &mut common.quic {
+            match side {
+                Side::Client => quic.start_local_traffic(),
+                Side::Server => quic.start_remote_traffic(),
+            }
+        }
         match common.side {
             Side::Client => self
                 .traffic
@@ -496,6 +573,9 @@ impl KeyScheduleTrafficWithClientFinishedPending {
     /// Installs the server application decrypter on the client, which may
     /// happen before the client sends its Finished.
     pub(crate) fn set_server_application_decrypter(&self, common: &mut CommonState) {
+        if let Some(quic) = &mut common.quic {
+            quic.start_remote_traffic();
+        }
         self.traffic
             .ks
             .set_decrypter(&self.traffic.current_server_traffic_secret, common);

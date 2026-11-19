@@ -14,9 +14,12 @@ use crate::msgs::base::Payload;
 use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
 use crate::msgs::handshake::CertificateChain;
-use crate::msgs::message::{Message, OutboundChunks, OutboundPlainMessage, PlainMessage};
+use crate::msgs::message::{
+    Message, MessagePayload, OutboundChunks, OutboundPlainMessage, PlainMessage,
+};
 use crate::record_layer::{PreEncryptAction, RecordLayer};
 use crate::suites::SupportedCipherSuite;
+use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
 
 /// Plaintext received from the peer is buffered up to this many bytes before
@@ -81,7 +84,8 @@ impl Side {
 /// How the handshake was completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandshakeKind {
-    /// A full handshake with certificate authentication.
+    /// A full handshake: certificate authentication, or (TLS 1.3) an
+    /// external PSK with (EC)DHE, see [`CommonState::external_psk_identity`].
     Full,
     /// A full handshake that needed a HelloRetryRequest (TLS 1.3 only).
     FullWithHelloRetryRequest,
@@ -130,6 +134,7 @@ pub struct IoState {
     tls_bytes_to_write: usize,
     plaintext_bytes_to_read: usize,
     peer_has_closed: bool,
+    revocation_pending: bool,
 }
 
 impl IoState {
@@ -147,6 +152,11 @@ impl IoState {
     pub fn peer_has_closed(&self) -> bool {
         self.peer_has_closed
     }
+
+    /// Whether progress requires resolving a pending certificate status request.
+    pub fn revocation_pending(&self) -> bool {
+        self.revocation_pending
+    }
 }
 
 /// Connection state that is independent of the handshake position.
@@ -159,6 +169,9 @@ pub struct CommonState {
     pub(crate) kx_state: KxState,
     pub(crate) alpn_protocol: Option<Vec<u8>>,
     pub(crate) peer_certificates: Option<CertificateChain<'static>>,
+    pub(crate) pending_revocation: Option<alloc::boxed::Box<crate::revocation::PendingRevocation>>,
+    pub(crate) peer_revocation_status: Option<crate::revocation::RevocationStatus>,
+    pub(crate) revocation_auth_outstanding: bool,
     message_fragmenter: MessageFragmenter,
     pub(crate) received_plaintext: ChunkVecBuffer,
     pub(crate) sendable_plaintext: ChunkVecBuffer,
@@ -190,6 +203,25 @@ pub struct CommonState {
     pub(crate) enable_secret_extraction: bool,
     pub(crate) encrypt_failed: bool,
     pub(crate) fips: bool,
+    /// Present on QUIC connections (RFC 9001): handshake messages and alerts
+    /// go to the QUIC implementation instead of the record layer.
+    pub(crate) quic: Option<alloc::boxed::Box<crate::quic::Quic>>,
+    /// Driven by the unbuffered API: received application data stays in the
+    /// caller's buffer instead of being copied into `received_plaintext`.
+    pub(crate) unbuffered: bool,
+    /// Unbuffered only: the record just processed was application data the
+    /// state machine accepted, left in place for the caller.
+    pub(crate) app_data_in_place: bool,
+    /// The external PSK the handshake uses: the one selected, or the one a
+    /// resumed session was established with.
+    pub(crate) external_psk: Option<Arc<crate::psk::ExternalPsk>>,
+    /// Whether the peer's Finished has verified, which authenticates the
+    /// peer's knowledge of [`Self::external_psk`].
+    pub(crate) external_psk_confirmed: bool,
+    /// Present once the connection is handed to the kernel: records go to
+    /// this queue as plaintext for the kernel to protect
+    /// ([`crate::kernel::KernelConnection`]).
+    pub(crate) kernel: Option<alloc::boxed::Box<crate::kernel::KernelQueue>>,
 }
 
 impl CommonState {
@@ -203,6 +235,9 @@ impl CommonState {
             kx_state: KxState::Start,
             alpn_protocol: None,
             peer_certificates: None,
+            pending_revocation: None,
+            peer_revocation_status: None,
+            revocation_auth_outstanding: false,
             message_fragmenter: MessageFragmenter::default(),
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
             sendable_plaintext: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
@@ -226,12 +261,30 @@ impl CommonState {
             enable_secret_extraction: false,
             encrypt_failed: false,
             fips: false,
+            quic: None,
+            unbuffered: false,
+            app_data_in_place: false,
+            external_psk: None,
+            external_psk_confirmed: false,
+            kernel: None,
         }
     }
 
     /// Whether there are TLS bytes waiting for `write_tls`.
     pub fn wants_write(&self) -> bool {
         !self.sendable_tls.is_empty()
+    }
+
+    /// The OCSP request blocking certificate authentication, if any.
+    pub fn pending_revocation(&self) -> Option<&crate::revocation::RevocationQuery> {
+        self.pending_revocation
+            .as_deref()
+            .map(|pending| pending.query())
+    }
+
+    /// The revocation result of the most recently verified peer identity.
+    pub fn peer_revocation_status(&self) -> Option<crate::revocation::RevocationStatus> {
+        self.peer_revocation_status
     }
 
     /// Whether the handshake is still in progress.
@@ -272,17 +325,80 @@ impl CommonState {
         self.handshake_kind
     }
 
+    /// The identity of the external PSK (RFC 9846 §4.3.11) the handshake
+    /// authenticated with; for an imported PSK (RFC 9258), its external
+    /// identity. `None` until the peer's Finished message has verified (which
+    /// proves the peer holds the key), and for a handshake that used no
+    /// external PSK.
+    ///
+    /// Such a handshake is reported as [`HandshakeKind::Full`] (or
+    /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
+    /// authentication was negotiated on top of it (RFC 8773), there are no
+    /// peer certificates. A session resumed from a ticket issued on such a
+    /// connection ([`HandshakeKind::Resumed`]) reports the same identity.
+    ///
+    /// A peer that offers or accepts external PSKs may still complete a
+    /// handshake without one (with certificates, or by resuming a session
+    /// that used none): unless `require_external_psk` is set in the
+    /// [`ClientConfig`](crate::ClientConfig) or
+    /// [`ServerConfig`](crate::ServerConfig), check this after the handshake.
+    pub fn external_psk_identity(&self) -> Option<&[u8]> {
+        self.external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+            .map(|psk| psk.identity())
+    }
+
+    /// The external PSK to record in a ticket issued on this connection.
+    pub(crate) fn external_psk_binding(
+        &self,
+        suites: &[SupportedCipherSuite],
+        resumption_secret: &[u8],
+    ) -> Result<Option<crate::psk::ExternalPskBinding>, Error> {
+        let Some(psk) = self
+            .external_psk
+            .as_ref()
+            .filter(|_| self.external_psk_confirmed)
+        else {
+            return Ok(None);
+        };
+        crate::psk::ExternalPskBinding::of(psk, suites, resumption_secret)
+            .map(Some)
+            .ok_or_else(|| Error::general("external PSK hash is unavailable in the provider"))
+    }
+
     /// Whether every negotiated component claims FIPS validation.
     pub fn fips(&self) -> bool {
         self.fips
     }
 
     /// Whether the connection wants to read more TLS bytes: not when buffered
-    /// plaintext is waiting for the application, not after the peer closed.
+    /// plaintext is waiting for the application, not after the peer closed,
+    /// and not while more control records (such as answers the peer's
+    /// messages call for) wait to be written than the send buffer limit,
+    /// capped at 64 KiB, allows.
     pub fn wants_read(&self) -> bool {
         self.received_plaintext.is_empty()
+            && self.pending_revocation.is_none()
             && !self.has_received_close_notify
             && (self.may_send_application_data || self.sendable_tls.is_empty())
+            && !self.control_backlog_full()
+    }
+
+    /// Whether more control records (anything but application data) wait to
+    /// be written than the send buffer limit, capped at
+    /// [`DEFAULT_BUFFER_LIMIT`], allows. They are queued whatever the limit,
+    /// and the peer's requests call for some (KeyUpdate answers,
+    /// post-handshake authentication responses): past this backlog the
+    /// connection stops reading until the transport takes them.
+    pub(crate) fn control_backlog_full(&self) -> bool {
+        let bound = self
+            .sendable_tls
+            .limit()
+            .map_or(DEFAULT_BUFFER_LIMIT, |limit| {
+                limit.min(DEFAULT_BUFFER_LIMIT)
+            });
+        self.sendable_tls.control_len() > bound
     }
 
     /// Sets the limit on buffered outgoing data.
@@ -307,6 +423,11 @@ impl CommonState {
 
     pub(crate) fn set_max_fragment_size(&mut self, new: Option<usize>) -> Result<(), Error> {
         self.message_fragmenter.set_max_fragment_size(new)
+    }
+
+    /// The largest plaintext fragment we put in one record.
+    pub(crate) fn max_fragment_len(&self) -> usize {
+        self.message_fragmenter.max_fragment_len()
     }
 
     /// Puts a negotiated `record_size_limit` (RFC 8449) into effect: `ours`
@@ -347,6 +468,7 @@ impl CommonState {
             tls_bytes_to_write: self.sendable_tls.len(),
             plaintext_bytes_to_read: self.received_plaintext.len(),
             peer_has_closed: self.has_received_close_notify,
+            revocation_pending: self.pending_revocation.is_some(),
         }
     }
 
@@ -354,8 +476,34 @@ impl CommonState {
         self.negotiated_version == Some(ProtocolVersion::TLSv1_3)
     }
 
+    /// Whether this is a QUIC connection (RFC 9001).
+    pub(crate) fn is_quic(&self) -> bool {
+        self.quic.is_some()
+    }
+
     /// Queues `m` for sending, encrypting it when `must_encrypt`.
+    ///
+    /// On a QUIC connection nothing goes to the record layer: handshake
+    /// messages are queued for CRYPTO frames at the current encryption level
+    /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
+    /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        if let Some(quic) = &mut self.quic {
+            match m.payload {
+                MessagePayload::Handshake { encoded, .. } => {
+                    quic.queue_handshake(encoded.bytes().to_vec());
+                }
+                MessagePayload::Alert(alert) if alert.level == AlertLevel::Fatal => {
+                    quic.record_alert(alert.description);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.kernel.is_some() {
+            self.send_to_kernel(&PlainMessage::from(m));
+            return;
+        }
         if !must_encrypt {
             let msg = PlainMessage::from(m);
             for fragment in self.message_fragmenter.fragment_message(&msg) {
@@ -369,9 +517,29 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
+        if self.send_to_kernel(&m) {
+            return;
+        }
         for fragment in self.message_fragmenter.fragment_message(&m) {
             self.send_single_fragment(fragment);
         }
+    }
+
+    /// Kernel offload: queues `m` as plaintext records for the kernel, one
+    /// per fragment, each taking a sequence number of the current write
+    /// key. Returns whether the connection is offloaded.
+    pub(crate) fn send_to_kernel(&mut self, m: &PlainMessage) -> bool {
+        let Some(queue) = self.kernel.as_mut() else {
+            return false;
+        };
+        for fragment in self.message_fragmenter.fragment_message(m) {
+            queue.push(crate::kernel::KernelOutput::Record {
+                typ: fragment.typ,
+                payload: fragment.payload.to_vec(),
+            });
+            self.record_layer.note_kernel_records(1);
+        }
+        true
     }
 
     /// Fragments and encrypts application data, honouring the confidentiality
@@ -381,10 +549,21 @@ impl CommonState {
         payload: OutboundChunks<'_>,
         limit: Limit,
     ) -> usize {
+        // The kernel sends the application data of an offloaded connection
+        // (and the handover requires none to be queued).
+        if self.kernel.is_some() {
+            return 0;
+        }
         let len = match limit {
             Limit::Yes => self.sendable_tls.apply_limit(payload.len()),
             Limit::No => payload.len(),
         };
+        // Nothing to send (an empty write, or a full send buffer): the
+        // fragmenter would still make one empty record of it, letting the
+        // buffer grow past its limit with every retried write.
+        if len == 0 {
+            return 0;
+        }
         let payload = payload.split_at(len).0;
         let fragments = len
             .div_ceil(self.message_fragmenter.max_fragment_len())
@@ -435,7 +614,11 @@ impl CommonState {
     }
 
     fn send_single_fragment(&mut self, m: OutboundPlainMessage<'_>) {
+        let application_data = m.typ == ContentType::ApplicationData;
         match self.record_layer.encrypt_outgoing(m) {
+            Ok(em) if application_data => {
+                self.sendable_tls.append(em.encode());
+            }
             Ok(em) => self.queue_tls_message(em),
             Err(err) => {
                 debug!("record encryption failed: {:?}", err);
@@ -444,8 +627,11 @@ impl CommonState {
         }
     }
 
+    /// Queues a control record (anything but application data). It is
+    /// queued whatever the send buffer limit, and counts towards
+    /// [`Self::control_backlog_full`] until it is written.
     pub(crate) fn queue_tls_message(&mut self, m: crate::msgs::message::OutboundOpaqueMessage) {
-        self.sendable_tls.append(m.encode());
+        self.sendable_tls.append_control(m.encode());
     }
 
     /// Sends a fatal alert (once) and returns `err` for the caller to surface.
@@ -551,8 +737,14 @@ impl CommonState {
         Ok(())
     }
 
-    /// Buffers received application data for the application.
+    /// Buffers received application data for the application, or, for an
+    /// unbuffered connection, notes that the record's plaintext is to be
+    /// handed to the caller where it was decrypted.
     pub(crate) fn take_received_plaintext(&mut self, bytes: Payload<'_>) {
+        if self.unbuffered {
+            self.app_data_in_place = true;
+            return;
+        }
         self.received_plaintext.append(bytes.into_vec());
     }
 
@@ -576,9 +768,7 @@ impl CommonState {
     pub(crate) fn send_change_cipher_spec(&mut self) {
         let m = Message {
             version: ProtocolVersion::TLSv1_2,
-            payload: crate::msgs::message::MessagePayload::ChangeCipherSpec(
-                crate::msgs::ccs::ChangeCipherSpecPayload,
-            ),
+            payload: MessagePayload::ChangeCipherSpec(crate::msgs::ccs::ChangeCipherSpecPayload),
         };
         self.send_msg(m, false);
         self.record_layer.start_encrypting();
@@ -615,8 +805,7 @@ impl CommonState {
 
     /// Buffers application data for after the handshake.
     pub(crate) fn buffer_plaintext(&mut self, payload: OutboundChunks<'_>) -> usize {
-        self.sendable_plaintext
-            .append_limited_copy(&payload.to_vec())
+        self.sendable_plaintext.append_limited_copy(payload)
     }
 
     /// Sends application data now, or buffers it until the handshake finishes.
@@ -758,111 +947,4 @@ fn is_always_fatal(desc: AlertDescription) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tls13_state() -> CommonState {
-        let mut common = CommonState::new(Side::Client);
-        common.negotiated_version = Some(ProtocolVersion::TLSv1_3);
-        common
-    }
-
-    fn alert(level: AlertLevel, description: AlertDescription) -> AlertMessagePayload {
-        AlertMessagePayload { level, description }
-    }
-
-    #[test]
-    fn tls13_user_canceled_is_ignored_at_any_level() {
-        // RFC 9846 §6.1: the receiver keeps reading until close_notify; the
-        // level carries no meaning in TLS 1.3 (§6).
-        let mut common = tls13_state();
-        for level in [AlertLevel::Warning, AlertLevel::Fatal] {
-            assert_eq!(
-                common.process_alert(&alert(level, AlertDescription::UserCanceled)),
-                Ok(())
-            );
-        }
-        assert!(!common.has_received_close_notify);
-        assert_eq!(
-            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::CloseNotify)),
-            Ok(())
-        );
-        assert!(common.has_received_close_notify);
-    }
-
-    #[test]
-    fn repeated_user_canceled_is_bounded() {
-        let mut common = tls13_state();
-        let user_canceled = alert(AlertLevel::Warning, AlertDescription::UserCanceled);
-        for _ in 0..MAX_WARNING_ALERTS {
-            assert_eq!(common.process_alert(&user_canceled), Ok(()));
-        }
-        assert_eq!(
-            common.process_alert(&user_canceled),
-            Err(PeerMisbehaved::TooManyWarningAlertsReceived.into())
-        );
-    }
-
-    #[test]
-    fn tls13_error_alerts_are_fatal_at_warning_level() {
-        let mut common = tls13_state();
-        assert_eq!(
-            common.process_alert(&alert(AlertLevel::Warning, AlertDescription::GeneralError)),
-            Err(Error::AlertReceived(AlertDescription::GeneralError))
-        );
-    }
-
-    #[test]
-    fn key_update_request_not_repeated_until_peer_updates() {
-        // RFC 9846 §4.7.3: until a KeyUpdate arrives from the peer, the
-        // sender MUST NOT send another update_requested.
-        let mut common = tls13_state();
-        let requested = KeyUpdateRequest::UpdateRequested;
-        assert_eq!(common.key_update_to_send(requested), Some(requested));
-        common.key_update_request_outstanding = true;
-        assert_eq!(
-            common.key_update_to_send(requested),
-            Some(KeyUpdateRequest::UpdateNotRequested)
-        );
-        common
-            .received_key_update(KeyUpdateRequest::UpdateNotRequested, 8)
-            .unwrap();
-        assert_eq!(common.key_update_to_send(requested), Some(requested));
-    }
-
-    #[test]
-    fn key_updates_stop_at_the_epoch_limit() {
-        // RFC 9846 §4.7.3: no more than 2^48-1 key updates are sent; at the
-        // limit a peer's update_requested is ignored.
-        let mut common = tls13_state();
-        common.sent_key_updates = MAX_KEY_UPDATES - 1;
-        assert!(
-            common
-                .key_update_to_send(KeyUpdateRequest::UpdateNotRequested)
-                .is_some()
-        );
-        common.sent_key_updates = MAX_KEY_UPDATES;
-        assert_eq!(
-            common.key_update_to_send(KeyUpdateRequest::UpdateNotRequested),
-            None
-        );
-        assert_eq!(MAX_KEY_UPDATES, (1u64 << 48) - 1);
-    }
-
-    #[test]
-    fn several_requests_owe_one_response() {
-        let mut common = tls13_state();
-        for _ in 0..3 {
-            common
-                .received_key_update(KeyUpdateRequest::UpdateRequested, 8)
-                .unwrap();
-        }
-        assert!(common.key_update_owed);
-        // Sending any KeyUpdate pays the debt. Without a record encrypter
-        // the message is dropped, but the bookkeeping is what is checked.
-        common.send_key_update(KeyUpdateRequest::UpdateNotRequested);
-        assert!(!common.key_update_owed);
-        assert_eq!(common.sent_key_updates, 1);
-        assert!(!common.key_update_request_outstanding);
-    }
-}
+mod tests;

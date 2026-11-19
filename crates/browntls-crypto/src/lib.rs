@@ -9,7 +9,7 @@
 //! | SHA-1 (HMAC-SHA1 for TLS 1.2 CBC suites only) | SHA-NI | SHA1 | Zbb |
 //! | SHA-2 | SHA-NI, AVX2+BMI2 | SHA2, SHA512 | Zvknha/Zvknhb, Zknh |
 //! | SHA-3 / SHAKE | BMI; AVX2, AVX-512VL 4-way | SHA3 (EOR3/RAX1/XAR/BCAX), NEON 4-way | Zbb; RVV 4-way |
-//! | AES / GHASH (GCM; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
+//! | AES / GHASH (GCM, and [`gcm::Ghash`] on its own; CCM uses the AES backends) | AES-NI+PCLMULQDQ, VAES | AES+PMULL | Zvkned+Zvkg/Zvbc, Zkne+Zbc/Zbkc |
 //! | AES decryption (CBC) | AES-NI, VAES | AES | Zvkned, Zknd |
 //! | ChaCha20 / Poly1305 | AVX2, AVX-512 | NEON | RVV |
 //! | X25519 / Ed25519 | 64-bit, BMI2/ADX | 64-bit | 64-bit |
@@ -26,10 +26,12 @@
 //! [`hpke`] implements Hybrid Public Key Encryption (RFC 9180, base mode)
 //! from the primitives above.
 //!
-//! The crate is `no_std` and allocation-free by default; `std` adds runtime
-//! feature detection on aarch64. Unsafe code is denied crate-wide and allowed
-//! only in architecture backend modules, CPU detection and the system-call
-//! trampoline, each with documented safety invariants.
+//! The crate is `no_std`, and allocation-free without its default features;
+//! `alloc` adds the allocating APIs (HPKE `seal`/`open`) and `std` (the
+//! default) adds runtime feature detection on aarch64 and load-aware
+//! routing, which allocates per-backend key copies. Unsafe code is denied
+//! crate-wide and allowed only in architecture backend modules, CPU detection
+//! and the system-call trampoline, each with documented safety invariants.
 #![no_std]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_op_in_unsafe_fn)]

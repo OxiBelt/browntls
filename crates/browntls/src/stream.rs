@@ -49,11 +49,14 @@ where
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.complete_prior_io()?;
         // Fetch records until plaintext is available or the peer closes.
-        while self.conn.wants_read() {
-            let at_eof = self.conn.complete_io(self.sock)?.0 == 0;
-            if at_eof {
+        // Reading also pauses while too many control records we owe the
+        // peer are queued; `complete_io` writes them before it reads.
+        while self.conn.wants_read() || self.conn.core.common_state.control_backlog_full() {
+            // A pass that only wrote, such as answering a KeyUpdate, read
+            // nothing but is not EOF: go round again and read.
+            let (rdlen, wrlen) = self.conn.complete_io(self.sock)?;
+            if rdlen == 0 && wrlen == 0 {
                 if let Ok(io_state) = self.conn.process_new_packets()
-                    && at_eof
                     && io_state.plaintext_bytes_to_read() == 0
                 {
                     return Err(std::io::Error::new(

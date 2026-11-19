@@ -5,7 +5,7 @@
 //!
 //! Each side's record protection, key schedule, key exchange, randomness and
 //! signature verification come from its own provider. RustCrypto signs
-//! nothing with RSA (RUSTSEC-2023-0071), so an RSA-keyed RustCrypto peer
+//! nothing with RSA, so an RSA-keyed RustCrypto peer
 //! loads its private key with the native key provider; everything else on
 //! that side stays RustCrypto's.
 

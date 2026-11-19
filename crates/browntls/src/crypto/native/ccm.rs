@@ -19,10 +19,11 @@
 //! integrity limit is enforced here. TLS closes the connection on the first
 //! record that fails authentication (RFC 9846 §5.2), but a server that
 //! rejects 0-RTT data skips records that fail to decrypt under the handshake
-//! key, up to `max_early_data_size` bytes (RFC 9846 §4.2.10; 16384 bytes even
-//! when early data is disabled), which alone would allow up to 2048 CCM_8
-//! forgery attempts (8-byte records). Each decrypter therefore counts the
-//! records that fail authentication under its key; once the count reaches
+//! key, up to `max_early_data_size` bytes (RFC 9846 §4.3.10; 16384 bytes even
+//! when early data is disabled), each record costing at least one byte,
+//! which alone would allow up to 16384 CCM_8 forgery attempts. Each
+//! decrypter therefore counts the records that fail authentication under
+//! its key; once the count reaches
 //! the limit it rejects every further record without attempting
 //! authentication, and reports the limit through
 //! [`MessageDecrypter::integrity_limit_reached`] so that the record layer
@@ -47,8 +48,8 @@ use browntls_crypto::ccm::{Aes128Ccm, Aes128Ccm8};
 use super::aead::Kind;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter,
-    NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
-    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage, Tls13AeadAlgorithm,
+    UnsupportedOperationError, make_tls13_aad, seal_record, seal_record_into,
 };
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
@@ -217,33 +218,61 @@ struct Encrypter<V> {
     iv: Iv,
 }
 
+impl<V: Variant> Encrypter<V> {
+    /// Seals a record body: the content at the front, then room for the
+    /// content type and the tag. TLSInnerPlaintext = content || ContentType
+    /// (no padding), then the tag (RFC 9846 §5.2).
+    fn seal(&self, typ: ContentType, seq: u64, body: &mut [u8]) -> Result<(), Error> {
+        let aad = make_tls13_aad(body.len());
+        let inner_len = body
+            .len()
+            .checked_sub(V::TAG_LEN)
+            .ok_or(Error::EncryptError)?;
+        let (inner, tag) = body
+            .split_at_mut_checked(inner_len)
+            .ok_or(Error::EncryptError)?;
+        *inner.last_mut().ok_or(Error::EncryptError)? = typ.into();
+
+        let nonce = Nonce::new(&self.iv, seq);
+        self.cipher
+            .seal(&nonce.0, &aad, inner, tag)
+            .map_err(|_| Error::EncryptError)
+    }
+}
+
 impl<V: Variant> MessageEncrypter for Encrypter<V> {
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        // TLSInnerPlaintext = content || ContentType (no padding), then the
-        // tag (RFC 9846 §5.2).
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = PrefixedPayload::with_capacity(total_len);
-        payload.extend_from_chunks(&msg.payload);
-        payload.extend_from_slice(&msg.typ.to_array());
-        let body_len = payload.len();
-        payload.extend_from_slice(&[0u8; 16][..V::TAG_LEN]);
-
-        let nonce = Nonce::new(&self.iv, seq);
-        let aad = make_tls13_aad(total_len);
-        let (body, tag) = payload.as_mut().split_at_mut(body_len);
-        self.cipher
-            .seal(&nonce.0, &aad, body, tag)
-            .map_err(|_| Error::EncryptError)?;
-
-        Ok(OutboundOpaqueMessage::new(
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record(
             ContentType::ApplicationData,
             ProtocolVersion::TLSv1_2,
-            payload,
-        ))
+            &msg.payload,
+            0,
+            body_len,
+            |body| self.seal(msg.typ, seq, body),
+        )
+    }
+
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record_into(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &msg.payload,
+            0,
+            body_len,
+            out,
+            |body| self.seal(msg.typ, seq, body),
+        )
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {

@@ -22,6 +22,11 @@
 //! uses the bitsliced S-box, so no table is indexed by key material); the
 //! hardware backends consume the resulting round keys. Expanded keys are
 //! zeroised on drop.
+//!
+//! The family's streams for load-aware routing ([`crate::accel::load`]) are
+//! the records of AES-GCM keys ([`crate::gcm`]), one stream per key size;
+//! such keys hold a key expanded for each alternate backend. The block cipher types here, CCM and CBC keep
+//! the backend they were created for.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -189,7 +194,21 @@ impl crate::accel::Backends for Backend {
             Self::RvZkne => "Zkne",
         }
     }
+
+    fn streams() -> &'static [crate::accel::load::Stream] {
+        &LOAD
+    }
 }
+
+/// Load-aware routing state: the records sealed and opened by AES-GCM keys
+/// ([`crate::gcm`]), 128-bit keys first, then 256-bit ones (fourteen rounds
+/// cost more per byte than ten, so the two are not one kind of work). A
+/// record is timed as a whole, CTR and GHASH together, and counted for the
+/// AES backend that encrypted it.
+pub(crate) static LOAD: [crate::accel::load::Stream; 2] = [
+    crate::accel::load::Stream::bulk("records (128-bit key)"),
+    crate::accel::load::Stream::bulk("records (256-bit key)"),
+];
 
 // Keys are long-lived (one per connection); the 960-byte bitsliced schedule is
 // not worth an allocation.
@@ -436,11 +455,13 @@ macro_rules! aes_variant {
 
 aes_variant!(
     /// AES-128 (encryption only).
-    Aes128, 16
+    Aes128,
+    16
 );
 aes_variant!(
     /// AES-256 (encryption only).
-    Aes256, 32
+    Aes256,
+    32
 );
 
 #[cfg(test)]

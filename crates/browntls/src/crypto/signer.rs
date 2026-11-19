@@ -7,10 +7,16 @@ use core::fmt::Debug;
 use browntls_pki::{AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
 
 use super::CryptoProvider;
+use crate::delegated_credential::{DelegatedCredential, DelegatedCredentialKey};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::{Error, InconsistentKeys};
+use crate::msgs::handshake::CertificatePayloadTls13;
 use crate::sync::Arc;
 use crate::x509;
+
+/// The longest OCSP response a `CertificateStatus` can carry
+/// (`OCSPResponse<1..2^24-1>`, RFC 6066 §8).
+const MAX_OCSP_RESPONSE_LEN: usize = 0xff_ffff;
 
 /// A private key that can produce handshake signatures.
 pub trait SigningKey: Debug + Send + Sync {
@@ -44,8 +50,20 @@ pub struct CertifiedKey {
     /// The end entity's signing key.
     pub key: Arc<dyn SigningKey>,
 
-    /// A stapled OCSP response for the end entity, if any.
+    /// A stapled OCSP response for the end entity, if any. Responses for
+    /// the rest of the chain are set with [`Self::set_ocsp_for`].
     pub ocsp: Option<Vec<u8>>,
+
+    /// OCSP responses for the certificates after the end entity: element
+    /// `i` belongs to `cert[i + 1]`.
+    intermediate_ocsp: Vec<Option<Vec<u8>>>,
+
+    /// The end entity's encoded `SignedCertificateTimestampList`.
+    sct_list: Option<Vec<u8>>,
+
+    /// Delegated credentials for the end entity (RFC 9345); see
+    /// [`Self::delegated_credentials`].
+    delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
 }
 
 impl CertifiedKey {
@@ -69,7 +87,102 @@ impl CertifiedKey {
             cert,
             key,
             ocsp: None,
+            intermediate_ocsp: Vec::new(),
+            sct_list: None,
+            delegated_credentials: Vec::new(),
         }
+    }
+
+    /// The OCSP response to staple for `cert[chain_index]`, if one is
+    /// configured: [`Self::ocsp`] for the end entity (index 0). An empty
+    /// response counts as none.
+    pub fn ocsp_for(&self, chain_index: usize) -> Option<&[u8]> {
+        let response = match chain_index.checked_sub(1) {
+            None => self.ocsp.as_deref(),
+            // `cert` is public and may have been shortened since.
+            Some(_) if chain_index >= self.cert.len() => None,
+            Some(intermediate) => self.intermediate_ocsp.get(intermediate)?.as_deref(),
+        };
+        response.filter(|response| !response.is_empty())
+    }
+
+    /// Sets, or with `None` or an empty response removes, the DER-encoded
+    /// OCSP response to staple for `cert[chain_index]`. Index 0 is the end
+    /// entity and sets [`Self::ocsp`]. The response is not interpreted.
+    ///
+    /// It is sent to a peer that asks for certificate status; TLS 1.3 can
+    /// carry one for every certificate in the chain (RFC 8446 §4.4.2.1).
+    ///
+    /// Fails if the chain has no such certificate, or if the response is
+    /// longer than its 24-bit length field allows.
+    pub fn set_ocsp_for(
+        &mut self,
+        chain_index: usize,
+        response: Option<Vec<u8>>,
+    ) -> Result<(), Error> {
+        if chain_index >= self.cert.len() {
+            return Err(Error::general(
+                "no certificate at this chain index for the OCSP response",
+            ));
+        }
+        let response = response.filter(|response| !response.is_empty());
+        if response
+            .as_ref()
+            .is_some_and(|r| r.len() > MAX_OCSP_RESPONSE_LEN)
+        {
+            return Err(Error::general("OCSP response is too large"));
+        }
+        let Some(intermediate) = chain_index.checked_sub(1) else {
+            self.ocsp = response;
+            return Ok(());
+        };
+        if self.intermediate_ocsp.len() <= intermediate {
+            self.intermediate_ocsp.resize(intermediate + 1, None);
+        }
+        self.intermediate_ocsp[intermediate] = response;
+        Ok(())
+    }
+
+    /// The end entity's signed certificate timestamps, as an encoded
+    /// `SignedCertificateTimestampList` (RFC 6962 §3.3), if configured.
+    pub fn sct_list(&self) -> Option<&[u8]> {
+        self.sct_list.as_deref()
+    }
+
+    /// Sets, or with `None` removes, the end entity's signed certificate
+    /// timestamps: an encoded `SignedCertificateTimestampList` (RFC 6962
+    /// §3.3), sent to a peer that asks for them.
+    ///
+    /// Fails unless it is a well-formed, non-empty list of non-empty SCTs;
+    /// the SCTs themselves are not interpreted.
+    pub fn set_sct_list(&mut self, sct_list: Option<Vec<u8>>) -> Result<(), Error> {
+        if let Some(sct_list) = &sct_list
+            && CertificatePayloadTls13::validate_sct_list(sct_list).is_err()
+        {
+            return Err(Error::general("malformed SignedCertificateTimestampList"));
+        }
+        self.sct_list = sct_list;
+        Ok(())
+    }
+
+    /// Adds a delegated credential for the end entity, with its private
+    /// `key` (RFC 9345). See [`DelegatedCredentialKey::new`] for the checks.
+    pub fn with_delegated_credential(
+        mut self,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        let dc = DelegatedCredentialKey::new(self.end_entity_cert()?, credential, key)?;
+        self.delegated_credentials.push(Arc::new(dc));
+        Ok(self)
+    }
+
+    /// The delegated credentials added with
+    /// [`Self::with_delegated_credential`], most preferred first. A TLS 1.3
+    /// server sends the first one the client accepts and signs
+    /// CertificateVerify with its key; otherwise `key` signs.
+    pub fn delegated_credentials(&self) -> &[Arc<DelegatedCredentialKey>] {
+        &self.delegated_credentials
     }
 
     /// Checks that the key's public half matches the end-entity certificate.
@@ -129,14 +242,4 @@ pub(crate) fn spki_from_parts(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn spki_encoding() {
-        let spki = public_key_to_spki(&browntls_pki::alg_id::ED25519, [0xaa; 32]);
-        let (alg, key) = x509::split_spki(spki.as_ref()).unwrap();
-        assert_eq!(alg, browntls_pki::alg_id::ED25519.as_bytes());
-        assert_eq!(key, [0xaa; 32]);
-    }
-}
+mod tests;

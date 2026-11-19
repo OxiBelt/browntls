@@ -12,14 +12,17 @@
 //! * [`client`] / [`server`]: configuration ([`ClientConfig`], [`ServerConfig`])
 //!   and connections ([`ClientConnection`], [`ServerConnection`]).
 //! * [`ConnectionCommon`]: the buffered connection API shared by both sides.
+//! * [`unbuffered`]: the caller-buffer-driven API
+//!   ([`client::UnbufferedClientConnection`],
+//!   [`server::UnbufferedServerConnection`]), also available without `std`.
 //! * [`Error`] and its sub-enums describe every failure the library reports.
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-// Without `std` the buffered connections are absent and nothing drives the
-// handshake state machines yet (the unbuffered API is not implemented), so
-// most of the protocol code is unreachable in that configuration.  Without
+// Without `std` the buffered connections are absent and only the unbuffered
+// API drives the handshake state machines, so the buffered-only helpers are
+// unreachable in that configuration.  Without
 // `tls12` the TLS 1.2 message types, which are compiled unconditionally to
 // keep the wire-format module uniform, have no users.  The all-features build
 // is the one that must be free of dead code.
@@ -51,7 +54,7 @@ mod log {
 }
 
 pub(crate) mod sync {
-    pub(crate) use alloc::sync::Arc;
+    pub(crate) use alloc::sync::{Arc, Weak};
 }
 
 #[macro_use]
@@ -64,19 +67,26 @@ pub mod compress;
 mod conn;
 pub mod crypto;
 mod ct;
+pub mod delegated_credential;
+pub mod ech;
 mod enums;
 mod error;
+pub mod exported_authenticator;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
 mod hash_hs;
+pub mod kernel;
 mod key_log;
 #[cfg(feature = "std")]
 mod key_log_file;
 #[cfg(feature = "std")]
 mod limited_cache;
+pub mod psk;
+pub mod quic;
 mod rand;
 mod record_layer;
+pub mod revocation;
 #[cfg(feature = "std")]
 mod stream;
 mod suites;
@@ -85,6 +95,7 @@ pub mod ticketer;
 #[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
+pub mod unbuffered;
 mod vecbuf;
 mod verify;
 mod versions;
@@ -135,7 +146,7 @@ pub mod client {
     pub use builder::WantsClientCert;
     pub use client_conn::{
         ClientConfig, ClientConnectionData, ClientHelloPadding, ClientSessionStore,
-        ResolvesClientCert, Resumption, TicketRequest, Tls12Resumption,
+        ResolvesClientCert, Resumption, TicketRequest, Tls12Resumption, UnbufferedClientConnection,
     };
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};
@@ -183,7 +194,8 @@ pub mod server {
     pub use server_conn::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
     pub use server_conn::{
         ClientHello, PostHandshakeAuthStatus, ProducesTickets, ResolvesServerCert, ServerConfig,
-        ServerConnectionData, StoresServerSessions,
+        ServerConnectionData, StoresServerSessions, UnbufferedAcceptStatus, UnbufferedAccepted,
+        UnbufferedAcceptedAlert, UnbufferedAcceptor, UnbufferedServerConnection,
     };
 
     pub use crate::verify::NoClientAuth;

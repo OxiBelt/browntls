@@ -34,6 +34,10 @@
 //! hardware checks that guard `unsafe` backend code are independent of the
 //! policy, and `--cfg browntls_force_soft` removes every accelerated backend.
 //!
+//! The policy's choice is static. [`load`] can additionally move a share of
+//! a family's work to another permitted backend while the selected one runs
+//! slower than usual (off by default).
+//!
 //! ```
 //! use browntls_crypto::accel::{self, Acceleration, Algorithm, Kind, Policy};
 //!
@@ -361,11 +365,15 @@ pub enum Algorithm {
     Rsa,
     /// ML-KEM polynomial arithmetic.
     MlKem,
+    /// P-384 field arithmetic.
+    P384,
+    /// P-521 field arithmetic.
+    P521,
 }
 
 impl Algorithm {
     /// Every algorithm family, in reporting order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Sha1,
         Self::Sha256,
         Self::Sha512,
@@ -379,6 +387,8 @@ impl Algorithm {
         Self::P256,
         Self::Rsa,
         Self::MlKem,
+        Self::P384,
+        Self::P521,
     ];
 
     const fn index(self) -> usize {
@@ -396,6 +406,8 @@ impl Algorithm {
             Self::P256 => 10,
             Self::Rsa => 11,
             Self::MlKem => 12,
+            Self::P384 => 13,
+            Self::P521 => 14,
         }
     }
 
@@ -416,6 +428,8 @@ impl Algorithm {
             Self::P256 => "P-256",
             Self::Rsa => "RSA",
             Self::MlKem => "ML-KEM",
+            Self::P384 => "P-384",
+            Self::P521 => "P-521",
         }
     }
 }
@@ -438,6 +452,11 @@ pub(crate) trait Backends: Copy + PartialEq + 'static {
     fn uses(self) -> Uses;
     /// A display name such as `"AES-NI"` or `"portable"`.
     fn name(self) -> &'static str;
+    /// The family's streams of work for load-aware routing ([`load`]); none
+    /// when its calls are never routed.
+    fn streams() -> &'static [load::Stream] {
+        &[]
+    }
 }
 
 fn portable<B: Backends>() -> B {
@@ -498,9 +517,13 @@ macro_rules! for_family {
             Algorithm::P256 => $f::<crate::nist::P256Backend>($($arg),*),
             Algorithm::Rsa => $f::<crate::rsa::RsaBackend>($($arg),*),
             Algorithm::MlKem => $f::<crate::mlkem::Backend>($($arg),*),
+            Algorithm::P384 => $f::<crate::nist::P384Backend>($($arg),*),
+            Algorithm::P521 => $f::<crate::nist::P521Backend>($($arg),*),
         }
     };
 }
+
+pub mod load;
 
 /// Every algorithm's policy in one word: algorithm `i` occupies bits
 /// `4 * i .. 4 * i + 4` with the [`Policy::to_bits`] encoding. All-preferred
@@ -511,9 +534,12 @@ static POLICIES: AtomicU64 = AtomicU64::new(0);
 
 const NIBBLE: u64 = 0xf;
 
+// One nibble per algorithm must fit the policy word.
+const _: () = assert!(4 * Algorithm::ALL.len() <= 64);
+
 #[inline]
 const fn shift(alg: Algorithm) -> u32 {
-    // `index` < 13, so the shift is below 52.
+    // `index` < 16 (checked above), so the shift is below 64.
     #[allow(clippy::cast_possible_truncation)]
     {
         4 * alg.index() as u32
@@ -712,7 +738,8 @@ mod tests {
             }
             assert_eq!(simd.name().parse::<Acceleration>(), Ok(simd));
         }
-        assert!(word >> 52 == 0, "only 52 bits are used");
+        let used = 4 * Algorithm::ALL.len();
+        assert!(used == 64 || word >> used == 0, "only {used} bits are used");
         assert_eq!("PREFERED".parse(), Ok(Acceleration::Preferred));
         assert!("fast".parse::<Acceleration>().is_err());
         for (i, a) in Algorithm::ALL.iter().enumerate() {

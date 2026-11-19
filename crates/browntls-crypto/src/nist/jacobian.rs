@@ -298,6 +298,15 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn wide_adx_jacobian_formulas() {
+        if super::super::wide_x86::available() {
+            check::<super::super::p384_x86::P384Adx, 6>();
+            check::<super::super::p521_x86::P521Adx, 9>();
+        }
+    }
+
     #[test]
     fn p384_jacobian_formulas() {
         check::<P384, 6>();

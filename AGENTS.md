@@ -3,8 +3,9 @@
 browntls is an independent Rust TLS library project with intended kernel
 integration. Its architecture is described in [Architecture](docs/Architecture.md)
 and its status in [Roadmap](docs/Roadmap.md). browntls does not depend on rustls
-at run time (rustls is only an interoperability test oracle), and no kernel
-mechanism has been designed yet.
+at run time (rustls is only an interoperability test oracle). Linux kernel TLS
+offload exists (`browntls::kernel`, `browntls-ktls`); no other kernel mechanism
+has been designed yet.
 
 ## Source of truth
 
@@ -17,16 +18,27 @@ and disclosure.
 Current layout:
 
 - Root Markdown files: project and contributor guidance.
-- `crates/browntls-crypto/`: primitives and architecture backends (the only
-  crate permitted to contain `unsafe`, confined to backend modules).
+- `crates/browntls-crypto/`: primitives and architecture backends (`unsafe`
+  confined to backend, CPU-detection, zeroisation and system-call modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
 - `crates/browntls/`: TLS protocol, provider mount point and providers.
+- `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls`
+  (`TlsConnector`, `TlsAcceptor`).
+- `crates/browntls-ktls/`: Linux kernel TLS offload of `browntls` connections
+  (`KtlsStream`); its `src/sys.rs` is the only other place `unsafe` is
+  permitted (kernel TLS system calls).
 - `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
   (test tooling, not published).
+- `crates/browntls-entropy/`: statistical entropy checks of generated keys,
+  nonces and handshake secrets (test tooling, not published).
 - `docs/`: technical and maintenance documentation.
-- `scripts/`: QEMU cross-testing and CI helpers.
+- `scripts/`: QEMU cross-testing, CI and fuzzing helpers, and the OpenSSL
+  benchmark comparison.
 - `tests/scripts/`: portable repository checks and their regression tests.
 - `tests/e2e/`: Docker end-to-end interoperability matrix and its harness tests.
+- `tests/kubernetes/`: certificate revocation test on minikube.
+- `fuzz/`: cargo-fuzz targets (own manifest, outside the workspace).
+- `.agents/` (linked from `.claude/`): agent skills.
 - `.github/`: workflows, contribution templates, and update automation.
 
 ## Working principles
@@ -38,11 +50,17 @@ Never present successful documentation CI as validation of a TLS implementation.
 
 Delegate only when useful tools are available and the task has a clear boundary.
 Parallelize independent investigation; give write tasks non-overlapping
-ownership. Require concise evidence and verification from workers. Prefer
-independent review of cryptography, unsafe/FFI, kernel boundaries, parsing,
-protocol state, concurrency, and resource limits. If independent review is
-unavailable, report that limit rather than inventing a reviewer. Do not bind
-this workflow to particular model names or subscription capabilities.
+ownership. Require concise evidence and verification from workers. Apply the
+mandatory [independent review gate](CONTRIBUTING.md#independent-review) to
+substantive behavior or safety changes in sensitive areas. If a suitable
+reviewer is unavailable, continue useful preparation and testing but leave
+those changes unlanded; report the gap rather than inventing a reviewer.
+
+Use the [subagent delegation skill](.agents/skills/subagent-delegation/SKILL.md)
+when delegation materially helps. It supports GPT and Claude workers in the
+same application and is also discoverable by Codex and Claude Code. Keep roles
+capability-based; resolve permitted model choices against the active runtime
+rather than assuming particular model names or subscription capabilities exist.
 
 Start security review from a trustworthy baseline and cover the change plus
 affected surrounding surfaces. Expand coverage when evidence warrants it;

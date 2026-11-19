@@ -11,5 +11,5 @@ pub use browntls::crypto::rustcrypto::*;
 pub const NAME: &str = "rustcrypto";
 
 /// Whether the provider's key loader signs with RSA keys. RustCrypto's does
-/// not (every `rsa` release is affected by RUSTSEC-2023-0071).
+/// not (`KeyProvider::load_private_key` rejects RSA keys).
 pub const SIGNS_RSA: bool = false;

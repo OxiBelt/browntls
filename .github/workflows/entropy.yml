@@ -1,0 +1,93 @@
+name: Entropy
+
+# Draws millions of keys, seeds, nonces, key shares and handshake secrets
+# from browntls's public generators and checks each stream statistically for
+# low entropy: duplicates, biased or stuck bits, per-byte min-entropy and
+# Shannon entropy, collision entropy of bit windows, repeated blocks and
+# serial correlation (crates/browntls-entropy/README.md). Each topic is a
+# separate job on one x86-64 runner; the other architectures' OS-entropy
+# paths run at smoke size in the native test jobs of rust.yml.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/entropy.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/browntls/**'
+      - 'crates/browntls-crypto/**'
+      - 'crates/browntls-entropy/**'
+      - 'rust-toolchain.toml'
+  pull_request:
+    paths:
+      - '.github/workflows/entropy.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/browntls/**'
+      - 'crates/browntls-crypto/**'
+      - 'crates/browntls-entropy/**'
+      - 'rust-toolchain.toml'
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Base sample count per generator (costly generators divide it)
+        required: false
+        default: ''
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  entropy:
+    name: Entropy ${{ matrix.topic }} (x86-64)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        topic:
+          - os_rng
+          - curve25519
+          - curve448
+          - nist
+          - mlkem
+          - hpke
+          - ffdhe
+          - rsa
+          - tls_kx
+          - tls_ticketer
+          - tls_handshake
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      - name: Report CPU
+        run: |
+          nproc
+          grep -m1 -E '^(model name|Features|isa|uarch)' /proc/cpuinfo || true
+
+      # The checks must still catch known-bad generators on this machine.
+      - name: Self-test the detectors
+        run: cargo test -p browntls-entropy --lib --locked
+
+      - name: Check ${{ matrix.topic }}
+        env:
+          # 2^22 samples per generator; costly generators divide this
+          # (see each test's `sample_count` call).
+          BROWNTLS_ENTROPY_SAMPLES: ${{ inputs.samples || '4194304' }}
+          TOPIC: ${{ matrix.topic }}
+        # One test at a time: each test already uses every core.
+        run: cargo test -p browntls-entropy --locked --test "${TOPIC}" -- --nocapture --test-threads=1

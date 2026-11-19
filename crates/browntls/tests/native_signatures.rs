@@ -106,7 +106,7 @@ fn rsa_crate_key(bits: usize) -> (Vec<u8>, Vec<u8>) {
     use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::pkcs8::EncodePrivateKey;
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
-    let key = rsa::RsaPrivateKey::new(&mut rng, bits).unwrap();
+    let key = rsa::PrivateKey::new(&mut rng, bits).unwrap();
     (
         key.to_pkcs8_der().unwrap().as_bytes().to_vec(),
         key.to_pkcs1_der().unwrap().as_bytes().to_vec(),
@@ -360,12 +360,10 @@ fn rsa_crate_signatures_verify_with_native() {
 
     for key in test_keys().iter().filter(|k| k.kind == Kind::Rsa) {
         let private = match &key.der {
-            PrivateKeyDer::Pkcs8(der) => {
-                rsa::RsaPrivateKey::from_pkcs8_der(der.secret_der()).unwrap()
-            }
+            PrivateKeyDer::Pkcs8(der) => rsa::PrivateKey::from_pkcs8_der(der.secret_der()).unwrap(),
             PrivateKeyDer::Pkcs1(der) => {
                 use rsa::pkcs1::DecodeRsaPrivateKey;
-                rsa::RsaPrivateKey::from_pkcs1_der(der.secret_der()).unwrap()
+                rsa::PrivateKey::from_pkcs1_der(der.secret_der()).unwrap()
             }
             _ => unreachable!(),
         };

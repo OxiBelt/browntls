@@ -8,6 +8,7 @@ use super::{
     HandshakePayload, KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random,
     ServerExtensions, ServerNamePayload, SessionId, read_payload,
 };
+use crate::ech::codec::EchClientHello;
 use crate::enums::{
     CertificateCompressionAlgorithm, CertificateType, CipherSuite, HandshakeType, ProtocolVersion,
     SignatureScheme,
@@ -56,6 +57,14 @@ pub(crate) struct ClientExtensions {
     pub(crate) client_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) server_certificate_types: Option<Vec<CertificateType>>,
     pub(crate) transport_parameters: Option<Payload<'static>>,
+    /// Only ever valid inside an EncodedClientHelloInner (RFC 9849 §5.1);
+    /// parsed so a server can reject it anywhere else.
+    pub(crate) ech_outer_extensions: Option<Vec<ExtensionType>>,
+    /// RFC 9849 §5: encoded after every other extension but the GREASE
+    /// extension, `padding` and `pre_shared_key`.
+    pub(crate) encrypted_client_hello: Option<EchClientHello>,
+    /// RFC 9345 §4.1.1: the schemes accepted for a delegated credential.
+    pub(crate) delegated_credential: Option<Vec<SignatureScheme>>,
     /// RFC 8449: the largest record we are willing to receive.
     pub(crate) record_size_limit: Option<u16>,
     /// RFC 9149: how many TLS 1.3 tickets we would like.
@@ -75,6 +84,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) unknown: Vec<ExtensionType>,
     /// Always encoded last (RFC 8446 §4.2.11).
     pub(crate) preshared_key: Option<PresharedKeyOffer>,
+    /// RFC 8773 `tls_cert_with_extern_psk`: an empty extension.
+    pub(crate) cert_with_extern_psk: Option<()>,
 }
 
 impl ClientExtensions {
@@ -155,10 +166,26 @@ impl ClientExtensions {
             ExtensionType::TransportParameters,
         );
         add(
+            self.delegated_credential.is_some(),
+            ExtensionType::DelegatedCredential,
+        );
+        add(
             self.record_size_limit.is_some(),
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(
+            self.cert_with_extern_psk.is_some(),
+            ExtensionType::TlsCertWithExternPsk,
+        );
+        add(
+            self.ech_outer_extensions.is_some(),
+            ExtensionType::EncryptedClientHelloOuterExtensions,
+        );
+        add(
+            self.encrypted_client_hello.is_some(),
+            ExtensionType::EncryptedClientHello,
+        );
         for unknown in &self.unknown {
             add(true, *unknown);
         }
@@ -268,11 +295,31 @@ impl Codec<'_> for ClientExtensions {
         if let Some(tp) = &self.transport_parameters {
             encode_extension(ExtensionType::TransportParameters, out, |b| tp.encode(b));
         }
+        if let Some(schemes) = &self.delegated_credential {
+            encode_extension(ExtensionType::DelegatedCredential, out, |b| {
+                encode_vec_u16(b, schemes);
+            });
+        }
         if let Some(limit) = self.record_size_limit {
             encode_extension(ExtensionType::RecordSizeLimit, out, |b| limit.encode(b));
         }
         if let Some(request) = &self.ticket_request {
             encode_extension(ExtensionType::TicketRequest, out, |b| request.encode(b));
+        }
+        if self.cert_with_extern_psk.is_some() {
+            encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
+        }
+        if let Some(types) = &self.ech_outer_extensions {
+            encode_extension(
+                ExtensionType::EncryptedClientHelloOuterExtensions,
+                out,
+                |b| {
+                    encode_vec_u8(b, types);
+                },
+            );
+        }
+        if let Some(ech) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| ech.encode(b));
         }
         if let Some(grease) = self.grease_last {
             // RFC 8701 §3: the second GREASE extension is not empty.
@@ -364,7 +411,9 @@ impl Codec<'_> for ClientExtensions {
                     out.server_certificate_types =
                         Some(read_nonempty_vec_u8(body, "ServerCertificateTypes")?);
                 }
-                ExtensionType::TransportParameters | ExtensionType::TransportParametersDraft => {
+                // RFC 9001 §8.2 only; the pre-RFC draft code point 0xffa5 is
+                // left unrecognised.
+                ExtensionType::TransportParameters => {
                     out.transport_parameters = Some(Payload::read(body).into_owned());
                 }
                 ExtensionType::RecordSizeLimit => {
@@ -380,6 +429,18 @@ impl Codec<'_> for ClientExtensions {
                 ExtensionType::PreSharedKey => {
                     out.preshared_key = Some(PresharedKeyOffer::read(body)?);
                 }
+                ExtensionType::EncryptedClientHelloOuterExtensions => {
+                    out.ech_outer_extensions = Some(read_nonempty_vec_u8(body, "OuterExtensions")?);
+                }
+                ExtensionType::EncryptedClientHello => {
+                    out.encrypted_client_hello = Some(EchClientHello::read(body)?);
+                }
+                ExtensionType::DelegatedCredential => {
+                    // SignatureSchemeList: supported_signature_algorithm<2..2^16-2>.
+                    out.delegated_credential =
+                        Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
+                }
+                ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();
@@ -515,6 +576,9 @@ pub(crate) struct ServerHelloPayload {
 }
 
 /// The result of parsing a ServerHello-shaped message.
+// Short-lived: `HandshakePayload::read` converts it at once, so boxing the
+// larger variant would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServerHelloOrRetry {
     Hello(ServerHelloPayload),
     Retry(HelloRetryRequest),
@@ -575,6 +639,8 @@ pub(crate) struct HelloRetryRequestExtensions {
     pub(crate) key_share: Option<NamedGroup>,
     pub(crate) cookie: Option<PayloadU16>,
     pub(crate) supported_versions: Option<ProtocolVersion>,
+    /// RFC 9849 §5: the server's `hrr_accept_confirmation`.
+    pub(crate) encrypted_client_hello: Option<[u8; 8]>,
     /// Present only when an unknown extension was seen; the handshake will
     /// reject the message, but the codec records it for diagnostics.
     pub(crate) unknown: Vec<ExtensionType>,
@@ -593,12 +659,26 @@ impl Codec<'_> for HelloRetryRequestExtensions {
         if let Some(v) = &self.supported_versions {
             encode_extension(ExtensionType::SupportedVersions, out, |b| v.encode(b));
         }
+        if let Some(conf) = &self.encrypted_client_hello {
+            encode_extension(ExtensionType::EncryptedClientHello, out, |b| {
+                b.extend_from_slice(conf);
+            });
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let mut out = Self::default();
         read_extensions(r, |typ, body| {
             match typ {
+                ExtensionType::EncryptedClientHello => {
+                    // RFC 9849 §6.1.4: any length but 8 is decode_error.
+                    let conf = body
+                        .take(8)
+                        .ok_or(InvalidMessage::MissingData("ECHHelloRetryRequest"))?;
+                    let mut out_conf = [0u8; 8];
+                    out_conf.copy_from_slice(conf);
+                    out.encrypted_client_hello = Some(out_conf);
+                }
                 ExtensionType::KeyShare => out.key_share = Some(NamedGroup::read(body)?),
                 ExtensionType::Cookie => {
                     let cookie = PayloadU16::read(body)?;
@@ -727,257 +807,4 @@ impl<'a> Codec<'a> for HandshakeMessagePayload<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_client_hello() -> ClientHelloPayload {
-        ClientHelloPayload {
-            client_version: ProtocolVersion::TLSv1_2,
-            random: Random::from([1u8; 32]),
-            session_id: SessionId::from_slice(&[2u8; 32]).unwrap(),
-            cipher_suites: alloc::vec![
-                CipherSuite::TLS13_AES_128_GCM_SHA256,
-                CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV
-            ],
-            compression_methods: alloc::vec![Compression::Null],
-            extensions: ClientExtensions {
-                server_name: Some(ServerNamePayload::SingleDnsName(
-                    browntls_pki::DnsName::try_from("example.com")
-                        .unwrap()
-                        .to_owned(),
-                )),
-                named_groups: Some(alloc::vec![NamedGroup::X25519]),
-                signature_schemes: Some(alloc::vec![SignatureScheme::ED25519]),
-                protocols: Some(alloc::vec![ProtocolName::from(b"h2".to_vec())]),
-                supported_versions: Some(alloc::vec![ProtocolVersion::TLSv1_3]),
-                key_shares: Some(alloc::vec![KeyShareEntry::new(
-                    NamedGroup::X25519,
-                    &[9; 32]
-                )]),
-                psk_modes: Some(alloc::vec![PskKeyExchangeMode::PSK_DHE_KE]),
-                preshared_key: Some(PresharedKeyOffer::new(
-                    super::super::PresharedKeyIdentity::new(alloc::vec![1, 2, 3], 7),
-                    alloc::vec![0xab; 32],
-                )),
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn client_hello_roundtrip() {
-        let ch = sample_client_hello();
-        let msg = HandshakeMessagePayload(HandshakePayload::ClientHello(ch.clone()));
-        let enc = msg.get_encoding();
-        assert_eq!(enc[0], 1);
-        let back = HandshakeMessagePayload::read_version(
-            &mut Reader::init(&enc),
-            ProtocolVersion::TLSv1_3,
-        )
-        .unwrap();
-        match back.0 {
-            HandshakePayload::ClientHello(parsed) => assert_eq!(parsed, ch),
-            other => panic!("wrong payload {other:?}"),
-        }
-        // binder truncation removes exactly the binders list
-        let truncated = msg.encoding_for_binder_signing();
-        assert_eq!(truncated.len(), enc.len() - (2 + 33));
-        assert_eq!(&enc[..truncated.len()], &truncated[..]);
-    }
-
-    #[test]
-    fn client_hello_with_later_rfc_extensions() {
-        let mut ch = sample_client_hello();
-        ch.extensions.record_size_limit = Some(16_385);
-        ch.extensions.ticket_request = Some(ClientTicketRequest {
-            new_session_count: 2,
-            resumption_count: 1,
-        });
-        ch.extensions.grease_first = Some(0x1a1a);
-        ch.extensions.grease_last = Some(0x2a2a);
-        ch.extensions.padding = Some(7);
-        let enc = ch.get_encoding();
-        let back = ClientHelloPayload::read_bytes(&enc).unwrap();
-        assert_eq!(back.extensions.record_size_limit, Some(16_385));
-        assert_eq!(back.extensions.ticket_request, ch.extensions.ticket_request);
-        assert_eq!(back.extensions.padding, Some(7));
-        // GREASE extensions read back as unknown ones, in order.
-        assert_eq!(
-            back.extensions.unknown,
-            [
-                ExtensionType::Unknown(0x1a1a),
-                ExtensionType::Unknown(0x2a2a)
-            ]
-        );
-        assert_eq!(back.extensions.preshared_key, ch.extensions.preshared_key);
-        // Neither GREASE nor padding counts as offered.
-        let offered = ch.extensions.present_types();
-        assert!(offered.contains(&ExtensionType::RecordSizeLimit));
-        assert!(offered.contains(&ExtensionType::TicketRequest));
-        assert!(!offered.contains(&ExtensionType::Padding));
-        assert!(
-            !offered
-                .iter()
-                .any(|t| matches!(t, ExtensionType::Unknown(_)))
-        );
-        // The padding body is zeros, followed only by pre_shared_key.
-        let psk_len = 4 + ch
-            .extensions
-            .preshared_key
-            .as_ref()
-            .unwrap()
-            .get_encoding()
-            .len();
-        let padding = &enc[enc.len() - psk_len - 11..enc.len() - psk_len];
-        assert_eq!(padding, [0, 0x15, 0, 7, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn psk_must_be_last() {
-        let mut ch = sample_client_hello();
-        // Encode manually with PSK first by swapping extension order:
-        let mut bytes = Vec::new();
-        ch.client_version.encode(&mut bytes);
-        ch.random.encode(&mut bytes);
-        ch.session_id.encode(&mut bytes);
-        encode_vec_u16(&mut bytes, &ch.cipher_suites);
-        encode_vec_u8(&mut bytes, &ch.compression_methods);
-        let psk = ch.extensions.preshared_key.take().unwrap();
-        let mut exts = Vec::new();
-        {
-            let list = LengthPrefixedBuffer::new(ListLength::U16, &mut exts);
-            encode_extension(ExtensionType::PreSharedKey, list.buf, |b| psk.encode(b));
-            encode_extension(ExtensionType::SupportedVersions, list.buf, |b| {
-                encode_vec_u8(b, &[ProtocolVersion::TLSv1_3]);
-            });
-        }
-        bytes.extend(exts);
-        assert_eq!(
-            ClientHelloPayload::read_bytes(&bytes),
-            Err(InvalidMessage::PreSharedKeyIsNotFinalExtension)
-        );
-    }
-
-    #[test]
-    fn client_hello_rejects_empty_lists_and_duplicates() {
-        let mut ch = sample_client_hello();
-        ch.cipher_suites.clear();
-        assert_eq!(
-            ClientHelloPayload::read_bytes(&ch.get_encoding()),
-            Err(InvalidMessage::IllegalEmptyList("CipherSuites"))
-        );
-        let ch = sample_client_hello();
-        let mut enc = ch.get_encoding();
-        // Build an extension block containing the same extension twice.
-        let mut bytes = Vec::new();
-        ch.client_version.encode(&mut bytes);
-        ch.random.encode(&mut bytes);
-        ch.session_id.encode(&mut bytes);
-        encode_vec_u16(&mut bytes, &ch.cipher_suites);
-        encode_vec_u8(&mut bytes, &ch.compression_methods);
-        {
-            let list = LengthPrefixedBuffer::new(ListLength::U16, &mut bytes);
-            encode_extension(ExtensionType::EarlyData, list.buf, |_| {});
-            encode_extension(ExtensionType::EarlyData, list.buf, |_| {});
-        }
-        assert_eq!(
-            ClientHelloPayload::read_bytes(&bytes),
-            Err(InvalidMessage::DuplicateExtension(0x2a))
-        );
-        enc.truncate(10);
-        assert!(ClientHelloPayload::read_bytes(&enc).is_err());
-    }
-
-    #[test]
-    fn client_hello_without_extensions_block() {
-        let ch = ClientHelloPayload {
-            client_version: ProtocolVersion::TLSv1_2,
-            random: Random::from([0u8; 32]),
-            session_id: SessionId::empty(),
-            cipher_suites: alloc::vec![CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256],
-            compression_methods: alloc::vec![Compression::Null],
-            extensions: ClientExtensions::default(),
-        };
-        let mut enc = ch.get_encoding();
-        // strip the (empty) extension block
-        enc.truncate(enc.len() - 2);
-        let back = ClientHelloPayload::read_bytes(&enc).unwrap();
-        assert_eq!(back, ch);
-        assert!(back.sni().is_none());
-        assert!(!back.has_duplicate_key_share());
-    }
-
-    #[test]
-    fn server_hello_and_hrr() {
-        let sh = ServerHelloPayload {
-            legacy_version: ProtocolVersion::TLSv1_2,
-            random: Random::from([5u8; 32]),
-            session_id: SessionId::empty(),
-            cipher_suite: CipherSuite::TLS13_AES_256_GCM_SHA384,
-            compression_method: Compression::Null,
-            extensions: ServerExtensions {
-                supported_versions: Some(ProtocolVersion::TLSv1_3),
-                key_share: Some(KeyShareEntry::new(NamedGroup::X25519, &[1; 32])),
-                ..Default::default()
-            },
-        };
-        let msg = HandshakeMessagePayload(HandshakePayload::ServerHello(sh.clone()));
-        let enc = msg.get_encoding();
-        match HandshakeMessagePayload::read_bytes(&enc).unwrap().0 {
-            HandshakePayload::ServerHello(back) => assert_eq!(back, sh),
-            other => panic!("{other:?}"),
-        }
-        assert!(!sh.has_downgrade_sentinel());
-
-        let hrr = HelloRetryRequest {
-            legacy_version: ProtocolVersion::TLSv1_2,
-            session_id: SessionId::empty(),
-            cipher_suite: CipherSuite::TLS13_AES_256_GCM_SHA384,
-            compression_method: Compression::Null,
-            extensions: HelloRetryRequestExtensions {
-                key_share: Some(NamedGroup::secp256r1),
-                supported_versions: Some(ProtocolVersion::TLSv1_3),
-                cookie: Some(PayloadU16::new(alloc::vec![1, 2])),
-                unknown: Vec::new(),
-            },
-        };
-        let msg = HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(hrr.clone()));
-        let enc = msg.get_encoding();
-        assert_eq!(enc[0], u8::from(HandshakeType::ServerHello));
-        match HandshakeMessagePayload::read_bytes(&enc).unwrap().0 {
-            HandshakePayload::HelloRetryRequest(back) => assert_eq!(back, hrr),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn oversize_handshake_rejected() {
-        let bytes = [1, 0x01, 0, 0];
-        assert_eq!(
-            HandshakeMessagePayload::read_bytes(&bytes).unwrap_err(),
-            InvalidMessage::HandshakePayloadTooLarge
-        );
-        let bytes = [1, 0, 0, 5, 0];
-        assert_eq!(
-            HandshakeMessagePayload::read_bytes(&bytes).unwrap_err(),
-            InvalidMessage::MessageTooShort
-        );
-    }
-
-    #[test]
-    fn message_hash_cannot_come_from_wire() {
-        let bytes = [0xfe, 0, 0, 1, 0];
-        assert_eq!(
-            HandshakeMessagePayload::read_bytes(&bytes).unwrap_err(),
-            InvalidMessage::UnexpectedMessage("MessageHash")
-        );
-    }
-
-    #[test]
-    fn unknown_handshake_type_is_opaque() {
-        let bytes = [0x7f, 0, 0, 2, 1, 2];
-        let msg = HandshakeMessagePayload::read_bytes(&bytes).unwrap();
-        assert_eq!(msg.typ(), HandshakeType::Unknown(0x7f));
-        assert_eq!(msg.get_encoding(), bytes);
-    }
-}
+mod tests;

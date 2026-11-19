@@ -102,7 +102,7 @@ impl MessageDecrypter for Plain {
 /// The native provider, optionally with the identity transform in place of
 /// every TLS 1.3 AEAD. Key exchange, key schedule, signatures and the TLS
 /// 1.2 suites stay real.
-fn provider(plain: bool) -> Arc<CryptoProvider> {
+pub(crate) fn provider(plain: bool) -> Arc<CryptoProvider> {
     let mut provider = native::default_provider();
     if plain {
         for suite in &mut provider.cipher_suites {
@@ -115,6 +115,7 @@ fn provider(plain: bool) -> Arc<CryptoProvider> {
                     },
                     hkdf_provider: real.hkdf_provider,
                     aead_alg: &PlainAead,
+                    quic: None,
                 }));
                 *suite = SupportedCipherSuite::Tls13(fake);
             }
@@ -192,7 +193,7 @@ impl Identity {
         Arc::new(roots)
     }
 
-    fn key(&self) -> PrivateKeyDer<'static> {
+    pub(crate) fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()))
     }
 }
@@ -420,6 +421,7 @@ fn finish<S: SideData>(conn: &mut ConnectionCommon<S>, failed: bool) {
 /// server flights first), a byte giving the records to drop from the last
 /// such flight, then the bytes the client receives.
 pub fn client(data: &[u8]) {
+    crate::init();
     let (mode, script) = parse(data);
     let configs = configs();
     let name = ServerName::try_from("localhost").expect("name");
@@ -463,6 +465,7 @@ pub fn client(data: &[u8]) {
 /// Input: as for [`client`], with genuine client flights first and the
 /// bytes the server receives after them.
 pub fn server(data: &[u8]) {
+    crate::init();
     let (mode, script) = parse(data);
     let configs = configs();
     let Ok(mut server) = ServerConnection::new(configs.server[mode.index()].clone()) else {

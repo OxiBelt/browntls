@@ -21,7 +21,8 @@ builds, run their `speed` binaries alternately with `--only <names>`.
 - AEADs: one seal per record with a fresh nonce, 13 bytes of AAD and a tag,
   at the record lengths of `openssl speed -aead` (2 to 16384 bytes).
 - Hashes: one-shot digest per message (`openssl speed -evp`).
-- X25519: one shared-secret derivation. Ed25519: 20-byte messages. ECDSA:
+- X25519 and X448: one shared-secret derivation (X448 also one public key).
+  Ed25519 and Ed448: 20-byte messages. ECDSA:
   pre-hashed digest with randomised (hedged) nonces. ECDH: one derivation.
   RSA: PKCS #1 v1.5 with SHA-256, CRT signing with blinding and a
   verify-before-release check.
@@ -29,6 +30,10 @@ builds, run their `speed` binaries alternately with `--only <names>`.
   1); the two runs differed by 5.1% per row (median), 12.8% at the 90th
   percentile and 21% at most, so differences below roughly 10% are not
   meaningful.
+- The X448, Ed448, P-384 and P-521 rows were measured for the revision that
+  added their fast paths, with the `speed` binary and `openssl speed` run
+  three times at about 1 s (browntls) and 2 s (OpenSSL) per row; they show
+  the medians. The other rows are from the two complete runs above.
 
 ## Results (x86-64)
 
@@ -79,12 +84,19 @@ builds, run their `speed` binaries alternately with `--only <names>`.
 | X25519 | derive | 27,204/s | 27,472/s | 28,587/s | 0.95× |
 | Ed25519 | sign | 73,706/s | 69,480/s | 24,551/s | 3.00× |
 | Ed25519 | verify | 26,524/s | 27,194/s | 8,978/s | 2.95× |
+| X448 | keygen | 18,211/s | 18,352/s | — | — |
+| X448 | derive | 6,605/s | 7,306/s | 5,648/s | 1.17× |
+| Ed448 | sign | 17,077/s | 17,849/s | 5,545/s | 3.08× |
+| Ed448 | verify | 6,598/s | 6,135/s | 5,164/s | 1.28× |
 | P-256 | sign | 52,902/s | 35,270/s | 42,682/s | 1.24× |
 | P-256 | verify | 16,626/s | 11,285/s | 13,656/s | 1.22× |
 | P-256 | ecdh | 15,309/s | 10,640/s | 17,458/s | 0.88× |
-| P-384 | sign | 6,128/s | 6,301/s | 1,285/s | 4.77× |
-| P-384 | verify | 3,004/s | 3,154/s | 1,752/s | 1.71× |
-| P-384 | ecdh | 2,861/s | 3,008/s | 1,518/s | 1.88× |
+| P-384 | sign | 11,259/s | 9,436/s | 1,362/s | 8.27× |
+| P-384 | verify | 4,054/s | 3,084/s | 1,534/s | 2.64× |
+| P-384 | ecdh | 3,935/s | 3,065/s | 1,431/s | 2.75× |
+| P-521 | sign | 7,352/s | 6,188/s | 3,976/s | 1.85× |
+| P-521 | verify | 2,594/s | 2,106/s | 2,070/s | 1.25× |
+| P-521 | ecdh | 2,397/s | 1,995/s | 3,344/s | 0.72× |
 | RSA-2048 | sign | 2,468/s | 794/s | 3,094/s | 0.80× |
 | RSA-2048 | verify | 79,754/s | 28,810/s | 55,100/s | 1.45× |
 | RSA-3072 | sign | 956/s | 266/s | 972/s | 0.98× |
@@ -107,6 +119,8 @@ Backends selected for the accelerated column:
 - P-256: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
 - RSA: AVX-512 IFMA + BMI2/ADX [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
 - ML-KEM: AVX2 [uses SIMD] (policy: SIMD preferred, dedicated preferred; available: SIMD)
+- P-384: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
+- P-521: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
 
 ## Observations
 
@@ -116,9 +130,10 @@ from the implementations, not profiles.
 - **Faster than OpenSSL 3.0.13 here**: AES-GCM records up to 8 KiB
   (1.1–4.4×), ChaCha20-Poly1305 records up to 1 KiB (1.35–2.0×), SHA-256
   up to 1 KiB (1.1–1.85×), SHA3-256 (1.0–1.5×), Ed25519 (about 3×), P-256
-  signing and verification (1.2×), P-384 (1.7–4.8×) and RSA verification
-  (1.45–1.7×). Inference: OpenSSL 3.0 uses generic code for Ed25519 and
-  P-384, and has higher per-call overhead for short inputs.
+  signing and verification (1.2×), P-384 (2.6–8.3×), P-521 signing and
+  verification (1.25–1.85×), Ed448 (1.3–3.1×), X448 (1.17×) and RSA
+  verification (1.45–1.7×). Inference: OpenSSL 3.0 uses generic code for
+  Ed25519 and P-384, and has higher per-call overhead for short inputs.
 - **Comparable**: AES-GCM at 16 KiB (0.97–1.06×), SHA-256 at 8–16 KiB,
   SHA-512 up to 64 bytes, X25519 (0.95×), RSA-3072 signing (0.98×).
 - **Slower**:
@@ -127,21 +142,53 @@ from the implementations, not profiles.
     computes the schedule for two blocks with AVX2 and runs the rounds in
     Rust. Unrolling the rounds and reusing `a ^ b` for `Maj` measured no
     gain, so the remaining step is hand-scheduled assembly.
-  - RSA-2048 signing (0.80×) and P-256 ECDH (0.88×).
+  - RSA-2048 signing (0.80×), P-256 ECDH (0.88×) and P-521 ECDH (0.72×).
+    Inference for P-521 (not profiled): OpenSSL's 64-bit `nistp521` code
+    keeps unreduced 58-bit limbs across several additions, while browntls
+    reduces fully after every field operation and forms the product and
+    its reduction in two steps through memory.
   - ChaCha20-Poly1305 records of 8–16 KiB (0.87–0.89×).
 - **Accelerated versus portable in browntls**: no accelerated backend is
   slower than the portable code beyond the noise level. Some show no gain
   here: X25519 with BMI2/ADX (0.99×), the BMI1/BMI2 Keccak behind SHA3-256,
   and ChaCha20-Poly1305 records below 136 bytes; short SHA-512 messages take
-  the portable compression on purpose. Ed25519 and P-384 have no
+  the portable compression on purpose. Ed25519, X448 and Ed448 have no
   accelerated backend; their two columns differ only by noise and by the
-  SHA-512 backend.
+  SHA-512 and SHAKE backends. The BMI2/ADX kernels of P-384 and P-521 gain
+  1.2–1.3× over their portable code.
 - ML-KEM-768 has no OpenSSL 3.0 counterpart (OpenSSL added ML-KEM in 3.5).
 
 ## Changes in this revision
 
+Interleaved A/B runs of the `speed` example (medians of three runs of about
+1 s per row, x86-64-v3 build) against the preceding revision, on the same
+machine, with the default policy and with portable code only:
+
+| Change | Row | Before | After | Ratio | Portable before | Portable after | Ratio |
+|---|---|---:|---:|---:|---:|---:|---:|
+| P-521: fold-and-rotate reduction for the Mersenne prime, add-one-and-test addition, safegcd inversions, BMI2/ADX kernels | P-521 sign | 2,564/s | 7,352/s | 2.87× | 2,521/s | 6,188/s | 2.45× |
+| | P-521 verify | 1,069/s | 2,594/s | 2.43× | 1,129/s | 2,106/s | 1.87× |
+| | P-521 ECDH | 1,057/s | 2,397/s | 2.27× | 1,104/s | 1,995/s | 1.81× |
+| P-384: Montgomery rounds specialised to the prime, safegcd inversions, BMI2/ADX kernels | P-384 sign | 6,132/s | 11,259/s | 1.84× | 6,239/s | 9,436/s | 1.51× |
+| | P-384 verify | 2,949/s | 4,054/s | 1.37× | 2,958/s | 3,084/s | 1.04× |
+| | P-384 ECDH | 2,898/s | 3,935/s | 1.36× | 2,858/s | 3,065/s | 1.07× |
+| Curve448: Karatsuba field multiplication | X448 derive | 5,222/s | 6,605/s | 1.26× | 5,250/s | 7,306/s | 1.39× |
+| Ed448: fixed-base comb for `[k]B`, width-8 NAF table for B in verification (plus the field change) | Ed448 sign | 4,281/s | 17,077/s | 3.99× | 4,172/s | 17,849/s | 4.28× |
+| | Ed448 verify | 4,004/s | 6,598/s | 1.65× | 4,036/s | 6,135/s | 1.52× |
+| X448 public keys through the Ed448 comb and the 4-isogeny | X448 keygen | 5,115/s | 18,211/s | 3.56× | 4,640/s | 18,352/s | 3.96× |
+
+The curve448 code has no accelerated backend, so its two pairs of columns
+measure the same code and differ by noise (and, for Ed448, by the SHAKE
+backend). The portable P-384 gain is small outside signing: its six
+reduction rounds form one dependency chain, which the assembly version
+shortens. No BMI2/ADX backend was added for curve448: its reduced-radix
+(56-bit limb) arithmetic has no carry chains, and the equivalent radix-2^64
+X25519 ladder measures no faster than the portable one on this CPU.
+
+## Changes in earlier revisions
+
 Interleaved A/B runs of the `speed` example (medians of three, x86-64-v3
-build) against the preceding revision, on the same machine:
+build) against the revision before each change, on the same machine:
 
 | Change | Row | Before | After | Ratio |
 |---|---|---:|---:|---:|
@@ -162,6 +209,62 @@ The portable P-256 path gained 1.6–2.0× and portable RSA signing 2.3–2.4×.
 Loading P-256's `p[3]` from an immediate instead of a static (so the crate
 links into shared objects) cost at most a few percent in A/B runs.
 
+## Load-aware backend routing
+
+`accel::load` (see [Architecture](Architecture.md#load-aware-backend-routing))
+moves work to another backend only when that backend measures faster than
+a congested primary. These measurements answer two questions on one
+machine: what does it cost to leave routing enabled, and what would a shift
+cost or gain. Reproduce with:
+
+```sh
+cargo run --release -p browntls-crypto --example load -- --cipher aes --threads 30 --fixed 0:50
+```
+
+The example seals 16 KiB records, one key per thread, with routing disabled
+and enabled, and once more with a share pinned on an alternate backend.
+
+- CPU: AMD EPYC 4585PX (virtual machine, 30 vCPUs, one thread per core),
+  with AVX-512 VAES, VPCLMULQDQ and IFMA, BMI2 and ADX
+- Medians of five runs of 2 s each; another job was using the machine at
+  times. Throughput is the total over all threads.
+
+| Cipher | Threads | Routing disabled | Enabled | 50% pinned on the first alternate |
+|---|---:|---:|---:|---:|
+| ChaCha20-Poly1305 | 1 | 4.6 GB/s | -0.3% | -28% (AVX2) |
+| ChaCha20-Poly1305 | 30 | 93.8 GB/s | -0.5% | -29% |
+| ChaCha20-Poly1305 | 90 | 93.5 GB/s | -0.6% | -29% |
+| AES-256-GCM | 1 | 26.4 GB/s | -3.0% | -47% (VAES on AVX2) |
+| AES-256-GCM | 30 | 346 GB/s | -4.0% | -32% |
+| AES-256-GCM | 90 | 338 GB/s | -3.4% | -34% |
+
+Observations:
+
+- **Cost of leaving it enabled**: about 20 ns per record of at least 4096
+  bytes (shorter records skip the routing decision). That is half a percent
+  of a ChaCha20-Poly1305 record and 3 to 4% of an AES-256-GCM record, which
+  takes 0.6 µs here. Single runs of the AES rows varied from -1.4% to -10%.
+  For key exchange and signatures the cost measured 0.1 to 0.2 µs per
+  operation: 1 to 4% of an ML-KEM operation and below the noise for the
+  curves and RSA.
+- **No shift happened**, with all cores busy (30 threads) or three threads
+  per core (90). The balancer noticed the slowdown under overload, probed
+  the alternates a few times, found none faster and stayed on the primary.
+- **A shift would have lost here**: pinning half of the work on the next
+  backend cost 28 to 47%, and for the other families every alternate
+  measured slower than its primary on the idle machine too (portable P-256
+  ECDH 1.5×, portable ML-KEM-768 2×, RSA-2048 signing 2.7× on BMI2/ADX and
+  3.8× on portable code). On this machine each core has its own vector and
+  AES units, the virtual CPUs do not share cores, and the widest backend
+  stays the fastest under load, so the premise of routing (the primary's
+  instructions being contended while another kind is free) does not arise.
+
+What these numbers do not show: a machine where it does arise, such as two
+hardware threads of one core competing for the same execution units, or
+wide-vector code slowed by frequency limits. No such measurement exists
+yet, so the benefit of routing is unverified; the cost above is what
+enabling it buys on a machine like this one.
+
 ## Improvement candidates
 
 - SHA-512 rounds in hand-scheduled x86-64 assembly with the schedule
@@ -171,7 +274,14 @@ links into shared objects) cost at most a few percent in A/B runs.
   variant choice was tuned on this CPU only).
 - ChaCha20-Poly1305 bulk records (Poly1305 with AVX-512 IFMA or a wider
   vector hash).
-- P-384 specialised field arithmetic and safegcd inversion, as for P-256.
+- P-521 ECDH (0.72× OpenSSL): fuse the product and its reduction in one
+  assembly block, and delay reductions across additions in the point
+  formulas. P-384: a reduction with a shorter dependency chain for the
+  portable code.
+- X448: a vectorised ladder (AVX2 with four 2^28-radix lanes, or AVX-512
+  IFMA) is the remaining route to an accelerated backend; aarch64 and
+  riscv64 kernels for the NIST curves (`umulh`/`adcs`, `mulhu`) would need
+  measurements on real hardware.
 - X25519: the BMI2/ADX ladder shows no gain over the portable code here;
   an AVX-512 IFMA field or a preference change would need measurements on
   more CPUs.

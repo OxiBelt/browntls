@@ -53,6 +53,7 @@ fn mixed_suite() -> SupportedCipherSuite {
         },
         hkdf_provider: rc.hkdf_provider,
         aead_alg: native::aead::TLS13_AES_128_GCM,
+        quic: rc.quic,
     }));
     SupportedCipherSuite::Tls13(suite)
 }
@@ -67,6 +68,7 @@ static NATIVE_PARTS_SUITE: Tls13CipherSuite = Tls13CipherSuite {
     },
     hkdf_provider: native::hkdf::HKDF_SHA256,
     aead_alg: native::aead::TLS13_CHACHA20_POLY1305,
+    quic: Some(native::quic::CHACHA20_POLY1305),
 };
 
 #[test]

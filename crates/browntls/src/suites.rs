@@ -79,6 +79,12 @@ impl SupportedCipherSuite {
         }
     }
 
+    /// Whether this suite can be used with QUIC (RFC 9001 §5.3): a TLS 1.3
+    /// suite with a QUIC algorithm.
+    pub fn usable_for_quic(&self) -> bool {
+        self.tls13().is_some_and(|suite| suite.quic.is_some())
+    }
+
     /// The protocol version this suite belongs to.
     pub fn version(&self) -> &'static SupportedProtocolVersion {
         match self {
@@ -147,6 +153,15 @@ impl fmt::Debug for SupportedCipherSuite {
 }
 
 /// Traffic secrets extracted from a connection, with their next sequence numbers.
+///
+/// The values are what Linux kernel TLS (`TLS_TX`, `TLS_RX`) takes: the
+/// sequence number is `rec_seq`, and for AES-GCM and AES-CCM the IV's first
+/// four bytes are the salt and the other eight the `iv`. For TLS 1.2
+/// AES-GCM those eight bytes are the explicit nonce of the next record in
+/// that direction (sequence number `tx.0` or `rx.0`), from which the kernel
+/// counts up, as the library does (`extra + seq`); the receive value is
+/// only meaningful when the peer uses the same scheme, and the kernel
+/// ignores it, reading each explicit nonce from its record.
 pub struct ExtractedSecrets {
     /// The transmit direction: `(sequence number, secrets)`.
     pub tx: (u64, ConnectionTrafficSecrets),
@@ -201,6 +216,25 @@ pub enum ConnectionTrafficSecrets {
         /// The IV.
         iv: Iv,
     },
+}
+
+impl ConnectionTrafficSecrets {
+    /// For TLS 1.2 AES-GCM, these keys with the IV advanced to the explicit
+    /// nonce of record `seq`; other algorithms derive each nonce from the
+    /// sequence number and are returned unchanged.
+    pub(crate) fn with_tls12_explicit_nonce_at(self, seq: u64) -> Self {
+        match self {
+            Self::Aes128Gcm { key, iv } => Self::Aes128Gcm {
+                key,
+                iv: iv.advance_explicit(seq),
+            },
+            Self::Aes256Gcm { key, iv } => Self::Aes256Gcm {
+                key,
+                iv: iv.advance_explicit(seq),
+            },
+            other => other,
+        }
+    }
 }
 
 impl fmt::Debug for ConnectionTrafficSecrets {

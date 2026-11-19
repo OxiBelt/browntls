@@ -81,6 +81,46 @@ fn acceptor_rejects_garbage_with_an_alert() {
     assert_eq!(out[5], 2);
 }
 
+#[test]
+fn records_read_past_the_client_hello_wait_for_the_connection_and_its_alert_can_be_sent() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+
+    let mut acceptor = Acceptor::default();
+    let mut bytes = Vec::new();
+    client.write_tls(&mut bytes).unwrap();
+    // After the ClientHello, in the same read: a well-formed record of an
+    // unknown content type.
+    bytes.extend_from_slice(&[0x63, 3, 3, 0, 1, 0]);
+    acceptor.read_tls(&mut &bytes[..]).unwrap();
+    let accepted = acceptor.accept().unwrap().expect("ClientHello complete");
+
+    // The connection has not looked at that record yet.
+    let mut server = accepted
+        .into_connection(Arc::new(server_config(&chain)))
+        .map_err(|(e, _)| e)
+        .unwrap();
+    assert!(server.wants_write(), "the server's flight");
+    server.process_new_packets().unwrap_err();
+
+    // What it queued goes out through `AcceptedAlert`: its flight, which
+    // the client reads up to the alert that follows it.
+    let mut alert = browntls::server::AcceptedAlert::from(server);
+    let mut out = Vec::new();
+    alert.write_all(&mut out).unwrap();
+    assert_eq!(alert.write(&mut Vec::new()).unwrap(), 0);
+    let mut out = &out[..];
+    let err = loop {
+        assert!(!out.is_empty(), "no alert after the flight");
+        client.read_tls(&mut out).unwrap();
+        if let Err(err) = client.process_new_packets() {
+            break err;
+        }
+    };
+    assert!(matches!(err, Error::AlertReceived(_)), "{err:?}");
+}
+
 // ------------------------------------------------------------------ Stream
 
 #[test]
@@ -135,6 +175,65 @@ fn connection_enum_wraps_either_side() {
     assert!(client.is_handshaking() && server.is_handshaking());
     assert!(client.wants_write(), "the ClientHello is queued");
     assert!(!server.wants_write());
+}
+
+// ---------------------------------------------------------------- complete_io
+
+/// A transport that replays fixed bytes, then reports EOF, and swallows writes.
+struct ScriptedIo {
+    incoming: std::io::Cursor<Vec<u8>>,
+}
+
+impl Read for ScriptedIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.incoming.read(buf)
+    }
+}
+
+impl Write for ScriptedIo {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `complete_io` on another thread and fails the test if it does not
+/// return within a few seconds.
+fn complete_io_with_deadline(
+    mut conn: Connection,
+    incoming: Vec<u8>,
+) -> std::io::Result<(usize, usize)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut io = ScriptedIo {
+            incoming: std::io::Cursor::new(incoming),
+        };
+        let _ignored = tx.send(conn.complete_io(&mut io));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("complete_io did not return")
+}
+
+/// A plaintext `close_notify` alert record.
+const CLOSE_NOTIFY_RECORD: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x01, 0x00];
+
+#[test]
+fn complete_io_returns_when_close_notify_arrives_during_the_handshake() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let server: Connection = ServerConnection::new(Arc::new(server_config(&chain)))
+        .unwrap()
+        .into();
+    let client: Connection = ClientConnection::new(Arc::new(client_config(&chain)), server_name())
+        .unwrap()
+        .into();
+    for conn in [server, client] {
+        let err = complete_io_with_deadline(conn, CLOSE_NOTIFY_RECORD.to_vec()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 }
 
 // ---------------------------------------------------------------- key log
@@ -669,3 +768,177 @@ fn custom_server_session_store_sees_puts_and_takes() {
     assert_eq!(*store.takes.lock().unwrap(), 1);
     assert_eq!(*store.puts.lock().unwrap(), 6);
 }
+
+// ---------------------------------------------------------------- blocking I/O
+
+/// A transport that hands out one queued chunk per read, then reports
+/// `WouldBlock`, and records what is written to it.
+#[derive(Default)]
+struct ChunkedIo {
+    chunks: std::collections::VecDeque<Vec<u8>>,
+    written: Vec<u8>,
+}
+
+impl Read for ChunkedIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(chunk) = self.chunks.front_mut() else {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        };
+        let n = chunk.len().min(buf.len());
+        buf[..n].copy_from_slice(&chunk[..n]);
+        chunk.drain(..n);
+        if chunk.is_empty() {
+            self.chunks.pop_front();
+        }
+        Ok(n)
+    }
+}
+
+impl Write for ChunkedIo {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The TLS bytes `conn` has queued.
+fn queued_tls<S: browntls::SideData>(conn: &mut browntls::ConnectionCommon<S>) -> Vec<u8> {
+    let mut out = Vec::new();
+    while conn.wants_write() {
+        conn.write_tls(&mut out).unwrap();
+    }
+    out
+}
+
+#[test]
+fn stream_read_answers_a_key_update_and_keeps_reading() {
+    stream_read_answers_a_key_update(None);
+}
+
+#[test]
+fn stream_read_writes_answers_past_the_control_backlog_and_keeps_reading() {
+    // One KeyUpdate answer is more than this limit lets wait unwritten, so
+    // the connection stops wanting to read until the answer is out.
+    stream_read_answers_a_key_update(Some(16));
+}
+
+fn stream_read_answers_a_key_update(limit: Option<usize>) {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.protocol_version(), Some(version::TLS13.version));
+    client.set_buffer_limit(limit.or(Some(64 * 1024)));
+
+    // The peer's KeyUpdate(update_requested) and its next record arrive in
+    // separate reads, so answering the KeyUpdate is a pass that reads nothing.
+    server.refresh_traffic_keys().unwrap();
+    let key_update = queued_tls(&mut server);
+    server.writer().write_all(b"hello").unwrap();
+    let data = queued_tls(&mut server);
+    let mut io = ChunkedIo {
+        chunks: [key_update, data].into(),
+        written: Vec::new(),
+    };
+
+    let mut buf = [0u8; 16];
+    let n = Stream::new(&mut client, &mut io).read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+
+    // The client answered with its own KeyUpdate, which the server accepts.
+    assert!(!io.written.is_empty());
+    server.read_tls(&mut io.written.as_slice()).unwrap();
+    server.process_new_packets().unwrap();
+}
+
+/// A transport whose writes accept nothing.
+struct ZeroWriteIo;
+
+impl Read for ZeroWriteIo {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
+}
+
+impl Write for ZeroWriteIo {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn complete_io_fails_when_the_transport_accepts_no_bytes() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client: Connection =
+        ClientConnection::new(Arc::new(client_config(&chain)), server_name())
+            .unwrap()
+            .into();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ignored = tx.send(client.complete_io(&mut ZeroWriteIo));
+    });
+    let err = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("complete_io did not return")
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+}
+
+#[test]
+fn writes_into_a_full_send_buffer_queue_no_records() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let mut client = ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config(&chain))).unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.protocol_version(), Some(version::TLS13.version));
+    let _ = queued_tls(&mut client);
+
+    // An empty write sends nothing.
+    assert_eq!(client.writer().write(&[]).unwrap(), 0);
+    assert!(!client.wants_write());
+
+    // Fill the send buffer, then retry: the retries take nothing and must
+    // queue nothing either (not even empty records).
+    client.set_buffer_limit(Some(4096));
+    let mut taken = 0;
+    while let n @ 1.. = client.writer().write(&[0x5a; 1000]).unwrap() {
+        taken += n;
+    }
+    for _ in 0..1000 {
+        assert_eq!(client.writer().write(&[0x5a; 1000]).unwrap(), 0);
+    }
+    let tls = queued_tls(&mut client);
+    let mut records = 0;
+    let mut rest = tls.as_slice();
+    while !rest.is_empty() {
+        let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
+        // More than the AEAD tag and the content type: some plaintext.
+        assert!(len > 17, "a record without plaintext was queued");
+        rest = &rest[5 + len..];
+        records += 1;
+    }
+    assert!(records <= 5, "{records} records for {taken} bytes");
+
+    // The peer receives exactly the plaintext that was taken.
+    server.read_tls(&mut tls.as_slice()).unwrap();
+    server.process_new_packets().unwrap();
+    let mut received = vec![0; taken + 1];
+    assert_eq!(server.reader().read(&mut received).unwrap(), taken);
+}
+
+include!("api/vectored_writes.rs");

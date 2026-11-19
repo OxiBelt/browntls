@@ -30,6 +30,74 @@ pub const TARGETS: &[Target] = &[
     ("pki_pem", crate::pki_pem, pki_pem),
     ("pki_crl", crate::pki_crl, pki_crl),
     ("cert_decompress", crate::cert_decompress, cert_decompress),
+    (
+        "crypto_hash",
+        crate::crypto_hash::run,
+        crate::crypto_hash::seeds,
+    ),
+    (
+        "crypto_cipher",
+        crate::crypto_cipher::run,
+        crate::crypto_cipher::seeds,
+    ),
+    (
+        "crypto_ecc",
+        crate::crypto_ecc::run,
+        crate::crypto_ecc::seeds,
+    ),
+    (
+        "crypto_rsa",
+        crate::crypto_rsa::run,
+        crate::crypto_rsa::seeds,
+    ),
+    (
+        "crypto_kem",
+        crate::crypto_kem::run,
+        crate::crypto_kem::seeds,
+    ),
+    (
+        "crypto_hpke",
+        crate::crypto_hpke::run,
+        crate::crypto_hpke::seeds,
+    ),
+    (
+        "crypto_util",
+        crate::crypto_util::run,
+        crate::crypto_util::seeds,
+    ),
+    ("pki_api", crate::pki_api::run, crate::pki_api::seeds),
+    (
+        "pki_revocation",
+        crate::pki_revocation::run,
+        crate::pki_revocation::seeds,
+    ),
+    (
+        "tls_config",
+        crate::tls_config::run,
+        crate::tls_config::seeds,
+    ),
+    ("tls_conn", crate::tls_conn::run, crate::tls_conn::seeds),
+    (
+        "tls_unbuffered",
+        crate::tls_unbuffered::run,
+        crate::tls_unbuffered::seeds,
+    ),
+    ("tls_ech", crate::tls_ech::run, crate::tls_ech::seeds),
+    (
+        "tls_kernel",
+        crate::tls_kernel::run,
+        crate::tls_kernel::seeds,
+    ),
+    ("tls_psk", crate::tls_psk::run, crate::tls_psk::seeds),
+    ("tls_quic", crate::tls_quic::run, crate::tls_quic::seeds),
+    ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),
+    ("tls_codec", crate::tls_codec::run, crate::tls_codec::seeds),
+    ("tls_tokio", crate::tls_tokio::run, crate::tls_tokio::seeds),
+    (
+        "tls_tokio_unbuffered",
+        crate::tls_tokio_unbuffered::run,
+        crate::tls_tokio_unbuffered::seeds,
+    ),
 ];
 
 fn identity() -> Identity {
@@ -43,6 +111,7 @@ fn field(out: &mut Vec<u8>, bytes: &[u8]) {
 
 /// The first flight of a real client: one ClientHello record.
 fn client_hello_record() -> Vec<u8> {
+    crate::init();
     let config = ClientConfig::builder()
         .with_root_certificates(Arc::new(RootCertStore::empty()))
         .with_no_client_auth();
@@ -183,15 +252,19 @@ fn pki_crl() -> Vec<Vec<u8>> {
 }
 
 fn cert_decompress() -> Vec<Vec<u8>> {
-    // a TLS 1.3 Certificate message body: empty context, one entry
+    // a TLS 1.3 Certificate message body: empty context, the certificate
+    // twice, so that every compressor shrinks it whatever random key the
+    // certificate has (a compressor that cannot shrink its input fails)
     let identity = identity();
     let cert = identity.chain[0].as_ref();
     let mut message = vec![0u8];
     let entry_len = cert.len() + 5;
-    message.extend_from_slice(&(entry_len as u32).to_be_bytes()[1..]);
-    message.extend_from_slice(&(cert.len() as u32).to_be_bytes()[1..]);
-    message.extend_from_slice(cert);
-    message.extend_from_slice(&[0, 0]);
+    message.extend_from_slice(&(2 * entry_len as u32).to_be_bytes()[1..]);
+    for _ in 0..2 {
+        message.extend_from_slice(&(cert.len() as u32).to_be_bytes()[1..]);
+        message.extend_from_slice(cert);
+        message.extend_from_slice(&[0, 0]);
+    }
 
     let compressors: [&dyn CertCompressor; 3] = [
         &browntls::compress::ZLIB,

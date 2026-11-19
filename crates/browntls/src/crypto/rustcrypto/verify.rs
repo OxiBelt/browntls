@@ -145,10 +145,10 @@ impl SignatureVerificationAlgorithm for Ed25519 {
 const RSA_MIN_BYTES: usize = 256;
 const RSA_MAX_BYTES: usize = 1024;
 
-fn rsa_public_key(der: &[u8]) -> Result<rsa::RsaPublicKey, InvalidSignature> {
+fn rsa_public_key(der: &[u8]) -> Result<rsa::PublicKey, InvalidSignature> {
     use rsa::pkcs1::DecodeRsaPublicKey;
     use rsa::traits::PublicKeyParts;
-    let key = rsa::RsaPublicKey::from_pkcs1_der(der).map_err(|_| InvalidSignature)?;
+    let key = rsa::PublicKey::from_pkcs1_der(der).map_err(|_| InvalidSignature)?;
     if !(RSA_MIN_BYTES..=RSA_MAX_BYTES).contains(&key.size()) {
         return Err(InvalidSignature);
     }

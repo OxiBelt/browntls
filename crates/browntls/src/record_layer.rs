@@ -58,7 +58,8 @@ pub(crate) struct RecordLayer {
     decrypt_state: DirectionState,
     confidentiality_limit: u64,
     /// Remaining plaintext bytes of records that may fail decryption
-    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.2.10).
+    /// silently (rejected 0-RTT data on the server, RFC 9846 §4.3.10); each
+    /// skipped record costs at least one byte.
     trial_decryption_len: Option<usize>,
     /// The record size limit we announced (RFC 8449), once negotiated.
     inbound_size_limit: Option<InboundSizeLimit>,
@@ -187,6 +188,25 @@ impl RecordLayer {
         &mut self,
         plain: OutboundPlainMessage<'_>,
     ) -> Result<OutboundOpaqueMessage, Error> {
+        let seq = self.next_write_seq()?;
+        self.message_encrypter.encrypt(plain, seq)
+    }
+
+    /// Like `encrypt_outgoing`, but writes the record to the front of `out`
+    /// and returns its length. The sequence number is used even when this
+    /// fails because `out` is too short.
+    pub(crate) fn encrypt_outgoing_into(
+        &mut self,
+        plain: OutboundPlainMessage<'_>,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let seq = self.next_write_seq()?;
+        self.message_encrypter.encrypt_into(plain, seq, out)
+    }
+
+    /// Takes the write sequence number for one record, if encryption is
+    /// active and the sequence space is not exhausted.
+    fn next_write_seq(&mut self) -> Result<u64, Error> {
         if self.encrypt_state != DirectionState::Active {
             return Err(Error::EncryptError);
         }
@@ -195,7 +215,7 @@ impl RecordLayer {
         }
         let seq = self.write_seq;
         self.write_seq += 1;
-        self.message_encrypter.encrypt(plain, seq)
+        Ok(seq)
     }
 
     /// Installs a new encrypter and resets the write sequence number.
@@ -284,6 +304,12 @@ impl RecordLayer {
         self.has_decrypted
     }
 
+    /// Kernel offload: the kernel sent `records` records under the current
+    /// write key, which used up their sequence numbers.
+    pub(crate) fn note_kernel_records(&mut self, records: u64) {
+        self.write_seq = self.write_seq.saturating_add(records);
+    }
+
     pub(crate) fn write_seq(&self) -> u64 {
         self.write_seq
     }
@@ -294,11 +320,31 @@ impl RecordLayer {
 
     /// Decides whether sending `add` more records is allowed under the limits.
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
-        match self.write_seq.saturating_add(add) {
+        self.pre_encrypt_action_at(self.write_seq, add)
+    }
+
+    /// What [`Self::pre_encrypt_action`] will answer once the write key has
+    /// been replaced by a KeyUpdate (same suite, sequence number zero).
+    pub(crate) fn pre_encrypt_action_after_key_update(&self, add: u64) -> PreEncryptAction {
+        self.pre_encrypt_action_at(0, add)
+    }
+
+    /// The length of a protected record body carrying `payload_len` bytes
+    /// under the current write key (the payload itself while unprotected).
+    pub(crate) fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+        if self.encrypt_state == DirectionState::Active {
+            self.message_encrypter.encrypted_payload_len(payload_len)
+        } else {
+            payload_len
+        }
+    }
+
+    fn pre_encrypt_action_at(&self, write_seq: u64, add: u64) -> PreEncryptAction {
+        match write_seq.saturating_add(add) {
             v if v >= SEQ_SOFT_LIMIT => PreEncryptAction::Refuse,
             // This write reaches or crosses the limit: refresh (TLS 1.3) or
             // close (TLS 1.2) now, also when it spans several records.
-            v if v >= self.confidentiality_limit && self.write_seq < self.confidentiality_limit => {
+            v if v >= self.confidentiality_limit && write_seq < self.confidentiality_limit => {
                 PreEncryptAction::RefreshOrClose
             }
             // The limit was reached by an earlier write whose refresh has
@@ -311,7 +357,7 @@ impl RecordLayer {
     /// Charges a skipped record of `requested` ciphertext bytes against the
     /// trial decryption budget; `false` once the budget would be exceeded.
     ///
-    /// RFC 9846 §4.2.10 counts `max_early_data_size` in plaintext bytes
+    /// RFC 9846 §4.3.10 counts `max_early_data_size` in plaintext bytes
     /// (excluding the inner content type and padding), so each record is
     /// charged the most plaintext it can carry: its length minus the
     /// AEAD expansion. TLS 1.3 uses one suite in both directions, so that
@@ -319,6 +365,11 @@ impl RecordLayer {
     /// adds, which is active by the time the client's records arrive. It is
     /// capped at the 256 bytes RFC 9846 §5.2 allows; without a write key
     /// nothing is subtracted (the stricter, ciphertext-based budget).
+    ///
+    /// Every record is charged at least one byte, even one too short to
+    /// carry plaintext: each skipped record cost a decryption attempt, so
+    /// the budget also bounds how many records are tried, not only how
+    /// much data they could hold.
     fn doing_trial_decryption(&mut self, requested: usize) -> bool {
         let overhead = if self.encrypt_state == DirectionState::Active {
             self.message_encrypter
@@ -327,7 +378,7 @@ impl RecordLayer {
         } else {
             0
         };
-        let plaintext_bound = requested.saturating_sub(overhead);
+        let plaintext_bound = requested.saturating_sub(overhead).max(1);
         match self
             .trial_decryption_len
             .and_then(|value| value.checked_sub(plaintext_bound))
@@ -377,13 +428,52 @@ mod tests {
     #[test]
     fn encrypting_without_cipher_fails() {
         let mut rl = RecordLayer::new();
-        let plain = OutboundPlainMessage {
+        let plain = || OutboundPlainMessage {
             typ: ContentType::ApplicationData,
             version: ProtocolVersion::TLSv1_2,
             payload: OutboundChunks::Single(&[1]),
         };
-        assert_eq!(rl.encrypt_outgoing(plain).err(), Some(Error::EncryptError));
+        assert_eq!(
+            rl.encrypt_outgoing(plain()).err(),
+            Some(Error::EncryptError)
+        );
+        let mut out = [0u8; 64];
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 0);
         assert_eq!(rl.pre_encrypt_action(1), PreEncryptAction::Nothing);
+    }
+
+    #[test]
+    fn encrypting_into_uses_sequence_numbers_as_encrypt_outgoing() {
+        let plain = || OutboundPlainMessage {
+            typ: ContentType::ApplicationData,
+            version: ProtocolVersion::TLSv1_2,
+            payload: OutboundChunks::Single(&[1]),
+        };
+        let mut rl = RecordLayer::new();
+        rl.set_message_encrypter(<dyn MessageEncrypter>::invalid(), u64::MAX);
+        let mut out = [0u8; 64];
+        // A failing encrypter still uses the sequence number.
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 1);
+        assert_eq!(
+            rl.encrypt_outgoing(plain()).err(),
+            Some(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, 2);
+        // At the hard limit nothing is used.
+        rl.write_seq = SEQ_HARD_LIMIT;
+        assert_eq!(
+            rl.encrypt_outgoing_into(plain(), &mut out),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(rl.write_seq, SEQ_HARD_LIMIT);
     }
 
     #[test]
@@ -485,6 +575,46 @@ mod tests {
         assert_eq!(
             decrypt(&mut rl, inner(64, 0)),
             Err(Error::PeerSentOversizedRecord)
+        );
+    }
+
+    /// Fails every record, as undecryptable 0-RTT data does.
+    struct AlwaysFails;
+
+    impl MessageDecrypter for AlwaysFails {
+        fn decrypt<'a>(
+            &mut self,
+            _msg: InboundOpaqueMessage<'a>,
+            _seq: u64,
+        ) -> Result<InboundPlainMessage<'a>, Error> {
+            Err(Error::DecryptError)
+        }
+    }
+
+    #[test]
+    fn trial_decryption_charges_at_least_one_byte_per_record() {
+        let mut rl = RecordLayer::new();
+        rl.set_message_encrypter(Box::new(NoTag), u64::MAX);
+        rl.set_message_decrypter_with_trial_decryption(Box::new(AlwaysFails), 4);
+        // A record of the expansion alone (or shorter) carries no plaintext
+        // but still costs one byte.
+        for len in [0, 1, 0, 1] {
+            assert_eq!(decrypt(&mut rl, alloc::vec![0; len]), Ok(0));
+        }
+        assert_eq!(rl.trial_decryption_len, Some(0));
+        assert_eq!(
+            decrypt(&mut rl, alloc::vec![0; 1]),
+            Err(Error::DecryptError)
+        );
+
+        // Longer records are charged their length less the expansion.
+        rl.set_message_decrypter_with_trial_decryption(Box::new(AlwaysFails), 4);
+        assert_eq!(decrypt(&mut rl, alloc::vec![0; 4]), Ok(0));
+        assert_eq!(rl.trial_decryption_len, Some(1));
+        assert_eq!(decrypt(&mut rl, alloc::vec![0; 2]), Ok(0));
+        assert_eq!(
+            decrypt(&mut rl, alloc::vec![0; 1]),
+            Err(Error::DecryptError)
         );
     }
 

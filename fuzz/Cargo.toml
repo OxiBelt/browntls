@@ -6,7 +6,7 @@ name = "browntls-fuzz"
 description = "Fuzz targets for the browntls codecs, PKI and handshake state machines"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "Apache-2.0"
 publish = false
 
@@ -16,9 +16,37 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli", "zstd"] }
+browntls = { path = "../crates/browntls", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
+browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
+browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp"] }
+# The revocation harness uses in-memory I/O and a paused timer.
+# The same lower bound as the workspace's (`[workspace.dependencies]`).
+tokio = { version = "1.53", default-features = false, features = ["io-util", "test-util"] }
 libfuzzer-sys = "0.4"
+# Independent implementations used only as differential oracles by the
+# crypto targets (the same set as `browntls-crypto`'s dev-dependencies).
+sha1 = "0.11"
+sha2 = "0.11"
+sha3 = "0.12"
+shake = "0.1"
+hmac = "0.13"
+hkdf = "0.13"
+aes = "0.9"
+aes-gcm = "0.11"
+cbc = "0.2"
+ccm = "0.6"
+chacha20poly1305 = "0.11"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+ed25519-dalek = "3"
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
+ml-kem = "0.3"
+hpke = { version = "0.15.1", default-features = false, features = ["alloc", "aes", "chacha", "x25519", "nistp"] }
+num-bigint = "0.5"
+ed448-goldilocks = "0.14.0-pre.15"
+x448 = { version = "0.14.0-pre.12", features = ["static_secrets"] }
 # Certificates and keys for the connection targets, generated at start-up
 # (no private keys are committed).
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
@@ -37,6 +65,13 @@ path = "src/lib.rs"
 
 [profile.release]
 debug = "line-tables-only"
+
+[[bin]]
+name = "pki_revocation"
+path = "fuzz_targets/pki_revocation.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "handshake_message"
@@ -90,6 +125,139 @@ bench = false
 [[bin]]
 name = "cert_decompress"
 path = "fuzz_targets/cert_decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_hash"
+path = "fuzz_targets/crypto_hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_cipher"
+path = "fuzz_targets/crypto_cipher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_ecc"
+path = "fuzz_targets/crypto_ecc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_rsa"
+path = "fuzz_targets/crypto_rsa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_kem"
+path = "fuzz_targets/crypto_kem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_hpke"
+path = "fuzz_targets/crypto_hpke.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_util"
+path = "fuzz_targets/crypto_util.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pki_api"
+path = "fuzz_targets/pki_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_config"
+path = "fuzz_targets/tls_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_conn"
+path = "fuzz_targets/tls_conn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_unbuffered"
+path = "fuzz_targets/tls_unbuffered.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_kernel"
+path = "fuzz_targets/tls_kernel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_ech"
+path = "fuzz_targets/tls_ech.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_psk"
+path = "fuzz_targets/tls_psk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_quic"
+path = "fuzz_targets/tls_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_auth"
+path = "fuzz_targets/tls_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_codec"
+path = "fuzz_targets/tls_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_tokio"
+path = "fuzz_targets/tls_tokio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_tokio_unbuffered"
+path = "fuzz_targets/tls_tokio_unbuffered.rs"
 test = false
 doc = false
 bench = false

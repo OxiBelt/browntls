@@ -1,7 +1,9 @@
 #!/bin/sh
 # Generate a throwaway CA with server and client certificates for each key
 # type into the directory given as the only argument (a per-run Docker
-# volume). The server certificate names the network alias `tls-server`.
+# volume). The server certificate names the network alias `tls-server`; the
+# `public` certificate names `ech-public.test`, the public name of the
+# Encrypted Client Hello scenarios, which a server rejecting ECH presents.
 # Keys are world-readable because the browntls image runs as an unprivileged
 # user; they live only as long as the test run's volume.
 set -eu
@@ -26,10 +28,11 @@ for kt in ecdsa-p256 rsa-2048 ed25519; do
     -addext keyUsage=critical,keyCertSign,cRLSign \
     -out "${d}/ca.pem"
   serial=2
-  for who in server client; do
+  for who in server client public; do
     case "${who}" in
       server) eku=serverAuth; san="subjectAltName=DNS:tls-server" ;;
       client) eku=clientAuth; san="subjectAltName=DNS:tls-client" ;;
+      public) eku=serverAuth; san="subjectAltName=DNS:ech-public.test" ;;
     esac
     printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=%s\n%s\n' \
       "${eku}" "${san}" > "${d}/${who}.ext"

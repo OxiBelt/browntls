@@ -9,6 +9,7 @@ use super::{ResolvesServerCert, ServerConfig, handy};
 use crate::builder::{ConfigBuilder, WantsVerifier};
 use crate::error::Error;
 use crate::key_log::NoKeyLog;
+use crate::psk::ResolvesExternalPsk;
 use crate::sign::{CertifiedKey, SingleCertAndKey};
 use crate::sync::Arc;
 use crate::verify::{ClientCertVerifier, NoClientAuth};
@@ -108,7 +109,21 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
+            external_psks: None,
+            cert_with_extern_psk: false,
+            require_external_psk: false,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
+            ech: None,
+            ech_backend: false,
         }
+    }
+
+    /// Serves only TLS 1.3 clients that offer one of the external PSKs
+    /// `psks` finds (RFC 9846 §4.3.11); without a certificate, a client
+    /// that offers none is refused with `handshake_failure`.
+    pub fn with_external_psks_only(self, psks: Arc<dyn ResolvesExternalPsk>) -> ServerConfig {
+        let mut config = self.with_cert_resolver(Arc::new(handy::NoServerCert));
+        config.external_psks = Some(psks);
+        config
     }
 }

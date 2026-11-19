@@ -1,10 +1,18 @@
 //! The connection core: feeding records to the handshake state machine and
 //! the buffered I/O API around it.
 
+mod buffered;
+#[cfg(all(test, feature = "std", feature = "native"))]
+mod control_backlog_tests;
+
 use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::mem;
-use core::ops::{Deref, DerefMut};
+use core::ops::Range;
+
+pub use buffered::ConnectionCommon;
+#[cfg(feature = "std")]
+pub use buffered::{Connection, Reader, Writer};
 
 use crate::common_state::{CommonState, IoState};
 use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
@@ -12,10 +20,11 @@ use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader as CodecReader;
-use crate::msgs::deframer::{Deframed, DeframerVecBuffer, MessageDeframer};
+use crate::msgs::deframer::{Deframed, DeframerBuffer, DeframerVecBuffer, MessageDeframer};
 use crate::msgs::enums::KeyUpdateRequest;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
+use crate::revocation::{RevocationCheck, RevocationResponse, RevocationStatus};
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 
 /// One position in the handshake state machine.
@@ -26,6 +35,15 @@ pub(crate) trait State<Data>: Send + Sync {
         cx: &mut Context<'_, Data>,
         message: Message<'_>,
     ) -> Result<Box<dyn State<Data>>, Error>;
+
+    /// Continues authentication after the final pending OCSP response.
+    fn resume_revocation(
+        self: Box<Self>,
+        _cx: &mut Context<'_, Data>,
+        _status: Option<RevocationStatus>,
+    ) -> Result<Box<dyn State<Data>>, Error> {
+        Err(Error::general("no revocation continuation"))
+    }
 
     /// RFC 5705 / RFC 8446 §7.5 keying material export.
     fn export_keying_material(
@@ -61,6 +79,13 @@ pub(crate) trait State<Data>: Send + Sync {
 
     /// Hook called when a record failed to decrypt.
     fn handle_decrypt_error(&self) {}
+
+    /// Kernel offload: the kernel delivered non-empty application data,
+    /// which renews the budgets of requests the peer may make without
+    /// sending data (the state machine sees no application data records).
+    fn received_application_data(&mut self, common: &mut CommonState) {
+        common.received_key_update_requests = 0;
+    }
 }
 
 /// What a state handler sees besides the message.
@@ -81,7 +106,45 @@ pub trait SideData: Debug + Send + Sync {
     /// with a fatal alert cannot be resumed.
     #[doc(hidden)]
     fn on_fatal_error(&mut self, _negotiated_version: Option<ProtocolVersion>) {}
+
+    /// Whether the record just processed was 0-RTT data that an unbuffered
+    /// server left in place (clears the flag).
+    #[doc(hidden)]
+    fn take_early_data_in_place(&mut self) -> bool {
+        false
+    }
+
+    /// Whether accepted 0-RTT data is buffered unread (server only).
+    #[doc(hidden)]
+    fn has_unread_early_data(&self) -> bool {
+        false
+    }
 }
+
+/// What [`ConnectionCore::process_one`] consumed.
+#[derive(Debug)]
+pub(crate) enum Processed {
+    /// A message that the state machine dealt with entirely.
+    Message,
+    /// An application data record that an unbuffered connection left in
+    /// place: its plaintext, as a range into the buffer's underlying storage
+    /// (see [`DeframerBuffer::position`]).
+    AppData(Range<usize>),
+    /// Like [`Self::AppData`], for 0-RTT data accepted by a server.
+    EarlyData(Range<usize>),
+}
+
+/// Where the read key stood before a handshake message was processed; see
+/// [`ConnectionCore::check_read_key_change`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadEpoch {
+    decrypting: bool,
+    seq: u64,
+}
+
+/// The state after [`ConnectionCore::process_one`], and what it consumed
+/// (`None`: no complete unit was buffered).
+pub(crate) type Step<Data> = (Box<dyn State<Data>>, Option<Processed>);
 
 /// The state machine plus everything it needs.
 pub(crate) struct ConnectionCore<Data> {
@@ -106,6 +169,40 @@ impl<Data: SideData> ConnectionCore<Data> {
         &mut self,
         buffer: &mut DeframerVecBuffer,
     ) -> Result<IoState, Error> {
+        let mut state = self.take_state()?;
+
+        if self.common_state.encrypt_failed {
+            return Err(self.fail(Error::EncryptError));
+        }
+
+        loop {
+            if self.common_state.has_received_close_notify
+                || self.common_state.pending_revocation.is_some()
+            {
+                // RFC 8446 §6.1: everything after close_notify is ignored.
+                break;
+            }
+
+            let (next, processed) = self.process_one(state, buffer)?;
+            state = next;
+            if processed.is_none() {
+                break;
+            }
+        }
+
+        self.state = Ok(state);
+
+        if self.common_state.pending_revocation.is_none() {
+            self.maybe_send_key_update()?;
+        }
+
+        Ok(self.common_state.current_io_state())
+    }
+
+    /// QUIC (RFC 9001 §4.1.3): processes in-order handshake bytes taken from
+    /// CRYPTO frames. There is no record layer; the bytes are TLS handshake
+    /// messages, possibly fragmented or coalesced.
+    pub(crate) fn read_quic_handshake(&mut self, mut data: &[u8]) -> Result<(), Error> {
         let mut state = match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
             Ok(state) => state,
             Err(e) => {
@@ -114,125 +211,287 @@ impl<Data: SideData> ConnectionCore<Data> {
             }
         };
 
-        if self.common_state.encrypt_failed {
-            return Err(self.fail(Error::EncryptError));
-        }
-
         loop {
-            if self.common_state.has_received_close_notify {
-                // RFC 8446 §6.1: everything after close_notify is ignored.
-                break;
-            }
-
-            let item = match self.deframer.pop(
-                &mut self.common_state.record_layer,
-                self.common_state.negotiated_version,
-                buffer,
-            ) {
-                Ok(Some(item)) => item,
-                Ok(None) => break,
-                Err(err) => {
-                    let err = self.handle_deframe_error(err, &*state);
+            let take = data.len().min(self.deframer.joiner.room());
+            if take > 0 {
+                if let Err(err) = self.deframer.joiner.push(&data[..take]) {
+                    let err = match err {
+                        Error::InvalidMessage(e) => self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(e), err),
+                        other => other,
+                    };
                     return Err(self.fail(err));
                 }
-            };
+                data = &data[take..];
+            }
 
-            let result = match item {
-                Deframed::Handshake { len, version } => {
-                    let decrypt_epoch = self.common_state.record_layer.read_seq();
-                    let was_decrypting = self.common_state.record_layer.is_decrypting();
-                    let bytes = &self.deframer.joiner.buffered()[..len];
-                    let parse_version = self.common_state.negotiated_version.unwrap_or(version);
-                    let result = match HandshakeMessagePayload::read_version(
-                        &mut CodecReader::init(bytes),
-                        parse_version,
-                    ) {
-                        Ok(parsed) => {
-                            let msg = Message {
-                                version,
-                                payload: MessagePayload::Handshake {
-                                    parsed,
-                                    encoded: Payload::Borrowed(bytes),
-                                },
-                            };
-                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
-                        }
-                        Err(err) => {
-                            let err = self
-                                .common_state
-                                .send_fatal_alert(AlertDescription::from(err), Error::from(err));
-                            Err(err)
-                        }
-                    };
-                    self.deframer.joiner.consume(len);
-                    // RFC 8446 §5.1: a handshake message that changes the read
-                    // key must end its record; nothing may follow it under the
-                    // old key.
-                    let key_changed = self.common_state.record_layer.is_decrypting()
-                        != was_decrypting
-                        || (self.common_state.record_layer.is_decrypting()
-                            && self.common_state.record_layer.read_seq() < decrypt_epoch);
-                    match result {
-                        Ok(_) if key_changed && !self.deframer.joiner.is_empty() => {
-                            Err(self.common_state.send_fatal_alert(
-                                AlertDescription::UnexpectedMessage,
-                                PeerMisbehaved::KeyEpochWithPendingFragment,
-                            ))
-                        }
-                        other => other,
-                    }
-                }
-                Deframed::Record {
-                    typ,
+            let mut progressed = false;
+            while self.common_state.pending_revocation.is_none()
+                && let Some(len) = self.deframer.joiner.complete_message_len()
+            {
+                progressed = true;
+                let read_level = self.common_state.quic.as_ref().map(|q| q.read_level);
+                let version = self
+                    .common_state
+                    .negotiated_version
+                    .unwrap_or(ProtocolVersion::TLSv1_2);
+                let bytes = &self.deframer.joiner.buffered()[..len];
+                let result = match HandshakeMessagePayload::read_version(
+                    &mut CodecReader::init(bytes),
                     version,
-                    plaintext,
-                    consumed,
-                    want_close_before_decrypt,
-                } => {
-                    if want_close_before_decrypt {
-                        self.common_state.send_close_notify();
+                ) {
+                    Ok(parsed) => {
+                        let msg = Message {
+                            version,
+                            payload: MessagePayload::Handshake {
+                                parsed,
+                                encoded: Payload::Borrowed(bytes),
+                            },
+                        };
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
                     }
-                    let payload = &buffer.filled()[plaintext];
-                    let result = match Message::try_from(InboundPlainMessage {
-                        typ,
-                        version,
-                        payload,
-                    }) {
-                        Ok(msg) => {
-                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
-                        }
-                        Err(err) => Err(self
-                            .common_state
-                            .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
-                    };
-                    buffer.discard(consumed);
-                    result
-                }
-            };
+                    Err(err) => Err(self
+                        .common_state
+                        .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                };
+                self.deframer.joiner.consume(len);
+                state = match result {
+                    Ok(next) => next,
+                    Err(err) => return Err(self.fail(err)),
+                };
 
-            match result {
-                Ok(new_state) => state = new_state,
-                Err(err) => return Err(self.fail(err)),
+                // RFC 9001 §4.1.3: once the peer moves to a new encryption
+                // level, no data of the previous level may remain
+                // unconsumed. That is a QUIC PROTOCOL_VIOLATION, not a TLS
+                // alert.
+                let level_changed =
+                    self.common_state.quic.as_ref().map(|q| q.read_level) != read_level;
+                if level_changed && (!self.deframer.joiner.is_empty() || !data.is_empty()) {
+                    return Err(self.fail(PeerMisbehaved::KeyEpochWithPendingFragment.into()));
+                }
+            }
+
+            if data.is_empty() {
+                break;
+            }
+            if take == 0 && !progressed {
+                // Unreachable: the joiner rejects a declared length that
+                // does not fit before it fills up.
+                let err = self.common_state.send_fatal_alert(
+                    AlertDescription::DecodeError,
+                    InvalidMessage::HandshakePayloadTooLarge,
+                );
+                return Err(self.fail(err));
             }
         }
 
         self.state = Ok(state);
+        Ok(())
+    }
 
-        self.maybe_send_key_update()?;
+    pub(crate) fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: RevocationResponse,
+    ) -> Result<(), Error> {
+        if self
+            .common_state
+            .pending_revocation()
+            .map(|query| query.id())
+            != Some(id)
+        {
+            return Err(Error::general("no matching pending revocation request"));
+        }
+        let Some(pending) = self.common_state.pending_revocation.take() else {
+            return Err(Error::general("no pending revocation request"));
+        };
+        let result = match pending.resolve(response) {
+            Ok(RevocationCheck::Pending(next)) => {
+                self.common_state.pending_revocation = Some(next);
+                return Ok(());
+            }
+            Ok(RevocationCheck::Complete(status)) => {
+                let state = self.take_state()?;
+                state.resume_revocation(
+                    &mut Context {
+                        common: &mut self.common_state,
+                        data: &mut self.data,
+                    },
+                    status,
+                )
+            }
+            Err(err) => Err(err),
+        };
+        match result {
+            Ok(state) => {
+                self.state = Ok(state);
+                Ok(())
+            }
+            Err(err) => {
+                let err =
+                    crate::client::tls13::send_cert_path_error_alert(&mut self.common_state, err);
+                Err(self.fail(err))
+            }
+        }
+    }
 
-        Ok(self.common_state.current_io_state())
+    /// Takes the state machine out of `self.state` for processing, or
+    /// returns the error that ended the connection.
+    pub(crate) fn take_state(&mut self) -> Result<Box<dyn State<Data>>, Error> {
+        match mem::replace(&mut self.state, Err(Error::HandshakeNotComplete)) {
+            Ok(state) => Ok(state),
+            Err(e) => {
+                self.state = Err(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    /// Deframes and processes one unit of `buffer`: a whole handshake
+    /// message, or one non-handshake record.
+    ///
+    /// Returns the next state, and `None` instead of a [`Processed`] when
+    /// `buffer` holds no complete unit. On error the connection has failed
+    /// ([`Self::fail`]) and the state is gone.
+    pub(crate) fn process_one(
+        &mut self,
+        state: Box<dyn State<Data>>,
+        buffer: &mut impl DeframerBuffer,
+    ) -> Result<Step<Data>, Error> {
+        let item = match self.deframer.pop(
+            &mut self.common_state.record_layer,
+            self.common_state.negotiated_version,
+            buffer,
+        ) {
+            Ok(Some(item)) => item,
+            Ok(None) => return Ok((state, None)),
+            Err(err) => {
+                let err = self.handle_deframe_error(err, &*state);
+                return Err(self.fail(err));
+            }
+        };
+
+        let mut processed = Processed::Message;
+        let result = match item {
+            Deframed::Handshake { len, version } => {
+                let epoch = self.read_epoch();
+                let bytes = &self.deframer.joiner.buffered()[..len];
+                let parse_version = self.common_state.negotiated_version.unwrap_or(version);
+                let result = match HandshakeMessagePayload::read_version(
+                    &mut CodecReader::init(bytes),
+                    parse_version,
+                ) {
+                    Ok(parsed) => {
+                        let msg = Message {
+                            version,
+                            payload: MessagePayload::Handshake {
+                                parsed,
+                                encoded: Payload::Borrowed(bytes),
+                            },
+                        };
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                    }
+                    Err(err) => {
+                        let err = self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(err), Error::from(err));
+                        Err(err)
+                    }
+                };
+                self.deframer.joiner.consume(len);
+                result.and_then(|next| self.check_read_key_change(epoch).map(|()| next))
+            }
+            Deframed::Record {
+                typ,
+                version,
+                plaintext,
+                consumed,
+                want_close_before_decrypt,
+            } => {
+                if want_close_before_decrypt {
+                    self.common_state.send_close_notify();
+                }
+                // `plaintext` is relative to the buffer as `pop` left it.
+                let position = buffer.position();
+                let in_storage = position + plaintext.start..position + plaintext.end;
+                let payload = &buffer.filled()[plaintext];
+                let result = match Message::try_from(InboundPlainMessage {
+                    typ,
+                    version,
+                    payload,
+                }) {
+                    Ok(msg) => {
+                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                    }
+                    Err(err) => Err(self
+                        .common_state
+                        .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                };
+                // Unbuffered connections leave application data where it was
+                // decrypted; the state machine only flagged that it took it.
+                let app_data = mem::take(&mut self.common_state.app_data_in_place);
+                let early_data = self.data.take_early_data_in_place();
+                if result.is_ok() {
+                    if app_data {
+                        processed = Processed::AppData(in_storage);
+                    } else if early_data {
+                        processed = Processed::EarlyData(in_storage);
+                    }
+                }
+                buffer.discard(consumed);
+                result
+            }
+        };
+
+        match result {
+            Ok(new_state) => Ok((new_state, Some(processed))),
+            Err(err) => Err(self.fail(err)),
+        }
+    }
+
+    /// The read key epoch, to check a handshake message against with
+    /// [`Self::check_read_key_change`] once it is processed.
+    pub(crate) fn read_epoch(&self) -> ReadEpoch {
+        let record_layer = &self.common_state.record_layer;
+        ReadEpoch {
+            decrypting: record_layer.is_decrypting(),
+            seq: record_layer.read_seq(),
+        }
+    }
+
+    /// RFC 8446 §5.1: a handshake message that changes the read key must end
+    /// its record; nothing may follow it under the old key. Fails with an
+    /// `unexpected_message` alert when the read key changed since `before`
+    /// while handshake bytes are still buffered.
+    ///
+    /// Every handshake message processed by the state machine is checked:
+    /// [`Self::process_one`] does it, and so do the server acceptors after
+    /// the ClientHello they read.
+    pub(crate) fn check_read_key_change(&mut self, before: ReadEpoch) -> Result<(), Error> {
+        let record_layer = &self.common_state.record_layer;
+        let changed = record_layer.is_decrypting() != before.decrypting
+            || (record_layer.is_decrypting() && record_layer.read_seq() < before.seq);
+        if changed && !self.deframer.joiner.is_empty() {
+            return Err(self.common_state.send_fatal_alert(
+                AlertDescription::UnexpectedMessage,
+                PeerMisbehaved::KeyEpochWithPendingFragment,
+            ));
+        }
+        Ok(())
     }
 
     /// Records `err` as the connection's final state and lets the side data
     /// forget any session the failed connection was using.
-    fn fail(&mut self, err: Error) -> Error {
+    pub(crate) fn fail(&mut self, err: Error) -> Error {
+        self.common_state.pending_revocation = None;
         self.data
             .on_fatal_error(self.common_state.negotiated_version);
         self.state = Err(err.clone());
         err
     }
 
-    fn process_msg(
+    pub(crate) fn process_msg(
         common: &mut CommonState,
         data: &mut Data,
         state: Box<dyn State<Data>>,
@@ -282,6 +541,21 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// Makes sure every fatal error is accompanied by an alert.
     pub(crate) fn ensure_alert_sent(common: &mut CommonState, err: Error) -> Error {
         if common.sent_fatal_alert {
+            return err;
+        }
+        // RFC 9001 makes these a QUIC PROTOCOL_VIOLATION, which has no TLS
+        // alert: `quic::ConnectionCommon::alert` stays `None`.
+        if common.is_quic()
+            && matches!(
+                err,
+                Error::PeerMisbehaved(
+                    PeerMisbehaved::InvalidMaxEarlyDataSize
+                        | PeerMisbehaved::NonEmptySessionIdInQuicClientHello
+                        | PeerMisbehaved::KeyEpochWithPendingFragment
+                        | PeerMisbehaved::UnsolicitedPostHandshakeCertificateRequest
+                )
+            )
+        {
             return err;
         }
         let desc = match &err {
@@ -347,16 +621,65 @@ impl<Data: SideData> ConnectionCore<Data> {
         }
     }
 
+    /// The early exporter (RFC 9846 §7.5); the body of the buffered and
+    /// unbuffered `export_early_keying_material`.
+    pub(crate) fn export_early_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if output.is_empty() {
+            return Err(Error::general(
+                "export_early_keying_material: output buffer is empty",
+            ));
+        }
+        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
+            return Err(Error::general(
+                "export_early_keying_material: context too long",
+            ));
+        }
+        // Like the regular exporter, nothing is exported once the
+        // connection has failed.
+        if let Err(err) = &self.state {
+            return Err(err.clone());
+        }
+        match &self.common_state.early_exporter {
+            Some(exporter) => exporter.export_keying_material(output, label, context),
+            None => Err(Error::General(
+                "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
+            )),
+        }
+    }
+
     pub(crate) fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
+        self.extracted_secrets()
+    }
+
+    /// The current secrets in the form the kernel takes, with the next
+    /// sequence numbers.
+    pub(crate) fn extracted_secrets(&self) -> Result<ExtractedSecrets, Error> {
         if !self.common_state.enable_secret_extraction {
             return Err(Error::general("Secret extraction is disabled"));
         }
-        let st = self.state?;
+        let st = match &self.state {
+            Ok(st) => st,
+            Err(err) => return Err(err.clone()),
+        };
         let record_layer = &self.common_state.record_layer;
         let PartiallyExtractedSecrets { tx, rx } = st.extract_secrets()?;
-        Ok(ExtractedSecrets {
-            tx: (record_layer.write_seq(), tx),
-            rx: (record_layer.read_seq(), rx),
+        let (tx_seq, rx_seq) = (record_layer.write_seq(), record_layer.read_seq());
+        Ok(match self.common_state.negotiated_version {
+            // The kernel continues TLS 1.2 explicit nonces from the IV it is
+            // given: hand it the next record's (`Nonce::tls12_explicit`).
+            Some(ProtocolVersion::TLSv1_2) => ExtractedSecrets {
+                tx: (tx_seq, tx.with_tls12_explicit_nonce_at(tx_seq)),
+                rx: (rx_seq, rx.with_tls12_explicit_nonce_at(rx_seq)),
+            },
+            _ => ExtractedSecrets {
+                tx: (tx_seq, tx),
+                rx: (rx_seq, rx),
+            },
         })
     }
 
@@ -428,10 +751,11 @@ impl<Data: SideData> ConnectionCore<Data> {
     }
 
     /// Reads one plaintext handshake message out of `buffer` without
-    /// advancing the state machine; used by the server `Acceptor`.
+    /// advancing the state machine; used by the server acceptors (buffered
+    /// and unbuffered).
     pub(crate) fn first_handshake_message(
         &mut self,
-        buffer: &mut DeframerVecBuffer,
+        buffer: &mut impl DeframerBuffer,
     ) -> Result<Option<Message<'static>>, Error> {
         loop {
             match self.deframer.pop(
@@ -511,517 +835,6 @@ impl<Data> State<Data> for NoState {
         _message: Message<'_>,
     ) -> Result<Box<dyn State<Data>>, Error> {
         Err(Error::HandshakeNotComplete)
-    }
-}
-
-/// A connection whose handshake is driven by the buffered API.
-pub struct ConnectionCommon<Data> {
-    pub(crate) core: ConnectionCore<Data>,
-    pub(crate) deframer_buffer: DeframerVecBuffer,
-}
-
-impl<Data: SideData> ConnectionCommon<Data> {
-    /// Processes every complete record received so far.
-    ///
-    /// Call this after `read_tls`. Returns what the connection now wants to
-    /// do, or the fatal error that ended it (after which an alert is usually
-    /// queued for `write_tls`).
-    pub fn process_new_packets(&mut self) -> Result<IoState, Error> {
-        self.core.process_new_packets(&mut self.deframer_buffer)
-    }
-
-    /// Derives keying material bound to this session (RFC 5705, RFC 8446 §7.5).
-    pub fn export_keying_material<T: AsMut<[u8]>>(
-        &self,
-        mut output: T,
-        label: &[u8],
-        context: Option<&[u8]>,
-    ) -> Result<T, Error> {
-        self.core
-            .export_keying_material(output.as_mut(), label, context)?;
-        Ok(output)
-    }
-
-    /// Derives keying material from the early exporter (RFC 9846 §7.5,
-    /// `early_exporter_master_secret`), the exporter for use with 0-RTT data.
-    ///
-    /// Available on a client from the moment it offers 0-RTT (see
-    /// `ClientConnection::early_data`) and on a server once it has accepted
-    /// 0-RTT; the client loses it again if the server rejects 0-RTT, since
-    /// the two sides would no longer agree on the value. Like 0-RTT data the
-    /// output is bound to the ClientHello and the resumption PSK only: it is
-    /// not forward secret and an attacker who replays the ClientHello
-    /// replays it too. Use [`Self::export_keying_material`] for anything
-    /// else; the two never return the same value.
-    pub fn export_early_keying_material<T: AsMut<[u8]>>(
-        &self,
-        mut output: T,
-        label: &[u8],
-        context: Option<&[u8]>,
-    ) -> Result<T, Error> {
-        let out = output.as_mut();
-        if out.is_empty() {
-            return Err(Error::general(
-                "export_early_keying_material: output buffer is empty",
-            ));
-        }
-        if context.is_some_and(|c| c.len() > usize::from(u16::MAX)) {
-            return Err(Error::general(
-                "export_early_keying_material: context too long",
-            ));
-        }
-        match &self.core.common_state.early_exporter {
-            Some(exporter) => exporter.export_keying_material(out, label, context)?,
-            None => {
-                return Err(Error::General(
-                    "early exporter unavailable: 0-RTT was not offered, or was rejected".into(),
-                ));
-            }
-        }
-        Ok(output)
-    }
-
-    /// The `tls-exporter` channel binding of RFC 9266: 32 bytes exported
-    /// with the label `EXPORTER-Channel-Binding` and an empty context.
-    ///
-    /// Defined only when the handshake produced a unique master secret
-    /// (RFC 9266 §2): always in TLS 1.3, and in TLS 1.2 only with the
-    /// extended master secret (RFC 7627), which the TLS 1.2 exporter already
-    /// requires. browntls never renegotiates, so the value is fixed for the
-    /// connection (RFC 9266 §4.2). Fails until the handshake is complete.
-    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
-        self.export_keying_material([0u8; 32], b"EXPORTER-Channel-Binding", Some(&[]))
-    }
-
-    /// Extracts the traffic secrets for kernel TLS offload.
-    ///
-    /// Requires `enable_secret_extraction` in the configuration and a
-    /// completed handshake. The connection is consumed because no further
-    /// records may be protected by this library afterwards.
-    pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
-        if self.deframer_buffer.has_pending() || self.core.deframer.has_buffered_handshake() {
-            return Err(Error::general(
-                "cannot extract secrets with unprocessed received data",
-            ));
-        }
-        self.core.dangerous_extract_secrets()
-    }
-
-    /// Limits the buffered outgoing data (`None` removes the limit).
-    pub fn set_buffer_limit(&mut self, limit: Option<usize>) {
-        self.core.common_state.set_buffer_limit(limit);
-    }
-
-    /// Rotates the traffic keys (TLS 1.3 only), asking the peer to do the same.
-    pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
-        self.core.refresh_traffic_keys()
-    }
-
-    pub(crate) fn replace_state(&mut self, new: Box<dyn State<Data>>) {
-        self.core.state = Ok(new);
-    }
-}
-
-#[cfg(feature = "std")]
-impl<Data: SideData> ConnectionCommon<Data> {
-    /// Reads TLS bytes from `rd` into the connection. Returns the number of
-    /// bytes read; zero means the transport reached end of file.
-    ///
-    /// Fails if received plaintext is waiting for the application, so that a
-    /// peer cannot force unbounded buffering.
-    pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
-        if self.core.common_state.received_plaintext.is_full() {
-            return Err(std::io::Error::other(
-                "received plaintext buffer full; read it with reader() first",
-            ));
-        }
-        let n = self.deframer_buffer.read(rd)?;
-        if n == 0 {
-            self.core.common_state.mark_eof();
-        }
-        Ok(n)
-    }
-
-    /// Writes queued TLS bytes to `wr`.
-    pub fn write_tls(&mut self, wr: &mut dyn std::io::Write) -> Result<usize, std::io::Error> {
-        self.core.common_state.sendable_tls.write_to(wr)
-    }
-
-    /// Plaintext received from the peer.
-    pub fn reader(&mut self) -> Reader<'_> {
-        Reader {
-            common: &mut self.core.common_state,
-        }
-    }
-
-    /// Plaintext to send to the peer.
-    pub fn writer(&mut self) -> Writer<'_> {
-        Writer {
-            sink: &mut self.core,
-        }
-    }
-
-    /// Drives the connection over `io` until the handshake completes, or,
-    /// once it has, until some plaintext was read or all queued TLS bytes
-    /// were written. Returns `(bytes read, bytes written)`.
-    pub fn complete_io<T>(&mut self, io: &mut T) -> Result<(usize, usize), std::io::Error>
-    where
-        T: std::io::Read + std::io::Write,
-    {
-        let until_handshaked = self.is_handshaking();
-        let mut eof = false;
-        let mut wrlen = 0;
-        let mut rdlen = 0;
-
-        loop {
-            while self.wants_write() {
-                wrlen += self.write_tls(io)?;
-            }
-            io.flush()?;
-
-            if !until_handshaked && wrlen > 0 {
-                return Ok((rdlen, wrlen));
-            }
-
-            while !eof && self.wants_read() {
-                match self.read_tls(io) {
-                    Ok(0) => {
-                        eof = true;
-                        break;
-                    }
-                    Ok(n) => {
-                        rdlen += n;
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-
-            if let Err(e) = self.process_new_packets() {
-                // Deliver any alert before reporting the failure.
-                let _ignored = self.write_tls(io);
-                let _ignored = io.flush();
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
-            }
-
-            match (eof, until_handshaked, self.is_handshaking()) {
-                (_, true, false) => return Ok((rdlen, wrlen)),
-                (_, false, _) => return Ok((rdlen, wrlen)),
-                (true, true, true) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "peer closed connection during handshake",
-                    ));
-                }
-                (false, true, true) => {}
-            }
-        }
-    }
-}
-
-impl<Data> Deref for ConnectionCommon<Data> {
-    type Target = CommonState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core.common_state
-    }
-}
-
-impl<Data> DerefMut for ConnectionCommon<Data> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core.common_state
-    }
-}
-
-impl<Data> From<ConnectionCore<Data>> for ConnectionCommon<Data> {
-    fn from(core: ConnectionCore<Data>) -> Self {
-        Self {
-            core,
-            deframer_buffer: DeframerVecBuffer::default(),
-        }
-    }
-}
-
-/// Reads plaintext received from the peer.
-#[cfg(feature = "std")]
-pub struct Reader<'a> {
-    common: &'a mut CommonState,
-}
-
-#[cfg(feature = "std")]
-impl Reader<'_> {
-    fn check_no_bytes_state(&self) -> std::io::Result<()> {
-        if self.common.has_received_close_notify {
-            // Clean EOF: the peer closed the session.
-            return Ok(());
-        }
-        if self.common.has_seen_eof {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "peer closed connection without sending TLS close_notify: \
-                 https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof",
-            ));
-        }
-        Err(std::io::ErrorKind::WouldBlock.into())
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::io::Read for Reader<'_> {
-    /// Returns `Ok(0)` only after the peer's `close_notify`; before that,
-    /// `WouldBlock` means no plaintext is buffered yet and `UnexpectedEof`
-    /// means the transport closed without a `close_notify`.
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = self.common.received_plaintext.read(buf);
-        if len == 0 && !buf.is_empty() {
-            self.check_no_bytes_state()?;
-        }
-        Ok(len)
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::io::BufRead for Reader<'_> {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        if self.common.received_plaintext.is_empty() {
-            self.check_no_bytes_state()?;
-        }
-        Ok(self.common.received_plaintext.chunk().unwrap_or(&[]))
-    }
-
-    fn consume(&mut self, amt: usize) {
-        self.common.received_plaintext.consume(amt);
-    }
-}
-
-#[cfg(feature = "std")]
-impl Debug for Reader<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Reader")
-    }
-}
-
-/// Writes plaintext to send to the peer.
-///
-/// Before the handshake completes, writes are buffered (subject to the
-/// buffer limit) and sent once it does.
-#[cfg(feature = "std")]
-pub struct Writer<'a> {
-    sink: &'a mut (dyn PlaintextSink + Send + Sync),
-}
-
-/// Where a [`Writer`] puts plaintext.
-#[cfg(feature = "std")]
-trait PlaintextSink {
-    fn write_plain(
-        &mut self,
-        payload: crate::msgs::message::OutboundChunks<'_>,
-    ) -> std::io::Result<usize>;
-}
-
-#[cfg(feature = "std")]
-impl<Data: SideData> PlaintextSink for ConnectionCore<Data> {
-    fn write_plain(
-        &mut self,
-        payload: crate::msgs::message::OutboundChunks<'_>,
-    ) -> std::io::Result<usize> {
-        if self.common_state.encrypt_failed {
-            return Err(std::io::Error::other("record encryption failed"));
-        }
-        let mut len = self
-            .common_state
-            .send_plain(payload, crate::common_state::Limit::Yes);
-        // A write that reached the confidentiality limit rotates the key
-        // right away, so later writes go out under the next key instead of
-        // being refused (RFC 9846 §5.5). A write the record layer held back
-        // for the refresh is retried once under the new key. Errors are left
-        // for `process_new_packets` to report: the bytes taken are queued.
-        if self.common_state.refresh_traffic_keys_pending {
-            let _ = self.maybe_send_key_update();
-            if len == 0 && !self.common_state.refresh_traffic_keys_pending {
-                len = self
-                    .common_state
-                    .send_plain(payload, crate::common_state::Limit::Yes);
-            }
-        }
-        Ok(len)
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::io::Write for Writer<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.sink.write_plain(buf.into())
-    }
-
-    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        let slices: alloc::vec::Vec<&[u8]> = bufs.iter().map(|s| &**s).collect();
-        let chunks = crate::msgs::message::OutboundChunks::new(&slices);
-        self.sink.write_plain(chunks)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(feature = "std")]
-impl Debug for Writer<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Writer")
-    }
-}
-
-impl<Data> Debug for ConnectionCommon<Data> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ConnectionCommon")
-            .field("common", &self.core.common_state)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A client or server connection.
-#[cfg(feature = "std")]
-#[derive(Debug)]
-pub enum Connection {
-    /// A client connection.
-    Client(crate::client::ClientConnection),
-    /// A server connection.
-    Server(crate::server::ServerConnection),
-}
-
-#[cfg(feature = "std")]
-impl Connection {
-    /// See [`ConnectionCommon::read_tls`].
-    pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
-        match self {
-            Self::Client(conn) => conn.read_tls(rd),
-            Self::Server(conn) => conn.read_tls(rd),
-        }
-    }
-
-    /// See [`ConnectionCommon::write_tls`].
-    pub fn write_tls(&mut self, wr: &mut dyn std::io::Write) -> Result<usize, std::io::Error> {
-        match self {
-            Self::Client(conn) => conn.write_tls(wr),
-            Self::Server(conn) => conn.write_tls(wr),
-        }
-    }
-
-    /// See [`ConnectionCommon::reader`].
-    pub fn reader(&mut self) -> Reader<'_> {
-        match self {
-            Self::Client(conn) => conn.reader(),
-            Self::Server(conn) => conn.reader(),
-        }
-    }
-
-    /// See [`ConnectionCommon::writer`].
-    pub fn writer(&mut self) -> Writer<'_> {
-        match self {
-            Self::Client(conn) => conn.writer(),
-            Self::Server(conn) => conn.writer(),
-        }
-    }
-
-    /// See [`ConnectionCommon::process_new_packets`].
-    pub fn process_new_packets(&mut self) -> Result<IoState, Error> {
-        match self {
-            Self::Client(conn) => conn.process_new_packets(),
-            Self::Server(conn) => conn.process_new_packets(),
-        }
-    }
-
-    /// See [`ConnectionCommon::export_keying_material`].
-    pub fn export_keying_material<T: AsMut<[u8]>>(
-        &self,
-        output: T,
-        label: &[u8],
-        context: Option<&[u8]>,
-    ) -> Result<T, Error> {
-        match self {
-            Self::Client(conn) => conn.export_keying_material(output, label, context),
-            Self::Server(conn) => conn.export_keying_material(output, label, context),
-        }
-    }
-
-    /// See [`ConnectionCommon::export_early_keying_material`].
-    pub fn export_early_keying_material<T: AsMut<[u8]>>(
-        &self,
-        output: T,
-        label: &[u8],
-        context: Option<&[u8]>,
-    ) -> Result<T, Error> {
-        match self {
-            Self::Client(conn) => conn.export_early_keying_material(output, label, context),
-            Self::Server(conn) => conn.export_early_keying_material(output, label, context),
-        }
-    }
-
-    /// See [`ConnectionCommon::tls_exporter_channel_binding`].
-    pub fn tls_exporter_channel_binding(&self) -> Result<[u8; 32], Error> {
-        match self {
-            Self::Client(conn) => conn.tls_exporter_channel_binding(),
-            Self::Server(conn) => conn.tls_exporter_channel_binding(),
-        }
-    }
-
-    /// See [`ConnectionCommon::complete_io`].
-    pub fn complete_io<T>(&mut self, io: &mut T) -> Result<(usize, usize), std::io::Error>
-    where
-        T: std::io::Read + std::io::Write,
-    {
-        match self {
-            Self::Client(conn) => conn.complete_io(io),
-            Self::Server(conn) => conn.complete_io(io),
-        }
-    }
-
-    /// See [`ConnectionCommon::dangerous_extract_secrets`].
-    pub fn dangerous_extract_secrets(self) -> Result<ExtractedSecrets, Error> {
-        match self {
-            Self::Client(conn) => conn.dangerous_extract_secrets(),
-            Self::Server(conn) => conn.dangerous_extract_secrets(),
-        }
-    }
-
-    /// See [`ConnectionCommon::set_buffer_limit`].
-    pub fn set_buffer_limit(&mut self, limit: Option<usize>) {
-        match self {
-            Self::Client(conn) => conn.set_buffer_limit(limit),
-            Self::Server(conn) => conn.set_buffer_limit(limit),
-        }
-    }
-
-    /// See [`ConnectionCommon::refresh_traffic_keys`].
-    pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
-        match self {
-            Self::Client(conn) => conn.refresh_traffic_keys(),
-            Self::Server(conn) => conn.refresh_traffic_keys(),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl Deref for Connection {
-    type Target = CommonState;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Client(conn) => conn,
-            Self::Server(conn) => conn,
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl DerefMut for Connection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::Client(conn) => conn,
-            Self::Server(conn) => conn,
-        }
     }
 }
 

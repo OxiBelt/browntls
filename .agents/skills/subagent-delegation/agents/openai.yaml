@@ -1,0 +1,7 @@
+interface:
+  display_name: "Subagent Delegation"
+  short_description: "Delegate bounded work to suitable GPT or Claude workers"
+  default_prompt: "Use $subagent-delegation to assign bounded work to permitted available workers, verify their evidence, and integrate the result."
+
+policy:
+  allow_implicit_invocation: true

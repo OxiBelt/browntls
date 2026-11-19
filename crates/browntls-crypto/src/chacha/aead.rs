@@ -1,8 +1,9 @@
 //! ChaCha20-Poly1305 AEAD (RFC 8439, section 2.8).
 
 use super::poly1305::{Poly1305, PolyBackend};
-use super::{Backend, KEY_LEN, Key, nonce_words, xor_words};
+use super::{Backend, KEY_LEN, Key, LOAD, nonce_words, xor_words};
 use crate::Error;
+use crate::accel::load::{self, Route};
 use crate::aead::{Aead, NONCE_LEN, TAG_LEN};
 use crate::zeroize::Zeroize;
 
@@ -16,6 +17,9 @@ pub struct ChaCha20Poly1305 {
     key: Key,
     backend: Backend,
     poly: PolyBackend,
+    /// Whether records take part in load-aware routing; not for an instance
+    /// created with explicit backends, which always uses them.
+    routed: bool,
 }
 
 impl core::fmt::Debug for ChaCha20Poly1305 {
@@ -44,10 +48,13 @@ impl ChaCha20Poly1305 {
             key: Key::new(key),
             backend,
             poly,
+            routed: false,
         })
     }
 
-    /// Returns the ChaCha20 and Poly1305 backends in use.
+    /// Returns the ChaCha20 and Poly1305 backends the instance was created
+    /// for. With load-aware routing ([`crate::accel::load`]) a record may be
+    /// encrypted by another ChaCha20 backend.
     #[must_use]
     pub fn backends(&self) -> (Backend, PolyBackend) {
         (self.backend, self.poly)
@@ -60,10 +67,27 @@ impl ChaCha20Poly1305 {
         Ok(())
     }
 
+    /// The ChaCha20 backend for a record of `len` bytes with `aad_len`
+    /// bytes of additional data.
+    fn route(&self, len: usize, aad_len: usize) -> Route<Backend> {
+        if !self.routed {
+            return Route::fixed(self.backend);
+        }
+        // Every available backend can run with this key.
+        let route = load::route(&LOAD[0], self.backend, len, |_| true);
+        // The cost is counted per record byte; additional data beyond a
+        // record header would make the record look slow.
+        if aad_len > len / 64 {
+            route.untimed()
+        } else {
+            route
+        }
+    }
+
     /// Derives the one-time Poly1305 key from block 0 (RFC 8439, 2.6).
-    fn poly(&self, nonce: &[u32; 3]) -> Poly1305 {
+    fn poly(&self, backend: Backend, nonce: &[u32; 3]) -> Poly1305 {
         let mut otk = [0u8; 64];
-        xor_words(self.backend, &self.key.0, 0, nonce, &mut otk[..32]);
+        xor_words(backend, &self.key.0, 0, nonce, &mut otk[..32]);
         let mac = Poly1305::with_backend(otk.first_chunk::<32>().unwrap_or(&[0; 32]), self.poly);
         otk.zeroize();
         mac
@@ -84,7 +108,9 @@ impl Aead for ChaCha20Poly1305 {
     const KEY_LEN: usize = KEY_LEN;
 
     fn new(key: &[u8]) -> Result<Self, Error> {
-        Self::with_backends(key, Backend::best(), PolyBackend::best())
+        let mut aead = Self::with_backends(key, Backend::best(), PolyBackend::best())?;
+        aead.routed = true;
+        Ok(aead)
     }
 
     fn seal_in_place(
@@ -95,9 +121,12 @@ impl Aead for ChaCha20Poly1305 {
     ) -> Result<[u8; TAG_LEN], Error> {
         Self::check_len(in_out.len())?;
         let n = nonce_words(nonce);
-        let mac = self.poly(&n);
-        xor_words(self.backend, &self.key.0, 1, &n, in_out);
-        Ok(Self::tag(mac, aad, in_out))
+        let route = self.route(in_out.len(), aad.len());
+        let mac = self.poly(route.backend(), &n);
+        xor_words(route.backend(), &self.key.0, 1, &n, in_out);
+        let tag = Self::tag(mac, aad, in_out);
+        route.done();
+        Ok(tag)
     }
 
     fn open_in_place(
@@ -109,17 +138,21 @@ impl Aead for ChaCha20Poly1305 {
     ) -> Result<(), Error> {
         Self::check_len(in_out.len())?;
         let n = nonce_words(nonce);
-        let mac = self.poly(&n);
+        let route = self.route(in_out.len(), aad.len());
+        let mac = self.poly(route.backend(), &n);
         // Authenticate before decrypting so unauthenticated plaintext never
         // exists in `in_out`.
         let mut expected = Self::tag(mac, aad, in_out);
         let ok = crate::ct::eq(&expected, tag);
         expected.zeroize();
         if !ok {
+            // Not reported to the balancer: a rejected record costs less
+            // than its length suggests, and a peer chooses how many to send.
             in_out.zeroize();
             return Err(Error::DecryptFailed);
         }
-        xor_words(self.backend, &self.key.0, 1, &n, in_out);
+        xor_words(route.backend(), &self.key.0, 1, &n, in_out);
+        route.done();
         Ok(())
     }
 }

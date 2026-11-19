@@ -89,6 +89,7 @@ enum_builder! {
         CachedInfo => 0x0019,
         CompressCertificate => 0x001b,
         RecordSizeLimit => 0x001c,
+        TlsCertWithExternPsk => 0x0021,
         DelegatedCredential => 0x0022,
         SessionTicket => 0x0023,
         PreSharedKey => 0x0029,

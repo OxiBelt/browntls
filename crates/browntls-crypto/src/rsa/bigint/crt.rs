@@ -6,9 +6,14 @@
 //! when the key was created), otherwise two
 //! [`Mont::exp_ct`] calls with the key's Montgomery kernel. Both compute the
 //! same values with the same constant-time structure.
+//!
+//! An exponentiation names the kernel it runs under ([`Under`]), which is
+//! the key's own unless load-aware routing sent the signature to a lower
+//! backend: under a kernel without IFMA the pair is two [`Under::exp_ct`]
+//! calls with that kernel, which need nothing but the primes' contexts.
 
 use super::HALF_LIMBS;
-use super::mont::Mont;
+use super::mont::{Mont, Under};
 
 /// Backend for the two CRT exponentiations of a private key.
 pub(crate) struct CrtExp {
@@ -51,12 +56,13 @@ impl CrtExp {
 
     /// `out_p = base_p^dp mod p` and `out_q = base_q^dq mod q`, bases and
     /// results in Montgomery form (`p.len() == q.len()` limbs, exponents of
-    /// the same length). Constant time.
+    /// the same length), under the kernel of `p` and `q`, which are the
+    /// contexts this backend was created for. Constant time.
     #[allow(clippy::too_many_arguments, reason = "two parallel problems")]
     pub(crate) fn exp(
         &self,
-        p: &Mont<HALF_LIMBS>,
-        q: &Mont<HALF_LIMBS>,
+        p: Under<'_, HALF_LIMBS>,
+        q: Under<'_, HALF_LIMBS>,
         out_p: &mut [u64],
         out_q: &mut [u64],
         base_p: &[u64],
@@ -65,7 +71,9 @@ impl CrtExp {
         dq: &[u64],
     ) {
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-        if let Some(ifma) = &self.ifma {
+        if let Some(ifma) = &self.ifma
+            && p.kernel().ifma().is_some()
+        {
             ifma.exp([out_p, out_q], [base_p, base_q], [dp, dq]);
             return;
         }

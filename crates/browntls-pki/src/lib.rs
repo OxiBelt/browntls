@@ -9,6 +9,12 @@
 //! * [`EndEntityCert`]: certificate parsing, path building to a
 //!   [`TrustAnchor`] (RFC 5280 §6), server name matching (RFC 6125) and
 //!   handshake signature verification; [`crl`]: certificate revocation lists.
+//! * Inspection of any certificate with the same strict parser: [`Cert`]
+//!   (which `EndEntityCert` dereferences to) with its [`extensions`] and
+//!   subject alternative names ([`GeneralName`]); [`Name`]: X.501
+//!   distinguished names; [`SignedData`]: signatures of certificates, CRLs,
+//!   certification requests and other signed messages, verified like path
+//!   validation verifies them.
 //! * [`SignatureVerificationAlgorithm`]: the seam through which a
 //!   cryptography provider verifies signatures. This crate contains no
 //!   cryptographic primitives.
@@ -31,14 +37,17 @@ mod asn1_time;
 mod cert;
 pub mod crl;
 mod crl_der;
+pub mod crlite;
 mod der;
 mod error;
-mod extensions;
-mod name;
+pub mod extensions;
+pub mod name;
+pub mod ocsp;
 mod path;
 pub mod pem;
 mod revocation;
 mod rsassa_pss;
+pub mod sct;
 pub mod server_name;
 mod signed_data;
 pub mod time;
@@ -46,6 +55,7 @@ pub mod types;
 mod verify;
 
 pub use alg_id::AlgorithmIdentifier;
+pub use cert::Cert;
 pub use crl::{
     BorrowedCertRevocationList, BorrowedRevokedCert, CertRevocationList, CrlsRequired,
     ExpirationPolicy, OwnedCertRevocationList, OwnedRevokedCert, RevocationCheckDepth,
@@ -53,7 +63,10 @@ pub use crl::{
     UnknownStatusPolicy,
 };
 pub use error::Error;
+pub use extensions::Extension;
+pub use name::{AttributeTypeAndValue, GeneralName, Name, RelativeDistinguishedName};
 pub use server_name::{DnsName, InvalidDnsNameError, IpAddr, ServerName};
+pub use signed_data::SignedData;
 pub use time::UnixTime;
 pub use types::{
     CertificateDer, CertificateRevocationListDer, CertificateSigningRequestDer, Der,

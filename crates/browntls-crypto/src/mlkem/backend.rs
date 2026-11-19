@@ -1,7 +1,9 @@
 //! Run-time selection of the polynomial-arithmetic backend.
 
+use super::params::ParameterSet;
 use super::poly::{self, N, Poly};
 use crate::Error;
+use crate::accel::load::Stream;
 
 /// A polynomial-arithmetic backend for ML-KEM.
 ///
@@ -79,6 +81,43 @@ impl crate::accel::Backends for Backend {
             Self::Rvv => "RVV",
         }
     }
+
+    fn streams() -> &'static [Stream] {
+        &LOAD
+    }
+}
+
+/// Load-aware routing state ([`crate::accel::load`]): one stream per
+/// parameter set and operation, since each combination has its own cost.
+/// [`stream`] finds the stream of an operation.
+static LOAD: [Stream; 9] = [
+    Stream::op("keygen (512)"),
+    Stream::op("encaps (512)"),
+    Stream::op("decaps (512)"),
+    Stream::op("keygen (768)"),
+    Stream::op("encaps (768)"),
+    Stream::op("decaps (768)"),
+    Stream::op("keygen (1024)"),
+    Stream::op("encaps (1024)"),
+    Stream::op("decaps (1024)"),
+];
+
+/// A routed operation: its position among the streams of a parameter set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Op {
+    /// Key generation from a seed.
+    Keygen = 0,
+    /// Encapsulation.
+    Encaps = 1,
+    /// Decapsulation.
+    Decaps = 2,
+}
+
+/// The stream of `op` with parameter set `P`.
+pub(crate) fn stream<P: ParameterSet>(op: Op) -> &'static Stream {
+    // The parameter sets have ranks 2, 3 and 4 (the trait is sealed).
+    const { assert!(P::K >= 2 && P::K <= 4) };
+    &LOAD[3 * (P::K - 2) + op as usize]
 }
 
 /// A backend that has been verified to be available on this CPU.

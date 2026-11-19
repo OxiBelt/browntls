@@ -85,11 +85,22 @@ pub enum Error {
     /// A configured `record_size_limit` is below 64 (RFC 8449 §4).
     BadRecordSizeLimit,
 
+    /// The configured TLS 1.3 ticket limit exceeds 255.
+    BadTls13TicketLimit,
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
     /// An error from a provider or other extension point.
     Other(OtherError),
+
+    /// The server rejected Encrypted Client Hello (RFC 9849 §6.1.6).
+    ///
+    /// The handshake with the server's public name completed, so the
+    /// rejection is authentic, but the connection is not usable: the client
+    /// sent `ech_required`. The error carries the server's retry
+    /// configurations, if any, for a new connection.
+    RejectedEch(crate::ech::RejectedEch),
 }
 
 /// Reasons a private key and certificate may not go together.
@@ -171,6 +182,8 @@ pub enum InvalidMessage {
     /// A certificate entry carried a recognised extension that RFC 9846
     /// §4.3 does not allow there.
     DisallowedCertificateExtension,
+    /// A malformed `ECHConfigList` or `ECHConfig` (RFC 9849 §4).
+    InvalidEchConfig,
 }
 
 impl From<InvalidMessage> for Error {
@@ -209,6 +222,13 @@ pub enum PeerMisbehaved {
     /// entry (RFC 9846 §4.5.1).
     BadCertChainExtensions,
     CipherSuiteDifferedOnRetry,
+    DelegatedCredentialBadSignature,
+    DelegatedCredentialExpired,
+    DelegatedCredentialNotOnEndEntity,
+    DelegatedCredentialSchemeMismatch,
+    DelegatedCredentialValidityTooLong,
+    DelegatedCredentialWithUnofferedScheme,
+    DelegatedCredentialWithoutDelegationUsage,
     DisallowedCertificateRequestExtension,
     DisallowedEncryptedExtension,
     DisallowedHelloRetryRequestExtension,
@@ -221,6 +241,29 @@ pub enum PeerMisbehaved {
     DuplicateNewSessionTicketExtensions,
     DuplicateServerHelloExtensions,
     DuplicateServerNameTypes,
+    /// The second ClientHello changed the ECH configuration, cipher suite
+    /// or `enc` (RFC 9849 §7.1.1).
+    EchChangedOnRetry,
+    /// The second ClientHello's ECH payload did not decrypt (RFC 9849 §7.1.1).
+    EchDecryptionFailedOnRetry,
+    /// An `ech_outer_extensions` extension in a ClientHello as sent, or one
+    /// referencing outer extensions illegally (RFC 9849 §5.1).
+    IllegalEchOuterExtensions,
+    /// A decrypted ClientHelloInner without an `inner` ECH extension, or
+    /// one offering TLS 1.2 (RFC 9849 §7.1).
+    IllegalEchInnerClientHello,
+    /// An ECH extension of type `inner` or an unknown type in a
+    /// ClientHello as sent (RFC 9849 §7).
+    IllegalEchClientHelloType,
+    /// Non-zero padding after an EncodedClientHelloInner (RFC 9849 §5.1).
+    IllegalEchPadding,
+    /// The HelloRetryRequest confirmed ECH but the ServerHello did not
+    /// (RFC 9849 §6.1.5).
+    EchAcceptanceVariedAfterRetry,
+    /// The outer ClientHello's server name is not the public name of the
+    /// ECH configuration that decrypted it, and the server checks it
+    /// (RFC 9849 §7.1).
+    EchPublicNameMismatch,
     EarlyDataAttemptedInSecondClientHello,
     EarlyDataExtensionWithoutResumption,
     EarlyDataOfferedWithVariedCipherSuite,
@@ -257,10 +300,14 @@ pub enum PeerMisbehaved {
     /// A second ClientHello did not echo our HelloRetryRequest's cookie
     /// (RFC 9846 §4.3.2).
     MissingCookieInSecondClientHello,
+    /// The first ClientHello offered ECH and the server accepted it, but
+    /// the second carries no ECH extension (RFC 9849 §7.1.1).
+    MissingEchExtensionInSecondClientHello,
     MissingKeyShare,
     MissingPskExtensionInSecondClientHello,
     MissingPskModesExtension,
     MissingQuicTransportParameters,
+    NonEmptySessionIdInQuicClientHello,
     OfferedDuplicateCertificateCompressions,
     OfferedDuplicateKeyShares,
     OfferedEarlyDataWithOldProtocolVersion,
@@ -268,12 +315,14 @@ pub enum PeerMisbehaved {
     OfferedIncorrectCompressions,
     PskExtensionMustBeLast,
     PskExtensionWithMismatchedIdsAndBinders,
+    QuicTransportParametersWithoutQuic,
     RefusedToFollowHelloRetryRequest,
     RejectedEarlyDataInterleavedWithHandshakeMessage,
     ResumptionAttemptedWithVariedEms,
     ResumptionOfferedWithVariedCipherSuite,
     ResumptionOfferedWithVariedEms,
     ResumptionOfferedWithIncompatibleCipherSuite,
+    ReusedAuthenticatorContext,
     SelectedDifferentCipherSuiteAfterRetry,
     SelectedInvalidPsk,
     SelectedTls12UsingTls13VersionExtension,
@@ -299,6 +348,10 @@ pub enum PeerMisbehaved {
     TooMuchEarlyDataReceived,
     UnexpectedCleartextExtension,
     UnsolicitedCertExtension,
+    UnsolicitedDelegatedCredential,
+    /// An ECH extension in a HelloRetryRequest when we sent none, or ECH
+    /// retry configurations after the server accepted ECH (RFC 9849 §5).
+    UnsolicitedEchExtension,
     UnsolicitedEncryptedExtension,
     /// A post-handshake CertificateRequest reached a client that did not
     /// offer `post_handshake_auth` (RFC 9846 §4.7.2).
@@ -306,6 +359,15 @@ pub enum PeerMisbehaved {
     UnsolicitedSctList,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
+    /// The server accepted 0-RTT although it did not select the first PSK
+    /// we offered (RFC 9846 §4.3.10).
+    EarlyDataAcceptedWithOtherPsk,
+    /// The server selected an external PSK and an ALPN protocol other than
+    /// the one the key is restricted to.
+    SelectedExternalPskWithOtherAlpn,
+    /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
+    /// selecting an external PSK.
+    CertWithExternPskWithoutExternalPsk,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -342,6 +404,15 @@ pub enum PeerIncompatible {
     Tls13RequiredForQuic,
     UncompressedEcPointsRequired,
     UnsolicitedCertificateTypeExtension,
+    /// The client offered neither a PSK we could use nor anything a server
+    /// without a certificate could authenticate with.
+    NoUsablePskForServerWithoutCertificate,
+    /// The server selected an external PSK without the certificate
+    /// authentication (RFC 8773) our configuration requires.
+    CertWithExternPskRequired,
+    /// The peer completed (or would complete) the handshake without the
+    /// external PSK our configuration requires (`require_external_psk`).
+    ExternalPskRequired,
 }
 
 impl From<PeerIncompatible> for Error {
@@ -606,9 +677,21 @@ impl fmt::Display for Error {
             Self::BadRecordSizeLimit => {
                 f.write_str("the supplied record_size_limit was smaller than 64")
             }
+            Self::BadTls13TicketLimit => {
+                f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
+            }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),
             Self::Other(err) => write!(f, "other error: {err}"),
+            Self::RejectedEch(r) => write!(
+                f,
+                "server rejected encrypted client hello ({})",
+                if r.can_retry() {
+                    "retry configurations available"
+                } else {
+                    "no usable retry configurations"
+                }
+            ),
         }
     }
 }

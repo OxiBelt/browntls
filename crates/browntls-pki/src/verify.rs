@@ -18,9 +18,21 @@ use crate::{
 pub type PathVerifier<'a> = &'a dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>;
 
 /// A parsed end-entity certificate.
+///
+/// Dereferences to [`Cert`], whose accessors ([`Cert::der`],
+/// [`Cert::subject`], [`Cert::subject_alt_names`], [`Cert::extensions`]
+/// and so on) inspect the certificate; the methods here verify it.
 #[derive(Debug)]
 pub struct EndEntityCert<'a> {
     pub(crate) inner: Cert<'a>,
+}
+
+impl<'a> core::ops::Deref for EndEntityCert<'a> {
+    type Target = Cert<'a>;
+
+    fn deref(&self) -> &Cert<'a> {
+        &self.inner
+    }
 }
 
 impl<'a> TryFrom<&'a CertificateDer<'a>> for EndEntityCert<'a> {
@@ -101,34 +113,24 @@ impl<'a> EndEntityCert<'a> {
         signed_data::verify_signature(alg, &spki, msg, signature)
     }
 
-    /// The certificate's `SubjectPublicKeyInfo` (DER, with outer SEQUENCE).
+    /// Whether the certificate carries the `DelegationUsage` extension
+    /// (OID 1.3.6.1.4.1.44363.44, RFC 9345 §4.2), which allows its key to
+    /// sign delegated credentials. A malformed value (anything but `NULL`)
+    /// or a second occurrence rejects the certificate when it is parsed.
     #[must_use]
-    pub fn subject_public_key_info(&self) -> SubjectPublicKeyInfoDer<'a> {
-        SubjectPublicKeyInfoDer::from_slice(self.inner.spki_der)
+    pub fn has_delegation_usage(&self) -> bool {
+        self.inner.delegation_usage.is_some()
     }
 
-    /// The certificate's DER encoding.
+    /// Whether the certificate has a `KeyUsage` extension with the
+    /// `digitalSignature` bit set. Unlike path validation, which treats an
+    /// absent `KeyUsage` as permitting any usage, this requires the
+    /// extension: RFC 9345 §4.2 asks for "the digitalSignature KeyUsage".
     #[must_use]
-    pub fn der(&self) -> CertificateDer<'a> {
-        CertificateDer::from_slice(self.inner.der)
-    }
-
-    /// The `serialNumber` contents: big-endian two's complement, as encoded.
-    #[must_use]
-    pub fn serial(&self) -> &'a [u8] {
-        self.inner.serial
-    }
-
-    /// The `issuer` `Name` contents (without the outer SEQUENCE).
-    #[must_use]
-    pub fn issuer(&self) -> &'a [u8] {
-        self.inner.issuer
-    }
-
-    /// The `subject` `Name` contents (without the outer SEQUENCE).
-    #[must_use]
-    pub fn subject(&self) -> &'a [u8] {
-        self.inner.subject
+    pub fn has_digital_signature_key_usage(&self) -> bool {
+        self.inner
+            .key_usage
+            .is_some_and(|ku| ku.bit_set(cert::KU_DIGITAL_SIGNATURE))
     }
 }
 

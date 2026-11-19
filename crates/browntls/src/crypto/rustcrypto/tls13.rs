@@ -11,8 +11,8 @@ use super::hash;
 use super::hmac;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, MessageDecrypter, MessageEncrypter,
-    Nonce, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload, Tls13AeadAlgorithm,
-    UnsupportedOperationError, make_tls13_aad,
+    Nonce, OutboundOpaqueMessage, OutboundPlainMessage, Tls13AeadAlgorithm,
+    UnsupportedOperationError, make_tls13_aad, seal_record, seal_record_into,
 };
 use crate::crypto::tls13::HkdfUsingHmac;
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
@@ -36,6 +36,7 @@ pub(crate) static TLS13_CHACHA20_POLY1305_SHA256_INTERNAL: &Tls13CipherSuite = &
     },
     hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA256),
     aead_alg: &CHACHA20_POLY1305,
+    quic: Some(super::quic::CHACHA20_POLY1305),
 };
 
 /// `TLS13_AES_256_GCM_SHA384`.
@@ -48,6 +49,7 @@ pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
         },
         hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA384),
         aead_alg: &AES_256_GCM,
+        quic: Some(super::quic::AES_256_GCM),
     });
 
 /// `TLS13_AES_128_GCM_SHA256`.
@@ -62,6 +64,7 @@ pub(crate) static TLS13_AES_128_GCM_SHA256_INTERNAL: &Tls13CipherSuite = &Tls13C
     },
     hkdf_provider: &HkdfUsingHmac(&hmac::HMAC_SHA256),
     aead_alg: &AES_128_GCM,
+    quic: Some(super::quic::AES_128_GCM),
 };
 
 /// Which [`ConnectionTrafficSecrets`] variant an algorithm's keys map to.
@@ -145,30 +148,61 @@ struct Tls13Encrypter<A> {
     iv: Iv,
 }
 
+impl<A: TlsAead> Tls13Encrypter<A> {
+    /// Seals a record body: the content at the front, then room for the
+    /// content type and the tag. TLSInnerPlaintext = content || ContentType
+    /// (no padding).
+    fn seal(&self, typ: ContentType, seq: u64, body: &mut [u8]) -> Result<(), Error> {
+        let aad = make_tls13_aad(body.len());
+        let inner_len = body.len().checked_sub(TAG_LEN).ok_or(Error::EncryptError)?;
+        let (inner, tag_out) = body
+            .split_at_mut_checked(inner_len)
+            .ok_or(Error::EncryptError)?;
+        *inner.last_mut().ok_or(Error::EncryptError)? = typ.into();
+
+        let nonce = Nonce::new(&self.iv, seq);
+        let tag = self
+            .cipher
+            .encrypt_inout_detached(&nonce.0.into(), &aad, InOutBuf::from(inner))
+            .map_err(|_| Error::EncryptError)?;
+        tag_out.copy_from_slice(&tag);
+        Ok(())
+    }
+}
+
 impl<A: TlsAead> MessageEncrypter for Tls13Encrypter<A> {
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
-        let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = PrefixedPayload::with_capacity(total_len);
-        payload.extend_from_chunks(&msg.payload);
-        payload.extend_from_slice(&msg.typ.to_array());
-
-        let nonce = Nonce::new(&self.iv, seq);
-        let aad = make_tls13_aad(total_len);
-        let tag = self
-            .cipher
-            .encrypt_inout_detached(&nonce.0.into(), &aad, InOutBuf::from(payload.as_mut()))
-            .map_err(|_| Error::EncryptError)?;
-        payload.extend_from_slice(&tag);
-
-        Ok(OutboundOpaqueMessage::new(
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record(
             ContentType::ApplicationData,
             ProtocolVersion::TLSv1_2,
-            payload,
-        ))
+            &msg.payload,
+            0,
+            body_len,
+            |body| self.seal(msg.typ, seq, body),
+        )
+    }
+
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let body_len = self.encrypted_payload_len(msg.payload.len());
+        seal_record_into(
+            ContentType::ApplicationData,
+            ProtocolVersion::TLSv1_2,
+            &msg.payload,
+            0,
+            body_len,
+            out,
+            |body| self.seal(msg.typ, seq, body),
+        )
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {

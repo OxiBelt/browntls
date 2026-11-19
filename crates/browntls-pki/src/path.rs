@@ -389,7 +389,7 @@ fn check_validity(cert: &Cert<'_>, time: UnixTime) -> Result<(), Error> {
 fn check_basic_constraints(cert: &Cert<'_>, role: Role, sub_ca_count: usize) -> Result<(), Error> {
     let (ca, path_len) = cert
         .basic_constraints
-        .map_or((false, None), |bc| (bc.ca, bc.path_len));
+        .map_or((false, None), |bc| (bc.ca, bc.path_len_constraint));
     match (role, ca, path_len) {
         (Role::EndEntity, true, _) => Err(Error::CaUsedAsEndEntity),
         (Role::Issuer, false, _) => Err(Error::EndEntityUsedAsCa),

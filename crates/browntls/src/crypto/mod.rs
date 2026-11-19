@@ -8,10 +8,11 @@
 //!
 //! Two providers ship with the crate behind cargo features:
 //!
-//! * [`native`] (feature `native`, default): backed by `browntls-crypto`.
-//! * [`rustcrypto`] (feature `rustcrypto`): backed by the RustCrypto crates.
+//! * `native` (feature `native`, default): backed by `browntls-crypto`.
+//! * `rustcrypto` (feature `rustcrypto`): backed by the RustCrypto crates.
 //!
-//! When exactly one of them is enabled it becomes the process default, unless
+//! With `std`, when exactly one of them is enabled it becomes the process
+//! default the first time a configuration builder needs one, unless
 //! another provider is installed first with [`CryptoProvider::install_default`].
 
 use alloc::boxed::Box;
@@ -29,6 +30,7 @@ use crate::versions::SupportedProtocolVersion;
 pub mod cipher;
 pub mod hash;
 pub mod hmac;
+pub mod hpke;
 pub(crate) mod signer;
 #[cfg(feature = "tls12")]
 pub mod tls12;
@@ -72,7 +74,7 @@ impl CryptoProvider {
     /// Fails (returning the provider) if a default was already installed.
     /// Without the `std` feature there is no process-wide state; the call then
     /// always fails and configurations must be built with
-    /// `builder_with_provider` or rely on the single enabled provider feature.
+    /// `builder_with_provider`.
     pub fn install_default(self) -> Result<(), Arc<Self>> {
         static_default::install_default(self)
     }

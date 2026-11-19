@@ -16,6 +16,8 @@ use crate::crypto::CryptoProvider;
 use crate::enums::SignatureScheme;
 use crate::error::Error;
 use crate::msgs::handshake::DistinguishedName;
+use crate::revocation::policy::{CrlConfig, PathRequest};
+use crate::revocation::{PeerEvidence, RevocationCheck, RevocationPolicy, require_local};
 use crate::sync::Arc;
 use crate::verify::{
     ClientCertVerified, ClientCertVerifier, DigitallySignedStruct, HandshakeSignatureValid,
@@ -31,6 +33,7 @@ pub struct ClientCertVerifierBuilder {
     revocation_check_depth: RevocationCheckDepth,
     unknown_revocation_policy: UnknownStatusPolicy,
     revocation_expiration_policy: ExpirationPolicy,
+    revocation_policy: Option<RevocationPolicy>,
     anon_policy: AnonymousClientPolicy,
     supported_algs: WebPkiSupportedAlgorithms,
 }
@@ -47,6 +50,7 @@ impl ClientCertVerifierBuilder {
             revocation_check_depth: RevocationCheckDepth::Chain,
             unknown_revocation_policy: UnknownStatusPolicy::Deny,
             revocation_expiration_policy: ExpirationPolicy::Ignore,
+            revocation_policy: None,
             anon_policy: AnonymousClientPolicy::Deny,
             supported_algs,
         }
@@ -64,6 +68,19 @@ impl ClientCertVerifierBuilder {
         subjects: impl IntoIterator<Item = DistinguishedName>,
     ) -> Self {
         self.root_hint_subjects.extend(subjects);
+        self
+    }
+
+    /// Requires the revocation status of the client's certificates under
+    /// `policy`, from the CRLs of this builder, stapled OCSP responses,
+    /// CRLite and, if the policy allows them, live OCSP queries.
+    ///
+    /// The CRL options of this builder keep their meaning: unless
+    /// [`Self::allow_unknown_revocation_status`] is set, every certificate
+    /// they apply to must be covered by a CRL, whatever other evidence
+    /// exists. Clients can staple OCSP responses in TLS 1.3 only.
+    pub fn with_revocation_policy(mut self, policy: RevocationPolicy) -> Self {
+        self.revocation_policy = Some(policy);
         self
     }
 
@@ -113,7 +130,7 @@ impl ClientCertVerifierBuilder {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(crl_error)?;
-        Ok(Arc::new(WebPkiClientVerifier::new(
+        let mut verifier = WebPkiClientVerifier::new(
             self.roots,
             self.root_hint_subjects,
             crls,
@@ -122,7 +139,9 @@ impl ClientCertVerifierBuilder {
             self.revocation_expiration_policy,
             self.anon_policy,
             self.supported_algs,
-        )))
+        );
+        verifier.revocation_policy = self.revocation_policy;
+        Ok(Arc::new(verifier))
     }
 }
 
@@ -138,10 +157,11 @@ enum AnonymousClientPolicy {
 pub struct WebPkiClientVerifier {
     roots: Arc<RootCertStore>,
     root_hint_subjects: Vec<DistinguishedName>,
-    crls: Vec<CertRevocationList<'static>>,
+    crls: Arc<Vec<CertRevocationList<'static>>>,
     revocation_check_depth: RevocationCheckDepth,
     unknown_revocation_policy: UnknownStatusPolicy,
     revocation_expiration_policy: ExpirationPolicy,
+    revocation_policy: Option<RevocationPolicy>,
     anonymous_policy: AnonymousClientPolicy,
     supported_algs: WebPkiSupportedAlgorithms,
 }
@@ -194,13 +214,45 @@ impl WebPkiClientVerifier {
         Self {
             roots,
             root_hint_subjects,
-            crls,
+            crls: Arc::new(crls),
             revocation_check_depth,
             unknown_revocation_policy,
             revocation_expiration_policy,
+            revocation_policy: None,
             anonymous_policy,
             supported_algs,
         }
+    }
+
+    /// Verifies the chain under `policy`. `allow_live` says whether the
+    /// caller can transport the OCSP queries of a pending result.
+    fn verify_with_policy(
+        &self,
+        policy: &RevocationPolicy,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<RevocationCheck, Error> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        policy.verify_path(&PathRequest {
+            end_entity: &cert,
+            roots: &self.roots.roots,
+            intermediates,
+            now,
+            algs: self.supported_algs.all,
+            usage: browntls_pki::KeyUsage::client_auth(),
+            crls: CrlConfig {
+                crls: &self.crls,
+                depth: self.revocation_check_depth,
+                unknown_status: self.unknown_revocation_policy,
+                expiration: self.revocation_expiration_policy,
+            },
+            server_name: None,
+            evidence,
+            allow_live,
+        })
     }
 }
 
@@ -228,6 +280,21 @@ impl ClientCertVerifier for WebPkiClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, Error> {
+        if let Some(policy) = &self.revocation_policy {
+            // This entry point carries no stapled evidence and cannot wait
+            // for a live query: the policy is decided from the CRLs and
+            // CRLite alone.
+            require_local(self.verify_with_policy(
+                policy,
+                end_entity,
+                intermediates,
+                &[],
+                now,
+                false,
+            )?)?;
+            return Ok(ClientCertVerified::assertion());
+        }
+
         let cert = ParsedCertificate::try_from(end_entity)?;
         let crl_refs: Vec<&CertRevocationList<'_>> = self.crls.iter().collect();
         let revocation = if self.crls.is_empty() {
@@ -250,6 +317,24 @@ impl ClientCertVerifier for WebPkiClientVerifier {
             revocation,
         )?;
         Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_client_cert_with_evidence(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+    ) -> Result<RevocationCheck, Error> {
+        let Some(policy) = &self.revocation_policy else {
+            self.verify_client_cert(end_entity, intermediates, now)?;
+            return Ok(RevocationCheck::Complete(None));
+        };
+        self.verify_with_policy(policy, end_entity, intermediates, evidence, now, true)
+    }
+
+    fn revocation_enabled(&self) -> bool {
+        self.revocation_policy.is_some()
     }
 
     fn verify_tls12_signature(
@@ -282,6 +367,7 @@ impl fmt::Debug for WebPkiClientVerifier {
             .field("root_hint_subjects", &self.root_hint_subjects.len())
             .field("crls", &self.crls.len())
             .field("anonymous_policy", &self.anonymous_policy)
+            .field("revocation_policy", &self.revocation_policy)
             .finish_non_exhaustive()
     }
 }

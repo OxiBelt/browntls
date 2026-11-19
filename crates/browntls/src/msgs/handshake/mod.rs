@@ -21,7 +21,8 @@ pub(crate) use extensions::{
     PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, ServerExtensions, ServerNamePayload,
 };
 pub(crate) use hello::{
-    ClientExtensions, HelloRetryRequest, HelloRetryRequestExtensions, ServerHelloPayload,
+    ClientExtensions, HELLO_RETRY_REQUEST_RANDOM, HelloRetryRequest, HelloRetryRequestExtensions,
+    ServerHelloPayload,
 };
 pub use hello::{ClientHelloPayload, HandshakeMessagePayload};
 pub(crate) use kx::ServerKeyExchangePayload;

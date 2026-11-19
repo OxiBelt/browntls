@@ -1,10 +1,21 @@
 //! Server configuration and connections.
 
+mod accept;
+#[cfg(feature = "std")]
+mod buffered;
+mod unbuffered_acceptor;
+
 use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
 use browntls_pki::{DnsName, UnixTime};
+
+#[cfg(feature = "std")]
+pub use buffered::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
+pub use unbuffered_acceptor::{
+    UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
+};
 
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
@@ -166,7 +177,15 @@ pub struct ServerConfig {
     /// Whether `dangerous_extract_secrets` is allowed.
     pub enable_secret_extraction: bool,
 
-    /// How much 0-RTT data to accept; zero disables early data.
+    /// How much 0-RTT data to accept under resumption; zero disables it.
+    /// Early data under an external PSK is governed by that PSK's own limit
+    /// (`ExternalPsk::with_early_data`) instead, whatever this value.
+    ///
+    /// It also bounds the rejected 0-RTT records skipped during the
+    /// handshake: their plaintext, and their number, since each costs at
+    /// least one byte. With zero, early data that is offered anyway is
+    /// skipped up to 16384 bytes. When the server decrypts with an external
+    /// PSK's handshake key, that PSK's own limit applies if larger.
     pub max_early_data_size: u32,
 
     /// Whether to send application data before the client's Finished.
@@ -229,6 +248,22 @@ pub struct ServerConfig {
     /// Decompressors for client certificates (RFC 8879).
     pub cert_decompressors: Vec<&'static dyn compress::CertDecompressor>,
 
+    /// Encrypted Client Hello keys (RFC 9849); `None` (the default)
+    /// ignores ECH. The certificate resolver must also hold a certificate
+    /// for each key's public name, so clients can authenticate a rejection.
+    pub ech: Option<Arc<crate::ech::EchServerConfig>>,
+    /// Act as the back-end server of an ECH split-mode deployment
+    /// (RFC 9849 §7.2): a client-facing server
+    /// ([`ech::split::ClientFacing`](crate::ech::split::ClientFacing))
+    /// decrypts the ClientHello and forwards the inner one, which carries
+    /// an `inner` ECH extension; this server then confirms acceptance in
+    /// its ServerHello (and HelloRetryRequest). An `outer` ECH extension is
+    /// refused with `illegal_parameter` (§7), as is an inner ClientHello
+    /// that offers TLS 1.2 or below. A ClientHello without ECH is served as
+    /// usual. Defaults to `false`; cannot be combined with
+    /// [`ech`](Self::ech), which makes the server decrypt itself (shared
+    /// mode).
+    pub ech_backend: bool,
     /// The largest `uncompressed_length` accepted in a peer's
     /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
     /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
@@ -254,8 +289,33 @@ pub struct ServerConfig {
     pub record_size_limit: Option<u16>,
 
     pub(super) versions: EnabledVersions,
-    pub(super) verifier: Arc<dyn ClientCertVerifier>,
+    pub(crate) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
+
+    /// Finds the external PSKs (RFC 9846 §4.3.11) clients may offer; `None`
+    /// (the default) accepts none. See [`crate::psk`].
+    ///
+    /// A TLS 1.3 handshake that selects an external PSK authenticates
+    /// through it and sends no certificate, so [`Self::cert_resolver`] may
+    /// return nothing for a client that offers one.
+    pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
+
+    /// Whether to authenticate with our certificate as well when the
+    /// client asks for it with `tls_cert_with_extern_psk` (RFC 8773) and an
+    /// external PSK is selected. Off by default.
+    pub cert_with_extern_psk: bool,
+
+    /// Whether to refuse a client that does not authenticate through one of
+    /// [`Self::external_psks`]: the handshake fails unless an external PSK
+    /// is selected, or a ticket issued on a connection that used one (and
+    /// whose key [`Self::external_psks`] still resolves) is resumed. Other
+    /// tickets are passed over, and TLS 1.2 is refused. Off by default.
+    ///
+    /// Useful for a server that has a certificate as well as external PSKs
+    /// but must serve only clients holding a PSK; without it, check
+    /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
+    /// once the handshake completes.
+    pub require_external_psk: bool,
 }
 
 impl ServerConfig {
@@ -269,8 +329,9 @@ impl ServerConfig {
     ///
     /// # Panics
     ///
-    /// Panics if no default provider is available; use
-    /// [`Self::builder_with_provider`] to avoid that.
+    /// Panics if no default provider is available, or if the provider has no
+    /// usable cipher suites or key exchange groups for `versions` (an empty
+    /// `versions` included); use [`Self::builder_with_provider`] to avoid that.
     #[cfg(feature = "std")]
     #[allow(clippy::panic)] // documented: no fallible API exists for this constructor
     pub fn builder_with_protocol_versions(
@@ -329,6 +390,38 @@ impl ServerConfig {
             .find(|s| s.suite() == suite)
     }
 
+    /// The part this configuration plays in ECH (RFC 9849 §7).
+    pub(crate) fn ech_role(&self) -> crate::ech::server::Role<'_> {
+        use crate::ech::server::Role;
+        match (&self.ech, self.ech_backend) {
+            (Some(ech), _) => Role::Shared(ech),
+            (None, true) => Role::Backend,
+            (None, false) => Role::Off,
+        }
+    }
+
+    pub(super) fn check_ech_role(&self) -> Result<(), Error> {
+        if self.ech.is_some() && self.ech_backend {
+            return Err(Error::General(
+                "ech (shared mode) and ech_backend (split mode) exclude each other".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks this configuration and applies its per-connection settings to
+    /// `common`: every server connection goes through here, whether created
+    /// with the configuration or given it by an acceptor.
+    pub(super) fn apply_to(&self, common: &mut CommonState) -> Result<(), Error> {
+        self.check_cookie_sealer()?;
+        self.check_ech_role()?;
+        common.set_max_fragment_size(self.max_fragment_size)?;
+        crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
+        common.enable_secret_extraction = self.enable_secret_extraction;
+        common.fips = self.fips();
+        Ok(())
+    }
+
     /// Refuses a configuration whose HelloRetryRequest cookie sealer is
     /// the ticketer itself: cookies need their own key (RFC 9846 §4.3.2
     /// leaves the cookie format to the server; the key split is ours).
@@ -366,11 +459,12 @@ impl TimeProvider for NoTime {
 
 /// Where 0-RTT stands on a server connection.
 #[derive(Default)]
-pub(super) enum EarlyDataState {
+enum EarlyDataKind {
     /// No decision yet.
     #[default]
     New,
-    /// Accepted: `received` holds the data, `left` what may still arrive.
+    /// Accepted: `received` holds the data (buffered API only), `left` what
+    /// may still arrive.
     Accepted {
         received: ChunkVecBuffer,
         left: usize,
@@ -379,32 +473,53 @@ pub(super) enum EarlyDataState {
     Rejected,
 }
 
+/// The server's 0-RTT bookkeeping.
+#[derive(Default)]
+pub(super) struct EarlyDataState {
+    kind: EarlyDataKind,
+    /// Unbuffered API: accepted early data stays in the caller's buffer.
+    in_place: bool,
+    /// Unbuffered API: the record just processed was accepted early data.
+    in_place_pending: bool,
+}
+
 impl EarlyDataState {
     pub(super) fn reject(&mut self) {
-        *self = Self::Rejected;
+        self.kind = EarlyDataKind::Rejected;
     }
 
     pub(super) fn accept(&mut self, max_size: usize) {
-        *self = Self::Accepted {
+        self.kind = EarlyDataKind::Accepted {
             received: ChunkVecBuffer::new(Some(max_size)),
             left: max_size,
         };
     }
 
     pub(super) fn was_accepted(&self) -> bool {
-        matches!(self, Self::Accepted { .. })
+        matches!(self.kind, EarlyDataKind::Accepted { .. })
     }
 
     pub(super) fn was_rejected(&self) -> bool {
-        matches!(self, Self::Rejected)
+        matches!(self.kind, EarlyDataKind::Rejected)
     }
 
     /// Stores early data; `false` if it exceeds what was announced.
+    ///
+    /// With the unbuffered API nothing is copied: the record stays where it
+    /// was decrypted and only the budget is charged.
     pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
-        let Self::Accepted { received, left } = self else {
+        let EarlyDataKind::Accepted { received, left } = &mut self.kind else {
             return false;
         };
         let available = bytes.len();
+        if self.in_place {
+            if available > *left {
+                return false;
+            }
+            *left -= available;
+            self.in_place_pending = true;
+            return true;
+        }
         if received.apply_limit(available) != available || available > *left {
             return false;
         }
@@ -413,10 +528,15 @@ impl EarlyDataState {
         true
     }
 
+    /// Unbuffered API: leave accepted early data in the caller's buffer.
+    fn set_in_place(&mut self) {
+        self.in_place = true;
+    }
+
     #[cfg(feature = "std")]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Accepted { received, .. } => Ok(received.read(buf)),
+        match &mut self.kind {
+            EarlyDataKind::Accepted { received, .. } => Ok(received.read(buf)),
             _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
         }
     }
@@ -424,14 +544,14 @@ impl EarlyDataState {
 
 impl fmt::Debug for EarlyDataState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::New => f.write_str("EarlyDataState::New"),
-            Self::Accepted { received, left } => f
+        match &self.kind {
+            EarlyDataKind::New => f.write_str("EarlyDataState::New"),
+            EarlyDataKind::Accepted { received, left } => f
                 .debug_struct("EarlyDataState::Accepted")
                 .field("received", &received.len())
                 .field("left", left)
                 .finish(),
-            Self::Rejected => f.write_str("EarlyDataState::Rejected"),
+            EarlyDataKind::Rejected => f.write_str("EarlyDataState::Rejected"),
         }
     }
 }
@@ -443,10 +563,19 @@ pub struct ServerConnectionData {
     pub(super) received_resumption_data: Option<Vec<u8>>,
     pub(super) resumption_data: Vec<u8>,
     pub(super) early_data: EarlyDataState,
+    /// The absolute expiry of the server delegated credential that
+    /// authenticated this TLS 1.3 connection or its resumed ancestor.
+    pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The original handshake authenticated with an external PSK alone.
+    pub(super) certificate_free: bool,
     /// The session cache entry this TLS 1.2 connection resumed or created,
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
+    /// What was decided about Encrypted Client Hello.
+    pub(crate) ech: crate::ech::server::ServerEch,
+    /// State for exported authenticators (RFC 9261).
+    pub(crate) authenticators: crate::exported_authenticator::ServerAuthenticatorState,
     /// Whether the TLS 1.3 ClientHello offered `post_handshake_auth`.
     pub(super) post_handshake_auth_offered: bool,
     /// The most recent post-handshake client authentication, if any.
@@ -479,16 +608,135 @@ impl SideData for ServerConnectionData {
             store.take(&id);
         }
     }
+
+    fn take_early_data_in_place(&mut self) -> bool {
+        core::mem::take(&mut self.early_data.in_place_pending)
+    }
+
+    fn has_unread_early_data(&self) -> bool {
+        matches!(&self.early_data.kind, EarlyDataKind::Accepted { received, .. } if !received.is_empty())
+    }
+}
+
+impl crate::kernel::KernelConnection<ServerConnectionData> {
+    /// Asks the client for a certificate after the handshake (RFC 9846
+    /// §4.7.2), as `ServerConnection::request_client_auth` does: the
+    /// CertificateRequest is queued for the kernel, and the client's answer
+    /// arrives through [`Self::handle_record`].
+    pub fn request_client_auth(&mut self) -> Result<(), Error> {
+        self.core.request_client_auth()
+    }
+
+    /// The state of the most recent post-handshake authentication, before
+    /// or after the handover, or `None` if none was requested.
+    pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
+        self.core.data.post_handshake_auth
+    }
+}
+
+impl ServerConnectionData {
+    pub(crate) fn server_name(&self) -> Option<&str> {
+        self.sni.as_ref().map(|n| n.as_ref())
+    }
+
+    pub(crate) fn received_resumption_data(&self) -> Option<&[u8]> {
+        self.received_resumption_data.as_deref()
+    }
+
+    pub(crate) fn set_resumption_data(&mut self, data: &[u8]) {
+        self.resumption_data = data.to_vec();
+    }
+
+    pub(crate) fn reject_early_data(&mut self) {
+        self.early_data.reject();
+    }
+
+    pub(crate) fn early_data_accepted(&self) -> bool {
+        self.early_data.was_accepted()
+    }
 }
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        config.check_cookie_sealer()?;
+        Self::for_server_with(config, None)
+    }
+
+    /// Queues a post-handshake CertificateRequest (RFC 9846 §4.7.2); the
+    /// body of the buffered and unbuffered `request_client_auth`.
+    pub(crate) fn request_client_auth(&mut self) -> Result<(), Error> {
+        if self.common_state.is_handshaking() {
+            return Err(Error::HandshakeNotComplete);
+        }
+        if !self.common_state.is_tls13() {
+            return Err(Error::General(
+                "post-handshake client authentication requires TLS 1.3".into(),
+            ));
+        }
+        let state = match &mut self.state {
+            Ok(state) => state,
+            Err(err) => return Err(err.clone()),
+        };
+        // A record whose encryption failed has used up its sequence number;
+        // nothing may follow it.
+        if self.common_state.encrypt_failed {
+            return Err(Error::EncryptError);
+        }
+        // RFC 9846 §6.1: the client sends nothing after its close_notify,
+        // and we would process nothing it sent, so a request would never be
+        // answered.
+        if self.common_state.has_received_close_notify {
+            return Err(Error::General(
+                "cannot request client authentication after the client's close_notify".into(),
+            ));
+        }
+        let mut cx = crate::conn::Context {
+            common: &mut self.common_state,
+            data: &mut self.data,
+        };
+        state.request_client_auth(&mut cx)
+    }
+
+    /// A QUIC server (RFC 9001): TLS 1.3 only, with a QUIC-capable suite,
+    /// and 0-RTT announced only with the sentinel size (§4.6.1).
+    pub(crate) fn for_quic_server(
+        config: Arc<ServerConfig>,
+        quic: crate::quic::Quic,
+    ) -> Result<Self, Error> {
+        if !config.supports_version(ProtocolVersion::TLSv1_3) {
+            return Err(Error::General(
+                "TLS 1.3 support is required for QUIC".into(),
+            ));
+        }
+        if !config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.usable_for_quic())
+        {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with QUIC".into(),
+            ));
+        }
+        if config.max_early_data_size != 0 && config.max_early_data_size != u32::MAX {
+            return Err(Error::General(
+                "QUIC servers must set max_early_data_size to 0 or u32::MAX".into(),
+            ));
+        }
+        if config.ech.is_some() || config.ech_backend {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over QUIC".into(),
+            ));
+        }
+        Self::for_server_with(config, Some(quic))
+    }
+
+    fn for_server_with(
+        config: Arc<ServerConfig>,
+        quic: Option<crate::quic::Quic>,
+    ) -> Result<Self, Error> {
         let mut common = CommonState::new(Side::Server);
-        common.set_max_fragment_size(config.max_fragment_size)?;
-        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
-        common.enable_secret_extraction = config.enable_secret_extraction;
-        common.fips = config.fips();
+        common.quic = quic.map(alloc::boxed::Box::new);
+        config.apply_to(&mut common)?;
         Ok(Self::new(
             alloc::boxed::Box::new(hs::ExpectClientHello::new(config)),
             ServerConnectionData::default(),
@@ -497,41 +745,21 @@ impl ConnectionCore<ServerConnectionData> {
     }
 }
 
-/// An [`std::io::Read`] for accepted early data; see [`ServerConnection::early_data`].
-#[cfg(feature = "std")]
-pub struct ReadEarlyData<'a> {
-    early_data: &'a mut EarlyDataState,
+/// A server-side TLS connection driven by the caller's buffers; see
+/// [`crate::unbuffered`].
+///
+/// Available without `std`. Accepted 0-RTT data is reported as
+/// [`ConnectionState::ReadEarlyData`](crate::unbuffered::ConnectionState::ReadEarlyData)
+/// records, in place, and is replayable by an attacker (see
+/// [`ServerConfig::max_early_data_size`]).
+pub struct UnbufferedServerConnection {
+    inner: crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>,
 }
 
-#[cfg(feature = "std")]
-impl fmt::Debug for ReadEarlyData<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReadEarlyData")
-            .field("state", self.early_data)
-            .finish()
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::io::Read for ReadEarlyData<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.early_data.read(buf)
-    }
-}
-
-/// A server-side TLS connection.
-#[cfg(feature = "std")]
-pub struct ServerConnection {
-    inner: crate::conn::ConnectionCommon<ServerConnectionData>,
-}
-
-#[cfg(feature = "std")]
-impl ServerConnection {
+impl UnbufferedServerConnection {
     /// Prepares to accept a connection with `config`.
     pub fn new(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        Ok(Self {
-            inner: ConnectionCore::for_server(config)?.into(),
-        })
+        Ok(Self::from_core(ConnectionCore::for_server(config)?))
     }
 
     /// The server name the client indicated, once its ClientHello was processed.
@@ -553,39 +781,27 @@ impl ServerConnection {
 
     /// Refuses any 0-RTT data on this connection.
     ///
-    /// Must be called before the handshake has processed the ClientHello
-    /// (right after [`Self::new`], or from a certificate resolver); a later
-    /// call has no effect on data already accepted.
+    /// Effective only before the ClientHello has been processed; once early
+    /// data was accepted this does nothing (the client is already sending
+    /// it under the early traffic key, RFC 9846 §4.3.10).
     pub fn reject_early_data(&mut self) {
-        debug_assert!(
-            self.inner.core.common_state.is_handshaking(),
-            "cannot retroactively reject early data"
-        );
-        self.inner.core.data.early_data.reject();
-    }
-
-    /// A reader for the client's 0-RTT ("early") data, if any was accepted.
-    ///
-    /// Early data is enabled by a non-zero [`ServerConfig::max_early_data_size`]
-    /// with stateful (non-ticket) resumption. It is **replayable** by an
-    /// attacker: the application must only act on it when a replay is
-    /// harmless, and the library offers no anti-replay store. Returns `None`
-    /// until the ClientHello has been processed, or if early data was not
-    /// offered or not accepted.
-    pub fn early_data(&mut self) -> Option<ReadEarlyData<'_>> {
-        let data = &mut self.inner.core.data;
-        if data.early_data.was_accepted() {
-            Some(ReadEarlyData {
-                early_data: &mut data.early_data,
-            })
-        } else {
-            None
+        let early_data = &mut self.inner.core.data.early_data;
+        if !early_data.was_accepted() {
+            early_data.reject();
         }
     }
 
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// What was decided about Encrypted Client Hello. With
+    /// [`EchStatus::Accepted`](crate::ech::EchStatus::Accepted), the
+    /// handshake used the client's encrypted ClientHello, and
+    /// [`Self::server_name`] is the name it carried.
+    pub fn ech_status(&self) -> crate::ech::EchStatus {
+        self.inner.core.data.ech.status()
     }
 
     /// Whether the client offered TLS 1.3 post-handshake authentication
@@ -599,35 +815,26 @@ impl ServerConnection {
     /// §4.7.2): queues a CertificateRequest with a fresh, unpredictable
     /// `certificate_request_context`.
     ///
-    /// Requires a completed TLS 1.3 handshake with a client that offered
+    /// The same rules as for the buffered `ServerConnection` apply: a
+    /// completed TLS 1.3 handshake with a client that offered
     /// `post_handshake_auth`, a client certificate verifier that offers
-    /// client authentication, and no request still unanswered. The answer
-    /// arrives through [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
-    /// and is checked with the configured verifier: follow it with
-    /// [`Self::post_handshake_auth_status`]. A client may take its time and
-    /// send application data first; a certificate the verifier refuses, a
-    /// bad signature or Finished, a missing certificate when the verifier
-    /// makes it mandatory, or messages interleaved with the answer end the
-    /// connection with the corresponding alert.
+    /// client authentication, no request still unanswered, and no
+    /// `close_notify` sent or received (the client would never answer).
+    /// Call it
+    /// between calls of
+    /// [`process_tls_records`](crate::unbuffered::UnbufferedConnectionCommon::process_tls_records),
+    /// not while a state it returned is held. The next call then offers
+    /// the CertificateRequest through
+    /// [`ConnectionState::EncodeTlsData`](crate::unbuffered::ConnectionState::EncodeTlsData)
+    /// before anything else; the client's answer arrives with the records
+    /// `process_tls_records` processes and is checked with the configured
+    /// verifier: follow it with [`Self::post_handshake_auth_status`]. A
+    /// refused certificate, a bad signature or Finished, a missing
+    /// certificate when the verifier makes it mandatory, or messages
+    /// interleaved with the answer end the connection with the
+    /// corresponding alert.
     pub fn request_client_auth(&mut self) -> Result<(), Error> {
-        let core = &mut self.inner.core;
-        if core.common_state.is_handshaking() {
-            return Err(Error::HandshakeNotComplete);
-        }
-        if !core.common_state.is_tls13() {
-            return Err(Error::General(
-                "post-handshake client authentication requires TLS 1.3".into(),
-            ));
-        }
-        let state = match &mut core.state {
-            Ok(state) => state,
-            Err(err) => return Err(err.clone()),
-        };
-        let mut cx = crate::conn::Context {
-            common: &mut core.common_state,
-            data: &mut core.data,
-        };
-        state.request_client_auth(&mut cx)
+        self.inner.core.request_client_auth()
     }
 
     /// The state of the most recent [`Self::request_client_auth`], or
@@ -636,282 +843,42 @@ impl ServerConnection {
         self.inner.core.data.post_handshake_auth
     }
 
-    /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()
     }
-}
 
-#[cfg(feature = "std")]
-impl fmt::Debug for ServerConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ServerConnection").finish_non_exhaustive()
+    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
+    pub fn dangerous_into_kernel_connection(
+        self,
+    ) -> Result<
+        (
+            crate::suites::ExtractedSecrets,
+            crate::kernel::KernelConnection<ServerConnectionData>,
+        ),
+        Error,
+    > {
+        self.inner.dangerous_into_kernel_connection()
     }
 }
 
-#[cfg(feature = "std")]
-impl core::ops::Deref for ServerConnection {
-    type Target = crate::conn::ConnectionCommon<ServerConnectionData>;
+impl fmt::Debug for UnbufferedServerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnbufferedServerConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::ops::Deref for UnbufferedServerConnection {
+    type Target = crate::unbuffered::UnbufferedConnectionCommon<ServerConnectionData>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-#[cfg(feature = "std")]
-impl core::ops::DerefMut for ServerConnection {
+impl core::ops::DerefMut for UnbufferedServerConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
-    }
-}
-
-#[cfg(feature = "std")]
-impl From<ServerConnection> for crate::conn::Connection {
-    fn from(conn: ServerConnection) -> Self {
-        Self::Server(conn)
-    }
-}
-
-/// Reads a ClientHello before choosing a [`ServerConfig`].
-#[cfg(feature = "std")]
-pub struct Acceptor {
-    inner: Option<crate::conn::ConnectionCommon<ServerConnectionData>>,
-}
-
-#[cfg(feature = "std")]
-impl Default for Acceptor {
-    fn default() -> Self {
-        Self {
-            inner: Some(
-                ConnectionCore::new(
-                    alloc::boxed::Box::new(Accepting),
-                    ServerConnectionData::default(),
-                    CommonState::new(Side::Server),
-                )
-                .into(),
-            ),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl Acceptor {
-    /// Reads TLS bytes from `rd`.
-    pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
-        match &mut self.inner {
-            Some(conn) => conn.read_tls(rd),
-            None => Err(std::io::Error::other(
-                "acceptor cannot read after successful acceptance",
-            )),
-        }
-    }
-
-    /// Returns the ClientHello once it has been read in full.
-    ///
-    /// On error, the alert to send to the client is returned too.
-    pub fn accept(&mut self) -> Result<Option<Accepted>, (Error, AcceptedAlert)> {
-        let Some(mut connection) = self.inner.take() else {
-            return Err((
-                Error::general("Acceptor polled after completion"),
-                AcceptedAlert::empty(),
-            ));
-        };
-
-        let message = match connection
-            .core
-            .first_handshake_message(&mut connection.deframer_buffer)
-        {
-            Ok(Some(msg)) => msg,
-            Ok(None) => {
-                self.inner = Some(connection);
-                return Ok(None);
-            }
-            Err(err) => {
-                // Every refusal comes with an alert the caller can send.
-                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
-                    &mut connection.core.common_state,
-                    err,
-                );
-                return Err((err, AcceptedAlert::from(connection)));
-            }
-        };
-
-        let mut cx = crate::conn::Context {
-            common: &mut connection.core.common_state,
-            data: &mut connection.core.data,
-        };
-        let sig_schemes = match hs::process_client_hello(&message, false, &mut cx) {
-            Ok((_, sig_schemes)) => sig_schemes,
-            Err(err) => {
-                let err = ConnectionCore::<ServerConnectionData>::ensure_alert_sent(
-                    &mut connection.core.common_state,
-                    err,
-                );
-                return Err((err, AcceptedAlert::from(connection)));
-            }
-        };
-
-        Ok(Some(Accepted {
-            connection,
-            message,
-            sig_schemes,
-        }))
-    }
-}
-
-#[cfg(feature = "std")]
-impl fmt::Debug for Acceptor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Acceptor").finish_non_exhaustive()
-    }
-}
-
-/// The alert an [`Acceptor`] or [`Accepted`] wants to send after a failure.
-#[cfg(feature = "std")]
-pub struct AcceptedAlert(ChunkVecBuffer);
-
-#[cfg(feature = "std")]
-impl AcceptedAlert {
-    fn empty() -> Self {
-        Self(ChunkVecBuffer::new(None))
-    }
-
-    /// Writes as much of the alert as `wr` accepts.
-    pub fn write(&mut self, wr: &mut dyn std::io::Write) -> Result<usize, std::io::Error> {
-        self.0.write_to(wr)
-    }
-
-    /// Writes the whole alert.
-    pub fn write_all(&mut self, wr: &mut dyn std::io::Write) -> Result<(), std::io::Error> {
-        while self.write(wr)? != 0 {}
-        Ok(())
-    }
-}
-
-#[cfg(feature = "std")]
-impl From<crate::conn::ConnectionCommon<ServerConnectionData>> for AcceptedAlert {
-    fn from(conn: crate::conn::ConnectionCommon<ServerConnectionData>) -> Self {
-        Self(conn.core.common_state.sendable_tls)
-    }
-}
-
-#[cfg(feature = "std")]
-impl fmt::Debug for AcceptedAlert {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AcceptedAlert").finish_non_exhaustive()
-    }
-}
-
-/// A ClientHello read by an [`Acceptor`], waiting for a configuration.
-#[cfg(feature = "std")]
-pub struct Accepted {
-    connection: crate::conn::ConnectionCommon<ServerConnectionData>,
-    message: crate::msgs::message::Message<'static>,
-    sig_schemes: Vec<SignatureScheme>,
-}
-
-#[cfg(feature = "std")]
-impl Accepted {
-    /// The ClientHello.
-    pub fn client_hello(&self) -> ClientHello<'_> {
-        ClientHello::new(
-            self.connection.core.data.sni.as_ref(),
-            &self.sig_schemes,
-            Self::client_hello_payload(&self.message),
-        )
-    }
-
-    /// Continues the handshake with `config`.
-    pub fn into_connection(
-        mut self,
-        config: Arc<ServerConfig>,
-    ) -> Result<ServerConnection, (Error, AcceptedAlert)> {
-        if let Err(err) = config
-            .check_cookie_sealer()
-            .and_then(|()| {
-                self.connection
-                    .set_max_fragment_size(config.max_fragment_size)
-            })
-            .and_then(|()| {
-                crate::common_state::check_record_size_limit_config(config.record_size_limit)
-            })
-        {
-            return Err((err, AcceptedAlert::from(self.connection)));
-        }
-        self.connection.enable_secret_extraction = config.enable_secret_extraction;
-        self.connection.fips = config.fips();
-
-        let state = hs::ExpectClientHello::new(config);
-        let mut cx = crate::conn::Context {
-            common: &mut self.connection.core.common_state,
-            data: &mut self.connection.core.data,
-        };
-        let payload = Self::client_hello_payload(&self.message);
-        let new = match state.with_certified_key(self.sig_schemes, payload, &self.message, &mut cx)
-        {
-            Ok(new) => new,
-            Err(err) => return Err((err, AcceptedAlert::from(self.connection))),
-        };
-        self.connection.replace_state(new);
-        Ok(ServerConnection {
-            inner: self.connection,
-        })
-    }
-
-    fn client_hello_payload<'a>(
-        message: &'a crate::msgs::message::Message<'_>,
-    ) -> &'a ClientHelloPayload {
-        match &message.payload {
-            crate::msgs::message::MessagePayload::Handshake {
-                parsed:
-                    crate::msgs::handshake::HandshakeMessagePayload(
-                        crate::msgs::handshake::HandshakePayload::ClientHello(ch),
-                    ),
-                ..
-            } => ch,
-            // `Acceptor::accept` only constructs `Accepted` from a ClientHello.
-            _ => unreachable_client_hello(),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-#[cold]
-fn unreachable_client_hello() -> &'static ClientHelloPayload {
-    // `Accepted` is only built after `process_client_hello` accepted the
-    // message as a ClientHello, so this cannot be reached. Returning a leaked
-    // minimal payload keeps the function free of panics.
-    static EMPTY: std::sync::OnceLock<ClientHelloPayload> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
-        random: crate::msgs::handshake::Random::from([0u8; 32]),
-        session_id: crate::msgs::handshake::SessionId::empty(),
-        cipher_suites: Vec::new(),
-        compression_methods: Vec::new(),
-        extensions: Default::default(),
-    })
-}
-
-#[cfg(feature = "std")]
-impl fmt::Debug for Accepted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Accepted").finish_non_exhaustive()
-    }
-}
-
-/// The state an [`Acceptor`] parks in: it never handles messages itself.
-#[cfg(feature = "std")]
-struct Accepting;
-
-#[cfg(feature = "std")]
-impl crate::conn::State<ServerConnectionData> for Accepting {
-    fn handle(
-        self: alloc::boxed::Box<Self>,
-        _cx: &mut crate::conn::Context<'_, ServerConnectionData>,
-        _message: crate::msgs::message::Message<'_>,
-    ) -> Result<alloc::boxed::Box<dyn crate::conn::State<ServerConnectionData>>, Error> {
-        Err(Error::general(
-            "Acceptor connections cannot process messages",
-        ))
     }
 }

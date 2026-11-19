@@ -1,0 +1,51 @@
+[package]
+name = "browntls-ktls"
+description = "Linux kernel TLS offload for browntls connections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Kept unpublished like the rest of the workspace until the release
+# prerequisites in docs/Maintenance.md are met.
+publish.workspace = true
+documentation = "https://docs.rs/browntls-ktls"
+readme = "README.md"
+keywords = ["tls", "ktls", "linux", "kernel", "browntls"]
+categories = ["cryptography", "network-programming", "os::linux-apis"]
+include = ["/src/**/*.rs", "/tests/common/mod.rs", "/README.md", "/LICENSE"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["native", "tls12", "logging"]
+# Feature pass-through to `browntls`; see its manifest for what each does.
+native = ["browntls/native"]
+rustcrypto = ["browntls/rustcrypto"]
+tls12 = ["browntls/tls12"]
+logging = ["browntls/logging"]
+# `AsyncKtlsStream`: kernel TLS on a `tokio::net::TcpStream`, and the
+# handover of `browntls-tokio` streams.
+tokio = ["dep:tokio", "dep:browntls-tokio"]
+
+[dependencies]
+browntls = { workspace = true, features = ["std"] }
+
+# The socket options and `sendmsg`/`recvmsg` control messages of kernel TLS
+# (`src/sys.rs`, the crate's only unsafe code).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2.191", default-features = false }
+# Readiness of the socket (`net`); the runtime is the caller's.
+tokio = { workspace = true, optional = true, features = ["net"] }
+browntls-tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+# Certificates generated at test run time (no committed private keys).
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[lints]
+workspace = true

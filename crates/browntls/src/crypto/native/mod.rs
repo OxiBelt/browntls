@@ -69,6 +69,46 @@
 //! # Ok::<(), browntls::Error>(())
 //! ```
 //!
+//! ## Load-aware routing
+//!
+//! The policy picks one backend per family. With the `std` feature,
+//! [`accel::load`] can also move part of a family's work to another
+//! permitted backend while the selected one runs slower than it usually
+//! does, for example because other work is using the same instructions.
+//! It is off by default and process-wide. Enable it before creating
+//! connections: AES-GCM keys are only routed if they were created while it
+//! was enabled. Nothing a peer can observe changes, since every backend
+//! computes the same results.
+//!
+//! Routed: AES-GCM and ChaCha20-Poly1305 records of at least 4096 bytes,
+//! X25519, P-256, P-384, P-521 and ML-KEM key exchange (also inside the
+//! hybrid groups), ECDSA signatures and verifications on those curves, and
+//! RSA signatures with 2048-, 3072- and 4096-bit keys.
+//!
+//! ```
+//! use browntls::crypto::native::accel::load;
+//!
+//! # #[cfg(feature = "std")] {
+//! // Shift when a backend is 25% slower than usual (the default).
+//! load::enable(load::Config::DEFAULT).expect("built with `std`");
+//!
+//! // Later: what is each kind of work doing?
+//! for s in load::status_all() {
+//!     println!("{s}"); // e.g. "AES records (256-bit key): steady on AES-NI (...)"
+//! }
+//! # load::disable();
+//! # }
+//! ```
+//!
+//! Linux kernel TLS can be the first place for a connection's records,
+//! ahead of the backends: see [`accel::load::kernel`] and the `routing`
+//! module of the `browntls-ktls` crate, which places connections by it.
+//!
+//! Whether routing helps depends on the machine: work only moves to a
+//! backend that measures faster than the congested one at that moment.
+//! See [`accel::load`] for the mechanism, its security considerations and
+//! its limits, and `docs/Performance.md` for measurements.
+//!
 //! Keys select their backend when created, so set policies before building
 //! configurations and connections.
 
@@ -84,11 +124,14 @@ use crate::sync::Arc;
 use crate::webpki::WebPkiSupportedAlgorithms;
 
 pub mod aead;
+pub mod delegated_credential;
 pub mod hash;
 pub mod hkdf;
 pub mod hmac;
+pub mod hpke;
 #[cfg(feature = "tls12")]
 pub mod prf;
+pub mod quic;
 pub mod sign;
 pub mod ticketer;
 pub mod verify;
@@ -266,9 +309,9 @@ pub mod kx_group {
 /// The RFC 9846 optional groups follow as a non-preferred tier, behind every
 /// other group: X448 (RFC 7748), then the RFC 7919 finite-field groups,
 /// usable for TLS 1.3 only (RFC 10015 §3). A client never sends their key
-/// shares first; a server selects one only when the client sent no key share
-/// for an earlier group and either sent one for the optional group or
-/// supports no earlier group.
+/// shares first; a server selects one only when the client supports no
+/// earlier group (a key share for an optional group is answered with a
+/// HelloRetryRequest for a preferred group the client supports).
 ///
 /// FFDHE6144 and FFDHE8192 are left out of the defaults (they remain in
 /// [`ALL_KX_GROUPS`]): a server spends about 10 and 20 ms per handshake on

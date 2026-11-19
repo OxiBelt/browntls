@@ -12,11 +12,15 @@
 //!
 //! Backends: the portable radix-2^51 ladder everywhere, and on x86-64 a
 //! radix-2^64 ladder using BMI2 `MULX` with ADX `ADCX`/`ADOX`, selected at run
-//! time through [`crate::cpu::features`].
+//! time under the X25519 acceleration policy ([`crate::accel`]). The ladder
+//! takes part in load-aware routing ([`crate::accel::load`]): while that is
+//! enabled and the selected backend runs slower than usual, a share of the
+//! calls uses the other one.
 
 use super::edwards::EdwardsPoint;
 use super::field::Fe;
 use crate::Error;
+use crate::accel::load;
 use crate::ct::{self, Choice};
 use crate::rand::SecureRandom;
 use crate::zeroize::Zeroize;
@@ -94,7 +98,14 @@ impl crate::accel::Backends for Backend {
             Self::X86Adx => "BMI2/ADX",
         }
     }
+
+    fn streams() -> &'static [load::Stream] {
+        &LOAD
+    }
 }
+
+/// Load-aware routing state: the variable-base multiplications of [`x25519`].
+static LOAD: [load::Stream; 1] = [load::Stream::op("derive")];
 
 /// The X25519 function with a specific backend, or `None` if the backend is
 /// not available on this CPU. Intended for differential tests.
@@ -121,14 +132,14 @@ pub fn x25519_with_backend(backend: Backend, scalar: &[u8; 32], u: &[u8; 32]) ->
 #[must_use]
 pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     let mut k = clamp(scalar);
-    #[cfg(target_arch = "x86_64")]
-    let out = if Backend::X86Adx.is_available() {
-        super::x86_adx::x25519(&k, u)
-    } else {
-        ladder_portable(&k, u)
+    // The policy's backend, or another one while that one is congested.
+    let route = load::route_call::<Backend>(&LOAD[0], 1);
+    let out = match route.backend() {
+        #[cfg(target_arch = "x86_64")]
+        Backend::X86Adx => super::x86_adx::x25519(&k, u),
+        _ => ladder_portable(&k, u),
     };
-    #[cfg(not(target_arch = "x86_64"))]
-    let out = ladder_portable(&k, u);
+    route.done();
     k.zeroize();
     out
 }

@@ -59,21 +59,22 @@ pub(crate) fn check<'a>(
         for name in GeneralNames::new(cert.subject_alt_name) {
             check_name(name?, permitted, excluded, budget)?;
         }
-        // The subject is a directory name and is always present.
-        check_name(GeneralName::DirectoryName, permitted, excluded, budget)?;
+        // The subject is a directory name and is always present (its value
+        // is not consulted: directoryName constraints fail closed).
+        check_name(GeneralName::DirectoryName(&[]), permitted, excluded, budget)?;
     }
     Ok(())
 }
 
-type SubtreeLists<'a> = (Option<&'a [u8]>, Option<&'a [u8]>);
+pub(crate) type SubtreeLists<'a> = (Option<&'a [u8]>, Option<&'a [u8]>);
 
-fn split<'a>(r: &mut Reader<'a>) -> Result<SubtreeLists<'a>, Error> {
+pub(crate) fn split<'a>(r: &mut Reader<'a>) -> Result<SubtreeLists<'a>, Error> {
     let permitted = r.optional(tag::context_constructed(0))?;
     let excluded = r.optional(tag::context_constructed(1))?;
     Ok((permitted, excluded))
 }
 
-fn read_subtree<'a>(r: &mut Reader<'a>) -> Result<GeneralName<'a>, Error> {
+pub(crate) fn read_subtree<'a>(r: &mut Reader<'a>) -> Result<GeneralName<'a>, Error> {
     // GeneralSubtree ::= SEQUENCE { base GeneralName, minimum [0] DEFAULT 0,
     // maximum [1] OPTIONAL }; this profile requires both to be absent.
     r.nested(tag::SEQUENCE, GeneralName::read)
@@ -107,11 +108,19 @@ fn check_name(
                 }
                 // Not implemented: fail closed by matching nothing permitted
                 // and everything excluded.
-                (GeneralName::DirectoryName, GeneralName::DirectoryName)
-                | (GeneralName::Uri(_), GeneralName::Uri(_)) => kind == Subtrees::Excluded,
+                (GeneralName::DirectoryName(_), GeneralName::DirectoryName(_))
+                | (
+                    GeneralName::UniformResourceIdentifier(_),
+                    GeneralName::UniformResourceIdentifier(_),
+                ) => kind == Subtrees::Excluded,
                 // A constraint on a form this crate cannot process must
                 // reject a certificate presenting that form (RFC 5280 §4.2).
-                (GeneralName::Unsupported(n), GeneralName::Unsupported(b)) if n == b => {
+                (GeneralName::Rfc822Name(_), GeneralName::Rfc822Name(_)) => {
+                    return Err(Error::NameConstraintViolation);
+                }
+                (GeneralName::Other { tag: n, .. }, GeneralName::Other { tag: b, .. })
+                    if n == b =>
+                {
                     return Err(Error::NameConstraintViolation);
                 }
                 _ => continue,
@@ -196,7 +205,10 @@ mod tests {
             check_single(&permitted, GeneralName::IpAddress(&[1, 2, 3, 4])),
             Ok(())
         );
-        assert_eq!(check_single(&permitted, GeneralName::DirectoryName), Ok(()));
+        assert_eq!(
+            check_single(&permitted, GeneralName::DirectoryName(&[])),
+            Ok(())
+        );
         let excluded = list(0xa1, &[DNS_EXAMPLE]);
         assert_eq!(
             check_single(&excluded, GeneralName::DnsName(b"www.example.com")),
@@ -209,7 +221,7 @@ mod tests {
         // Directory name constraints fail closed.
         let dir = list(0xa0, &[b"\xa4\x00"]);
         assert_eq!(
-            check_single(&dir, GeneralName::DirectoryName),
+            check_single(&dir, GeneralName::DirectoryName(&[])),
             Err(Error::NameConstraintViolation)
         );
         // rfc822Name constraints only matter for rfc822Name SANs.
@@ -219,7 +231,27 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            check_single(&mail, GeneralName::Unsupported(1)),
+            check_single(&mail, GeneralName::Rfc822Name(b"a@example.com")),
+            Err(Error::NameConstraintViolation)
+        );
+        // Other unsupported forms only matter for the same form.
+        let other = list(0xa0, &[b"\x88\x01\x2a"]);
+        assert_eq!(
+            check_single(&other, GeneralName::Rfc822Name(b"a@example.com")),
+            Ok(())
+        );
+        assert_eq!(
+            check_single(&other, GeneralName::Other { tag: 0, value: b"" }),
+            Ok(())
+        );
+        assert_eq!(
+            check_single(
+                &other,
+                GeneralName::Other {
+                    tag: 8,
+                    value: b"\x2b"
+                }
+            ),
             Err(Error::NameConstraintViolation)
         );
         // Malformed presented DNS names are an error here.

@@ -273,7 +273,12 @@ fn parse_v6(s: &str) -> Option<[u8; 16]> {
                 }
                 return Some(n + 2);
             }
-            if g.is_empty() || g.len() > 4 || n >= out.len() {
+            // `from_str_radix` alone would also accept a leading `+`.
+            if g.is_empty()
+                || g.len() > 4
+                || n >= out.len()
+                || !g.bytes().all(|b| b.is_ascii_hexdigit())
+            {
                 return None;
             }
             out[n] = u16::from_str_radix(g, 16).ok()?;
@@ -441,6 +446,19 @@ mod tests {
         assert!(IpAddr::try_from("1:2:3:4:5:6:7:8:9").is_err());
         assert!(IpAddr::try_from("1::2::3").is_err());
         assert!(IpAddr::try_from("12345::").is_err());
+        for s in [
+            "+1::",
+            "1::+2",
+            "::+100:2",
+            "+1:2:3:4:5:6:7:8",
+            "1::-2",
+            "1:: 2",
+        ] {
+            assert!(IpAddr::try_from(s).is_err(), "{s}");
+            assert!(ServerName::try_from(s).is_err(), "{s}");
+            #[cfg(feature = "std")]
+            assert!(s.parse::<std::net::IpAddr>().is_err(), "{s}");
+        }
         #[cfg(feature = "std")]
         for s in ["2001:db8::", "fe80::1:2", "1:0:0:2::3", "::ffff:1.2.3.4"] {
             let ours = IpAddr::try_from(s).unwrap();

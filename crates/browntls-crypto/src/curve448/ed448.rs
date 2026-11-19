@@ -1,6 +1,6 @@
 //! Ed448 signatures (RFC 8032 §5.2, PureEdDSA with `dom4(0, context)`).
 //!
-//! TLS uses Ed448 with an empty context (RFC 9846 §4.2.3, RFC 8422 §5.10):
+//! TLS uses Ed448 with an empty context (RFC 9846 §4.3.3, RFC 8422 §5.10):
 //! [`SigningKey::sign`] and [`VerifyingKey::verify`]. The `*_with_context`
 //! variants take a context of at most 255 octets (RFC 8032 §5.2). The
 //! prehashed variant Ed448ph is not implemented.

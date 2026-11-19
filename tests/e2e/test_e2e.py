@@ -7,9 +7,11 @@ derives from them.
 
 import importlib.util
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location("e2e", Path(__file__).with_name("e2e.py"))
 e2e = importlib.util.module_from_spec(_SPEC)
@@ -34,9 +36,40 @@ class MatrixTest(unittest.TestCase):
         include = e2e.matrix("e2e")["include"]
         pairs = {(m["arch"], m["suite"]) for m in include}
         self.assertEqual(len(pairs), len(include))
-        self.assertEqual(pairs, {(a, s) for a in e2e.ARCHES for s in e2e.SUITES})
+        self.assertEqual(
+            pairs,
+            {
+                (a, s)
+                for a in e2e.ARCHES
+                for s in e2e.SUITES
+                if a not in e2e.SUITES[s].skip_arches
+            },
+        )
         for m in include:
             self.assertEqual(m["runner"], e2e.ARCHES[m["arch"]].runner)
+
+    def test_e2e_matrix_names_the_peer_image_for_the_cache_key(self):
+        for m in e2e.matrix("e2e")["include"]:
+            peer_image = e2e.SUITES[m["suite"]].peer_image
+            self.assertEqual(m["peer_image"], peer_image)
+            self.assertTrue((e2e.E2E_DIR / "peer" / f"{peer_image}.Dockerfile").is_file())
+
+    def test_ubuntu_lts_peers(self):
+        # Ubuntu 24.04 (OpenSSL 3.0) runs everywhere; Ubuntu 26.04's riscv64
+        # image needs RVA23, which the native riscv64 runner lacks.
+        pairs = {(m["arch"], m["suite"]) for m in e2e.matrix("e2e")["include"]}
+        for arch in e2e.ARCHES:
+            self.assertIn((arch, "openssl-3.0"), pairs)
+        self.assertNotIn(("riscv64", "openssl-ubuntu-26.04"), pairs)
+        for arch in ("amd64", "arm64", "riscv64-zvk"):
+            self.assertIn((arch, "openssl-ubuntu-26.04"), pairs)
+        dockerfile = e2e.E2E_DIR / "peer" / "ubuntu-26.04.Dockerfile"
+        self.assertIn("FROM ubuntu:26.04@sha256:", dockerfile.read_text())
+
+    def test_run_refuses_a_skipped_arch(self):
+        args = mock.Mock(arch="riscv64", suite="openssl-ubuntu-26.04")
+        with self.assertRaisesRegex(SystemExit, "does not run on riscv64"):
+            e2e.cmd_run(args)
 
     def test_image_matrix_has_one_entry_per_arch(self):
         include = e2e.matrix("images")["include"]
@@ -78,6 +111,7 @@ class ScenarioTest(unittest.TestCase):
 
         self.assertIn("tls13-x25519mlkem768", names("openssl"))
         self.assertIn("defaults-pq", names("openssl"))
+        self.assertIn("tls13-x25519mlkem768", names("openssl-ubuntu-26.04"))
         self.assertNotIn("tls13-x25519mlkem768", names("openssl-3.0"))
         self.assertIn("defaults-classical", names("openssl-3.0"))
         self.assertNotIn("tls13-x25519mlkem768", names("gnutls"))
@@ -133,6 +167,15 @@ class CommandTest(unittest.TestCase):
         self.assertIn("-Verify", e2e.peer_server_command(sc, "openssl"))
         self.assertIn("--require-client-cert", e2e.peer_server_command(sc, "gnutls"))
 
+    def test_async_scenarios_pass_the_flag_to_both_roles(self):
+        scenarios = [s for s in e2e.SCENARIOS if s.async_io]
+        self.assertEqual(len(scenarios), 3)
+        for sc in scenarios:
+            for role in sc.roles:
+                self.assertIn("--async", e2e.browntls_args(sc, role))
+        plain = self.scenario("tls13-aes128gcm-x25519")
+        self.assertNotIn("--async", e2e.browntls_args(plain, "client"))
+
     def test_peer_clients_connect_to_the_server_alias(self):
         sc = self.scenario("tls12-rsa-chacha20")
         for impl in ("openssl", "gnutls"):
@@ -183,6 +226,20 @@ class CheckTest(unittest.TestCase):
         problems = e2e.check_browntls(sc, "server", e2e.Container("s", 1, out), None)
         self.assertEqual(len(problems), 3, problems)
 
+    def test_async_scenarios_require_async_output(self):
+        sc = self.scenario("async-tls12")
+        common = dict(
+            version="TLSv1_2",
+            suite="TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            group="secp256r1",
+            handshake="Full",
+        )
+        reply = e2e.MESSAGE[::-1]
+        ok = e2e.Container("c", 0, connection("client", io="async", **common))
+        self.assertEqual(e2e.check_browntls(sc, "client", ok, reply), [])
+        blocking = e2e.Container("c", 0, connection("client", **common))
+        self.assertEqual(len(e2e.check_browntls(sc, "client", blocking, reply)), 1)
+
     def test_resumed_connection_must_be_resumed(self):
         sc = self.scenario("tls12-resumption")
         common = dict(version="TLSv1_2", suite="TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
@@ -218,6 +275,163 @@ class CheckTest(unittest.TestCase):
         )
         problems = e2e.check_browntls(sc, "server", e2e.Container("s", 0, out), None)
         self.assertEqual(problems, ["browntls server saw no client certificate"])
+
+
+class EchTest(unittest.TestCase):
+    def scenario(self, name):
+        return next(s for s in e2e.SCENARIOS if s.name == name)
+
+    def names(self, suite):
+        return {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+
+    def test_suites_and_roles(self):
+        go = e2e.SUITES["go"]
+        self.assertTrue(all(s.ech is not None for s in e2e.scenarios_for(go)))
+        for suite in ("openssl", "openssl-3.0", "openssl-ubuntu-26.04", "gnutls"):
+            self.assertFalse(any(n.startswith("ech-") for n in self.names(suite)), suite)
+        browntls = self.names("browntls")
+        for sc in e2e.SCENARIOS:
+            if sc.ech is not None:
+                self.assertIn(sc.name, browntls)
+        # Go has no split-mode server, nor GREASE or random identifiers.
+        self.assertEqual(self.scenario("ech-split").roles_for(go), ("server",))
+        self.assertEqual(self.scenario("ech-shared").roles_for(go), ("client", "server"))
+        self.assertNotIn("ech-split-grease", self.names("go"))
+        self.assertNotIn("ech-split-random-config-id", self.names("go"))
+
+    def test_split_mode_commands(self):
+        sc = self.scenario("ech-split-hello-retry-request")
+        front = e2e.ech_client_facing_args(sc)
+        self.assertEqual(front[0], "client-facing")
+        self.assertIn(f"{e2e.SERVER_ALIAS}={e2e.BACKEND_ALIAS}:{e2e.PORT}", front)
+        self.assertIn(e2e.pki(sc.key, "public.pem"), front)
+        self.assertNotIn("--group", front)
+        backend = e2e.ech_terminating_server_args(sc, 1, backend=True)
+        self.assertIn("--ech-backend", backend)
+        self.assertNotIn("--ech-config", backend)
+        self.assertEqual(backend[backend.index("--group") + 1], "secp256r1")
+        client = e2e.ech_browntls_client_args(sc)
+        self.assertEqual(client[client.index("--server-name") + 1], e2e.SERVER_ALIAS)
+        self.assertIn(e2e.ech_file("current", "ech-config-list"), client)
+
+    def test_client_variants(self):
+        stale = self.scenario("ech-split-retry-configs")
+        client = e2e.ech_browntls_client_args(stale)
+        self.assertIn(e2e.ech_file("stale", "ech-config-list"), client)
+        self.assertIn("--ech-retry", client)
+        self.assertIn("-retry", e2e.ech_go_client_command(stale))
+        front = e2e.ech_client_facing_args(stale)
+        self.assertEqual(front[front.index("--accept") + 1], "2")
+        grease = self.scenario("ech-split-grease")
+        client = e2e.ech_browntls_client_args(grease)
+        self.assertIn("--ech-grease", client)
+        self.assertNotIn("--ech-config-list", client)
+        self.assertEqual(client[client.index("--server-name") + 1], e2e.ECH_PUBLIC_NAME)
+        random = self.scenario("ech-split-random-config-id")
+        self.assertIn("--ech-random-config-id", e2e.ech_browntls_client_args(random))
+        front = e2e.ech_client_facing_args(random)
+        self.assertIn("--ech-trial-decryption", front)
+        self.assertIn("--ech-public-name-check", front)
+
+    def test_shared_mode_commands(self):
+        sc = self.scenario("ech-shared-hello-retry-request")
+        server = e2e.ech_terminating_server_args(sc, 1, backend=False)
+        self.assertIn("--ech-config", server)
+        self.assertNotIn("--ech-backend", server)
+        self.assertTrue(any(a.startswith(e2e.ECH_PUBLIC_NAME + ",") for a in server))
+        go = e2e.ech_go_server_command(sc)
+        self.assertIn("-p256-only", go)
+        self.assertEqual(go.count("-cert"), 2)
+
+    def test_checks(self):
+        sc = self.scenario("ech-split-retry-configs")
+        reply = e2e.MESSAGE[::-1]
+        rejected = '{"event":"ech-rejected","index":0,"retry_configs":true}'
+        accepted = connection(
+            "client", version="TLSv1_3", handshake="Full", ech="Accepted", received=reply
+        )
+        good = e2e.Container("c", 0, rejected + "\n" + accepted)
+        self.assertEqual(e2e.check_ech_client(sc, "browntls", good), [])
+        # The retry must follow exactly one rejection.
+        self.assertEqual(
+            len(e2e.check_ech_client(sc, "browntls", e2e.Container("c", 0, accepted))), 1
+        )
+        go = json.dumps(
+            {
+                "event": "connection",
+                "role": "client",
+                "version": "TLSv1_3",
+                "handshake": "Full",
+                "ech_accepted": False,
+                "received": reply,
+            }
+        )
+        problems = e2e.check_ech_client(sc, "go", e2e.Container("c", 0, rejected + "\n" + go))
+        self.assertEqual(problems, ["go client: ECH not accepted"])
+
+        decisions = "\n".join(
+            [
+                '{"event":"client-facing","decision":"Local","ech":"Rejected"}',
+                '{"event":"ech-required","role":"server","index":0}',
+                '{"event":"client-facing","decision":"Forward","ech":"Accepted",'
+                f'"server_name":"{e2e.SERVER_ALIAS}"}}',
+            ]
+        )
+        self.assertEqual(e2e.check_client_facing(sc, e2e.Container("f", 0, decisions)), [])
+        wrong = decisions.replace('"Forward"', '"Local"')
+        self.assertEqual(len(e2e.check_client_facing(sc, e2e.Container("f", 0, wrong))), 1)
+
+        backend = connection(
+            "server", version="TLSv1_3", handshake="Full", ech="Accepted", server_name="tls-server"
+        )
+        self.assertEqual(
+            e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, backend), 1, 0, 0), []
+        )
+        outer = backend.replace("tls-server", e2e.ECH_PUBLIC_NAME)
+        self.assertEqual(
+            len(e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, outer), 1, 0, 0)), 1
+        )
+
+
+class DockerTest(unittest.TestCase):
+    def test_timeout_reports_the_last_output(self):
+        lines = [f"#{i} step {i}".encode() for i in range(100)]
+        expired = subprocess.TimeoutExpired(
+            ["docker", "build"], 1800, output=b"", stderr=b"\n".join(lines) + b"\n"
+        )
+        with mock.patch.object(e2e.subprocess, "run", side_effect=expired):
+            with self.assertRaises(e2e.DockerError) as raised:
+                e2e.docker("build", ".", timeout=1800)
+        message = str(raised.exception)
+        self.assertIn("docker build timed out after 1800s", message)
+        self.assertIn("#99 step 99", message)
+        self.assertIn(f"#{100 - e2e.TIMEOUT_TAIL_LINES} step", message)
+        self.assertNotIn(f"#{99 - e2e.TIMEOUT_TAIL_LINES} step", message)
+
+    def test_timeout_without_output(self):
+        expired = subprocess.TimeoutExpired(["docker", "build"], 5)
+        with mock.patch.object(e2e.subprocess, "run", side_effect=expired):
+            with self.assertRaises(e2e.DockerError) as raised:
+                e2e.docker("build", ".", timeout=5)
+        self.assertEqual(str(raised.exception), "docker build timed out after 5s")
+
+    def test_peer_build_uses_plain_progress_and_can_be_saved(self):
+        calls = []
+
+        def fake_docker(*args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(["docker", *args], 0, "", "")
+
+        args = e2e.parser().parse_args(["build-peer", "--suite", "go", "--save", "/nonexistent/peer.tar"])
+        with mock.patch.object(e2e, "docker", side_effect=fake_docker), \
+                mock.patch.object(e2e.Path, "mkdir"), \
+                mock.patch("builtins.print"):
+            self.assertEqual(args.func(args), 0)
+        (build, build_kwargs), (save, _) = calls
+        self.assertEqual(build[0], "build")
+        self.assertIn("browntls-e2e-peer:go", build)
+        self.assertEqual(build_kwargs["env"], {"BUILDKIT_PROGRESS": "plain"})
+        self.assertEqual(save, ("save", "-o", "/nonexistent/peer.tar", "browntls-e2e-peer:go"))
 
 
 if __name__ == "__main__":

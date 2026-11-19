@@ -10,6 +10,7 @@ pub use crate::msgs::message::{
     BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage, OutboundChunks,
     OutboundOpaqueMessage, OutboundPlainMessage, PlainMessage, PrefixedPayload,
 };
+use crate::msgs::message::{HEADER_SIZE, encode_header};
 use crate::suites::ConnectionTrafficSecrets;
 
 /// An AEAD usable with TLS 1.3 (RFC 8446 §5.2).
@@ -41,6 +42,12 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
     /// Creates a record encrypter from the write key, the fixed IV and the
     /// `extra` bytes that seed the explicit nonce.
+    ///
+    /// An algorithm with an explicit nonce (AES-GCM, RFC 5288 §3) must give
+    /// record `seq` the explicit nonce `extra + seq` (big-endian, modulo
+    /// 2^64), which is how Linux kernel TLS continues the sequence after
+    /// [`Self::extract_keys`]; any other scheme can repeat a nonce once the
+    /// kernel takes over.
     fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn MessageEncrypter>;
 
     /// Creates a record decrypter from the read key and the fixed IV.
@@ -50,6 +57,11 @@ pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
     fn key_block_shape(&self) -> KeyBlockShape;
 
     /// Converts the key material into a form usable outside the library.
+    ///
+    /// For an algorithm with an explicit nonce the returned IV is the fixed
+    /// IV followed by `explicit`, the explicit nonce of sequence number zero;
+    /// the library advances it to the next record's before handing it out
+    /// (see [`crate::ExtractedSecrets`]).
     fn extract_keys(
         &self,
         key: AeadKey,
@@ -229,6 +241,113 @@ pub trait MessageEncrypter: Send + Sync {
 
     /// The ciphertext length (excluding the record header) for a plaintext of `payload_len`.
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
+
+    /// Encrypts `msg` as one complete record (header included) at the front
+    /// of `out` and returns the record's length; `seq` is the record
+    /// sequence number. The record is the one [`Self::encrypt`] would
+    /// return, encoded (with values of its own where the encrypter draws
+    /// random ones, such as the explicit IV of a CBC suite).
+    ///
+    /// The unbuffered connection API calls this to encrypt application data
+    /// straight into the caller's buffer. The provided implementation calls
+    /// [`Self::encrypt`] and copies the encoded record, so it allocates once
+    /// per record; an implementation that encrypts in place in `out` avoids
+    /// that.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::EncryptError`] if `out` is shorter than the record
+    /// (`5 + `[`Self::encrypted_payload_len`]`(len)` for an implementation
+    /// whose length is exact), and any error of the encryption itself. On
+    /// error the contents of `out` are unspecified, but hold no plaintext
+    /// written by this method: an implementation that copies the plaintext
+    /// into `out` must zero what it wrote before failing. The sequence number
+    /// counts as used either way.
+    ///
+    /// The unbuffered API does not rely on an implementation for either: it
+    /// accepts only a returned length that frames one record within `out`,
+    /// and wipes `out` itself when the call fails.
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let record = self.encrypt(msg, seq)?.encode();
+        out.get_mut(..record.len())
+            .ok_or(Error::EncryptError)?
+            .copy_from_slice(&record);
+        Ok(record.len())
+    }
+}
+
+/// Builds an encrypted record in a fresh buffer for
+/// [`MessageEncrypter::encrypt`]: a body of `body_len` zero bytes with the
+/// plaintext at `offset`, which `seal` then turns into the record body
+/// (nonce, ciphertext, tag, as the algorithm lays them out).
+///
+/// [`seal_record_into`] builds exactly the same record in place.
+pub(crate) fn seal_record(
+    typ: ContentType,
+    version: ProtocolVersion,
+    plain: &OutboundChunks<'_>,
+    offset: usize,
+    body_len: usize,
+    seal: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+) -> Result<OutboundOpaqueMessage, Error> {
+    if offset.saturating_add(plain.len()) > body_len || body_len > usize::from(u16::MAX) {
+        return Err(Error::EncryptError);
+    }
+    let mut body = PrefixedPayload::with_capacity(body_len);
+    body.resize(offset);
+    body.extend_from_chunks(plain);
+    if body.len() != offset + plain.len() {
+        // The chunks hold less than `plain.len()` bytes.
+        return Err(Error::EncryptError);
+    }
+    body.resize(body_len);
+    seal(body.as_mut())?;
+    Ok(OutboundOpaqueMessage::new(typ, version, body))
+}
+
+/// Builds the record of [`seal_record`] in place at the front of `out`, for
+/// [`MessageEncrypter::encrypt_into`], and returns its length.
+///
+/// Fails with [`Error::EncryptError`], writing nothing, when `out` is
+/// shorter than the record; when `seal` fails, the body is zeroed so that no
+/// plaintext stays in `out`.
+pub(crate) fn seal_record_into(
+    typ: ContentType,
+    version: ProtocolVersion,
+    plain: &OutboundChunks<'_>,
+    offset: usize,
+    body_len: usize,
+    out: &mut [u8],
+    seal: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+) -> Result<usize, Error> {
+    let plain_end = offset.saturating_add(plain.len());
+    if plain_end > body_len || body_len > usize::from(u16::MAX) {
+        return Err(Error::EncryptError);
+    }
+    let record_len = HEADER_SIZE + body_len;
+    let (header, body) = out
+        .get_mut(..record_len)
+        .ok_or(Error::EncryptError)?
+        .split_at_mut(HEADER_SIZE);
+    let (prefix, rest) = body.split_at_mut(offset);
+    let (text, suffix) = rest.split_at_mut(plain.len());
+    prefix.fill(0);
+    suffix.fill(0);
+    let sealed = match plain.copy_to_slice(text) {
+        Some(()) => seal(body),
+        None => Err(Error::EncryptError),
+    };
+    if let Err(err) = sealed {
+        super::zeroize_slice(body);
+        return Err(err);
+    }
+    header.copy_from_slice(&encode_header(typ, version, body_len));
+    Ok(record_len)
 }
 
 impl dyn MessageEncrypter {
@@ -303,6 +422,34 @@ impl Nonce {
             *n ^= *i;
         }
         Self(nonce)
+    }
+
+    /// The TLS 1.2 AES-GCM nonce of record `seq` (RFC 5288 §3): the 4-byte
+    /// fixed IV, then the explicit nonce, which is the IV's last eight bytes
+    /// plus `seq` (big-endian, modulo 2^64).
+    ///
+    /// Distinct for every sequence number under one key, and unpredictable
+    /// across connections because the seed comes from the key block. Linux
+    /// kernel TLS counts the explicit nonce up in the same way, so a
+    /// connection handed to the kernel at sequence number `seq` continues
+    /// with [`Iv::advance_explicit`]`(seq)` and never repeats a nonce.
+    #[inline]
+    pub(crate) fn tls12_explicit(iv: &Iv, seq: u64) -> Self {
+        Self(iv.advance_explicit(seq).0)
+    }
+}
+
+impl Iv {
+    /// This IV with `seq` added to its last eight bytes (big-endian, modulo
+    /// 2^64): for a TLS 1.2 AES-GCM IV, the one whose explicit part is the
+    /// explicit nonce of record `seq` (see [`Nonce::tls12_explicit`]).
+    pub(crate) fn advance_explicit(&self, seq: u64) -> Self {
+        let mut iv = self.0;
+        let mut explicit = [0u8; 8];
+        explicit.copy_from_slice(&iv[NONCE_LEN - 8..]);
+        let advanced = u64::from_be_bytes(explicit).wrapping_add(seq);
+        put_u64(advanced, &mut iv[NONCE_LEN - 8..]);
+        Self(iv)
     }
 }
 
@@ -456,6 +603,82 @@ mod tests {
             make_tls12_aad(1, ContentType::Handshake, ProtocolVersion::TLSv1_2, 5),
             [0, 0, 0, 0, 0, 0, 0, 1, 0x16, 3, 3, 0, 5]
         );
+    }
+
+    #[test]
+    fn seal_record_into_matches_seal_record_and_cleans_up() {
+        let plain = OutboundChunks::Single(b"secret");
+        // A "seal" that marks the bytes around the plaintext.
+        let seal = |body: &mut [u8]| {
+            body[0] = 0xee;
+            body[body.len() - 1] = 0xff;
+            Ok(())
+        };
+        let typ = ContentType::Handshake;
+        let v = ProtocolVersion::TLSv1_2;
+        let expected = seal_record(typ, v, &plain, 2, 10, seal).unwrap().encode();
+        let mut out = [0x55u8; 16];
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, 10, &mut out, seal),
+            Ok(15)
+        );
+        assert_eq!(out[..15], expected[..]);
+        assert_eq!(out[15], 0x55);
+
+        // Too short: nothing written.
+        let mut out = [0x55u8; 14];
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, 10, &mut out, seal),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(out, [0x55u8; 14]);
+
+        // A failing seal leaves no plaintext behind.
+        let mut out = [0x55u8; 16];
+        let fail = |_: &mut [u8]| Err(Error::General("seal failed".into()));
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, 10, &mut out, fail),
+            Err(Error::General("seal failed".into()))
+        );
+        assert_eq!(out[5..15], [0u8; 10]);
+
+        // Plaintext that does not fit the body, or chunks shorter than they
+        // claim, are errors.
+        assert!(seal_record(typ, v, &plain, 5, 10, seal).is_err());
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 5, 10, &mut [0u8; 15], seal),
+            Err(Error::EncryptError)
+        );
+        // A body the header's length field cannot state.
+        let most = usize::from(u16::MAX);
+        let mut out = alloc::vec![0x55u8; most + 6];
+        assert!(seal_record(typ, v, &plain, 2, most, seal).is_ok());
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, most, &mut out, seal),
+            Ok(most + 5)
+        );
+        assert_eq!(out[3..5], [0xff, 0xff]);
+        out.fill(0x55);
+        assert!(seal_record(typ, v, &plain, 2, most + 1, seal).is_err());
+        assert_eq!(
+            seal_record_into(typ, v, &plain, 2, most + 1, &mut out, seal),
+            Err(Error::EncryptError)
+        );
+        assert!(out.iter().all(|b| *b == 0x55));
+
+        let data: [&[u8]; 1] = [b"abc"];
+        let short = OutboundChunks::Multiple {
+            chunks: &data,
+            start: 0,
+            end: 4,
+        };
+        assert!(seal_record(typ, v, &short, 0, 8, seal).is_err());
+        let mut out = [0x55u8; 13];
+        assert_eq!(
+            seal_record_into(typ, v, &short, 0, 8, &mut out, seal),
+            Err(Error::EncryptError)
+        );
+        assert_eq!(out[5..], [0u8; 8]);
     }
 
     #[test]

@@ -616,8 +616,25 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   server's early-data store only flag it instead of copying it.
   `WriteTraffic::encrypt` encrypts into a caller buffer after checking the
   whole size first (`InsufficientSize` carries the exact requirement, and
-  nothing is consumed); a KeyUpdate that is due (an answer to the peer, or
-  the RFC 9846 §5.5 refresh) is written into the same buffer in order. At
+  nothing is consumed). Each data record is built in place there
+  (`MessageEncrypter::encrypt_into`): the plaintext is copied once behind
+  the header and sealed, without a per-record allocation for the built-in
+  providers (an encrypter that keeps the provided `encrypt_into` allocates
+  one record and copies it). What an encrypter reports is accepted only as
+  one application data record within the buffer; otherwise, and when it
+  fails, the buffer is zeroed from that record on and the write fails. A
+  KeyUpdate that is due (an answer to the peer, or the RFC 9846 §5.5
+  refresh) is written into the same buffer in order. Once a record has
+  failed to encrypt (`encrypt_failed`), `WriteTraffic` takes no more data
+  and makes no `close_notify`: the peer could not read them, and after a
+  KeyUpdate that was lost the write key has moved on without the peer (a
+  refresh asked for then still queues a KeyUpdate, which the peer rejects,
+  before the failure is reported). So a KeyUpdate before the data
+  that fails to encrypt fails the write with no data taken, one after the
+  data leaves that write's records good and reported, and no `close_notify`
+  follows either. (The buffered connection reports the failure at its next
+  `process_new_packets` or write; records it encrypts until then are ones
+  the peer cannot read and answers with an alert.) At
   the limit, data that cannot be rekeyed (TLS 1.2, 0-RTT) fails with
   `EncryptExhausted`, and a server's half-RTT data fails with the temporary
   `KeyUpdateAwaitsHandshake` until the client's Finished arrives, instead of

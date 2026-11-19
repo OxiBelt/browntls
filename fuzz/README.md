@@ -4,7 +4,7 @@ A [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) project for the
 untrusted-input surfaces of browntls (message codecs, the record deframer,
 certificate decompression, the PKI parsers and path validation, the client and
 server handshake state machines) and for the whole public API of the four
-library crates, through API targets grouped by topic.
+library crates other than `browntls-ktls`, through API targets grouped by topic.
 
 The project is not a member of the workspace. It has its own `Cargo.toml` and
 `Cargo.lock`, depends on `browntls` with the `fuzzing` feature (unstable entry
@@ -172,7 +172,7 @@ one x86-64 runner (`ubuntu-26.04`):
 - Pull requests fuzz, for two minutes each, the targets whose sources or
   harness changed; a change to the shared fuzz infrastructure selects every
   target.
-- A daily run fuzzes every target for twenty minutes and keeps each target's
+- A weekly run fuzzes every target for twenty minutes and keeps each target's
   minimized corpus in the Actions cache, which later runs start from. A job
   saves its corpus only when every target it ran was clean.
 - A manual run chooses the targets, the time per target and the
@@ -235,7 +235,7 @@ workflow saves no corpus from a job that failed, was cancelled or timed out.
 Once the finding is fixed, the next clean run saves a corpus again.
 
 A topic-granularity run keeps its own corpus, separate from the per-target
-corpora of the daily run.
+corpora of the weekly run.
 
 Record each manual campaign (revision, toolchain, targets, duration, result)
 with the change it supports.

@@ -121,15 +121,15 @@ prerequisites below are met.
 
 [`fuzz/`](../fuzz/README.md) holds cargo-fuzz targets for the handshake
 message codecs, the record deframer, certificate decompression, PEM, X.509
-path validation, CRLs and the client and server connections, and one target
-per topic of the public API, which together must reach every public function
-of the library crates (checked in CI by `scripts/fuzz/api_coverage.py`; the
+path validation, CRLs and the client and server connections, and API-sequence
+targets grouped by topic of the public API, which together must reach every public function
+of the library crates other than `browntls-ktls` (checked in CI by `scripts/fuzz/api_coverage.py`; the
 few exemptions are listed with their reasons in
 `fuzz/api-coverage-exemptions.txt`). CI builds the harnesses with the pinned
 stable toolchain and runs them over generated seeds; the Fuzz workflow fuzzes
 the targets as a matrix with a pinned nightly toolchain: briefly on pull
-requests for the targets whose sources changed, and daily for twenty minutes
-per target and architecture, keeping corpora in the Actions cache. The nightly
+requests for the targets whose sources changed, and weekly for twenty minutes
+per target on one x86-64 runner, keeping corpora in the Actions cache. The nightly
 toolchain and `cargo-fuzz` versions are pinned in the workflow and upgraded
 explicitly. Longer campaigns are still run by hand and recorded with the
 change they support: revision, toolchain, targets, duration and outcome. A

@@ -15,6 +15,9 @@ browntls is in initial development. The workspace contains:
   ([README](crates/browntls-tokio/README.md)).
 - `crates/browntls-ktls`: Linux kernel TLS offload of browntls connections
   ([README](crates/browntls-ktls/README.md)).
+- `crates/browntls-e2e` and `crates/browntls-entropy`: unpublished test tools
+  (the [Docker end-to-end](tests/e2e/README.md) peer and the
+  [entropy checks](crates/browntls-entropy/README.md)).
 
 See [Architecture](docs/Architecture.md) for the design and
 [Roadmap](docs/Roadmap.md) for implementation status and gaps. The code has not
@@ -33,8 +36,9 @@ Rust 1.100.0 is required (pinned in `rust-toolchain.toml`).
 
 The contributor workflow takes inspiration from
 [OxiBelt](https://github.com/OxiBelt/OxiBelt), adapted to this library's current
-stage. Proxy, WAF, browser, container-release, and Kubernetes machinery are not
-part of this initialization.
+stage. Proxy, WAF, browser, and container-release machinery are not part of
+this initialization; Kubernetes is used only for the
+[revocation test](tests/kubernetes/README.md).
 
 ## License
 

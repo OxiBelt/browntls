@@ -76,10 +76,6 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   peer data when their features are enabled; `ruzstd` contains `unsafe`.
 - Named, non-author review of `unsafe` code, constant-time properties and
   cryptographic correctness, with Miri or sanitizer evidence where applicable.
-- `deny.toml` ignores RUSTSEC-2023-0071 (`rsa` 0.9, Marvin) for public-key
-  verification uses until 2027-01-31; it needs a named owner and tracking
-  issue, and should be removed once tests verify RSA through
-  `browntls-crypto`.
 - RISC-V vector and scalar crypto backends assume data-independent
   instruction latency; detection does not yet require Zkt/Zvkt. Several
   internal accelerated entry points (`nist` P-256 BMI2/ADX, ML-KEM SIMD) rely

@@ -154,10 +154,21 @@ impl<S> Shared<S> {
                 _end: EndOfTurn { shared: self, side },
             })),
             Err(TryLockError::WouldBlock) => None,
-            // The stream may be in any state: no half uses it again.
-            Err(TryLockError::Poisoned(_)) => Some(Err(io::Error::other(
-                "a poll of the other half of this TLS stream panicked",
-            ))),
+            // A poisoned result still holds the stream lock. End its turn
+            // normally so a half waiting on that lock gets its wakeup, but
+            // never use the stream: its TLS state may be unknown.
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let turn = Turn {
+                    stream: poisoned.into_inner(),
+                    _end: EndOfTurn { shared: self, side },
+                };
+                #[cfg(test)]
+                tests::reached(tests::Point::PoisonedAcquired);
+                drop(turn);
+                Some(Err(io::Error::other(
+                    "a poll of the other half of this TLS stream panicked",
+                )))
+            }
         }
     }
 

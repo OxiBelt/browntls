@@ -59,12 +59,17 @@ fn find_session(
         .resumption
         .store
         .take_tls13_ticket(server_name)
+        .filter(|ticket| {
+            !config.revocation_enabled()
+                || (ticket.server_cert_chain().0.is_empty() && ticket.external_psk().is_some())
+        })
         .map(ClientSessionValue::Tls13)
         .or_else(|| {
             #[cfg(feature = "tls12")]
             {
                 if quic
                     || ech_offer
+                    || config.revocation_enabled()
                     || config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled
                 {
                     return None;
@@ -394,6 +399,7 @@ pub(super) fn emit_client_hello_for_retry(
                 .collect()
         }),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
+        sct_request: config.revocation_enabled().then_some(()),
         extended_master_secret: supports_tls12.then_some(()),
         encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),
@@ -440,6 +446,7 @@ pub(super) fn emit_client_hello_for_retry(
 
     #[cfg(feature = "tls12")]
     if supports_tls12
+        && !config.revocation_enabled()
         && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets
     {
         exts.session_ticket = Some(match &input.resuming {

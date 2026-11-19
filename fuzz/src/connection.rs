@@ -193,7 +193,7 @@ impl Identity {
         Arc::new(roots)
     }
 
-    fn key(&self) -> PrivateKeyDer<'static> {
+    pub(crate) fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()))
     }
 }

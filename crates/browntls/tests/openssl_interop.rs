@@ -17,6 +17,8 @@
 
 #[path = "openssl_interop/matrix.rs"]
 mod matrix;
+#[path = "openssl_interop/ocsp.rs"]
+mod ocsp;
 #[path = "openssl_interop/psk.rs"]
 mod psk;
 #[path = "openssl_interop/tls13_optional.rs"]

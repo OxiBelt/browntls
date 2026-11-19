@@ -252,6 +252,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "ruzstd",
+ "sha1",
  "sha2 0.11.1",
  "signature 3.0.0",
  "x25519-dalek",

@@ -74,6 +74,16 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core.read_quic_handshake(plaintext)
     }
 
+    /// Supplies the result of the current OCSP query and processes buffered CRYPTO data.
+    pub fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: crate::revocation::RevocationResponse,
+    ) -> Result<(), Error> {
+        self.core.resolve_peer_revocation(id, response)?;
+        self.read_hs(&[])
+    }
+
     /// Appends the handshake bytes to send at the current sending level to
     /// `buf`, and returns the keys of the next level once they exist.
     ///
@@ -311,6 +321,18 @@ impl Connection {
         match self {
             Self::Client(conn) => conn.read_hs(plaintext),
             Self::Server(conn) => conn.read_hs(plaintext),
+        }
+    }
+
+    /// Supplies the result of the current OCSP query and processes buffered CRYPTO data.
+    pub fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: crate::revocation::RevocationResponse,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Client(conn) => conn.resolve_peer_revocation(id, response),
+            Self::Server(conn) => conn.resolve_peer_revocation(id, response),
         }
     }
 

@@ -84,6 +84,8 @@ pub enum KernelHandoffBlocker {
     /// A KeyUpdate (an answer owed to the peer, or a key refresh) still has
     /// to be sent under the current key.
     KeyUpdatePending,
+    /// Peer certificate authentication is waiting for revocation evidence.
+    RevocationPending,
     /// The configured `max_fragment_size` is below the smallest record
     /// payload Linux accepts (64 bytes; 63 for TLS 1.3).
     FragmentTooSmall,
@@ -101,6 +103,7 @@ impl KernelHandoffBlocker {
                 | Self::UnsentRecords
                 | Self::UnsentPlaintext
                 | Self::KeyUpdatePending
+                | Self::RevocationPending
         )
     }
 }
@@ -118,6 +121,7 @@ impl fmt::Display for KernelHandoffBlocker {
             Self::UnsentRecords => "records are waiting to be written",
             Self::UnsentPlaintext => "application data is waiting to be sent",
             Self::KeyUpdatePending => "a KeyUpdate is waiting to be sent",
+            Self::RevocationPending => "certificate authentication is awaiting revocation evidence",
             Self::FragmentTooSmall => "the maximum fragment size is below what kernel TLS takes",
         })
     }
@@ -200,6 +204,9 @@ impl<Data: SideData> ConnectionCore<Data> {
         let Ok(state) = &self.state else {
             return Some(KernelHandoffBlocker::HandshakeIncomplete);
         };
+        if common.pending_revocation.is_some() || common.revocation_auth_outstanding {
+            return Some(KernelHandoffBlocker::RevocationPending);
+        }
         if common.is_handshaking() || common.suite.is_none() {
             return Some(KernelHandoffBlocker::HandshakeIncomplete);
         }

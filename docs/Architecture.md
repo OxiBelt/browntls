@@ -87,6 +87,50 @@ Everything returned borrows from the input, and work is linear in input
 lengths that the parser already bounds (64 KiB per certificate element, 4 GiB
 for a signed structure's `tbs`).
 
+### Certificate revocation
+
+The built-in server-certificate and client-certificate verifiers accept an
+optional `RevocationPolicy`. The policy starts in strict leaf mode.
+`check_full_chain` extends coverage to intermediates and `best_effort`
+allows an indeterminate result. The connection exposes that result through
+`peer_revocation_status`. Configured CRLs continue to apply under their own
+depth, freshness, and missing-status rules.
+
+OCSP responses are checked against the certificate and its verified issuer.
+A response can be signed by the issuer or a directly issued responder
+authorized for OCSP signing. Authenticated revocation takes precedence over
+affirmative evidence. A certificate marked Must-Staple requires a fresh
+good staple. TLS 1.2 carries server staples in CertificateStatus. TLS 1.3
+carries per-certificate staples in CertificateEntry, including client
+authentication when requested. With the policy enabled, the client offers the
+RFC 6962 SCT extension. SCTs from certificates, authenticated OCSP responses,
+and negotiated TLS extensions are verified against configured log keys.
+
+CRLite reads Mozilla Clubcard V3 and V4 filters. The application authenticates
+the source and supplies the full filter, ordered deltas, expiry, generation,
+and CT log keys as a unit. A verified timestamp in a covered log interval
+allows lookup by the issuer's SPKI hash and certificate serial. Missing
+coverage, missing enrollment, and expired data provide no good result. A
+snapshot can be atomically replaced through `SharedRevocationData` with
+`std`. The application owns distribution, rollback protection across
+process restarts, and publisher authentication.
+
+Live OCSP is independently opt-in. Buffered, unbuffered, and QUIC
+connections expose `pending_revocation` and `resolve_peer_revocation`.
+They verify the path and the peer's proof of possession before requesting
+network evidence. The driver supplies DER or reports unavailability and
+the verifier makes the authentication decision. Drivers must authorize
+responder destinations for the verified issuer and refresh their status
+cache within signed validity. `browntls-tokio` can drive this step with an
+application-provided transport. `ServerStapleResolver` validates and
+atomically installs server leaf staples and withholds expired responses.
+
+Revocation-enabled certificate authentication uses a full handshake each
+time. Revocation-aware post-handshake authentication exposes the new
+identity only after the response and Finished verify. Pending checks and
+outstanding revocation-aware authentication block kernel handoff. See
+[browntls-tokio](../crates/browntls-tokio/README.md) for application integration.
+
 ## Crypto provider mount point
 
 `browntls::crypto` defines the provider interface, modelled on rustls 0.23 so
@@ -245,7 +289,8 @@ where they live:
   signatures.
 - Server certificates: an empty Certificate message is `decode_error` when it
   arrives; a non-empty `certificate_request_context` is `illegal_parameter`;
-  OCSP responses may come with any entry (only the end entity's is used).
+  OCSP responses may come with any entry and are associated with the
+  certificate they accompany. The revocation policy controls the check depth.
 - Key shares come in `supported_groups` order, and a server that would have
   preferred a group other than the one the client's shares allowed lists its
   groups in EncryptedExtensions (RFC 9846 §4.3.7). Key shares are generated

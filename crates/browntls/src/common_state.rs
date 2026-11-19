@@ -134,6 +134,7 @@ pub struct IoState {
     tls_bytes_to_write: usize,
     plaintext_bytes_to_read: usize,
     peer_has_closed: bool,
+    revocation_pending: bool,
 }
 
 impl IoState {
@@ -151,6 +152,11 @@ impl IoState {
     pub fn peer_has_closed(&self) -> bool {
         self.peer_has_closed
     }
+
+    /// Whether progress requires resolving a pending certificate status request.
+    pub fn revocation_pending(&self) -> bool {
+        self.revocation_pending
+    }
 }
 
 /// Connection state that is independent of the handshake position.
@@ -163,6 +169,9 @@ pub struct CommonState {
     pub(crate) kx_state: KxState,
     pub(crate) alpn_protocol: Option<Vec<u8>>,
     pub(crate) peer_certificates: Option<CertificateChain<'static>>,
+    pub(crate) pending_revocation: Option<alloc::boxed::Box<crate::revocation::PendingRevocation>>,
+    pub(crate) peer_revocation_status: Option<crate::revocation::RevocationStatus>,
+    pub(crate) revocation_auth_outstanding: bool,
     message_fragmenter: MessageFragmenter,
     pub(crate) received_plaintext: ChunkVecBuffer,
     pub(crate) sendable_plaintext: ChunkVecBuffer,
@@ -226,6 +235,9 @@ impl CommonState {
             kx_state: KxState::Start,
             alpn_protocol: None,
             peer_certificates: None,
+            pending_revocation: None,
+            peer_revocation_status: None,
+            revocation_auth_outstanding: false,
             message_fragmenter: MessageFragmenter::default(),
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
             sendable_plaintext: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
@@ -261,6 +273,18 @@ impl CommonState {
     /// Whether there are TLS bytes waiting for `write_tls`.
     pub fn wants_write(&self) -> bool {
         !self.sendable_tls.is_empty()
+    }
+
+    /// The OCSP request blocking certificate authentication, if any.
+    pub fn pending_revocation(&self) -> Option<&crate::revocation::RevocationQuery> {
+        self.pending_revocation
+            .as_deref()
+            .map(|pending| pending.query())
+    }
+
+    /// The revocation result of the most recently verified peer identity.
+    pub fn peer_revocation_status(&self) -> Option<crate::revocation::RevocationStatus> {
+        self.peer_revocation_status
     }
 
     /// Whether the handshake is still in progress.
@@ -355,6 +379,7 @@ impl CommonState {
     /// capped at 64 KiB, allows.
     pub fn wants_read(&self) -> bool {
         self.received_plaintext.is_empty()
+            && self.pending_revocation.is_none()
             && !self.has_received_close_notify
             && (self.may_send_application_data || self.sendable_tls.is_empty())
             && !self.control_backlog_full()
@@ -443,6 +468,7 @@ impl CommonState {
             tls_bytes_to_write: self.sendable_tls.len(),
             plaintext_bytes_to_read: self.received_plaintext.len(),
             peer_has_closed: self.has_received_close_notify,
+            revocation_pending: self.pending_revocation.is_some(),
         }
     }
 

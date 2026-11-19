@@ -42,6 +42,7 @@
 //! | [`ConnectionState::EncodeTlsData`] | [`EncodeTlsData::encode`] into the output buffer |
 //! | [`ConnectionState::TransmitTlsData`] | sends the output buffer, then [`TransmitTlsData::done`] |
 //! | [`ConnectionState::BlockedHandshake`] | receives more TLS bytes |
+//! | [`ConnectionState::PendingRevocation`] | resolves the current OCSP query |
 //! | [`ConnectionState::ReadTraffic`] / [`ConnectionState::ReadEarlyData`] | consumes the record |
 //! | [`ConnectionState::WriteTraffic`] | encrypts data to send, or receives more TLS bytes |
 //! | [`ConnectionState::PeerClosed`] | stops reading; may still write and close |
@@ -88,6 +89,17 @@ pub struct UnbufferedConnectionCommon<Data> {
 }
 
 impl<Data: SideData> UnbufferedConnectionCommon<Data> {
+    /// Supplies the result of the current OCSP query.
+    ///
+    /// Call [`Self::process_tls_records`] again, even when no new bytes arrived.
+    pub fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: crate::revocation::RevocationResponse,
+    ) -> Result<(), Error> {
+        self.core.resolve_peer_revocation(id, response)
+    }
+
     pub(crate) fn new(mut core: ConnectionCore<Data>) -> Self {
         core.common_state.unbuffered = true;
         Self {
@@ -124,6 +136,7 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
                 payload: &mut buffer.into_inner()[range],
             })),
             Ok(Step::BlockedHandshake) => Ok(ConnectionState::BlockedHandshake),
+            Ok(Step::PendingRevocation) => Ok(ConnectionState::PendingRevocation),
             Ok(Step::WriteTraffic) => {
                 Ok(ConnectionState::WriteTraffic(WriteTraffic { conn: self }))
             }
@@ -153,6 +166,9 @@ impl<Data: SideData> UnbufferedConnectionCommon<Data> {
             }
 
             let common = &self.core.common_state;
+            if common.pending_revocation().is_some() {
+                return Ok(Step::PendingRevocation);
+            }
             if common.has_received_close_notify {
                 // RFC 9846 §6.1: nothing after close_notify is processed.
                 if !self.emitted_peer_closed {
@@ -526,6 +542,7 @@ enum Step {
     ReadTraffic(Range<usize>),
     ReadEarlyData(Range<usize>),
     BlockedHandshake,
+    PendingRevocation,
     WriteTraffic,
     PeerClosed,
     Closed,
@@ -586,6 +603,9 @@ pub enum ConnectionState<'c, 'i, Data> {
     /// The handshake cannot progress without more TLS bytes from the peer.
     BlockedHandshake,
 
+    /// Peer authentication needs the result of its pending OCSP query.
+    PendingRevocation,
+
     /// Application data may be sent; receiving more TLS bytes is needed for
     /// anything else.
     ///
@@ -620,6 +640,7 @@ impl<Data> fmt::Debug for ConnectionState<'_, '_, Data> {
             Self::EncodeTlsData(_) => f.write_str("EncodeTlsData"),
             Self::TransmitTlsData(_) => f.write_str("TransmitTlsData"),
             Self::BlockedHandshake => f.write_str("BlockedHandshake"),
+            Self::PendingRevocation => f.write_str("PendingRevocation"),
             Self::WriteTraffic(_) => f.write_str("WriteTraffic"),
             Self::PeerClosed => f.write_str("PeerClosed"),
             Self::Closed => f.write_str("Closed"),

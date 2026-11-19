@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use browntls::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::common::{self, IoSession, MidHandshake, StreamState, coop};
+use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
 use crate::kernel::IntoKernelHandoff;
 use crate::split::{self, ReadHalf, WriteHalf};
 
@@ -27,9 +27,24 @@ pub use lazy::{LazyConfigAcceptor, StartHandshake};
 pub struct TlsAcceptor {
     inner: Arc<ServerConfig>,
     early_data: bool,
+    revocation: RevocationSource,
 }
 
 impl TlsAcceptor {
+    /// Answers the certificate status (OCSP) queries of this acceptor's
+    /// connections (about client certificates) with `fetcher`: during the
+    /// handshake, and in reads after it (post-handshake authentication).
+    /// Without one, such a query is answered as unavailable at once. See
+    /// [`crate::revocation`].
+    #[cfg(feature = "ocsp")]
+    pub fn revocation_fetcher(
+        mut self,
+        fetcher: Arc<crate::revocation::RevocationFetcher>,
+    ) -> Self {
+        self.revocation = RevocationSource::new(fetcher);
+        self
+    }
+
     /// Whether [`accept`](Self::accept) may return before the handshake
     /// completes, so the server can read the client's 0-RTT ("early") data
     /// without waiting for the client's Finished. Off by default.
@@ -124,7 +139,7 @@ impl TlsAcceptor {
         Accept(MidHandshake::Handshaking(TlsStream {
             io: stream,
             session,
-            st: StreamState::new(),
+            st: StreamState::new(self.revocation.for_stream()),
             early: self
                 .early_data
                 .then(|| EarlyPhase::new(self.inner.send_half_rtt_data)),
@@ -142,6 +157,7 @@ impl From<Arc<ServerConfig>> for TlsAcceptor {
         Self {
             inner,
             early_data: false,
+            revocation: RevocationSource::default(),
         }
     }
 }
@@ -150,6 +166,7 @@ impl fmt::Debug for TlsAcceptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsAcceptor")
             .field("early_data", &self.early_data)
+            .field("revocation", &self.revocation)
             .finish_non_exhaustive()
     }
 }

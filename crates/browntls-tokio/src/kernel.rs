@@ -13,8 +13,9 @@
 //! instead: it finishes a client's 0-RTT phase and the handshake of a
 //! server's stream returned before its end, writes and flushes every
 //! queued record, reads exactly up to the next record boundary (the kernel
-//! must start at one), answers what the records read on the way call for,
-//! and takes the plaintext received so far out of the connection. The
+//! must start at one), answers what the records read on the way call for
+//! (a certificate status query of the connection included), and takes the
+//! plaintext received so far out of the connection. The
 //! [`KernelHandoff`] it resolves to holds the transport, the connection
 //! (for `dangerous_into_kernel_connection`) and that plaintext, which the
 //! application reads before anything the kernel delivers.
@@ -377,6 +378,10 @@ where
         return Poll::Ready(Err(err));
     }
     loop {
+        // A certificate read on the way may have left the connection
+        // waiting on a certificate status query: nothing else moves until
+        // it is answered.
+        ready!(Stream::new(&mut *io, &mut *session).poll_revocation(cx, &mut st.revocation))?;
         let Some(blocker) = session.kernel_handoff_blocker() else {
             // Nothing is queued any more; bytes a buffering transport still
             // holds must be out before the kernel writes behind them.

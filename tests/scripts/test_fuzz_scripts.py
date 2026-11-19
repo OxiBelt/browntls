@@ -54,10 +54,21 @@ class PlanTests(unittest.TestCase):
         include = PLAN.matrix("target", ["fuzz/src/pki.rs"], None)["include"]
         self.assertEqual({e["targets"] for e in include}, {"pki_cert", "pki_pem", "pki_crl"})
 
+    def test_revocation_changes_select_the_revocation_harness(self):
+        for path in (
+            "crates/browntls/src/revocation/policy/data.rs",
+            "crates/browntls/src/quic/connection.rs",
+            "crates/browntls-tokio/src/revocation/staple.rs",
+            "fuzz/src/pki_revocation/fixtures.rs",
+        ):
+            include = PLAN.matrix("target", [path], None)["include"]
+            self.assertIn("pki_revocation", {e["targets"] for e in include}, path)
+
     def test_crate_manifest_selects_that_crates_targets(self):
         include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None)["include"]
         self.assertEqual(
-            {e["targets"] for e in include}, {"pki_cert", "pki_pem", "pki_crl", "pki_api"}
+            {e["targets"] for e in include},
+            {"pki_cert", "pki_pem", "pki_crl", "pki_api", "pki_revocation"},
         )
 
     def test_shared_infrastructure_selects_everything(self):

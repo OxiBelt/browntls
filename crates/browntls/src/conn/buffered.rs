@@ -25,6 +25,16 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core.process_new_packets(&mut self.deframer_buffer)
     }
 
+    /// Supplies the result of the current OCSP query and processes any buffered input.
+    pub fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: crate::revocation::RevocationResponse,
+    ) -> Result<(), Error> {
+        self.core.resolve_peer_revocation(id, response)?;
+        self.process_new_packets().map(|_| ())
+    }
+
     /// Derives keying material bound to this session (RFC 5705, RFC 8446 §7.5).
     pub fn export_keying_material<T: AsMut<[u8]>>(
         &self,
@@ -172,7 +182,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// post-handshake authentication responses, alerts) wait to be written,
     /// so that a peer cannot force unbounded buffering in either direction.
     /// [`CommonState::wants_read`](crate::CommonState::wants_read) is false in
-    /// both cases.
+    /// both cases. When an OCSP response is pending, returns `WouldBlock`
+    /// until it is resolved.
     pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
         if self.core.common_state.received_plaintext.is_full() {
             return Err(std::io::Error::other(
@@ -180,6 +191,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
             ));
         }
         let common = &self.core.common_state;
+        if common.pending_revocation().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "certificate revocation response is pending",
+            ));
+        }
         if common.may_send_application_data && common.control_backlog_full() {
             return Err(std::io::Error::other(
                 "too many queued TLS records; write them with write_tls() first",
@@ -266,6 +283,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 let _ignored = self.write_tls(io);
                 let _ignored = io.flush();
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
+            if self.pending_revocation().is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "certificate revocation response is pending",
+                ));
             }
 
             // After close_notify the connection stops wanting to read, so
@@ -560,6 +583,18 @@ impl Connection {
         match self {
             Self::Client(conn) => conn.process_new_packets(),
             Self::Server(conn) => conn.process_new_packets(),
+        }
+    }
+
+    /// Supplies the result of the current OCSP query and processes any buffered input.
+    pub fn resolve_peer_revocation(
+        &mut self,
+        id: u64,
+        response: crate::revocation::RevocationResponse,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Client(conn) => conn.resolve_peer_revocation(id, response),
+            Self::Server(conn) => conn.resolve_peer_revocation(id, response),
         }
     }
 

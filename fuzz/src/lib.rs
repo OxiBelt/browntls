@@ -31,6 +31,7 @@ pub mod crypto_kem;
 pub mod crypto_rsa;
 pub mod crypto_util;
 pub mod pki_api;
+pub mod pki_revocation;
 pub mod tls_auth;
 pub mod tls_codec;
 pub mod tls_config;

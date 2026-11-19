@@ -86,6 +86,7 @@ pub mod psk;
 pub mod quic;
 mod rand;
 mod record_layer;
+pub mod revocation;
 #[cfg(feature = "std")]
 mod stream;
 mod suites;

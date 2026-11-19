@@ -16,6 +16,8 @@ use crate::msgs::codec::{
 };
 use crate::msgs::enums::{CertificateStatusType, ClientCertificateType, ExtensionType};
 
+mod evidence;
+
 /// A TLS 1.2 certificate chain: the end entity first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CertificateChain<'a>(pub(crate) Vec<CertificateDer<'a>>);
@@ -185,7 +187,13 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         read_extensions(r, |typ, body| {
             match typ {
                 ExtensionType::StatusRequest => status = Some(CertificateStatus::read(body)?),
-                ExtensionType::SCT => sct_list = Some(Payload::read(body)),
+                // RFC 6962 §3.3: a well-formed, non-empty list. Whether we
+                // asked for it is checked by the handshake.
+                ExtensionType::SCT => {
+                    let list = body.rest();
+                    evidence::validate_sct_list(list)?;
+                    sct_list = Some(Payload::Borrowed(list));
+                }
                 // Whether we offered it is checked by the handshake.
                 ExtensionType::DelegatedCredential => {
                     delegated_credential = Some(DelegatedCredential::read(body)?);
@@ -251,8 +259,8 @@ impl<'a> CertificatePayloadTls13<'a> {
         }
     }
 
-    /// Whether any entry other than the first carries extensions (RFC 8446
-    /// §4.4.2: only the end entity may have `status_request` or `sct`).
+    /// The first entry's OCSP response.
+    #[cfg(test)]
     pub(crate) fn end_entity_ocsp(&self) -> Vec<u8> {
         self.entries
             .first()
@@ -388,6 +396,12 @@ pub(crate) struct CertificateRequestExtensions {
     /// RFC 9345 §4.1.2: the schemes the server accepts for a client's
     /// delegated credential.
     pub(crate) delegated_credential: Option<Vec<SignatureScheme>>,
+    /// RFC 8446 §4.4.2.1: an empty `status_request`, asking the client to
+    /// staple OCSP responses to its Certificate entries.
+    pub(crate) status_request: Option<()>,
+    /// An empty `signed_certificate_timestamp` (RFC 6962 §3.3.1, permitted
+    /// in CertificateRequest by RFC 8446 §4.2), asking the client for SCTs.
+    pub(crate) sct_request: Option<()>,
 }
 
 impl Codec<'_> for CertificateRequestExtensions {
@@ -419,6 +433,12 @@ impl Codec<'_> for CertificateRequestExtensions {
                 encode_vec_u16(b, schemes)
             });
         }
+        if self.status_request.is_some() {
+            encode_extension(ExtensionType::StatusRequest, out, |_| {});
+        }
+        if self.sct_request.is_some() {
+            encode_extension(ExtensionType::SCT, out, |_| {});
+        }
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -446,6 +466,10 @@ impl Codec<'_> for CertificateRequestExtensions {
                     out.delegated_credential =
                         Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
                 }
+                // Both must be empty here: `read_extensions` rejects any
+                // body left unread.
+                ExtensionType::StatusRequest => out.status_request = Some(()),
+                ExtensionType::SCT => out.sct_request = Some(()),
                 other => {
                     out.unknown.push(other);
                     body.rest();

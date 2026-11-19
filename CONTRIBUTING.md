@@ -104,7 +104,10 @@ python3 tests/e2e/e2e.py build --arch amd64
 python3 tests/e2e/e2e.py run --arch amd64 --suite openssl
 ```
 
-There are no Kubernetes test gates.
+The revocation Kubernetes job exercises Tokio clients and a private OCSP
+responder. Run the same suite locally with
+`python3 -B tests/kubernetes/revocation.py`. See the
+[minikube test prerequisites](tests/kubernetes/README.md).
 
 ## Commit messages and signatures
 

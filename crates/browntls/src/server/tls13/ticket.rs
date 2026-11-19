@@ -95,6 +95,7 @@ pub(super) fn emit_ticket(
             .external_psk_binding(&config.provider.cipher_suites, &secret)?,
     );
     value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+    value.certificate_free = cx.data.certificate_free;
     let plain = value.get_encoding();
 
     let ticket = if config.ticketer.enabled() {

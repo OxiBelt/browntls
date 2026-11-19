@@ -22,6 +22,7 @@ use crate::msgs::message::{Message, MessagePayload};
 use crate::server::common::ActiveCertifiedKey;
 use crate::server::hs::{self, ServerContext};
 use crate::server::server_conn::ServerConfig;
+use crate::sign::CertifiedKey;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::{
     KeyScheduleHandshake, KeyScheduleTrafficWithClientFinishedPending,
@@ -276,6 +277,9 @@ pub(super) fn certificate_request_message(
         ));
     }
     let authorities = config.verifier.root_hint_subjects();
+    // RFC 8446 §4.4.2.1: ask for the client's OCSP responses, and its SCTs,
+    // when its certificate's revocation status is evaluated.
+    let evidence = crate::server::common::client_revocation_enabled(config).then_some(());
     let cr = CertificateRequestPayloadTls13 {
         context: PayloadU8::new(context),
         extensions: CertificateRequestExtensions {
@@ -285,6 +289,8 @@ pub(super) fn certificate_request_message(
                 &config.cert_decompressors,
                 config.cert_decompression_limit,
             ),
+            status_request: evidence,
+            sct_request: evidence,
             ..Default::default()
         },
     };
@@ -323,25 +329,38 @@ pub(super) fn choose_delegated_credential<'a>(
         .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
 }
 
-pub(super) fn emit_certificate_tls13(
-    transcript: &mut HandshakeHash,
-    common: &mut CommonState,
-    config: &ServerConfig,
-    server_key: &ActiveCertifiedKey<'_>,
+/// The server's Certificate message for `certified_key`, with what
+/// `client_hello` asked for: the OCSP response configured for each entry if
+/// it sent `status_request` (RFC 8446 §4.4.2.1), and the end entity's SCT
+/// list if it sent `signed_certificate_timestamp` (RFC 6962 §3.3.1).
+fn certificate_body<'a>(
+    certified_key: &'a CertifiedKey,
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
-) {
-    // RFC 6066 §8: staple only when the client asked.
-    let ocsp = client_hello
-        .extensions
-        .certificate_status_request
-        .as_ref()
-        .and_then(|_| server_key.get_ocsp());
-    let mut cert_body = CertificatePayloadTls13::new(server_key.get_cert().iter(), ocsp);
+) -> CertificatePayloadTls13<'a> {
+    let mut cert_body = CertificatePayloadTls13::from_certified_key(
+        certified_key,
+        client_hello.extensions.certificate_status_request.is_some(),
+        client_hello.extensions.sct_request.is_some(),
+    );
     // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
     if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
         first.delegated_credential = Some(dc.credential().clone());
     }
+    cert_body
+}
+
+/// Sends the Certificate (or CompressedCertificate) message for
+/// `certified_key`, the credential `server_key` was made from.
+pub(super) fn emit_certificate_tls13(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    config: &ServerConfig,
+    certified_key: &CertifiedKey,
+    client_hello: &ClientHelloPayload,
+    delegated: Option<&DelegatedCredentialKey>,
+) {
+    let cert_body = certificate_body(certified_key, client_hello, delegated);
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression
@@ -440,3 +459,6 @@ pub(super) fn emit_finished_tls13(
         cx.common,
     )
 }
+
+#[cfg(test)]
+mod tests;

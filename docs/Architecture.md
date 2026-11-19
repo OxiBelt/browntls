@@ -2019,6 +2019,115 @@ verification, FFDHE, X448, Ed25519, Ed448, the hash functions and the
 public NIST arithmetic types (`FieldElement`, `Scalar`, `AffinePoint`,
 `ProjectivePoint`) are not routed.
 
+#### Kernel TLS at the head of the order
+
+Linux kernel TLS is another place where the records of a connection can be
+protected, but it takes whole connections and does not give them back, so it
+cannot be one more backend of a record stream. `accel::load::kernel` puts it
+in front of the backends instead, for the record work the kernel can take
+(AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 records), and the choice is
+made once per connection, when it is ready to be handed over:
+
+| Kernel TLS | `accel::load` | Where a new connection's records are protected (`kernel::place`) |
+|---|---|---|
+| not active | either | In userspace, by the family's backends, routed between them record by record as above |
+| active | disabled | By the kernel |
+| active | enabled | By the kernel, unless the stream of that record work keeps the connection in userspace (below), where the backends take it as above |
+
+So while kernel TLS is active the order is kernel TLS, then the family's
+backends in their preference order (for AES-GCM those with dedicated AES
+instructions, widest first; for ChaCha20-Poly1305 the SIMD backends; the
+portable code last; a unit test pins that no backend with SIMD alone comes
+before one with dedicated instructions in these families). While it is not
+active, nothing differs from the order above. A driver activates it once it
+knows that the running kernel takes connections
+(`browntls_ktls::routing::activate`, which asks the kernel to attach the
+`tls` upper layer protocol to a loopback socket).
+
+With routing enabled, each of the three kinds of record work has one more
+stream, with two channels, the kernel (the primary) and userspace (its one
+alternate), run by the controller described above. Two things differ because
+a connection is placed as a whole and stays where it was put:
+
+- While the kernel is probed, every new connection stays in userspace until
+  four of its writes were timed, then one in eight. A probe that waited for
+  one placement in eight would often run out first (it is given up after 64
+  timed writes of the primary), since connections can be rare next to
+  writes.
+- A shifted share is a share of the new connections. Connections the kernel
+  has stay with it, and those in userspace stay there, so a shift acts as
+  fast as connections come and go.
+
+The crypto crate does not see the socket, so the driver reports the costs
+(`kernel::sample`, `Sample::done`): for one write in sixteen of at least
+4096 bytes (every such write of a userspace connection while the kernel is
+probed), the bytes of application data the socket accepted and what that
+took. Both places are measured alike, from the plaintext to the bytes TCP
+has taken: for the kernel that is the `send` that encrypts
+(`Engine::write`, so `KtlsStream` and `AsyncKtlsStream` however they were
+made), for userspace the encryption by a backend and the `send`
+(`UserspaceStream`, `AsyncUserspaceStream`). `browntls-ktls` measures
+processor time of the calling thread (`clock_gettime` with
+`CLOCK_THREAD_CPUTIME_ID`), so that waiting for the peer or for room in the
+socket counts for neither place. `kernel::status` and `status_all` report
+the streams in the form of the backends' reports (primary `kernel TLS`,
+alternate `userspace`, costs per byte written) and `kernel::set_fixed` pins
+the share of new connections kept in userspace; the backends' own reports
+(`load::status_all`, `lanes`) are unchanged.
+
+`browntls_ktls::routing::RoutedStream::new` follows the placement for a
+buffered connection: it completes the handshake, asks `kernel::place` for
+the negotiated suite's record work, and returns the connection as a
+`KtlsStream` or, in userspace, as a `UserspaceStream` (a
+`browntls::Stream` that reports its writes). A connection that was placed
+with the kernel and that the kernel cannot take (no `tls` module, a suite
+or a configuration without a kernel form) stays in userspace with the
+refusal recorded, and the application data a refused handover had taken is
+read first; I/O failures and `WouldBlock` are returned as `KtlsStream::new`
+returns them. `AsyncRoutedStream::from_client` and `from_server` do the
+same for `browntls-tokio` streams, whose handshake is done before they are
+placed, except for a stream returned early for 0-RTT data: a server has its
+suite by then and is placed by it, and a client, which has none yet,
+follows the order alone. An `AsyncUserspaceStream` times a write one poll
+at a time, and not before the handshake is complete. A suite whose records
+have no stream (TLS 1.3 AES-128-CCM) follows the order alone.
+
+Limits, beyond those of the routing as a whole:
+
+- Only new connections move. A process with a few long-lived connections
+  is never rebalanced.
+- Userspace is measured by the connections that are there: those kept back
+  to measure it and those the kernel refused. If none of them writes while
+  the kernel is probed, the probe ends without a comparison and the
+  kernel's present cost is accepted as its baseline.
+- Only writes are timed; a connection is placed for both directions by what
+  sending costs.
+- The costs include the kernel's network stack for both places. Load on it
+  slows both alike, which the controller probes and then accepts.
+- Processor time of the calling thread does not include encryption that the
+  kernel hands to another context (asynchronous crypto drivers, a network
+  device that encrypts); such a kernel measures cheap and keeps its
+  connections, which is the intended outcome but not a measured one.
+- What only the kernel can do (`sendfile` without a copy to userspace) is
+  no part of a cost per byte written. An application that depends on it
+  hands its connections over with `KtlsStream::new` and does not ask the
+  routing.
+- A userspace write that found no room in a non-blocking socket (a
+  `UserspaceStream` on such a socket, a poll of an `AsyncUserspaceStream`)
+  encrypts without sending all of it and is reported cheaper than it is;
+  the time between two polls is not counted.
+- The placement was exercised with synthetic costs
+  (`crates/browntls-crypto/tests/accel_load_kernel.rs`) and with fixed
+  shares on real sockets (`crates/browntls-ktls/tests/routing.rs`,
+  `tests/tokio_routing.rs`); no test drives the automatic controller
+  through real timings, and whether a shift away from the kernel ever pays
+  on real hardware is not measured.
+
+Where a connection's records are protected changes no byte on the wire.
+The placement is a function of call counters, lengths of writes and
+measured durations; the kernel holds the traffic keys of the connections
+placed with it, as with any kernel TLS handover.
+
 ### Operating-system interface
 
 On Linux x86-64, aarch64 and riscv64, `browntls-crypto` issues `getrandom(2)`

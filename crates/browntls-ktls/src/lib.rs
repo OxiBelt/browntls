@@ -39,6 +39,13 @@
 //! unharmed ([`HandoffError::Refused`]), so the caller can go on in
 //! userspace.
 //!
+//! # Load-aware routing
+//!
+//! With the `native` feature, the `routing` module makes kernel TLS the
+//! first place for a connection's records under the native provider's
+//! load-aware routing: `routing::RoutedStream::new` hands a connection to
+//! the kernel or leaves it in userspace, as the routing places it.
+//!
 //! # Tokio
 //!
 //! With the `tokio` feature, `AsyncKtlsStream` is the same offload on a

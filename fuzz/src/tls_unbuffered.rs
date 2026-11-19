@@ -543,16 +543,16 @@ impl World {
         seen
     }
 
-    /// Steps `side` until it waits for input. Returns whether it
-    /// transmitted anything.
+    /// Steps `side` until it waits for input, at most 64 times. Returns
+    /// whether it made progress: transmitted anything or consumed input.
     fn drive(&mut self, side: usize, args: &StepArgs<'_>) -> bool {
-        let before = self.wire[side].len();
+        let before = (self.wire[side].len(), self.inbuf[side].len());
         for _ in 0..64 {
             if self.step(side, args) != Seen::Busy {
                 break;
             }
         }
-        self.wire[side].len() != before
+        (self.wire[side].len(), self.inbuf[side].len()) != before
     }
 
     /// Moves up to `amount` transmitted bytes of `from` to its peer.
@@ -563,24 +563,33 @@ impl World {
         n > 0
     }
 
+    /// Drives both sides and delivers everything until nothing moves.
+    ///
+    /// A side counts as moving while it consumes input, not only while it
+    /// transmits: a peer that queued many records (up to 64 per `Drive`
+    /// that never calls `TransmitTlsData::done`) needs more than one
+    /// 64-step `drive` to read them, and stopping earlier would report
+    /// data the receiver simply had not processed yet as lost. The bound
+    /// covers the most records an input can queue (64 operations of 64
+    /// steps, each encrypting at most 255 bytes) with room to spare, so
+    /// running out of rounds means the connections never settle (a
+    /// livelock), which is reported as such rather than as lost data.
     fn pump(&mut self) {
         let args = StepArgs {
             flags: RETRY,
             ..StepArgs::default()
         };
-        for _ in 0..32 {
+        for _ in 0..1024 {
             let mut moved = false;
             for side in [CLIENT, SERVER] {
                 moved |= self.drive(side, &args);
                 moved |= self.deliver(side, usize::MAX);
             }
             if !moved {
-                break;
+                return;
             }
         }
-        for side in [CLIENT, SERVER] {
-            self.drive(side, &args);
-        }
+        panic!("connections did not settle after 1024 pump rounds");
     }
 
     fn commons(&self) -> [Option<&CommonState>; 2] {

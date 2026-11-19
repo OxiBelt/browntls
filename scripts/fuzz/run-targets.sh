@@ -18,9 +18,11 @@
 # A crash is a potential vulnerability (SECURITY.md): libFuzzer's output and
 # the crashing input stay in FUZZ_FINDINGS and are not printed, because CI
 # logs of this repository are public (on a CI runner they are discarded with
-# the runner). Only the target, the exit status, the
+# the runner unless the workflow seals them with
+# scripts/fuzz/findings-envelope.sh). Only the target, the exit status, the
 # kind of finding, libFuzzer's random seed, its final statistics and the
-# input's SHA-256 are printed.
+# input's SHA-256 are printed, besides the CPU model, its crypto-relevant
+# flags and the backends browntls-crypto selects on it.
 #
 # A failing input may be an entry of the target's corpus (restored from an
 # earlier run or generated as a seed) rather than a new mutation, so a failing
@@ -42,6 +44,7 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 findings="${FUZZ_FINDINGS:-${repo}/fuzz/findings}"
 mkdir -p "${findings}"
 cd "${repo}/fuzz"
+cpu_flags_of_interest='avx2|avx512(f|vl|bw|dq|ifma|vbmi)|vaes|vpclmulqdq|gfni|sha_ni|sha512|aes|pclmulqdq|bmi2|adx'
 
 # Debug assertions also enable overflow checks in the fuzzed code.
 build=(cargo "+${toolchain}" fuzz build --release --debug-assertions --sanitizer "${sanitizer}")
@@ -49,6 +52,19 @@ build=(cargo "+${toolchain}" fuzz build --release --debug-assertions --sanitizer
 echo "::group::Generate seeds"
 cargo "+${toolchain}" run --locked --example seed_corpus
 echo "::endgroup::"
+
+# The machine and the crypto backends it selects, so that a finding can be
+# matched to the code paths that ran (runners differ in CPU). Not sensitive.
+cpu_model="unknown CPU"
+if [[ -r /proc/cpuinfo ]]; then
+  cpu_model="$(sed -n '/^model name/{s/^model name[[:space:]]*: //p;q}' /proc/cpuinfo)"
+  cpu_model="${cpu_model:-unknown CPU}"
+  cpu_flags="$(sed -n '/^flags/{s/^flags[[:space:]]*: //p;q}' /proc/cpuinfo)"
+  echo "CPU: ${cpu_model} ($(nproc) logical CPUs)"
+  echo "CPU flags (crypto-relevant): $(tr ' ' '\n' <<< "${cpu_flags}" \
+    | { grep -xE "${cpu_flags_of_interest}" || true; } | sort | tr '\n' ' ')"
+fi
+cargo "+${toolchain}" run --locked --quiet --example cpu_features
 
 failed=()
 for target in "$@"; do
@@ -97,7 +113,7 @@ for target in "$@"; do
       break
     fi
   done
-  echo "::error title=Fuzz finding in ${target}::${target} failed (exit ${status}, ${kind}). The input and log are withheld from the public log; see fuzz/README.md, Continuous fuzzing."
+  echo "::error title=Fuzz finding in ${target}::${target} failed (exit ${status}, ${kind}) on ${cpu_model}. The input and log are withheld from the public log; see fuzz/README.md, Continuous fuzzing."
   quarantine="$(mktemp -d "${artifacts}corpus.XXXXXX")"
   mv "corpus/${target}" "${quarantine}/"
   echo "The ${target} corpus was moved to the findings directory."

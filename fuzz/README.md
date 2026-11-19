@@ -193,11 +193,37 @@ runtime).
 works the same locally (set `FUZZ_TOOLCHAIN` to the workflow's nightly). Since
 CI logs of this repository are public, a failing target prints only its name,
 the kind of finding, libFuzzer's seed, its final statistics and the SHA-256 of
-the input. The input and the log are not uploaded and are lost with the
-runner, and the seed alone does not replay the run (the starting corpus and
-the generated certificates differ), so a CI finding is a signal: fuzz that
-target locally until it reproduces, and handle the result as a potential
-vulnerability, as described under [Running](#running).
+the input. Before fuzzing, the script prints the CPU model, its
+crypto-relevant flags and the backend `browntls-crypto` selects for each
+algorithm family (`cargo run --example cpu_features`), since runners of the
+same label differ in CPU and a finding may depend on the backend that ran.
+
+The seed alone does not replay a run (the starting corpus and the generated
+certificates differ), so the workflow keeps a failing job's findings
+directory (crash inputs, libFuzzer logs and the quarantined corpus) for the
+maintainers, encrypted: `scripts/fuzz/findings-envelope.sh seal` packs it and
+encrypts it as CMS AuthEnvelopedData (ECDH P-384, AES-256-GCM) to the
+recipient certificate in the Actions variable `FUZZ_FINDINGS_RECIPIENT`
+(PEM; an organization variable at present, which GitHub does not pass to
+workflows of pull requests from forks), and only the sealed file is
+uploaded, as the artifact `fuzz-findings-sealed-<job>-<attempt>`, kept for
+14 days. Anyone signed in
+can download it; only the private key opens it. The job log shows the
+certificate's SHA-256 fingerprint. Without the variable, or in a run that
+does not receive it, nothing is uploaded and the findings are lost with the
+runner. A maintainer opens a download with
+
+```sh
+scripts/fuzz/findings-envelope.sh open KEY CERT findings.cms NEW-DIRECTORY
+```
+
+which refuses a modified file before unpacking anything. Anyone can encrypt
+to the public certificate, so treat what it unpacks as untrusted input, keep
+it out of public places, and handle a finding as a potential vulnerability,
+as described under [Running](#running). The private key is never committed to
+this repository; `findings-envelope.sh keygen KEY CERT` makes a new pair
+(replace the variable to rotate it). Without the sealed findings, fuzz that
+target locally until it reproduces.
 
 The input that fails can be an entry of the corpus the job started from (a
 cached corpus or a seed) rather than a new mutation. Pull requests, from forks

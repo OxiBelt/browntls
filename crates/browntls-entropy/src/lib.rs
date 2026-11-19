@@ -532,15 +532,10 @@ fn check_bytes(p: &Packed, hist: &[[u64; 256]], r: &mut Report) {
     }
     let df = 255.0;
     let chi_crit = stats::chi2_from_z(stats::z_one_sided(ALPHA, full), df);
-    // The count of one value at one position is binomial with mean
-    // `expected`. A normal approximation of its upper tail is far too thin
-    // for small means (at 4096 samples it fails an ideal generator about
-    // once in 60,000 analyses instead of 1 in 10^9); the Poisson tail of the
-    // same mean is heavier than the binomial one, so it keeps the rate
-    // below `ALPHA`. `max_crit` is the smallest count that fails.
-    let max_crit = poisson_upper_crit(expected, ALPHA / (full * 256) as f64);
+    let sigma = (n * (1.0 / 256.0) * (255.0 / 256.0)).sqrt();
+    let max_crit = expected + stats::z_one_sided(ALPHA, full * 256) * sigma;
     let h_floor = stats::shannon_from_chi2(chi_crit, 256.0, n);
-    let hmin_floor = -((max_crit - 1) as f64 / n).log2();
+    let hmin_floor = -(max_crit / n).log2();
     let mut worst_chi = (0.0f64, 0usize);
     let mut worst_max = (0u64, 0usize);
     let mut min_h = f64::INFINITY;
@@ -561,7 +556,7 @@ fn check_bytes(p: &Packed, hist: &[[u64; 256]], r: &mut Report) {
         if max > worst_max.0 {
             worst_max = (max, pos);
         }
-        if chi > chi_crit || max >= max_crit {
+        if chi > chi_crit || max as f64 > max_crit {
             let value = h.iter().position(|&c| c == max).unwrap_or(0);
             bad.push(format!(
                 "packed byte {pos} (from {}): chi2 = {chi:.0}, value {value:#04x} in {:.5} of samples",

@@ -286,6 +286,30 @@ fn tickets_arriving_after_the_handover_are_stored() {
     assert!(off.control_sent.is_empty());
 }
 
+#[test]
+fn ticket_limit_continues_across_handover() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (mut client, mut server) = pair(prov::cipher_suite::TLS13_AES_128_GCM_SHA256, &chain);
+    transfer(&mut server, &mut client);
+    client.process_new_packets().unwrap();
+    assert_eq!(client.tls13_tickets_received(), 2);
+
+    let (_, mut conn) = client.dangerous_into_kernel_connection().unwrap();
+    let (head, tail) = split_ticket(0);
+    for _ in 0..9 {
+        conn.handle_record(ContentType::Handshake, &head).unwrap();
+        conn.handle_record(ContentType::Handshake, &tail).unwrap();
+    }
+    assert_eq!(conn.tls13_tickets_received(), 8);
+    assert!(!conn.has_output());
+    // The cap does not turn malformed later messages into accepted input.
+    assert!(
+        conn.handle_record(ContentType::Handshake, &[4, 0, 0, 0])
+            .is_err()
+    );
+}
+
 /// The client and server of `pair` before their handshake.
 fn unfinished_pair(
     suite: SupportedCipherSuite,

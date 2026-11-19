@@ -523,6 +523,46 @@ fn ticket_request_bounds_the_tickets_sent() {
 }
 
 #[test]
+fn client_ticket_limit_bounds_acceptance() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    for limit in [0, 3, 8, 255] {
+        let mut client_config = client_with(&chain, &[&version::TLS13]);
+        client_config.max_tls13_tickets_per_connection = limit;
+        let mut server_config = server_config(&chain);
+        server_config.send_tls13_tickets = limit + 2;
+        let (mut client, mut server) = connect(client_config, server_config);
+        assert_eq!(tickets_received(&mut client, &mut server), limit as u32);
+        assert!(!client.is_handshaking());
+    }
+}
+
+#[test]
+fn client_ticket_limit_validates_and_clamps_the_request() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut config = client_with(&chain, &[&version::TLS13]);
+    config.max_tls13_tickets_per_connection = 256;
+    assert!(matches!(
+        ClientConnection::new(Arc::new(config), server_name()),
+        Err(Error::BadTls13TicketLimit)
+    ));
+
+    for (limit, expected) in [(0, 0), (3, 3), (255, 200)] {
+        let mut config = client_with(&chain, &[&version::TLS13]);
+        config.max_tls13_tickets_per_connection = limit;
+        config.tls13_ticket_request = Some(TicketRequest {
+            new_session_count: 200,
+            resumption_count: 6,
+        });
+        let mut client = ClientConnection::new(Arc::new(config), server_name()).unwrap();
+        let hello = Hello::parse(&flight(&mut client), true);
+        let body = &hello.ext(EXT_TICKET_REQUEST).unwrap().body;
+        assert_eq!(body, &[expected, 6.min(expected)]);
+    }
+}
+
+#[test]
 fn ticket_request_resumption_count_applies_to_resumed_sessions() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);

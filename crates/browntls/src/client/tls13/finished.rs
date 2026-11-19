@@ -352,6 +352,9 @@ impl ExpectTraffic {
         {
             return Ok(());
         }
+        if cx.data.tls13_tickets_received >= self.config.max_tls13_tickets_per_connection as u32 {
+            return Ok(());
+        }
 
         let secret = self
             .key_schedule

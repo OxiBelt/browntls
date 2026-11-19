@@ -603,6 +603,12 @@ RFC 9257 guidance and what browntls enforces:
   `send_tls13_tickets`, and announces that number as `expected_count` in
   EncryptedExtensions. The extension in a ServerHello or HelloRetryRequest
   is `illegal_parameter` (TLS 1.3) or `unsupported_extension` (TLS 1.2).
+  A client's requested counts are clamped to
+  `max_tls13_tickets_per_connection` (default 8, valid 0–255). The client
+  accepts the first that many valid tickets across the entire connection,
+  including after kernel handoff, and ignores further valid tickets without
+  deriving or storing them. Zero disables ticket storage. Invalid ticket
+  messages still fail through the ordinary protocol checks.
 - GREASE (RFC 8701, `msgs::grease`), client only, opt-in
   (`ClientConfig::enable_grease`, default off until the GnuTLS end-to-end
   scenarios have run with it): random per-connection GREASE values first in

@@ -112,6 +112,27 @@ fn biased_byte_is_caught() {
 }
 
 #[test]
+fn a_rare_count_of_an_ideal_generator_passes() {
+    // Seen on CI from a P-384 key share: 4096 samples of 96 free bytes, one
+    // value 46 times at one position (16 expected). An ideal generator
+    // makes such a count in about 1 of 60,000 analyses, far above `ALPHA`.
+    const SAMPLES: usize = 4096;
+    let stream = Stream::new("rare count", 96);
+    let mut raw = vec![0u8; SAMPLES * 96];
+    let mut rng = SplitMix(0x0123_4567_89ab_cdef);
+    for (i, out) in raw.chunks_mut(96).enumerate() {
+        rng.fill(out);
+        if i < 46 {
+            out[49] = 0xd7;
+        } else if out[49] == 0xd7 {
+            out[49] = 0xd6;
+        }
+    }
+    let report = analyze(&Samples::from_raw(stream, raw));
+    assert!(report.passed(), "{report:#?}");
+}
+
+#[test]
 fn low_entropy_seed_is_caught() {
     // A 20-bit seed expanded by a good PRNG: every window is uniform, but
     // samples repeat.

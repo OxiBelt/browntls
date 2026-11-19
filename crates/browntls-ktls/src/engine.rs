@@ -6,11 +6,12 @@
 //!
 //! Every call that reaches the socket may return `WouldBlock` on a
 //! non-blocking one. [`Engine::read`] does so only when the kernel has no
-//! record to give (it tolerates a full socket for what it has to send);
-//! [`Engine::write`], [`Engine::sendfile`], [`Engine::flush`] and
-//! [`Engine::flush_outputs`] only when the socket has no room.
+//! record to give, or when the outputs waiting for room cost more than
+//! their budget ([`Engine::reading_paused`]); short of that it tolerates a
+//! full socket for what it has to send. [`Engine::write`],
+//! [`Engine::sendfile`], [`Engine::flush`] and [`Engine::flush_outputs`]
+//! return it only when the socket has no room.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -22,6 +23,7 @@ use browntls::{
 
 use crate::crypto_info::CryptoInfo;
 use crate::ledger::{Backlog, Ledger};
+use crate::outputs::Waiting;
 use crate::sys;
 
 /// The most plaintext in one record (RFC 9846 §5.1), which the kernel puts
@@ -61,8 +63,8 @@ pub(crate) struct Engine<Data> {
     /// Where the later parts of a control record are received.
     scratch: Vec<u8>,
     /// Outputs waiting behind a record the socket had no room for, in
-    /// order; carried out first next time.
-    backlog: VecDeque<KernelOutput>,
+    /// order; carried out first next time. Never new receive keys.
+    waiting: Waiting,
     /// The connection failed; every later call reports this.
     failed: Option<(io::ErrorKind, Error)>,
     /// What the kernel was given to send, to be set against what TCP has
@@ -91,7 +93,7 @@ impl<Data: SideData> Engine<Data> {
             pending_pos: 0,
             control: None,
             scratch: Vec::new(),
-            backlog: VecDeque::new(),
+            waiting: Waiting::default(),
             failed: None,
             ledger: None,
             rx_no_pad: false,
@@ -126,13 +128,28 @@ impl<Data: SideData> Engine<Data> {
         sys::set_crypto_info(fd, true, rx.as_bytes())
     }
 
+    /// How many outputs wait for room (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting_len(&self) -> usize {
+        self.waiting.len()
+    }
+
     pub(crate) fn conn(&self) -> &KernelConnection<Data> {
         &self.conn
     }
 
     /// Whether outputs (control records, keys) wait to be carried out.
     pub(crate) fn has_outputs(&self) -> bool {
-        !self.backlog.is_empty() || self.conn.has_output()
+        !self.waiting.is_empty() || self.conn.has_output()
+    }
+
+    /// Whether reading has stopped until the socket takes the outputs that
+    /// wait: they cost more than [`crate::outputs::BUDGET`]. A peer that
+    /// asks for answers (KeyUpdates, post-handshake authentication) and
+    /// reads none of them cannot make them pile up without bound, as the
+    /// userspace connection's `wants_read` ensures.
+    pub(crate) fn reading_paused(&self) -> bool {
+        self.waiting.over_budget()
     }
 
     /// Whether [`Self::read`] returns without asking the kernel: plaintext
@@ -226,47 +243,33 @@ impl<Data: SideData> Engine<Data> {
     /// then new keys.
     ///
     /// When the socket has no room for a record (`WouldBlock`), the record
-    /// and every output after it wait in the backlog, except new receive
+    /// and every output after it wait, except new receive
     /// keys, which are installed at once: reception must not wait for
-    /// transmission, and the two directions' keys are independent.
+    /// transmission, and the two directions' keys are independent. Each
+    /// call tries only the first waiting output before taking the new ones.
     pub(crate) fn flush_outputs(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
-        while let Some(output) = self.conn.pop_output() {
-            self.backlog.push_back(output);
-        }
         let version = self.conn.protocol_version();
-        while let Some(output) = self.backlog.pop_front() {
-            let result = match &output {
-                KernelOutput::Record { typ, payload } => {
-                    let sent = sys::send_record(fd, u8::from(*typ), payload);
-                    if let (Ok(()), Some(ledger)) = (&sent, &mut self.ledger) {
-                        ledger.sent(payload.len());
-                    }
-                    sent
+        // What waits goes first, in order.
+        while let Some(output) = self.waiting.front() {
+            match carry_out(fd, version, &mut self.ledger, output) {
+                Ok(()) => {
+                    self.waiting.pop_front();
                 }
-                KernelOutput::TxKeys(secrets) => {
-                    // The kernel counts the records of new keys from zero:
-                    // what the old keys made is read before they go.
-                    let made = self.ledger.as_ref().map(|ledger| ledger.records_made(fd));
-                    let installed = install_keys(fd, version, false, secrets);
-                    if installed.is_ok() {
-                        match (&mut self.ledger, made) {
-                            (Some(ledger), Some(Ok(made))) => ledger.rekeyed(made),
-                            _ => self.ledger = None,
-                        }
-                    }
-                    installed
-                }
-                KernelOutput::RxKeys(secrets) => install_keys(fd, version, true, secrets),
-                other => Err(io::Error::other(format!("unknown kernel output {other:?}"))),
-            };
-            match result {
-                Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    self.backlog.push_front(output);
-                    return match self.install_waiting_rx_keys(fd, version) {
-                        Ok(()) => Err(err),
-                        Err(err) => Err(self.output_failed(err)),
-                    };
+                    return Err(self.blocked(fd, version, err));
+                }
+                Err(err) => return Err(self.output_failed(err)),
+            }
+        }
+        while let Some(output) = self.conn.pop_output() {
+            match carry_out(fd, version, &mut self.ledger, &output) {
+                Ok(()) => {}
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        && !matches!(output, KernelOutput::RxKeys(_)) =>
+                {
+                    self.waiting.push_back(output);
+                    return Err(self.blocked(fd, version, err));
                 }
                 Err(err) => return Err(self.output_failed(err)),
             }
@@ -274,24 +277,27 @@ impl<Data: SideData> Engine<Data> {
         Ok(())
     }
 
-    /// Installs the receive keys waiting in the backlog, keeping the rest
-    /// in order.
-    fn install_waiting_rx_keys(
+    /// The socket had no room (`err`, `WouldBlock`): the connection's
+    /// outputs not yet taken join those that wait, in order, except new
+    /// receive keys, which are installed now. Only the outputs new since
+    /// the last call are looked at.
+    fn blocked(
         &mut self,
         fd: BorrowedFd<'_>,
         version: ProtocolVersion,
-    ) -> io::Result<()> {
-        let mut rest = VecDeque::with_capacity(self.backlog.len());
-        while let Some(output) = self.backlog.pop_front() {
+        err: io::Error,
+    ) -> io::Error {
+        while let Some(output) = self.conn.pop_output() {
             match output {
                 KernelOutput::RxKeys(secrets) => {
-                    install_keys(fd, version, true, &secrets)?;
+                    if let Err(err) = install_keys(fd, version, true, &secrets) {
+                        return self.output_failed(err);
+                    }
                 }
-                other => rest.push_back(other),
+                other => self.waiting.push_back(other),
             }
         }
-        self.backlog = rest;
-        Ok(())
+        err
     }
 
     /// An output that did not happen leaves the kernel's state behind the
@@ -301,13 +307,13 @@ impl<Data: SideData> Engine<Data> {
         // step with the kernel: drop it. So is the count of what the
         // kernel was given (it may have taken part of a record).
         self.ledger = None;
-        self.backlog.clear();
+        self.waiting.clear();
         while self.conn.pop_output().is_some() {}
         self.fail_with(err.kind(), Error::General(format!("kernel TLS: {err}")))
     }
 
     /// Carries out the outputs, tolerating a full socket: what waits is
-    /// sent by a later call.
+    /// sent by a later call (and stops reading past its budget).
     fn flush_outputs_if_room(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
         match self.flush_outputs(fd) {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
@@ -376,6 +382,10 @@ impl<Data: SideData> Engine<Data> {
             // Keys to install come before the next record; answers owed are
             // sent when there is room (or by the next write or flush).
             self.flush_outputs_if_room(fd)?;
+            if self.reading_paused() {
+                // Nothing more is read until the socket takes what waits.
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
             let continuing = self.control.as_ref().map(|(typ, _)| *typ);
             let into: &mut [u8] = if continuing.is_some() {
                 self.scratch.resize(MAX_PAYLOAD + 256, 0);
@@ -582,6 +592,40 @@ impl<Data> fmt::Debug for Engine<Data> {
             .field("pending", &(self.pending.len() - self.pending_pos))
             .field("failed", &self.failed)
             .finish_non_exhaustive()
+    }
+}
+
+/// Carries out one output on the socket `fd`, keeping `ledger` (the count
+/// of what the kernel was given to send) in step.
+fn carry_out(
+    fd: BorrowedFd<'_>,
+    version: ProtocolVersion,
+    ledger: &mut Option<Ledger>,
+    output: &KernelOutput,
+) -> io::Result<()> {
+    match output {
+        KernelOutput::Record { typ, payload } => {
+            let sent = sys::send_record(fd, u8::from(*typ), payload);
+            if let (Ok(()), Some(ledger)) = (&sent, ledger.as_mut()) {
+                ledger.sent(payload.len());
+            }
+            sent
+        }
+        KernelOutput::TxKeys(secrets) => {
+            // The kernel counts the records of new keys from zero: what
+            // the old keys made is read before they go.
+            let made = ledger.as_ref().map(|ledger| ledger.records_made(fd));
+            let installed = install_keys(fd, version, false, secrets);
+            if installed.is_ok() {
+                match (ledger.as_mut(), made) {
+                    (Some(ledger), Some(Ok(made))) => ledger.rekeyed(made),
+                    _ => *ledger = None,
+                }
+            }
+            installed
+        }
+        KernelOutput::RxKeys(secrets) => install_keys(fd, version, true, secrets),
+        other => Err(io::Error::other(format!("unknown kernel output {other:?}"))),
     }
 }
 

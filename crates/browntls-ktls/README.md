@@ -32,6 +32,15 @@ so call it, and let it finish, before dropping a stream that has written;
 with a `KtlsStream` on a non-blocking socket, wait for `unsent()` to be zero
 before closing. Blocking sockets without a send timeout are not affected.
 
+A read answers what the peer's records call for (KeyUpdates,
+post-handshake authentication, alerts). Answers that a full non-blocking
+socket has no room for wait in the stream; once they take more than
+64 KiB, reads take in nothing more until the socket has taken enough of
+them, so a peer that keeps asking and reads no answers cannot make them
+pile up. A `KtlsStream` read then returns `WouldBlock` although the socket
+stays readable: wait for it to be writable before reading again. An
+`AsyncKtlsStream` read waits for that itself.
+
 ## Zero copy
 
 `sendfile` on either stream sends part of a regular file as application

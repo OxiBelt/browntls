@@ -11,9 +11,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-#[path = "../tests/common/mod.rs"]
-mod common;
-
 use std::net::{Shutdown, TcpStream};
 use std::os::fd::AsFd;
 use std::sync::{Arc, mpsc};
@@ -22,8 +19,8 @@ use std::thread;
 use browntls::{ClientConnection, ServerConnection, StreamOwned, SupportedCipherSuite};
 
 use crate::KtlsStream;
+use crate::common::{Pki, kernel_tls, localhost, offloadable_suites, pattern, tcp_pair, temp_file};
 use crate::sys::test_signals::{sigpipe_pending, sigpipes_delivered};
-use common::{Pki, kernel_tls, localhost, offloadable_suites, pattern, tcp_pair, temp_file};
 
 /// One TLS 1.3 and one TLS 1.2 suite, as far as the provider has them.
 fn suites() -> Vec<SupportedCipherSuite> {

@@ -1082,11 +1082,19 @@ records with `sendmsg` and `TLS_SET_RECORD_TYPE`, new keys with `TLS_TX` or
 the payload limit whole or, on a full non-blocking socket, not at all
 (`EAGAIN`); the stream then keeps it and the outputs after it in a backlog
 that is carried out before anything else is sent, so no application data or
-transmit key change overtakes it. New receive keys in the backlog are
-installed at once, so reading never waits for room to send: `read` sends what
-it can and goes on, a `write` that sent bytes reports them even if the
-outputs it triggered must wait, and `flush` sends what is left (including a
-fatal alert after a failure). The descriptor's flags are
+transmit key change overtakes it. New receive keys never wait there: they
+are installed at once, and each blocked attempt looks only at the outputs
+new since the last one, so the backlog is never scanned whole. Reading does
+not wait for room to send while the backlog is small: `read` sends what it
+can and goes on, a `write` that sent bytes reports them even if the outputs
+it triggered must wait, and `flush` sends what is left (including a fatal
+alert after a failure). Once the backlog costs more than 64 KiB (each
+output its in-memory size plus a record's payload, the userspace cap on
+unwritten control records), `read` takes in no more records and reports
+`WouldBlock` until the socket takes it (`AsyncKtlsStream` waits for room),
+so a peer that keeps asking for answers it does not read cannot make the
+backlog grow without bound. The check falls before each record is read, so
+the backlog may pass the bound by what one record calls for. The descriptor's flags are
 never changed. Writes are one plain `send` each, which closes its last record,
 so `n` bytes make at most `n.div_ceil(max)` records (unless the kernel closes
 records early under memory pressure); that bound is reported with
@@ -1112,7 +1120,8 @@ What follows the handover lives in one `Engine` (`src/engine.rs`): the
 `KernelConnection`, the plaintext from before the handover, a control record
 in transit and the backlog. It owns no socket; every call takes the
 descriptor, and reports `WouldBlock` only for what it documents (a read when
-the kernel has no record, a write or flush when the socket has no room).
+the kernel has no record or the backlog is over its bound, a write or flush
+when the socket has no room).
 `KtlsStream` is that engine with a socket.
 
 The engine also keeps a ledger (`src/ledger.rs`) of what the kernel was given

@@ -59,6 +59,8 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod ledger;
 #[cfg(target_os = "linux")]
+mod outputs;
+#[cfg(target_os = "linux")]
 mod quiet_close;
 #[cfg(all(
     test,
@@ -81,3 +83,10 @@ mod tokio_stream;
 #[cfg(all(target_os = "linux", feature = "tokio"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use tokio_stream::{AsyncKtlsStream, StreamHandoffError};
+
+#[cfg(all(test, target_os = "linux"))]
+mod backpressure_tests;
+// The integration tests' helpers, loaded once for the tests in the crate.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/common/mod.rs"]
+mod common;

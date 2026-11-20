@@ -636,7 +636,8 @@ impl ServerCertVerifier for SchemeRecordingServerVerifier {
 #[derive(Debug)]
 pub struct SchemeRecordingClientVerifier {
     pub inner: Arc<dyn ClientCertVerifier>,
-    pub offer: Vec<SignatureScheme>,
+    offer: Vec<SignatureScheme>,
+    first_offer: Mutex<Option<Vec<SignatureScheme>>>,
     pub seen: Mutex<Vec<SignatureScheme>>,
 }
 
@@ -645,8 +646,14 @@ impl SchemeRecordingClientVerifier {
         Arc::new(Self {
             inner,
             offer: offer.to_vec(),
+            first_offer: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Overrides the list only for the next inquiry.
+    pub fn set_first_offer(&self, offer: Vec<SignatureScheme>) {
+        *self.first_offer.lock().unwrap() = Some(offer);
     }
 
     /// The schemes of the signatures checked so far.
@@ -695,7 +702,11 @@ impl ClientCertVerifier for SchemeRecordingClientVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.offer.clone()
+        self.first_offer
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.offer.clone())
     }
 
     fn requires_raw_public_keys(&self) -> bool {

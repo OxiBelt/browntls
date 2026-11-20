@@ -162,3 +162,55 @@ fn transparency_info_only_when_offered_and_for_x509() {
     let rpk = Some(CertificateType::RawPublicKey);
     assert!(!certificate_body(&key, &offered, None, rpk).has_transparency_info());
 }
+
+#[cfg(feature = "native")]
+#[test]
+fn greased_request_encodes_only_the_eligible_delegated_schemes() {
+    let provider = Arc::new(crate::crypto::native::default_provider());
+    let ca = rcgen::generate_simple_self_signed(vec!["client.example".into()]).unwrap();
+    let mut roots = crate::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ca.cert.der().to_vec()))
+        .unwrap();
+    let verifier = crate::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .unwrap();
+    let mut config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(Arc::new(crate::server::handy::NoServerCert));
+    config.enable_grease = true;
+    config.enable_delegated_credentials = true;
+
+    let (message, offer) = certificate_request_message(&config, vec![]).unwrap();
+    let MessagePayload::Handshake {
+        parsed: HandshakeMessagePayload(HandshakePayload::CertificateRequestTls13(request)),
+        ..
+    } = message.payload
+    else {
+        panic!("expected CertificateRequest");
+    };
+    let encoded = request.get_encoding();
+    let received = CertificateRequestPayloadTls13::read_bytes(&encoded).unwrap();
+    let schemes = received.extensions.signature_algorithms.unwrap();
+    assert!(crate::msgs::grease::is_grease_u16(schemes[0].into()));
+    assert_eq!(schemes[1..], offer.signature_schemes);
+    assert!(schemes.contains(&SignatureScheme::RSA_PSS_SHA256));
+    let eligible: Vec<_> = schemes[1..]
+        .iter()
+        .copied()
+        .filter(|scheme| {
+            !matches!(
+                scheme,
+                SignatureScheme::RSA_PSS_SHA256
+                    | SignatureScheme::RSA_PSS_SHA384
+                    | SignatureScheme::RSA_PSS_SHA512
+            )
+        })
+        .collect();
+    assert_eq!(received.extensions.delegated_credential, Some(eligible));
+}

@@ -2192,7 +2192,9 @@ be built with a struct literal; `CertifiedKey::new` remains.
   so a client whose certificate key cannot sign (kept offline) still
   authenticates when the server accepts credentials. The server verifies
   the chain as usual, validates the credential when CertificateVerify
-  arrives and checks that signature with the credential's key through
+  arrives using the real signature and delegated-credential schemes sent
+  in that specific CertificateRequest, and checks the signature with the
+  credential's key through
   `ClientCertVerifier::verify_tls13_signature_with_delegated_key` (the
   default implementation refuses; `WebPkiClientVerifier` implements it). It
   checks the credential's expiry again when the client's Finished arrives.

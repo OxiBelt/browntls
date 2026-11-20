@@ -127,3 +127,78 @@ fn server_rejects_invalid_credential_after_the_handshake() {
     );
     assert!(server.client_delegated_credential().is_none());
 }
+
+/// Capture the ordinary schemes that arrived in CertificateRequest and
+/// supply the delegated credential that answers it.
+#[derive(Debug)]
+struct RequestRecordingResolver {
+    key: Arc<CertifiedKey>,
+    received: std::sync::Mutex<Vec<SignatureScheme>>,
+}
+
+impl browntls_core::client::ResolvesClientCert for RequestRecordingResolver {
+    fn resolve(&self, _: &[&[u8]], schemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+        *self.received.lock().unwrap() = schemes.to_vec();
+        Some(self.key.clone())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn client_auth_verifies_with_the_schemes_sent_in_each_greased_request() {
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let chain = delegation_client_chain(KeyType::EcdsaP256);
+    let (dc, key) = issue_for(
+        Side::Client,
+        &chain,
+        SignatureScheme::ED25519,
+        shifted(3600),
+    );
+    let credential_key = with_client_credentials(&chain, vec![(dc.clone(), key)]);
+
+    for post_handshake in [false, true] {
+        let resolver = Arc::new(RequestRecordingResolver {
+            key: Arc::new(credential_key.clone()),
+            received: Default::default(),
+        });
+        let mut client_config = ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::new(&server_chain))
+            .with_client_cert_resolver(resolver.clone());
+        client_config.enable_post_handshake_auth = post_handshake;
+        let verifier = SchemeRecordingClientVerifier::new(
+            PinnedClientVerifier::new(&chain, !post_handshake),
+            &[SignatureScheme::ECDSA_NISTP384_SHA384],
+        );
+        verifier.set_first_offer(vec![
+            dc.algorithm,
+            SignatureScheme::ED25519,
+            SignatureScheme::Unknown(0x0a0a),
+        ]);
+        let mut server_config = dc_server(&server_chain, verifier.clone());
+        server_config.enable_grease = true;
+        server_config.request_client_auth_after_handshake = post_handshake;
+        let (mut client, mut server) = connect(client_config, server_config);
+        do_handshake(&mut client, &mut server).unwrap();
+        if post_handshake {
+            assert!(resolver.received.lock().unwrap().is_empty());
+            post_handshake_auth(&mut client, &mut server).unwrap();
+        }
+
+        let received = resolver.received.lock().unwrap();
+        assert_eq!(
+            received.len(),
+            3,
+            "one GREASE scheme followed by two real schemes"
+        );
+        assert!(grease_wire::is_grease(received[0].into()));
+        assert_eq!(received[1..], [dc.algorithm, SignatureScheme::ED25519]);
+        assert_eq!(server.client_delegated_credential(), Some(&dc));
+        assert_eq!(verifier.seen(), [dc.algorithm, SignatureScheme::ED25519]);
+    }
+}

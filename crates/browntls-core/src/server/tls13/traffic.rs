@@ -6,15 +6,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::client_auth::{
-    check_client_certificate, check_client_certificate_verify, check_client_credential_unexpired,
-    client_auth_sigschemes,
+    ClientAuthOffer, check_client_certificate, check_client_certificate_verify,
+    check_client_credential_unexpired,
 };
 use super::flight::certificate_request_message;
 use super::ticket::emit_ticket;
 use crate::common_state::{CommonState, Side};
 use crate::conn::State;
 use crate::ct::constant_time_eq;
-use crate::enums::{AlertDescription, ContentType, HandshakeType, SignatureScheme};
+use crate::enums::{AlertDescription, ContentType, HandshakeType};
 use crate::error::{Error, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
@@ -125,7 +125,7 @@ struct PendingClientAuth {
     /// The transcript through the client Finished, then this request and
     /// the answer so far.
     transcript: HandshakeHash,
-    offered_sigschemes: Vec<SignatureScheme>,
+    offer: ClientAuthOffer,
     stage: ClientAuthStage,
 }
 
@@ -177,7 +177,7 @@ impl PostHandshakeAuth {
             self.config.provider.secure_random,
             POST_HANDSHAKE_CONTEXT_RANDOM_LEN,
         )?);
-        let m = certificate_request_message(&self.config, context.clone())?;
+        let (m, offer) = certificate_request_message(&self.config, context.clone())?;
         let mut transcript = self.transcript.fork();
         transcript.add_message(&m);
         trace!("Sending post-handshake CertificateRequest {:?}", m);
@@ -189,7 +189,7 @@ impl PostHandshakeAuth {
         self.pending = Some(PendingClientAuth {
             context,
             transcript,
-            offered_sigschemes: client_auth_sigschemes(&self.config),
+            offer,
             stage: ClientAuthStage::Certificate,
         });
         Ok(())
@@ -239,7 +239,13 @@ impl PostHandshakeAuth {
         pending.stage = match (pending.stage, payload) {
             (ClientAuthStage::Certificate, HandshakePayload::CertificateTls13(certp)) => {
                 pending.transcript.add_message(m);
-                match check_client_certificate(cx.common, &self.config, certp, &pending.context)? {
+                match check_client_certificate(
+                    cx.common,
+                    &self.config,
+                    certp,
+                    &pending.context,
+                    &pending.offer,
+                )? {
                     Some(cert) => ClientAuthStage::CertificateVerify(cert),
                     None => ClientAuthStage::Finished(None),
                 }
@@ -254,7 +260,13 @@ impl PostHandshakeAuth {
                     compressed,
                 )?;
                 pending.transcript.add_message(m);
-                match check_client_certificate(cx.common, &self.config, &certp, &pending.context)? {
+                match check_client_certificate(
+                    cx.common,
+                    &self.config,
+                    &certp,
+                    &pending.context,
+                    &pending.offer,
+                )? {
                     Some(cert) => ClientAuthStage::CertificateVerify(cert),
                     None => ClientAuthStage::Finished(None),
                 }
@@ -268,7 +280,7 @@ impl PostHandshakeAuth {
                     &self.config,
                     &pending.transcript,
                     &cert,
-                    &pending.offered_sigschemes,
+                    &pending.offer,
                     sig,
                 )?;
                 pending.transcript.add_message(m);

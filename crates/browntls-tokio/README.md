@@ -178,7 +178,9 @@ timeouts of their own: the one around `accept` no longer covers them.
 offload (the configuration needs `enable_secret_extraction`): it finishes a
 0-RTT phase (a client's, or the handshake of a server stream returned
 before its end), writes and flushes every queued record, reads exactly up to the
-next record boundary, and sets the plaintext already received aside. The
+next record boundary (record by record until a client's answer is complete
+when a server asked for a client certificate after the handshake and checks
+it for revocation), and sets the plaintext already received aside. The
 `KernelHandoff` it resolves to gives the transport, the connection (for
 `dangerous_into_kernel_connection`, see `browntls_core::kernel`) and that
 plaintext, which is read before anything the kernel delivers.

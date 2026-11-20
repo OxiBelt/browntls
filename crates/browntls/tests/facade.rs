@@ -124,3 +124,47 @@ fn transparency_is_nameable() {
     let mut config = Pki::new().client_config();
     config.request_transparency_info = true;
 }
+
+/// `trusted_ca_keys` (RFC 6066 §6), named through `browntls` only: a TLS 1.2
+/// server whose resolver follows the client's list acknowledges it.
+#[cfg(feature = "tls12")]
+#[test]
+fn trusted_ca_keys_through_the_root() {
+    use browntls::server::{ResolvesServerCert, ResolvesServerCertUsingTrustedCaKeys};
+    use browntls::{ServerConfig, TrustedAuthority};
+
+    let pki = Pki::new();
+    let sha1 = browntls::crypto::native::sha1;
+    let mut resolver = ResolvesServerCertUsingTrustedCaKeys::new(Arc::new(
+        browntls::sign::SingleCertAndKey::from(pki.certified_key()),
+    ));
+    resolver
+        .add_for_root(pki.ca(), sha1, pki.certified_key())
+        .unwrap();
+    let resolver: Arc<dyn ResolvesServerCert> = Arc::new(resolver);
+    let server_config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&browntls::version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    let mut client_config = pki.client_config();
+    client_config.trusted_ca_keys = Some(vec![TrustedAuthority::x509_name(pki.ca()).unwrap()]);
+
+    let mut client = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+    while client.is_handshaking() || server.is_handshaking() {
+        let mut buf = Vec::new();
+        client.write_tls(&mut buf).unwrap();
+        server.read_tls(&mut &buf[..]).unwrap();
+        server.process_new_packets().unwrap();
+        buf.clear();
+        server.write_tls(&mut buf).unwrap();
+        client.read_tls(&mut &buf[..]).unwrap();
+        client.process_new_packets().unwrap();
+    }
+    assert!(client.trusted_ca_keys_acknowledged());
+    assert_eq!(
+        client.protocol_version(),
+        Some(browntls::ProtocolVersion::TLSv1_2)
+    );
+}

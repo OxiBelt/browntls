@@ -257,9 +257,10 @@ impl Dtls {
             return;
         };
         let current = self.write_epoch();
-        if current >= APPLICATION_EPOCH && self.out.abandoned {
-            // The KeyUpdate announcing these keys was not sent (the peer
-            // closed, or the connection failed): keep the current ones.
+        if current >= APPLICATION_EPOCH && (self.out.abandoned || self.out.closing) {
+            // The KeyUpdate announcing these keys was not sent (either
+            // side closed, or the connection failed): keep the current
+            // ones.
             return;
         }
         let epoch = match self.pending_write.as_ref() {
@@ -669,7 +670,7 @@ impl Dtls {
         let current = self.write_epoch();
         // Once flights are abandoned nothing gets acknowledged any more:
         // the peer may never have seen the KeyUpdate.
-        if self.out.abandoned || self.out.has_unacknowledged(current) {
+        if self.out.abandoned || self.out.closing || self.out.has_unacknowledged(current) {
             return;
         }
         if let Some(next) = self.pending_write.take() {

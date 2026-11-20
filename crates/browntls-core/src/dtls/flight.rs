@@ -17,9 +17,10 @@ use core::time::Duration;
 use super::state::{APPLICATION_EPOCH, Dtls, MAX_ACKS};
 use super::wire::{self, HandshakeHeader, RecordNumber};
 use crate::common_state::Side;
-use crate::enums::{AlertDescription, ContentType};
+use crate::enums::{AlertDescription, ContentType, HandshakeType};
 use crate::error::Error;
 use crate::log::trace;
+use crate::msgs::enums::AlertLevel;
 
 /// The first retransmission timeout (RFC 9147 §5.8.2).
 pub(super) const INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
@@ -73,9 +74,12 @@ pub(super) struct Outgoing {
     /// the main handshake we queue starts a new flight.
     flight_closed: bool,
     flight_started_this_input: bool,
-    /// After a fatal alert, or once the peer closed, no handshake message
-    /// is sent again.
+    /// After a fatal alert, or once either side closed, no handshake
+    /// message is sent again.
     pub(super) abandoned: bool,
+    /// We closed with our last flight unacknowledged: that flight alone is
+    /// still retransmitted, each time followed by close_notify again.
+    pub(super) closing: bool,
 }
 
 impl Outgoing {
@@ -91,6 +95,7 @@ impl Outgoing {
             flight_closed: true,
             flight_started_this_input: false,
             abandoned: false,
+            closing: false,
         }
     }
 
@@ -171,7 +176,7 @@ impl Dtls {
         let Some(body) = rest.get(wire::TLS_HANDSHAKE_HEADER_LEN - 1..) else {
             return;
         };
-        if out.abandoned {
+        if out.abandoned || out.closing {
             return;
         }
         let epoch = self.write.last().map_or(0, |w| w.epoch);
@@ -225,8 +230,13 @@ impl Dtls {
             self.write_ack(out, space(out))?;
         }
 
-        if self.write_fragments(out, start)? && self.out.deadline.is_none() && !self.is_hrr_only() {
+        let wrote = self.write_fragments(out, start)?;
+        if wrote && self.out.deadline.is_none() && !self.is_hrr_only() {
             self.out.deadline = Some(now + self.out.timeout);
+        }
+        let close = (AlertLevel::Warning, AlertDescription::CloseNotify);
+        if wrote && self.out.closing && !self.alerts.contains(&close) {
+            self.alerts.push_back(close);
         }
 
         // Alerts go last: the peer reads nothing after a close_notify
@@ -239,6 +249,10 @@ impl Dtls {
             if !fits && out.len() > start {
                 break;
             }
+            if description == AlertDescription::CloseNotify && wrote && self.out.has_pending() {
+                // The rest of what was queued before it comes first.
+                break;
+            }
             self.alerts.pop_front();
             self.seal_record(
                 out,
@@ -247,11 +261,31 @@ impl Dtls {
                 &[u8::from(level), u8::from(description)],
             )?;
             if description == AlertDescription::CloseNotify {
-                // Nothing we send from now on is read.
-                self.abandon_flights();
+                self.close_sent();
             }
         }
         Ok(out.len() > start)
+    }
+
+    /// Our close_notify is sent: the peer reads nothing after it (RFC 9846
+    /// §6.1), so nothing more is queued or retransmitted, except a
+    /// client's last flight, which the server needs to complete its
+    /// handshake: until acknowledged, it is retransmitted with
+    /// close_notify after it.
+    fn close_sent(&mut self) {
+        let finished = u8::from(HandshakeType::Finished);
+        let last_flight = self.side == Side::Client
+            && self
+                .out
+                .messages
+                .iter()
+                .any(|m| !m.post_handshake && m.typ == finished);
+        if last_flight {
+            self.out.messages.retain(|m| !m.post_handshake);
+            self.out.closing = true;
+        } else {
+            self.abandon_flights();
+        }
     }
 
     /// Writes an ACK of what is to be acknowledged, if it fits `space`.

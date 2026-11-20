@@ -825,3 +825,63 @@ fn a_key_update_sent_with_close_notify_is_read_first() {
     // The KeyUpdate came ahead of close_notify: the client acknowledges it.
     assert!(pair.client.write_datagram(&mut out, now).unwrap());
 }
+
+/// Every datagram `from` has to send now, delivered to `to`.
+fn flush_to<A: SideData, B: SideData>(
+    from: &mut dtls::ConnectionCommon<A>,
+    to: &mut dtls::ConnectionCommon<B>,
+    now: Duration,
+) {
+    let mut out = Vec::new();
+    while from.write_datagram(&mut out, now).unwrap() {
+        to.read_datagram(&mut out, now).unwrap();
+        out.clear();
+    }
+}
+
+#[test]
+fn a_client_closing_right_after_its_finished_still_finishes_the_handshake() {
+    let (mut pair, ..) = Pair::default_pair();
+    let now = Duration::from_secs(1000);
+    // ClientHello, HelloRetryRequest, ClientHello, the server's flight.
+    for _ in 0..2 {
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+    }
+    assert!(!pair.client.is_handshaking());
+    pair.client.send_close_notify();
+    // Finished and close_notify are lost.
+    let mut out = Vec::new();
+    while pair.client.write_datagram(&mut out, now).unwrap() {
+        out.clear();
+    }
+    let mut sim = Sim::perfect();
+    sim.now = now;
+    pair.run(&mut sim, |client, server| {
+        !server.handshaking() && client.timeout().is_none() && server.timeout().is_none()
+    })
+    .unwrap();
+    assert!(pair.server.peer_has_closed());
+}
+
+#[test]
+fn close_notify_waits_for_the_messages_queued_before_it() {
+    for mtu in 256..=320 {
+        let (mut pair, ..) = Pair::default_pair();
+        pair.client.set_mtu(mtu).unwrap();
+        pair.server.set_mtu(mtu).unwrap();
+        let now = Duration::from_secs(1000);
+        loop {
+            flush_to(&mut pair.client, &mut pair.server, now);
+            if !pair.server.is_handshaking() {
+                break;
+            }
+            flush_to(&mut pair.server, &mut pair.client, now);
+        }
+        // The server's tickets are queued, then it closes.
+        pair.server.send_close_notify();
+        flush_to(&mut pair.server, &mut pair.client, now);
+        assert!(pair.client.peer_has_closed());
+        assert_eq!(pair.client.tls13_tickets_received(), 2, "MTU {mtu}");
+    }
+}

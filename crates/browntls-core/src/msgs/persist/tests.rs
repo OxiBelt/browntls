@@ -1,4 +1,4 @@
-//! Tests of the stored session values.
+//! Tests for the session values in the parent module.
 
 use browntls_pki::CertificateDer;
 
@@ -54,7 +54,7 @@ fn server_value_delegated_credential_expiry_roundtrip() {
     assert_eq!(back.delegated_credential_expiry, Some(expiry));
 
     let mut invalid_tag = sample().get_encoding();
-    *invalid_tag.last_mut().unwrap() = 2;
+    *invalid_tag.last_mut().unwrap() = 4;
     assert!(ServerSessionValue::read_bytes(&invalid_tag).is_err());
 
     let mut legacy = sample().get_encoding();
@@ -64,6 +64,34 @@ fn server_value_delegated_credential_expiry_roundtrip() {
     let mut tls12 = sample();
     tls12.version = ProtocolVersion::TLSv1_2;
     tls12.set_delegated_credential_expiry(Some(expiry));
+    assert!(ServerSessionValue::read_bytes(&tls12.get_encoding()).is_err());
+}
+
+#[test]
+fn server_value_client_delegated_credential_expiry_roundtrip() {
+    let server = UnixTime::since_unix_epoch(core::time::Duration::from_secs(1_234));
+    let client = UnixTime::since_unix_epoch(core::time::Duration::from_secs(5_678));
+    for (server, client) in [(None, Some(client)), (Some(server), Some(client))] {
+        let mut v = sample();
+        v.set_delegated_credential_expiry(server);
+        v.client_delegated_credential_expiry = client;
+        let enc = v.get_encoding();
+        let back = ServerSessionValue::read_bytes(&enc).unwrap();
+        assert_eq!(back.delegated_credential_expiry, server);
+        assert_eq!(back.client_delegated_credential_expiry, client);
+        assert!(alloc::format!("{back:?}").contains("client_delegated_credential_expiry"));
+        // Every deadline the tag announces must follow.
+        assert!(ServerSessionValue::read_bytes(&enc[..enc.len() - 1]).is_err());
+    }
+
+    // A client credential authenticates a certificate chain, in TLS 1.3.
+    let mut no_chain = sample();
+    no_chain.client_cert_chain = None;
+    no_chain.client_delegated_credential_expiry = Some(client);
+    assert!(ServerSessionValue::read_bytes(&no_chain.get_encoding()).is_err());
+    let mut tls12 = sample();
+    tls12.version = ProtocolVersion::TLSv1_2;
+    tls12.client_delegated_credential_expiry = Some(client);
     assert!(ServerSessionValue::read_bytes(&tls12.get_encoding()).is_err());
 }
 

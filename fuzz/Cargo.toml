@@ -221,6 +221,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_binding"
+path = "fuzz_targets/tls_binding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tls_psk"
 path = "fuzz_targets/tls_psk.rs"
 test = false

@@ -145,6 +145,15 @@ pub fn seeds() -> Vec<Vec<u8>> {
         .op(Op::Check, &[]);
     seeds.push(seed.0);
 
+    // RFC 7924 cached_info: TLS 1.2 without resumption and with client
+    // authentication, so the second connection gets the server's
+    // Certificate and CertificateRequest as fingerprints.
+    let seed = Seed::new([0x02, 0x21, 0, 0, 0], &plain)
+        .conversation()
+        .reconnect(&plain)
+        .conversation();
+    seeds.push(seed.0);
+
     // Post-handshake authentication, with and without a certificate.
     for auth in [0x03u8, 0x02, 0x01] {
         let seed = Seed::new([0x01, auth, 0, 0, 0], &plain)

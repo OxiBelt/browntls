@@ -18,6 +18,7 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace, warning};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
+use crate::msgs::enums::ExtensionType;
 use crate::msgs::handshake::{
     CertificateRequestPayloadTls13, HandshakeMessagePayload, HandshakePayload, PresharedKeyBinder,
     ServerExtensions, ServerHelloPayload,
@@ -442,6 +443,13 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         // RFC 8449 §4: in TLS 1.3 the server's limit comes here. RFC 9149's
         // `expected_count` is a hint only and needs no action.
         hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
+        crate::external_binding::handshake::client_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            exts,
+            true,
+            cx.data.ech_status == EchStatus::Rejected,
+        )?;
 
         let psk_selected = self.resuming_session.is_some() || self.external_psk.is_some();
         // RFC 9846 §4.3.10: early_data here requires a PSK, and the first
@@ -548,6 +556,10 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 suite: self.suite,
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
+                offered_transparency_info: self
+                    .hello
+                    .sent_extensions
+                    .contains(&ExtensionType::TransparencyInfo),
                 offered_sigschemes: self.hello.offered_sigschemes,
             })),
         }
@@ -608,6 +620,21 @@ pub(super) fn delegated_credential_schemes(
         .into_iter()
         .filter(|scheme| delegated_credential::credential_scheme_allowed(*scheme))
         .collect()
+}
+
+/// The schemes of `certreq`'s `delegated_credential` extension and the
+/// current time, when a delegated credential may answer it (RFC 9345
+/// §4.1.2). Never with raw public keys (RFC 7250), which have no
+/// certificate to delegate from, nor without a clock.
+fn delegated_credential_request<'a>(
+    config: &ClientConfig,
+    certreq: &'a CertificateRequestPayloadTls13,
+) -> Option<(&'a [crate::enums::SignatureScheme], browntls_pki::UnixTime)> {
+    let dc_schemes = certreq.extensions.delegated_credential.as_deref()?;
+    if config.client_auth_cert_resolver.only_raw_public_keys() {
+        return None;
+    }
+    Some((dc_schemes, config.current_time().ok()?))
 }
 
 /// Sends the alert for a certificate chain that failed validation.

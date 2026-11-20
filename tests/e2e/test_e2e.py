@@ -149,16 +149,41 @@ class CommandTest(unittest.TestCase):
         sc = self.scenario("tls13-optional-extensions")
         client = e2e.browntls_args(sc, "client")
         server = e2e.browntls_args(sc, "server")
-        for flag in ("--grease", "--ticket-request", "--padding"):
+        for flag in ("--ticket-request", "--padding"):
             self.assertIn(flag, client)
             self.assertNotIn(flag, server)
         for args in (client, server):
             self.assertEqual(
                 args[args.index("--record-size-limit") + 1], str(e2e.OPTIONAL_RECORD_SIZE_LIMIT)
             )
+            # A browntls server sends GREASE too (RFC 8701 §4.1).
+            self.assertIn("--grease", args)
         plain = self.scenario("tls13-aes128gcm-x25519")
-        self.assertNotIn("--grease", e2e.browntls_args(plain, "client"))
+        for role in e2e.ROLES:
+            self.assertNotIn("--grease", e2e.browntls_args(plain, role))
         self.assertNotIn("--record-size-limit", e2e.browntls_args(plain, "server"))
+
+    def test_server_grease_meets_tls13_client_authentication(self):
+        sc = self.scenario("tls13-optional-extensions-client-auth")
+        self.assertEqual(sc.tls, "1.3")
+        self.assertTrue(sc.client_auth and sc.optional_extensions)
+        self.assertIn("server", sc.roles)
+        server = e2e.browntls_args(sc, "server")
+        self.assertIn("--grease", server)
+        self.assertIn("--client-ca", server)
+        client = e2e.browntls_args(sc, "client")
+        self.assertIn("--grease", client)
+        self.assertIn("--cert", client)
+        # Every peer client presents its certificate to the browntls server.
+        self.assertIn("-cert", e2e.peer_client_command(sc, "openssl")[2])
+        self.assertIn("--x509certfile", e2e.peer_client_command(sc, "gnutls")[2])
+        for suite in ("openssl", "openssl-3.0", "openssl-ubuntu-26.04", "gnutls"):
+            names = {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+            self.assertIn(sc.name, names, suite)
+            self.assertIn("server", sc.roles_for(e2e.SUITES[suite]), suite)
+        browntls = e2e.SUITES["browntls"]
+        self.assertIn(sc, e2e.scenarios_for(browntls))
+        self.assertNotIn(sc, e2e.scenarios_for(e2e.SUITES["go"]))
 
     def test_client_auth_arguments(self):
         sc = self.scenario("tls13-client-auth")

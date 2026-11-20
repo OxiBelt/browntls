@@ -4,9 +4,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use browntls_pki::{AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
+use browntls_pki::{
+    AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime,
+};
 
 use super::CryptoProvider;
+use crate::common_state::Side;
 use crate::delegated_credential::{DelegatedCredential, DelegatedCredentialKey};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::{Error, InconsistentKeys};
@@ -61,9 +64,16 @@ pub struct CertifiedKey {
     /// The end entity's encoded `SignedCertificateTimestampList`.
     sct_list: Option<Vec<u8>>,
 
+    /// The end entity's encoded `TransItemList` (RFC 9162 §6.3).
+    transparency_info: Option<Vec<u8>>,
+
     /// Delegated credentials for the end entity (RFC 9345); see
     /// [`Self::delegated_credentials`].
     delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
+
+    /// URLs naming the chain, for a TLS 1.2 client (RFC 6066 §5); see
+    /// [`Self::set_certificate_url`].
+    certificate_url: Option<crate::certificate_url::CertificateUrl>,
 }
 
 impl CertifiedKey {
@@ -89,7 +99,9 @@ impl CertifiedKey {
             ocsp: None,
             intermediate_ocsp: Vec::new(),
             sct_list: None,
+            transparency_info: None,
             delegated_credentials: Vec::new(),
+            certificate_url: None,
         }
     }
 
@@ -165,24 +177,128 @@ impl CertifiedKey {
         Ok(())
     }
 
-    /// Adds a delegated credential for the end entity, with its private
-    /// `key` (RFC 9345). See [`DelegatedCredentialKey::new`] for the checks.
+    /// The end entity's Certificate Transparency 2.0 items, as an encoded
+    /// `TransItemList` (RFC 9162 §6.3), if configured.
+    pub fn transparency_info(&self) -> Option<&[u8]> {
+        self.transparency_info.as_deref()
+    }
+
+    /// Sets, or with `None` removes, the end entity's Certificate
+    /// Transparency 2.0 items: an encoded `TransItemList` (RFC 9162 §6.3)
+    /// sent in the `transparency_info` extension (§6.5) to a client that
+    /// offers it, during a full handshake only (in the TLS 1.2 ServerHello,
+    /// or on the end entity's TLS 1.3 CertificateEntry).
+    ///
+    /// The list is sent as given. RFC 9162 §6.5 says a server SHOULD
+    /// leave out items the certificate or its stapled OCSP response
+    /// already carries; the application builds the list accordingly (see
+    /// [`TransItemList`](browntls_pki::transparency::TransItemList)).
+    ///
+    /// Fails unless the list parses and holds at least one SCT
+    /// (`x509_sct_v2` or `precert_sct_v2`, §6.4), or if it is longer than
+    /// an extension body (65535 octets). Items are not verified.
+    pub fn set_transparency_info(&mut self, list: Option<Vec<u8>>) -> Result<(), Error> {
+        if let Some(list) = &list {
+            let parsed = browntls_pki::transparency::TransItemList::parse(list)
+                .map_err(|_| Error::general("malformed TransItemList"))?;
+            if !parsed.has_sct() {
+                return Err(Error::general("TransItemList without an SCT"));
+            }
+            if list.len() > usize::from(u16::MAX) {
+                return Err(Error::general("TransItemList is too large"));
+            }
+        }
+        self.transparency_info = list;
+        Ok(())
+    }
+
+    /// Adds a server's delegated credential for the end entity (one issued
+    /// for [`Side::Server`]), with its private `key` (RFC 9345 §4.1.1). See
+    /// [`DelegatedCredentialKey::new_for`] for the checks.
     pub fn with_delegated_credential(
-        mut self,
+        self,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
     ) -> Result<Self, Error> {
-        let dc = DelegatedCredentialKey::new(self.end_entity_cert()?, credential, key)?;
+        self.with_delegated_credential_for(Side::Server, credential, key)
+    }
+
+    /// Adds a client's delegated credential for the end entity (one issued
+    /// for [`Side::Client`]), with its private `key` (RFC 9345 §4.1.2). See
+    /// [`DelegatedCredentialKey::new_for`] for the checks.
+    ///
+    /// A client tries its credentials before [`Self::key`], so `key` may be
+    /// one that cannot sign (kept offline). A
+    /// [`ResolvesClientCert`](crate::client::ResolvesClientCert) that only
+    /// returns certified keys whose `key` signs one of the offered schemes
+    /// never lets such a credential answer.
+    pub fn with_client_delegated_credential(
+        self,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        self.with_delegated_credential_for(Side::Client, credential, key)
+    }
+
+    fn with_delegated_credential_for(
+        mut self,
+        side: Side,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        let dc = DelegatedCredentialKey::new_for(side, self.end_entity_cert()?, credential, key)?;
         self.delegated_credentials.push(Arc::new(dc));
         Ok(self)
     }
 
     /// The delegated credentials added with
-    /// [`Self::with_delegated_credential`], most preferred first. A TLS 1.3
-    /// server sends the first one the client accepts and signs
-    /// CertificateVerify with its key; otherwise `key` signs.
+    /// [`Self::with_delegated_credential`] and
+    /// [`Self::with_client_delegated_credential`], most preferred first.
+    ///
+    /// In TLS 1.3, a server sends the first of its credentials (those for
+    /// [`Side::Server`]) that the client accepts, and a client the first
+    /// of its own (those for [`Side::Client`]) that the server's
+    /// CertificateRequest accepts; that credential's key then signs
+    /// CertificateVerify. Otherwise `key` signs.
     pub fn delegated_credentials(&self) -> &[Arc<DelegatedCredentialKey>] {
         &self.delegated_credentials
+    }
+
+    /// Sets, or with `None` removes, the URLs a TLS 1.2 client sends in
+    /// place of its chain (a CertificateURL message, RFC 6066 §5) when
+    /// [`ClientConfig::enable_client_certificate_url`] is set and the server
+    /// accepted them. [`Self::cert`] may then be empty: a key without a
+    /// chain authenticates only through its URLs, and sends an empty
+    /// Certificate (and no CertificateVerify) to any other server.
+    ///
+    /// The server fetches the URLs; they must name the DER objects whose
+    /// hashes they carry. Servers ignore this.
+    ///
+    /// [`ClientConfig::enable_client_certificate_url`]: crate::ClientConfig::enable_client_certificate_url
+    pub fn set_certificate_url(&mut self, urls: Option<crate::certificate_url::CertificateUrl>) {
+        self.certificate_url = urls;
+    }
+
+    /// The URLs set with [`Self::set_certificate_url`].
+    pub fn certificate_url(&self) -> Option<&crate::certificate_url::CertificateUrl> {
+        self.certificate_url.as_ref()
+    }
+
+    /// The first credential with which `side` can authenticate the end
+    /// entity at `now` to a peer that offered `dc_schemes` in its
+    /// `delegated_credential` extension and `sig_schemes` in
+    /// `signature_algorithms`.
+    pub(crate) fn choose_delegated_credential(
+        &self,
+        side: Side,
+        dc_schemes: &[SignatureScheme],
+        sig_schemes: &[SignatureScheme],
+        now: UnixTime,
+    ) -> Option<&Arc<DelegatedCredentialKey>> {
+        let end_entity = self.cert.first()?;
+        self.delegated_credentials
+            .iter()
+            .find(|dc| dc.usable(side, end_entity, dc_schemes, sig_schemes, now))
     }
 
     /// Checks that the key's public half matches the end-entity certificate.

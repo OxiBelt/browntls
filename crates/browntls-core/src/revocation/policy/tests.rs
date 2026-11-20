@@ -132,6 +132,7 @@ fn a_verified_sct_enables_crlite_and_rotation_applies_to_the_next_check() {
             &[CertificateEvidence {
                 ocsp: None,
                 scts: Some(sct),
+                transparency_info: None,
             }],
             now,
         )

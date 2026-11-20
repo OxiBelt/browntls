@@ -104,6 +104,44 @@ fn client_hello_with_later_rfc_extensions() {
 }
 
 #[test]
+fn client_hello_with_rfc6066_legacy_extensions() {
+    use super::super::TrustedAuthority;
+
+    let mut ch = sample_client_hello();
+    // The codec does not care which the handshake would send.
+    ch.extensions.preshared_key = None;
+    ch.extensions.client_certificate_url = Some(());
+    ch.extensions.trusted_ca_keys = Some(alloc::vec![
+        TrustedAuthority::PreAgreed,
+        TrustedAuthority::CertSha1Hash([7; 20]),
+    ]);
+    ch.extensions.truncated_hmac = Some(());
+    let enc = ch.get_encoding();
+    let back = ClientHelloPayload::read_bytes(&enc).unwrap();
+    assert_eq!(back, ch);
+    assert!(back.extensions.unknown.is_empty());
+    let offered = back.extensions.present_types();
+    for typ in [
+        ExtensionType::ClientCertificateUrl,
+        ExtensionType::TrustedCAKeys,
+        ExtensionType::TruncatedHMAC,
+    ] {
+        assert!(offered.contains(&typ), "{typ:?}");
+    }
+    // client_certificate_url (2) and truncated_hmac (4) are empty;
+    // trusted_ca_keys (3) holds the list with its length prefix.
+    let mut wire = alloc::vec![0, 2, 0, 0, 0, 3, 0, 24, 0, 22, 0, 3];
+    wire.extend([7; 20]);
+    wire.extend([0, 4, 0, 0]);
+    assert!(enc.windows(wire.len()).any(|w| w == wire));
+
+    // An empty list is distinct from an absent extension.
+    ch.extensions.trusted_ca_keys = Some(Vec::new());
+    let back = ClientHelloPayload::read_bytes(&ch.get_encoding()).unwrap();
+    assert_eq!(back.extensions.trusted_ca_keys, Some(Vec::new()));
+}
+
+#[test]
 fn psk_must_be_last() {
     let mut ch = sample_client_hello();
     // Encode manually with PSK first by swapping extension order:

@@ -75,7 +75,19 @@ where
         mut self,
         fetcher: Arc<crate::revocation::RevocationFetcher>,
     ) -> Self {
-        self.revocation = RevocationSource::new(fetcher);
+        self.revocation.set_fetcher(fetcher);
+        self
+    }
+
+    /// Fetches, with `fetcher`, the client certificates a TLS 1.2 client
+    /// names by URL (RFC 6066 §5); see
+    /// [`TlsAcceptor::client_certificate_url_fetcher`](super::TlsAcceptor::client_certificate_url_fetcher).
+    /// `fetcher` must authorize every destination the client names.
+    pub fn client_certificate_url_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::certificate_url::FetchClientCertificateUrl>,
+    ) -> Self {
+        self.revocation.set_certificate_url_fetcher(fetcher);
         self
     }
 
@@ -215,7 +227,19 @@ where
         mut self,
         fetcher: Arc<crate::revocation::RevocationFetcher>,
     ) -> Self {
-        self.revocation = RevocationSource::new(fetcher);
+        self.revocation.set_fetcher(fetcher);
+        self
+    }
+
+    /// Fetches, with `fetcher`, the client certificates a TLS 1.2 client
+    /// names by URL (RFC 6066 §5); see
+    /// [`TlsAcceptor::client_certificate_url_fetcher`](super::TlsAcceptor::client_certificate_url_fetcher).
+    /// `fetcher` must authorize every destination the client names.
+    pub fn client_certificate_url_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::certificate_url::FetchClientCertificateUrl>,
+    ) -> Self {
+        self.revocation.set_certificate_url_fetcher(fetcher);
         self
     }
 

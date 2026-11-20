@@ -349,11 +349,12 @@ impl Connection<'_> {
         }
         // Entry extensions must answer extensions of the request; ours
         // carry none that a certificate entry may answer.
-        if payload
-            .entries
-            .iter()
-            .any(|e| e.status.is_some() || e.sct_list.is_some() || e.delegated_credential.is_some())
-        {
+        if payload.entries.iter().any(|e| {
+            e.status.is_some()
+                || e.sct_list.is_some()
+                || e.transparency_info.is_some()
+                || e.delegated_credential.is_some()
+        }) {
             return Err(PeerMisbehaved::UnsolicitedCertExtension.into());
         }
 

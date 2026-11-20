@@ -312,25 +312,20 @@ fn traffic_key_iv(
     )
 }
 
-/// browntls clients never present delegated credentials and servers never
-/// ask for them, so a client Certificate entry carrying one is an
-/// unsolicited extension (`unsupported_extension`). The client's flight is
-/// replaced with a hand-made Certificate encrypted under the client
-/// handshake traffic key.
-#[test]
-fn server_rejects_a_client_credential() {
-    init_logging();
-    let server_chain = server_chain(KeyType::EcdsaP256);
-    let client_chain = delegation_server_chain(KeyType::EcdsaP256);
+/// Hands the server of `server_config` (serving `server_chain`) a client
+/// Certificate made of `entries`, each a certificate and the delegated
+/// credential on its entry, instead of the client's own flight: the
+/// server's flight is dropped and the Certificate is encrypted under the
+/// client handshake traffic key. Returns the server's error and the
+/// plaintext of the alert it then sends.
+fn hand_made_client_certificate(
+    server_chain: &Chain,
+    mut server_config: ServerConfig,
+    entries: &[(&[u8], Option<&DelegatedCredential>)],
+) -> (Error, Vec<u8>) {
     let log = Arc::new(SecretLog::default());
-    let mut server_config = ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&browntls_core::version::TLS13])
-        .unwrap()
-        .with_client_cert_verifier(PinnedClientVerifier::new(&client_chain, true))
-        .with_single_cert(server_chain.cert_chain(), server_chain.private_key())
-        .unwrap();
     server_config.key_log = log.clone();
-    let (mut client, mut server) = connect(client_config(&server_chain), server_config);
+    let (mut client, mut server) = connect(client_config(server_chain), server_config);
     transfer(&mut client, &mut server);
     server.process_new_packets().unwrap();
     // The server's flight is dropped: the client never answers it.
@@ -338,30 +333,25 @@ fn server_rejects_a_client_credential() {
         server.write_tls(&mut std::io::sink()).unwrap();
     }
 
-    let (_, spki) = dc_key(&rcgen::PKCS_ED25519);
-    let dc = DelegatedCredential {
-        credential: Credential {
-            valid_time: 3600,
-            dc_cert_verify_algorithm: SignatureScheme::ED25519,
-            public_key: spki,
-        },
-        algorithm: SignatureScheme::ECDSA_NISTP256_SHA256,
-        signature: vec![1; 64],
-    }
-    .to_bytes();
     let u24 = |len: usize| u32::try_from(len).unwrap().to_be_bytes()[1..].to_vec();
     let u16 = |len: usize| u16::try_from(len).unwrap().to_be_bytes().to_vec();
-    let cert = client_chain.end_entity.as_ref();
-    let mut extension = vec![0x00, 0x22];
-    extension.extend(u16(dc.len()));
-    extension.extend(&dc);
-    let mut entry = u24(cert.len());
-    entry.extend(cert);
-    entry.extend(u16(extension.len()));
-    entry.extend(&extension);
+    let mut list = Vec::new();
+    for (cert, dc) in entries {
+        let mut extensions = Vec::new();
+        if let Some(dc) = dc {
+            let dc = dc.to_bytes();
+            extensions.extend([0x00, 0x22]);
+            extensions.extend(u16(dc.len()));
+            extensions.extend(&dc);
+        }
+        list.extend(u24(cert.len()));
+        list.extend(*cert);
+        list.extend(u16(extensions.len()));
+        list.extend(&extensions);
+    }
     let mut body = vec![0]; // empty certificate_request_context
-    body.extend(u24(entry.len()));
-    body.extend(&entry);
+    body.extend(u24(list.len()));
+    body.extend(&list);
     let mut message = vec![11]; // Certificate
     message.extend(u24(body.len()));
     message.extend(&body);
@@ -393,12 +383,7 @@ fn server_rejects_a_client_credential() {
         .encode();
 
     server.read_tls(&mut &record[..]).unwrap();
-    assert_eq!(
-        server.process_new_packets(),
-        Err(Error::PeerMisbehaved(
-            PeerMisbehaved::UnsolicitedCertExtension
-        ))
-    );
+    let error = server.process_new_packets().unwrap_err();
 
     // After its Finished the server writes with its first application
     // traffic key, from sequence number 0.
@@ -419,8 +404,42 @@ fn server_rejects_a_client_credential() {
         )
         .unwrap();
     assert_eq!(plain.typ, browntls_core::ContentType::Alert);
-    assert_eq!(
-        plain.payload,
-        [2, u8::from(AlertDescription::UnsupportedExtension)]
+    (error, plain.payload.to_vec())
+}
+
+/// A server that did not ask for client delegated credentials
+/// (`ServerConfig::enable_delegated_credentials` is off) answers a client
+/// Certificate entry carrying one with `unexpected_message` (RFC 9345
+/// §4.1.2).
+#[test]
+fn server_rejects_a_client_credential() {
+    init_logging();
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = delegation_server_chain(KeyType::EcdsaP256);
+    let server_config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&browntls_core::version::TLS13])
+        .unwrap()
+        .with_client_cert_verifier(PinnedClientVerifier::new(&client_chain, true))
+        .with_single_cert(server_chain.cert_chain(), server_chain.private_key())
+        .unwrap();
+    let (_, spki) = dc_key(&rcgen::PKCS_ED25519);
+    let dc = DelegatedCredential {
+        credential: Credential {
+            valid_time: 3600,
+            dc_cert_verify_algorithm: SignatureScheme::ED25519,
+            public_key: spki,
+        },
+        algorithm: SignatureScheme::ECDSA_NISTP256_SHA256,
+        signature: vec![1; 64],
+    };
+    let (error, alert) = hand_made_client_certificate(
+        &server_chain,
+        server_config,
+        &[(client_chain.end_entity.as_ref(), Some(&dc))],
     );
+    assert_eq!(
+        error,
+        Error::PeerMisbehaved(PeerMisbehaved::UnsolicitedDelegatedCredential)
+    );
+    assert_eq!(alert, [2, u8::from(AlertDescription::UnexpectedMessage)]);
 }

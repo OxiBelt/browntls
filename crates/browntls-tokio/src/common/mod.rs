@@ -19,6 +19,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use browntls_core::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+mod certificate_url;
 mod coalesce;
 pub(crate) mod coop;
 mod handshake;
@@ -300,7 +301,8 @@ where
         }
     }
 
-    /// Answers the certificate status queries the connection waits on
+    /// Answers the client certificate URL query (RFC 6066 §5), then the
+    /// certificate status queries the connection waits on
     /// (one after another, when a chain needs several): `Ready(Ok(()))`
     /// once it waits on none, `Pending` while an answer is fetched, the
     /// fetch then waking `cx`.
@@ -313,6 +315,7 @@ where
         cx: &mut Context<'_>,
         revocation: &mut PeerRevocation,
     ) -> Poll<io::Result<()>> {
+        ready!(self.poll_client_certificate_url(cx, &mut revocation.certificate_url))?;
         while let Some(query) = self.session.pending_revocation() {
             let id = query.id();
             let response = ready!(revocation.poll_response(cx, query));

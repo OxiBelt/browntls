@@ -331,9 +331,11 @@ class Scenario:
     connections: int = 1
     # "default", "peer-disabled" (refused) or "peer-disabled-allowed"
     etm: str = "default"
-    # browntls turns on the optional extensions: GREASE (RFC 8701),
-    # ticket_request (RFC 9149) and padding (RFC 7685) as a client, and a
-    # small record_size_limit (RFC 8449) on either side.
+    # browntls turns on the optional extensions: ticket_request (RFC 9149)
+    # and padding (RFC 7685) as a client, and GREASE (RFC 8701) and a small
+    # record_size_limit (RFC 8449) on either side. A browntls server sends
+    # GREASE in its TLS 1.3 NewSessionTicket and CertificateRequest
+    # messages; the latter needs `client_auth`.
     optional_extensions: bool = False
     roles: tuple[str, ...] = ROLES
     requires: frozenset[str] = frozenset()
@@ -486,6 +488,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         "TLS13_AES_128_GCM_SHA256",
         "X25519",
         "ecdsa-p256",
+        optional_extensions=True,
+    ),
+    # A browntls server's GREASE CertificateRequest (RFC 8701 §4.1): the
+    # client ignores its unknown values and sends its certificate.
+    _tls13(
+        "tls13-optional-extensions-client-auth",
+        "TLS13_AES_256_GCM_SHA384",
+        "X25519",
+        "ecdsa-p256",
+        client_auth=True,
         optional_extensions=True,
     ),
     _tls13(
@@ -677,9 +689,9 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
     if sc.etm == "peer-disabled-allowed":
         args.append("--allow-mac-then-encrypt")
     if sc.optional_extensions:
-        args += ["--record-size-limit", str(OPTIONAL_RECORD_SIZE_LIMIT)]
+        args += ["--record-size-limit", str(OPTIONAL_RECORD_SIZE_LIMIT), "--grease"]
         if role == "client":
-            args += ["--grease", "--ticket-request", "1,1", "--padding", "1024"]
+            args += ["--ticket-request", "1,1", "--padding", "1024"]
     if sc.async_io:
         args.append("--async")
     return args

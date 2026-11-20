@@ -7,6 +7,7 @@ use crate::error::{CertRevocationListError, CertificateError, Error};
 mod anchors;
 mod client_verifier;
 mod server_verifier;
+mod transparency;
 mod verify;
 
 pub use anchors::RootCertStore;
@@ -26,6 +27,17 @@ pub enum VerifierBuilderError {
     NoRootAnchors,
     /// A CRL could not be parsed.
     InvalidCrl(CertRevocationListError),
+    /// A Certificate Transparency 2.0 log or trusted tree head of
+    /// [`CtV2Requirements`](crate::transparency::CtV2Requirements) is
+    /// invalid: a malformed log ID, or a key that is not a P-256 or
+    /// Ed25519 `SubjectPublicKeyInfo`.
+    InvalidTransparencyLog(browntls_pki::transparency::TransparencyError),
+    /// Two Certificate Transparency 2.0 logs of
+    /// [`CtV2Requirements`](crate::transparency::CtV2Requirements) share a
+    /// log ID or a key. A version 2 SCT's signature does not cover its log
+    /// ID (RFC 9162 §4.8), so one SCT could be presented under the ID of
+    /// each log with its key and be counted for several distinct logs.
+    DuplicateTransparencyLog,
 }
 
 impl From<CertRevocationListError> for VerifierBuilderError {
@@ -39,6 +51,12 @@ impl fmt::Display for VerifierBuilderError {
         match self {
             Self::NoRootAnchors => f.write_str("no root trust anchors were provided"),
             Self::InvalidCrl(e) => write!(f, "provided CRL could not be parsed: {e:?}"),
+            Self::InvalidTransparencyLog(e) => {
+                write!(f, "invalid Certificate Transparency 2.0 log: {e}")
+            }
+            Self::DuplicateTransparencyLog => {
+                f.write_str("two Certificate Transparency 2.0 logs share an ID or a key")
+            }
         }
     }
 }

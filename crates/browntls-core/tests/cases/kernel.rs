@@ -772,6 +772,64 @@ fn post_handshake_auth_through_the_kernel() {
     );
 }
 
+/// RFC 8701 §4.1: with GREASE on, the CertificateRequest an offloaded
+/// server hands to the kernel carries the GREASE values, and the client
+/// answers it as usual.
+#[test]
+fn post_handshake_certificate_request_through_the_kernel_carries_grease() {
+    use browntls_core::server::PostHandshakeAuthStatus;
+    init_logging();
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let client_chain = client_chain(KeyType::Ed25519);
+    for grease in [true, false] {
+        let mut client = ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::new(&server_chain))
+            .with_client_auth_cert(client_chain.cert_chain(), client_chain.private_key())
+            .unwrap();
+        client.enable_post_handshake_auth = true;
+        let mut server = ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(PinnedClientVerifier::new(&client_chain, true))
+            .with_single_cert(server_chain.cert_chain(), server_chain.private_key())
+            .unwrap();
+        server.request_client_auth_after_handshake = true;
+        server.enable_secret_extraction = true;
+        server.enable_grease = grease;
+        let mut client = ClientConnection::new(Arc::new(client), server_name()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server)).unwrap();
+        do_handshake(&mut client, &mut server).unwrap();
+        transfer(&mut server, &mut client);
+        client.process_new_packets().unwrap();
+
+        let (secrets, conn) = server.dangerous_into_kernel_connection().unwrap();
+        let mut off = Offloaded::new(conn, secrets);
+        off.conn.request_client_auth().unwrap();
+        off.flush();
+        let (typ, request) = off.control_sent.last().unwrap();
+        assert_eq!(*typ, ContentType::Handshake);
+        let messages = grease_wire::handshake_messages(request);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, 13, "a CertificateRequest");
+        if grease {
+            grease_wire::assert_greased_certificate_request(&messages[0].1);
+        } else {
+            grease_wire::assert_plain_certificate_request(&messages[0].1);
+        }
+
+        let _ = kernel_to_peer(&mut off, &mut client);
+        assert_eq!(client.post_handshake_auth_responses(), 1);
+        peer_to_kernel(&mut client, &mut off).unwrap();
+        assert_eq!(
+            off.conn.post_handshake_auth_status(),
+            Some(PostHandshakeAuthStatus::Authenticated)
+        );
+    }
+}
+
 #[test]
 fn the_bytes_to_the_next_record_boundary_are_reported() {
     use std::io::Write;

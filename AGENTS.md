@@ -1,19 +1,20 @@
 # Agent guidance
 
 browntls is an independent Rust TLS library project with intended kernel
-integration. Its architecture is described in [Architecture](docs/Architecture.md)
-and its status in [Roadmap](docs/Roadmap.md). browntls does not depend on rustls
-at run time (rustls is only an interoperability test oracle). Linux kernel TLS
-offload exists (`browntls_core::kernel`, `browntls-ktls`); no other kernel mechanism
-has been designed yet.
+integration. Its architecture is described in
+[Architecture](docs/Architecture.md) and its status in
+[Roadmap](docs/Roadmap.md). browntls does not depend on rustls at run time
+(rustls is only an interoperability test oracle). Linux kernel TLS offload
+exists (`browntls_core::kernel`, `browntls-ktls`); no other kernel mechanism has
+been designed yet.
 
 ## Source of truth
 
 [CONTRIBUTING.md](CONTRIBUTING.md) governs contribution workflow, validation,
 security requirements, signed commits, and LLM assistance notices. Follow it
 when this orientation file diverges. See [maintenance](docs/Maintenance.md) for
-dependency and release prerequisites and [SECURITY.md](SECURITY.md) for reporting
-and disclosure.
+dependency and release prerequisites and [SECURITY.md](SECURITY.md) for
+reporting and disclosure.
 
 Current layout:
 
@@ -27,9 +28,9 @@ Current layout:
 - `crates/browntls-core/`: TLS protocol, provider mount point and providers.
 - `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls-core`
   (`TlsConnector`, `TlsAcceptor`).
-- `crates/browntls-ktls/`: Linux kernel TLS offload of `browntls-core` connections
-  (`KtlsStream`); its `src/sys.rs` is the only other place `unsafe` is
-  permitted (kernel TLS system calls).
+- `crates/browntls-ktls/`: Linux kernel TLS offload of `browntls-core`
+  connections (`KtlsStream`); its `src/sys.rs` is the only other place `unsafe`
+  is permitted (kernel TLS system calls).
 - `crates/browntls-e2e/`: command-line TLS peer for the Docker end-to-end tests
   (test tooling, not published).
 - `crates/browntls-entropy/`: statistical entropy checks of generated keys,

@@ -10,12 +10,13 @@ twice, or a seed truncated somewhere on the way to the key.
 Each test draws millions of values from one public generator of
 `browntls-crypto` or `browntls-core`, keeps only the bits that the specification
 leaves free (clamped and range-limited bits are masked out), and runs the
-checks below on every resulting stream. [`entropy.yml`](../../.github/workflows/entropy.yml)
-runs every topic as its own job on one x86-64 runner (`ubuntu-26.04`).
-`browntls-crypto` issues the `getrandom(2)` system call with separate inline
-assembly on each architecture; the aarch64 and riscv64 paths are checked only
-at smoke size, by `cargo test --workspace` in the native aarch64 and riscv64
-jobs of the [Rust workflow](../../.github/workflows/rust.yml).
+checks below on every resulting stream.
+[`entropy.yml`](../../.github/workflows/entropy.yml) runs every topic as its own
+job on one x86-64 runner (`ubuntu-26.04`). `browntls-crypto` issues the
+`getrandom(2)` system call with separate inline assembly on each architecture;
+the aarch64 and riscv64 paths are checked only at smoke size, by
+`cargo test --workspace` in the native aarch64 and riscv64 jobs of the
+[Rust workflow](../../.github/workflows/rust.yml).
 
 ## Checks and thresholds
 

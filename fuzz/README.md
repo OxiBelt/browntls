@@ -9,11 +9,11 @@ library crates (`browntls-crypto`, `browntls-pki`, `browntls-core` and
 not fuzzed, and the facade `browntls` has no function of its own.
 
 The project is not a member of the workspace. It has its own `Cargo.toml` and
-`Cargo.lock`, depends on `browntls-core` with the `fuzzing` feature (unstable entry
-points into otherwise private codecs, `browntls_core::fuzzing`; not a supported API)
-and on `rcgen` for certificates generated at start-up. It names the library
-crates directly, not through the facade `browntls`, which does not offer
-`fuzzing`. It enables both the
+`Cargo.lock`, depends on `browntls-core` with the `fuzzing` feature (unstable
+entry points into otherwise private codecs, `browntls_core::fuzzing`; not a
+supported API) and on `rcgen` for certificates generated at start-up. It names
+the library crates directly, not through the facade `browntls`, which does not
+offer `fuzzing`. It enables both the
 `native` and the `rustcrypto` providers, so the library has no implicit default
 provider; harnesses call `browntls_fuzz::init()` to install the native one.
 The crypto targets also depend on the RustCrypto crates that `browntls-crypto`
@@ -123,7 +123,8 @@ whatever a stream declares.
 `cargo +nightly fuzz run <target> artifacts/<target>/<file>` replays one. Treat
 a crash as a potential vulnerability: follow [SECURITY.md](../SECURITY.md), do
 not attach inputs to public issues, and keep evidence in the private
-repository named in [Maintenance](../docs/Maintenance.md#private-security-evidence).
+repository named in
+[Maintenance](../docs/Maintenance.md#private-security-evidence).
 
 ## Checks on the stable toolchain
 
@@ -142,12 +143,13 @@ cargo test --manifest-path fuzz/Cargo.toml --locked
 ## Public API coverage
 
 Together the targets must reach every `pub fn` of `browntls-core`,
-`browntls-crypto`, `browntls-pki` and `browntls-tokio`. `scripts/fuzz/api_coverage.py` checks
-it: it builds the library tests above with LLVM source-based coverage, runs
-them, and fails for any public function (outside test modules) whose body
-never ran. A function defined in a macro must run in every expansion.
-The facade `browntls` is not in the list: it defines no `pub fn`, and the
-functions it re-exports are counted in the crates that define them.
+`browntls-crypto`, `browntls-pki` and `browntls-tokio`.
+`scripts/fuzz/api_coverage.py` checks it: it builds the library tests above with
+LLVM source-based coverage, runs them, and fails for any public function
+(outside test modules) whose body never ran. A function defined in a macro must
+run in every expansion. The facade `browntls` is not in the list: it defines no
+`pub fn`, and the functions it re-exports are counted in the crates that define
+them.
 
 ```sh
 rustup component add llvm-tools

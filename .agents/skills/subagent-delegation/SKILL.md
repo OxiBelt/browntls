@@ -31,11 +31,11 @@ intended behavior is decided and file/API ownership can be separated.
 | Final integration | Reconcile independently changed surfaces, public contracts, tests, and unresolved findings when cross-cutting review adds confidence. |
 
 Before selecting any worker model, read the
-[model-routing reference](references/model-routing.md). It contains the permitted
-GPT and Claude models, availability checks, effort selection, and fallback rules.
-GPT and Claude workers may coexist in the same application; the host's actual
-tools determine which combinations it supports. Do not assume separate clients
-or preconfigured custom agents are necessary.
+[model-routing reference](references/model-routing.md). It contains the
+permitted GPT and Claude models, availability checks, effort selection, and
+fallback rules. GPT and Claude workers may coexist in the same application; the
+host's actual tools determine which combinations it supports. Do not assume
+separate clients or preconfigured custom agents are necessary.
 
 ## Assign and supervise
 
@@ -59,8 +59,9 @@ must report newly discovered overlap instead of editing another worker's scope.
 Keep useful independent work moving while workers run. Avoid repeatedly waiting
 for results or duplicating their assignments. The parent reviews actual diffs,
 integrates them, and owns commits, signing, and external writes. Workers must
-not commit, push, publish, or delegate recursively without explicit authorization.
-Close completed workers when the host supports lifecycle management.
+not commit, push, publish, or delegate recursively without explicit
+authorization. Close completed workers when the host supports lifecycle
+management.
 
 ## Evidence and escalation
 
@@ -95,10 +96,10 @@ persistence with an unsuitable worker.
 ## Independent review and security coverage
 
 Apply the mandatory review gate in
-[contribution policy](../../../CONTRIBUTING.md#independent-review) before landing
-substantive behavior or safety changes in its listed sensitive areas. A capable,
-named non-author person or separate agent must inspect the actual diff and
-materially affected code. The same model in a separate agent is allowed;
+[contribution policy](../../../CONTRIBUTING.md#independent-review) before
+landing substantive behavior or safety changes in its listed sensitive areas. A
+capable, named non-author person or separate agent must inspect the actual diff
+and materially affected code. The same model in a separate agent is allowed;
 provider diversity alone proves neither independence nor correctness. Give the
 reviewer the contract and evidence, not just the author's conclusions.
 
@@ -120,8 +121,9 @@ Use these prompts where relevant, without turning every task into a full audit:
 - Unsafe, FFI, kernel, and concurrency: confinement, safety invariants,
   ownership/lifetimes, synchronization, cancellation and cleanup, supported
   platforms, and applicable Miri/sanitizer/fuzz/syscall evidence with limits.
-  The only kernel mechanism is Linux kernel TLS offload (`browntls_core::kernel`,
-  `browntls-ktls`); do not invent others for this workflow.
+  The only kernel mechanism is Linux kernel TLS offload
+  (`browntls_core::kernel`, `browntls-ktls`); do not invent others for this
+  workflow.
 
 Start from a trustworthy review baseline: an immutable revision with relevant
 scope, configuration/platform, retained evidence, and explicit gaps. Check that
@@ -150,9 +152,10 @@ through agent guidance and report native Claude discovery unavailable until the
 local link is restored. Do not maintain a second copy. Client discovery does
 not establish worker-model availability.
 
-Adapted from [OxiBelt's delegation skill](https://github.com/OxiBelt/OxiBelt/blob/f0608e8249e837b41a392ffdd9974426b949eaee/.agents/skills/subagent-delegation/SKILL.md),
-revision `f0608e8249e837b41a392ffdd9974426b949eaee`.
-Copyright 2026 OxiBelt contributors. Modified for browntls: capability-based
-routing, shared GPT/Claude use, permitted models, mandatory sensitive-change
-review, and TLS/PKI/backend-specific evidence. Licensed under
+Adapted from [OxiBelt's delegation
+skill](https://github.com/OxiBelt/OxiBelt/blob/f0608e8249e837b41a392ffdd9974426b949eaee/.agents/skills/subagent-delegation/SKILL.md),
+revision `f0608e8249e837b41a392ffdd9974426b949eaee`. Copyright 2026 OxiBelt
+contributors. Modified for browntls: capability-based routing, shared GPT/Claude
+use, permitted models, mandatory sensitive-change review, and
+TLS/PKI/backend-specific evidence. Licensed under
 [Apache-2.0](../../../LICENSE).

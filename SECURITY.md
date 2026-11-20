@@ -6,8 +6,8 @@ browntls is an independent Rust TLS library project with intended kernel
 integration. It is in initial development: the TLS implementation, primitives
 and PKI code are unreleased, unaudited and carry no production-readiness claim.
 Public APIs may change. Kernel integration so far is Linux kernel TLS offload
-(`browntls_core::kernel`, `browntls-ktls`); other kernel mechanisms remain undecided. No cryptographic
-certification is claimed.
+(`browntls_core::kernel`, `browntls-ktls`); other kernel mechanisms remain
+undecided. No cryptographic certification is claimed.
 
 `main` is the supported development branch for triage and fixes; it is not a
 stable release. No released versions or backport commitments currently exist.
@@ -16,16 +16,18 @@ Establish release support and end-of-support rules before the first publication.
 Reports affecting repository code, documentation, dependency choices, build and
 CI configuration, or official future artifacts are in scope when they establish
 a realistic unsafe outcome. A dependency issue matters when browntls's use is
-affected. There are no blanket finding-class exclusions or accepted-risk waivers.
+affected. There are no blanket finding-class exclusions or accepted-risk
+waivers.
 
 ## Threat boundaries and security requirements
 
 These are requirements for design and review, not claims that the controls
 are implemented or verified:
 
-- Treat peer-controlled protocol bytes, certificates, extensions, and negotiation
-  state as untrusted. Preserve authentication and protocol state; reject invalid
-  data safely and bound CPU, memory, buffering, and other attacker-driven work.
+- Treat peer-controlled protocol bytes, certificates, extensions, and
+  negotiation state as untrusted. Preserve authentication and protocol state;
+  reject invalid data safely and bound CPU, memory, buffering, and other
+  attacker-driven work.
 - Protect private keys, session secrets, randomness, and sensitive plaintext.
   Do not expose them through logs, errors, serialization, or test evidence.
 - Validate caller-controlled configuration and provider selection. Security
@@ -46,11 +48,12 @@ Development status is not a blanket reason to suppress meaningful findings.
 
 ## Private reporting
 
-Use [GitHub private vulnerability reporting](https://github.com/OxiBelt/browntls/security/advisories/new).
-Do not disclose an unpatched vulnerability in public issues, discussions, pull
+Use [GitHub private vulnerability
+reporting](https://github.com/OxiBelt/browntls/security/advisories/new). Do not
+disclose an unpatched vulnerability in public issues, discussions, pull
 requests, commits, or CI artifacts. If private reporting is unavailable, do not
-substitute a public channel containing vulnerability details; wait for maintainers
-to restore a private reporting route.
+substitute a public channel containing vulnerability details; wait for
+maintainers to restore a private reporting route.
 
 Include the affected immutable revision or release, relevant configuration and
 platform, attacker prerequisites, impact, and a minimal safe reproduction when
@@ -59,10 +62,10 @@ This policy does not authorize testing systems you do not own or operate.
 
 ## Response and disclosure
 
-Maintainers validate reports, assess affected boundaries and upstream dependencies,
-and coordinate remediation privately. There are no guaranteed response deadlines.
-Credit reporters with their consent. Coordinate cryptographic and provider issues
-with affected upstreams when appropriate.
+Maintainers validate reports, assess affected boundaries and upstream
+dependencies, and coordinate remediation privately. There are no guaranteed
+response deadlines. Credit reporters with their consent. Coordinate
+cryptographic and provider issues with affected upstreams when appropriate.
 
 Keep one repository security advisory per validated report-worthy finding. Keep
 reports in private triage or draft state until a supported fix or actionable
@@ -73,10 +76,10 @@ unless explicitly authorized. There is no fixed embargo period; maintainers
 coordinate timing based on remediation, upstream dependencies, and exposure.
 
 Store scan results and tracking evidence only in the private repository
-`OxiBelt/browntls-private-resources`, with source revisions, checksums, sanitized
-evidence, and coverage limitations. Follow the contribution signing and LLM
-assistance requirements. Do not put undisclosed details or private evidence links
-in public contribution messages.
+`OxiBelt/browntls-private-resources`, with source revisions, checksums,
+sanitized evidence, and coverage limitations. Follow the contribution signing
+and LLM assistance requirements. Do not put undisclosed details or private
+evidence links in public contribution messages.
 
 ## Current limitations
 

@@ -84,8 +84,9 @@ Where this document says where code lives it names the crate that defines it
 
 Every feature of the three crates behind the facade, except the `fuzzing`
 feature of `browntls-core` (see below), exists in it under the same name and
-turns that feature on in each of those crates that has it (the table under [Cargo features](#cargo-features-browntls-core) lists
-what the features of `browntls-core` do):
+turns that feature on in each of those crates that has it (the table under
+[Cargo features](#cargo-features-browntls-core) lists what the features of
+`browntls-core` do):
 
 - The facade takes the three crates without their default features, so its
   own feature set alone decides what is built: `default-features = false`
@@ -305,12 +306,13 @@ Revocation-enabled certificate authentication uses a full handshake each
 time. Revocation-aware post-handshake authentication exposes the new
 identity only after the response and Finished verify. Pending checks and
 outstanding revocation-aware authentication block kernel handoff. See
-[browntls-tokio](../crates/browntls-tokio/README.md) for application integration.
+[browntls-tokio](../crates/browntls-tokio/README.md) for application
+integration.
 
 ## Crypto provider mount point
 
-`browntls_core::crypto` defines the provider interface, modelled on rustls 0.23 so
-that existing provider designs map onto it:
+`browntls_core::crypto` defines the provider interface, modelled on rustls 0.23
+so that existing provider designs map onto it:
 
 - `CryptoProvider`: cipher suites, key-exchange groups, signature
   verification algorithms, secure random source and private-key loader. A
@@ -328,8 +330,9 @@ Extracted secrets (`ExtractedSecrets`) are in the form Linux kernel TLS takes.
 TLS 1.2 AES-GCM gives record `seq` the explicit nonce `seed + seq` (modulo
 2^64, the seed coming from the key block), and the extracted IV carries the
 explicit nonce of the next record: the kernel counts up from the value it is
-given, so it continues the library's sequence exactly. TLS 1.3 and ChaCha20-Poly1305 nonces are the IV XORed
-with the sequence number on both sides.
+given, so it continues the library's sequence exactly. TLS 1.3 and
+ChaCha20-Poly1305 nonces are the IV XORed with the sequence number on both
+sides.
 
 Providers shipped in the `browntls-core` crate:
 
@@ -340,9 +343,10 @@ Providers shipped in the `browntls-core` crate:
 
 A provider is plain data (static trait objects), so applications can build a
 mixed provider, for example native AEADs with RustCrypto signatures, or supply
-their own implementation of any trait; `crates/browntls-core/tests/native_mixed.rs`
-shows the pattern. When exactly one provider feature is enabled it becomes the
-implicit default; with both enabled, the application installs one explicitly.
+their own implementation of any trait;
+`crates/browntls-core/tests/native_mixed.rs` shows the pattern. When exactly one
+provider feature is enabled it becomes the implicit default; with both enabled,
+the application installs one explicitly.
 
 ### Algorithm tiers (native provider)
 
@@ -846,8 +850,9 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   falls between reads: the records one `read_tls` took in (at most one
   maximum-size record's worth) are processed in full, so the queue may pass
   the bound by what they call for (one KeyUpdate, or one post-handshake
-  authentication answer per CertificateRequest among them). Reading resumes once `write_tls` has taken the backlog;
-  `complete_io` writes before it reads, so it never meets the bound.
+  authentication answer per CertificateRequest among them). Reading resumes once
+  `write_tls` has taken the backlog; `complete_io` writes before it reads, so it
+  never meets the bound.
 - Unbuffered (`unbuffered.rs`, no `std` needed):
   `UnbufferedClientConnection`/`UnbufferedServerConnection`.
   `process_tls_records(&mut incoming)` parses records from the front of the
@@ -935,8 +940,8 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
 module (below); it depends only on Tokio's I/O traits (no runtime; the
 default `coop` feature adds Tokio's `rt` feature for the task budget, see
 below, and the optional `ocsp` feature adds Tokio's `time` for staple
-refresh). In the streams at the crate root, each poll pairs the connection with the
-transport for its duration (`common::Stream`) and drives `read_tls` and
+refresh). In the streams at the crate root, each poll pairs the connection with
+the transport for its duration (`common::Stream`) and drives `read_tls` and
 `write_tls` through adapters that turn the task context's `Pending` into
 `WouldBlock`, the design of tokio-rustls:
 
@@ -1051,13 +1056,13 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   the transport takes it at once.
 - With the `coop` feature the streams, the server's `EarlyDataReader`, the
   handshake futures and `LazyConfigAcceptor` take part in Tokio's
-  cooperative scheduling (`tokio::task::coop`, `common::coop`). Tokio's resources take a unit of the
-  task's budget per completed operation and return `Pending`, rescheduling
-  the task, once it is spent. A TLS stream completes operations the
-  transport never sees (reads of buffered plaintext, writes the connection
-  buffers) and may run over a transport that does not count, so it counts
-  itself: an operation starts only while budget is left and takes one unit
-  when it completes. The unit is taken after the operation, not held across
+  cooperative scheduling (`tokio::task::coop`, `common::coop`). Tokio's
+  resources take a unit of the task's budget per completed operation and return
+  `Pending`, rescheduling the task, once it is spent. A TLS stream completes
+  operations the transport never sees (reads of buffered plaintext, writes the
+  connection buffers) and may run over a transport that does not count, so it
+  counts itself: an operation starts only while budget is left and takes one
+  unit when it completes. The unit is taken after the operation, not held across
   it as Tokio's `RestoreOnPending` would be, because a restored unit also
   gives back what the transport took meanwhile. In addition, every read
   from the transport after the first in one poll takes a unit
@@ -1069,16 +1074,16 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   the caller's buffer; a client finishes an early-data handshake and then
   reads, and so does a server stream returned early; a server's early data
   reader drives the handshake step after step), so the stream's state
-  carries "this poll has read" from one pairing to the next (`StreamState::read_before`, cleared when a poll
-  begins). Writes need no such bound: one poll writes only what the caller
-  handed it and what was queued. A read wakes its own task and returns
-  `Pending` in two places, both after the control records the connection
-  owed filled their backlog, which stops it reading until they are
-  written, and the poll wrote them all: in `write_before_reading` (the
-  records were queued behind a writer's, and the read wrote everything),
-  and at the end of `Stream::poll_fill_buf` (the backlog was full when the
-  poll began, or the poll's own reads filled it, and the answer the read
-  writes in any case emptied it). In both no transport waker is
+  carries "this poll has read" from one pairing to the next
+  (`StreamState::read_before`, cleared when a poll begins). Writes need no such
+  bound: one poll writes only what the caller handed it and what was queued. A
+  read wakes its own task and returns `Pending` in two places, both after the
+  control records the connection owed filled their backlog, which stops it
+  reading until they are written, and the poll wrote them all: in
+  `write_before_reading` (the records were queued behind a writer's, and the
+  read wrote everything), and at the end of `Stream::poll_fill_buf` (the backlog
+  was full when the poll began, or the poll's own reads filled it, and the
+  answer the read writes in any case emptied it). In both no transport waker is
   registered, since the last read returned or none was made, and nothing
   is left to write; the next poll reads, so the wake does not repeat. The
   task returns to the scheduler and takes nothing from the budget.
@@ -1103,19 +1108,19 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `AsyncBufRead`, since the stream's buffer cannot be lent out between two
   polls while the other half uses the stream.
 - `into_kernel_handoff` (`browntls_tokio::kernel`) readies a client or
-  server stream for [kernel TLS offload](#kernel-tls-offload-browntls_corekernel)
-  without operating system support of its own. `into_inner` would drop what
-  only the stream holds (an unfinished 0-RTT phase with the early data to
-  send again, a read error kept for the next read), and the connection's
-  handover then fails on what is still in flight. The future instead clears
-  the connection's `kernel_handoff_blocker` step by step: it ends the 0-RTT
-  phase as any other operation would (so `EarlyDataNotResent` is reported
-  and the stream stays usable), completes a handshake still in progress,
-  writes and flushes the queued records, reads exactly
-  `bytes_to_record_boundary` bytes while a record is incomplete and
-  processes them (answering a KeyUpdate received on the way), and moves the
-  received plaintext, accepted 0-RTT data first, into a buffer of its own.
-  That 0-RTT data can be replayed and is never returned by reads of the
+  server stream for
+  [kernel TLS offload](#kernel-tls-offload-browntls_corekernel) without
+  operating system support of its own. `into_inner` would drop what only the
+  stream holds (an unfinished 0-RTT phase with the early data to send again, a
+  read error kept for the next read), and the connection's handover then fails
+  on what is still in flight. The future instead clears the connection's
+  `kernel_handoff_blocker` step by step: it ends the 0-RTT phase as any other
+  operation would (so `EarlyDataNotResent` is reported and the stream stays
+  usable), completes a handshake still in progress, writes and flushes the
+  queued records, reads exactly `bytes_to_record_boundary` bytes while a record
+  is incomplete and processes them (answering a KeyUpdate received on the way),
+  and moves the received plaintext, accepted 0-RTT data first, into a buffer of
+  its own. That 0-RTT data can be replayed and is never returned by reads of the
   stream, so `early_data_len` tells where it ends. Every round clears the
   blocker it met, moves bytes or returns, so it cannot spin; bytes after
   the peer's `close_notify`, a whole record or part of one, fail it at once
@@ -1197,8 +1202,9 @@ nothing per record and copy plaintext at most once:
   data.
 - A write encrypts at most 65 536 bytes and returns that count; the next
   write first waits for `Outgoing` to drain, so it holds the records of
-  one write at most, besides the bounded answers below and `close_notify`. A vectored write gathers small slices, up to 16 384 bytes, into
-  one record through a scratch buffer that is zeroed afterwards.
+  one write at most, besides the bounded answers below and `close_notify`. A
+  vectored write gathers small slices, up to 16 384 bytes, into one record
+  through a scratch buffer that is zeroed afterwards.
 - A read that encodes records for the peer (a KeyUpdate answer, a
   post-handshake authentication response, an alert) writes them at once
   with the joint waker described above, and the write side wakes a parked
@@ -1274,10 +1280,10 @@ alert or an encryption failure it refuses for good (`Closed`).
 `kernel_handoff_blocker` reports which without consuming the connection, so a
 driver can drain it first (`dangerous_into_kernel_connection` drops the
 connection when it fails);
-`dangerous_extract_secrets` refuses the same things in flight. Secret extraction must be
-enabled, QUIC connections and suites without a kernel form (TLS 1.2 AES-CBC,
-AES-128-CCM-8) are refused, and so is a configured `max_fragment_size` below
-the smallest payload limit Linux takes (64 bytes, 63 for TLS 1.3).
+`dangerous_extract_secrets` refuses the same things in flight. Secret extraction
+must be enabled, QUIC connections and suites without a kernel form (TLS 1.2
+AES-CBC, AES-128-CCM-8) are refused, and so is a configured `max_fragment_size`
+below the smallest payload limit Linux takes (64 bytes, 63 for TLS 1.3).
 `dangerous_extract_secrets` refuses disabled extraction and unsupported suites
 with its own errors and otherwise adds the in-flight checks, which take
 precedence when something is in flight and apply even after our
@@ -1299,10 +1305,10 @@ records or enforce the record size limit we announced on what it receives.
 
 Tests drive a `KernelConnection` against a userspace stand-in for the kernel
 that protects records with the extracted secrets as Linux does
-(`crates/browntls-core/tests/cases/kernel.rs`): data in both directions, KeyUpdate
-from either side, tickets after the handover, post-handshake authentication,
-closure, the blockers, the limits and malformed records, for every suite with a
-kernel form on both providers.
+(`crates/browntls-core/tests/cases/kernel.rs`): data in both directions,
+KeyUpdate from either side, tickets after the handover, post-handshake
+authentication, closure, the blockers, the limits and malformed records, for
+every suite with a kernel form on both providers.
 
 ### Linux kernel TLS (`browntls-ktls`)
 
@@ -1346,10 +1352,10 @@ unwritten control records), `read` takes in no more records and reports
 `WouldBlock` until the socket takes it (`AsyncKtlsStream` waits for room),
 so a peer that keeps asking for answers it does not read cannot make the
 backlog grow without bound. The check falls before each record is read, so
-the backlog may pass the bound by what one record calls for. The descriptor's flags are
-never changed. Writes are one plain `send` each, which closes its last record,
-so `n` bytes make at most `n.div_ceil(max)` records (unless the kernel closes
-records early under memory pressure); that bound is reported with
+the backlog may pass the bound by what one record calls for. The descriptor's
+flags are never changed. Writes are one plain `send` each, which closes its last
+record, so `n` bytes make at most `n.div_ceil(max)` records (unless the
+kernel closes records early under memory pressure); that bound is reported with
 `records_sent`, and a write takes at most 64 records so the confidentiality
 limit is met in steps (it can be passed by fewer than 64 records). Bytes sent
 on the socket directly (`splice`) must be reported with
@@ -1543,16 +1549,16 @@ cannot be read or do not fit, and with `TimedOut` when the same records have
 been held for five seconds although the socket had room and TCP had nothing
 in flight whose acknowledgement would make the kernel send. Only where there
 is no ledger (`Unsupported`) does the stream wait for room alone, as it did
-before the ledger existed: that narrows the window without closing it. A test of that earlier wait, which
-shut down straight after writing a megabyte into 4096-byte socket buffers,
-failed in one of six kernel CI jobs: the kernel end's read after its shutdown
-failed with `BrokenPipe`. The likely cause, from reading the kernel and not
-shown by the log, is the kernel's late send meeting the FIN (`EPIPE`, which
-the kernel then leaves on the socket as its error). The wait for room (ask
-the kernel, stay pending without room, be woken when room appears), the
-pauses and the five-second limit are tested without kernel TLS
-(`src/tokio_stream.rs`, `src/drain.rs`), as is TCP's count on plain TCP
-(`src/ledger.rs`). The other tests
+before the ledger existed: that narrows the window without closing it. A test of
+that earlier wait, which shut down straight after writing a megabyte
+into 4096-byte socket buffers, failed in one of six kernel CI jobs: the
+kernel end's read after its shutdown failed with `BrokenPipe`. The likely cause,
+from reading the kernel and not shown by the log, is the kernel's late send
+meeting the FIN (`EPIPE`, which the kernel then leaves on the socket as its
+error). The wait for room (ask the kernel, stay pending without room, be woken
+when room appears), the pauses and the five-second limit are tested without
+kernel TLS (`src/tokio_stream.rs`, `src/drain.rs`), as is TCP's count on plain
+TCP (`src/ledger.rs`). The other tests
 (`crates/browntls-ktls/tests/tokio_offload.rs`) run on the running kernel
 like those of `KtlsStream`: both ends offloaded for every
 suite with KeyUpdates, data in flight at the handover kept in order, an
@@ -1562,15 +1568,15 @@ wire by a relay), split halves across key updates, a client still in its
 0-RTT phase (with the server's count of accepted 0-RTT data), truncation, a
 megabyte written through small socket buffers and shut down at once, a
 shutdown that stays pending while the kernel holds records a peer does not
-read (and the count of them), a peer that closed TCP before the handover (the kernel
-attaches the upper layer protocol to an established connection only,
+read (and the count of them), a peer that closed TCP before the handover (the
+kernel attaches the upper layer protocol to an established connection only,
 `ENOTCONN`; the stream goes on in userspace), and refusals that return the
 stream.
 
 `src/sys.rs` is the crate's only `unsafe` code, an exception to the workspace's
 `unsafe_code = "deny"`: `setsockopt`, `getsockopt`, `poll` on one descriptor
-without waiting, `ioctl(SIOCOUTQ)`, `uname`, `sendfile` (whose only pointer is to the
-offset) with `fstat` and the calling thread's signal mask around it,
+without waiting, `ioctl(SIOCOUTQ)`, `uname`, `sendfile` (whose only pointer is
+to the offset) with `fstat` and the calling thread's signal mask around it,
 `sendmsg`/`recvmsg` with one control message, plain `send`, and
 `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` for the routing's write timing. Its
 invariants are listed at its top: borrowed descriptors,
@@ -1699,9 +1705,9 @@ a random 32-byte context.
   requests it made, authenticators it made, and spontaneous authenticators
   it validated. A full list makes further requests, authenticators or
   spontaneous validations fail; answers to its own requests are recorded
-  on the request, so a peer cannot use up the room they need. A request's `signature_algorithms` is required;
-  `certificate_authorities` may be set, `server_name`, `oid_filters` and
-  `status_request` are not supported.
+  on the request, so a peer cannot use up the room they need. A request's
+  `signature_algorithms` is required; `certificate_authorities` may be set,
+  `server_name`, `oid_filters` and `status_request` are not supported.
 - Errors are returned to the caller; no alert is sent and the connection
   continues, since the messages are outside the TLS record layer.
 - No other implementation the project tests against exposes exported
@@ -1825,16 +1831,16 @@ back-end server that terminates it.
 - `ech::svcb` reads the `ech` SvcParam (RFC 9848) from SVCB/HTTPS record
   data or its Base64 presentation form; the crate does no DNS lookups.
 
-Tests: shared and split mode in-process (`crates/browntls-core/tests/ech_native.rs`:
-acceptance with and without a HelloRetryRequest, input fed byte by byte, an
-inner ClientHello spanning records, resumption, rejection completed locally
-with retry configurations and the retry forwarded, GREASE and non-ECH
-connections kept local, every error path of the client-facing and back-end
-servers, trial decryption with random identifiers, a back-end server on the
-RustCrypto provider), the `tls_ech` fuzz target (split mode in fuzz-chosen
-pieces), and the Docker E2E matrix (`ech-*` scenarios: browntls in every
-role, and Go crypto/tls 1.27 as client and shared-mode server, also as the
-client of the browntls split-mode servers).
+Tests: shared and split mode in-process
+(`crates/browntls-core/tests/ech_native.rs`: acceptance with and without a
+HelloRetryRequest, input fed byte by byte, an inner ClientHello spanning
+records, resumption, rejection completed locally with retry configurations and
+the retry forwarded, GREASE and non-ECH connections kept local, every error path
+of the client-facing and back-end servers, trial decryption with random
+identifiers, a back-end server on the RustCrypto provider), the `tls_ech` fuzz
+target (split mode in fuzz-chosen pieces), and the Docker E2E matrix (`ech-*`
+scenarios: browntls in every role, and Go crypto/tls 1.27 as client and
+shared-mode server, also as the client of the browntls split-mode servers).
 
 Not implemented: ECH with DTLS or QUIC, and a client-facing server that
 inspects anything after the back-end server's ServerHello (by design: it
@@ -1842,8 +1848,8 @@ relays the encrypted handshake unmodified).
 
 ### QUIC-TLS (RFC 9001)
 
-`browntls_core::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a QUIC
-implementation feeds the contents of CRYPTO frames to `read_hs`, takes the
+`browntls_core::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a
+QUIC implementation feeds the contents of CRYPTO frames to `read_hs`, takes the
 bytes to send from `write_hs`, and receives the keys of each encryption level
 as a `KeyChange`. Packets, frames, transport parameters, loss recovery and
 the choice of packet number space stay with the QUIC implementation; browntls
@@ -1865,11 +1871,12 @@ supported.
   providers, AES-128-CCM on the native one; TLS_AES_128_CCM_8_SHA256 has none
   (§5.3) and is never offered. The RustCrypto provider computes the ChaCha20
   header protection block itself, since the `chacha20` crate refuses block
-  counter 0xffffffff, which a peer can choose. Keys come from "quic key", "quic iv" and
-  "quic hp" (§5.1); Initial keys from the client's Destination Connection ID
-  (§5.2). Header protection masks the packet number without branching on its
-  length (§9.5). Each packet key reports the §6.6 confidentiality and
-  integrity limits; counting packets is the QUIC implementation's job.
+  counter 0xffffffff, which a peer can choose. Keys come from "quic key", "quic
+  iv" and "quic hp" (§5.1); Initial keys from the client's Destination
+  Connection ID (§5.2). Header protection masks the packet number without
+  branching on its length (§9.5). Each packet key reports the §6.6
+  confidentiality and integrity limits; counting packets is the QUIC
+  implementation's job.
 - Key update: `Secrets::next_packet_keys` derives the next phase with
   "quic ku" (§6); a TLS KeyUpdate message is `unexpected_message`.
 - Other TLS extensions: `record_size_limit` is neither offered nor
@@ -2127,8 +2134,8 @@ per kind:
 `accelerated` and `accelerated_by(kind)` report, per family, the policy, the
 kinds the CPU offers, and the selected backend with the kinds it uses.
 Keyed objects (AES-GCM, ML-KEM and RSA private keys) keep the backend chosen
-when they were created or loaded. Hardware feature checks that guard `unsafe` code are
-independent of the policy.
+when they were created or loaded. Hardware feature checks that guard `unsafe`
+code are independent of the policy.
 
 ### Load-aware backend routing
 
@@ -2334,8 +2341,8 @@ The crypto crate does not see the socket, so the driver reports the costs
 (`kernel::sample`, `Sample::done`): for one write in sixteen of at least
 4096 bytes (every such write of a userspace connection while the kernel is
 probed, until four were timed), the bytes of application data the socket
-accepted and what that took. Both places are measured alike, from the plaintext to the bytes TCP
-has taken: for the kernel that is the `send` that encrypts
+accepted and what that took. Both places are measured alike, from the plaintext
+to the bytes TCP has taken: for the kernel that is the `send` that encrypts
 (`Engine::write`, so `KtlsStream` and `AsyncKtlsStream` however they were
 made), for userspace the encryption by a backend and the `send`
 (`UserspaceStream`, `AsyncUserspaceStream`). `browntls-ktls` measures
@@ -2439,8 +2446,9 @@ entropy from the optional `getrandom` crate feature.
   `browntls-tokio`; `libc` (Linux only) for `browntls-ktls`, plus
   `tokio` with `net` (adding `mio` and `socket2`) and `browntls-tokio` with
   its `tokio` feature; none of its own for `browntls`, whose dependencies
-  are the three crates it re-exports. Independent implementations (RustCrypto, rustls with
-  ring, tokio-rustls, rcgen) are dev-dependencies used as test oracles.
+  are the three crates it re-exports. Independent implementations (RustCrypto,
+  rustls with ring, tokio-rustls, rcgen) are dev-dependencies used as test
+  oracles.
 - `deny.toml` defines advisory, license, ban and source policy, enforced with
   a checksum-pinned cargo-deny in CI.
 

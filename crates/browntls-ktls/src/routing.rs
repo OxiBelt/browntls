@@ -2,10 +2,10 @@
 //! records, under the native provider's load-aware routing.
 //!
 //! The native provider can route cryptographic work between its backends
-//! by what they cost at the moment (`browntls_core::crypto::native::accel::load`).
-//! Its order of places for the records of a connection has kernel TLS in
-//! front (`accel::load::kernel`) once this module has found that the
-//! running kernel takes connections:
+//! by what they cost at the moment
+//! (`browntls_core::crypto::native::accel::load`). Its order of places for the
+//! records of a connection has kernel TLS in front (`accel::load::kernel`) once
+//! this module has found that the running kernel takes connections:
 //!
 //! 1. kernel TLS, after [`activate`];
 //! 2. the provider's backends in userspace, in their usual order (those

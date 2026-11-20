@@ -75,7 +75,8 @@ impl ClientAuthDetails {
             .collect();
 
         if let Some(certkey) = resolver.resolve(&acceptable_issuers, sigschemes) {
-            // RFC 5246 §7.4.4, RFC 8422 §5.5: ecdsa_sign covers ECDSA and EdDSA keys.
+            // RFC 5246 §7.4.4, RFC 8422 §5.5: ecdsa_sign covers ECDSA and EdDSA
+            // keys.
             let wanted = match certkey.key.algorithm() {
                 SignatureAlgorithm::RSA => Some(ClientCertificateType::RSASign),
                 SignatureAlgorithm::ECDSA

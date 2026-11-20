@@ -25,8 +25,8 @@
 //!
 //! The family's streams for load-aware routing ([`crate::accel::load`]) are
 //! the records of AES-GCM keys ([`crate::gcm`]), one stream per key size;
-//! such keys hold a key expanded for each alternate backend. The block cipher types here, CCM and CBC keep
-//! the backend they were created for.
+//! such keys hold a key expanded for each alternate backend. The block cipher
+//! types here, CCM and CBC keep the backend they were created for.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;

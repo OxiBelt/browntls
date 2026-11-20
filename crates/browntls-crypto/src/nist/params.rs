@@ -3,7 +3,8 @@
 //!
 //! Only the standard hexadecimal constants are written down; the Montgomery
 //! factors and inversion exponents are derived from them at compile time. The
-//! base-point tables live in `tables/` (generated, validated by `table::tests`).
+//! base-point tables live in `tables/` (generated, validated by
+//! `table::tests`).
 
 use super::curve::{Affine, Curve, Fe, fe_from_canonical};
 use super::mont;

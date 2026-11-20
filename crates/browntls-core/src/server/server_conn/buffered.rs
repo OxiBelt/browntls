@@ -13,7 +13,8 @@ use crate::error::Error;
 use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
 
-/// An [`std::io::Read`] for accepted early data; see [`ServerConnection::early_data`].
+/// An [`std::io::Read`] for accepted early data; see
+/// [`ServerConnection::early_data`].
 #[cfg(feature = "std")]
 pub struct ReadEarlyData<'a> {
     early_data: &'a mut EarlyDataState,
@@ -50,7 +51,8 @@ impl ServerConnection {
         })
     }
 
-    /// The server name the client indicated, once its ClientHello was processed.
+    /// The server name the client indicated, once its ClientHello was
+    /// processed.
     pub fn server_name(&self) -> Option<&str> {
         self.inner.core.data.sni.as_ref().map(|n| n.as_ref())
     }
@@ -82,13 +84,14 @@ impl ServerConnection {
 
     /// A reader for the client's 0-RTT ("early") data, if any was accepted.
     ///
-    /// Early data is enabled by a non-zero [`ServerConfig::max_early_data_size`]
-    /// with stateful (non-ticket) resumption, or under an external PSK
-    /// created with `ExternalPsk::with_early_data`. It is **replayable** by an
-    /// attacker: the application must only act on it when a replay is
-    /// harmless, and the library offers no anti-replay store. Returns `None`
-    /// until the ClientHello has been processed, or if early data was not
-    /// offered or not accepted.
+    /// Early data is enabled by a non-zero
+    /// [`ServerConfig::max_early_data_size`] with stateful (non-ticket)
+    /// resumption, or under an external PSK created with
+    /// `ExternalPsk::with_early_data`. It is **replayable** by an attacker: the
+    /// application must only act on it when a replay is harmless, and the
+    /// library offers no anti-replay store. Returns `None` until the
+    /// ClientHello has been processed, or if early data was not offered or not
+    /// accepted.
     pub fn early_data(&mut self) -> Option<ReadEarlyData<'_>> {
         let data = &mut self.inner.core.data;
         if data.early_data.was_accepted() {
@@ -129,13 +132,14 @@ impl ServerConnection {
     /// client authentication, no request still unanswered, and no
     /// `close_notify` sent or received (the client would never answer). The
     /// answer
-    /// arrives through [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
+    /// arrives through
+    /// [`Self::process_new_packets`](crate::ConnectionCommon::process_new_packets)
     /// and is checked with the configured verifier: follow it with
     /// [`Self::post_handshake_auth_status`]. A client may take its time and
-    /// send application data first; a certificate the verifier refuses, a
-    /// bad signature or Finished, a missing certificate when the verifier
-    /// makes it mandatory, or messages interleaved with the answer end the
-    /// connection with the corresponding alert.
+    /// send application data first; a certificate the verifier refuses, a bad
+    /// signature or Finished, a missing certificate when the verifier makes it
+    /// mandatory, or messages interleaved with the answer end the connection
+    /// with the corresponding alert.
     pub fn request_client_auth(&mut self) -> Result<(), Error> {
         self.inner.core.request_client_auth()
     }

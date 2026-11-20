@@ -16,8 +16,9 @@
 //! * riscv64: the Linux `riscv_hwprobe` system call (kernel 6.4+). On other
 //!   systems, or for emulators whose `riscv_hwprobe` does not report the vector
 //!   crypto extensions, a build may assert extensions with
-//!   `--cfg browntls_assume_riscv="<ext>"`; asserting an extension the CPU lacks
-//!   results in an illegal-instruction trap, never in silent miscomputation.
+//!   `--cfg browntls_assume_riscv="<ext>"`; asserting an extension the CPU
+//!   lacks results in an illegal-instruction trap, never in silent
+//!   miscomputation.
 //!
 //! Building with `--cfg browntls_force_soft` disables every SIMD and hardware
 //! backend so that only the portable implementations run.
@@ -151,8 +152,8 @@ impl Features {
     pub const NONE: Self = Self { bits: 0 };
 
     accessors! { "x86_64":
-        /// x86-64-v3 baseline: AVX, AVX2, BMI1, BMI2, FMA, MOVBE, LZCNT, F16C with
-        /// operating-system support for YMM state.
+        /// x86-64-v3 baseline: AVX, AVX2, BMI1, BMI2, FMA, MOVBE, LZCNT, F16C
+        /// with operating-system support for YMM state.
         x86_v3 => X86_V3,
         /// SSSE3.
         x86_ssse3 => X86_SSSE3,
@@ -189,7 +190,8 @@ impl Features {
     }
 
     accessors! { "aarch64":
-        /// Advanced SIMD (NEON); mandatory on aarch64 unless `browntls_force_soft`.
+        /// Advanced SIMD (NEON); mandatory on aarch64 unless
+        /// `browntls_force_soft`.
         arm_neon => ARM_NEON,
         /// FEAT_AES and FEAT_PMULL.
         arm_aes => ARM_AES,
@@ -240,7 +242,8 @@ impl Features {
 
     /// Returns a copy with every feature in `mask` removed.
     ///
-    /// Intended for tests that exercise a lower backend tier on capable hardware.
+    /// Intended for tests that exercise a lower backend tier on capable
+    /// hardware.
     #[must_use]
     pub fn without(self, mask: Self) -> Self {
         Self {

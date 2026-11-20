@@ -3,8 +3,9 @@
 //!
 //! An external PSK (EPSK) is a key both peers obtained outside TLS, with an
 //! identity that names it in the `pre_shared_key` extension. A client lists
-//! its keys in [`ClientConfig::external_psks`](crate::ClientConfig::external_psks);
-//! a server finds them through a [`ResolvesExternalPsk`] in
+//! its keys in
+//! [`ClientConfig::external_psks`](crate::ClientConfig::external_psks); a
+//! server finds them through a [`ResolvesExternalPsk`] in
 //! [`ServerConfig::external_psks`](crate::ServerConfig::external_psks).
 //!
 //! browntls always combines an external PSK with an (EC)DHE exchange

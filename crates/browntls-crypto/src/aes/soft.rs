@@ -60,7 +60,8 @@ impl Key {
             for (j, c) in comp.iter().enumerate() {
                 let x = [c & M1, (c & M2) >> 1, (c & M4) >> 2, (c & M8) >> 3];
                 for (k, xk) in x.iter().enumerate() {
-                    // Every nibble of `xk` is 0 or 1; 15 * nibble is 0x0 or 0xF.
+                    // Every nibble of `xk` is 0 or 1; 15 * nibble is 0x0
+                    // or 0xF.
                     skey[8 * i + 4 * j + k] = (xk << 4).wrapping_sub(*xk);
                 }
             }

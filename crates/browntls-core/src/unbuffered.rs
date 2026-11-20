@@ -1,7 +1,8 @@
 //! The unbuffered connection API: the caller owns every buffer.
 //!
 //! [`UnbufferedClientConnection`](crate::client::UnbufferedClientConnection)
-//! and [`UnbufferedServerConnection`](crate::server::UnbufferedServerConnection)
+//! and
+//! [`UnbufferedServerConnection`](crate::server::UnbufferedServerConnection)
 //! drive the same handshake state machines as the buffered connections, but
 //! never copy records into internal queues on the application-data path:
 //!
@@ -91,7 +92,8 @@ pub struct UnbufferedConnectionCommon<Data> {
 impl<Data: SideData> UnbufferedConnectionCommon<Data> {
     /// Supplies the result of the current OCSP query.
     ///
-    /// Call [`Self::process_tls_records`] again, even when no new bytes arrived.
+    /// Call [`Self::process_tls_records`] again, even when no new bytes
+    /// arrived.
     pub fn resolve_peer_revocation(
         &mut self,
         id: u64,

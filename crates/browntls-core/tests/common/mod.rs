@@ -279,7 +279,8 @@ impl PinnedServerVerifier {
         })
     }
 
-    /// Expects the server to present `chain`'s key as an RFC 7250 raw public key.
+    /// Expects the server to present `chain`'s key as an RFC 7250 raw public
+    /// key.
     pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
         Arc::new(Self {
             expected: CertificateDer::from(chain.end_entity_spki.clone()),
@@ -371,7 +372,8 @@ impl PinnedClientVerifier {
         })
     }
 
-    /// Expects the client to present `chain`'s key as an RFC 7250 raw public key.
+    /// Expects the client to present `chain`'s key as an RFC 7250 raw public
+    /// key.
     pub fn raw_public_key(chain: &Chain) -> Arc<Self> {
         Arc::new(Self {
             expected: CertificateDer::from(chain.end_entity_spki.clone()),
@@ -640,7 +642,8 @@ impl ClientCertVerifier for SchemeRecordingClientVerifier {
     }
 }
 
-/// A client configuration trusting `chain`'s end entity, all versions and suites.
+/// A client configuration trusting `chain`'s end entity, all versions and
+/// suites.
 pub fn client_config(chain: &Chain) -> ClientConfig {
     ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
@@ -693,7 +696,8 @@ pub fn transfer<A: SideData, B: SideData>(
     total
 }
 
-/// Drives both sides until neither is handshaking; fails on either side's error.
+/// Drives both sides until neither is handshaking; fails on either side's
+/// error.
 pub fn do_handshake(
     client: &mut ClientConnection,
     server: &mut ServerConnection,
@@ -714,7 +718,8 @@ pub fn do_handshake(
     Ok(())
 }
 
-/// Runs the handshake expecting an error on one side; returns `(client, server)` results.
+/// Runs the handshake expecting an error on one side; returns
+/// `(client, server)` results.
 pub fn do_handshake_until_error(
     client: &mut ClientConnection,
     server: &mut ServerConnection,

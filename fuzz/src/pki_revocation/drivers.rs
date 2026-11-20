@@ -1,4 +1,5 @@
-//! Real TLS and QUIC certificate flights with an application-owned OCSP response.
+//! Real TLS and QUIC certificate flights with an application-owned OCSP
+//! response.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

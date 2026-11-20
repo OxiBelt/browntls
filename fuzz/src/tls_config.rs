@@ -1,4 +1,5 @@
-//! `browntls-core` configuration and provider APIs (`fuzz_targets/tls_config.rs`).
+//! `browntls-core` configuration and provider APIs
+//! (`fuzz_targets/tls_config.rs`).
 //!
 //! Reaches the configuration builders (`builder.rs`, `client/builder.rs`,
 //! `server/builder.rs`), cipher suites (`suites.rs`, `tls12/`, `tls13/`),

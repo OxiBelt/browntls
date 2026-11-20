@@ -447,11 +447,13 @@ fn rsassa_pss_keys_round_trip() {
 //
 //   openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -out a.pem
 //   openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 \
-//     -pkeyopt rsa_pss_keygen_md:sha256 -pkeyopt rsa_pss_keygen_mgf1_md:sha256 \
+//     -pkeyopt rsa_pss_keygen_md:sha256 \
+//     -pkeyopt rsa_pss_keygen_mgf1_md:sha256 \
 //     -pkeyopt rsa_pss_keygen_saltlen:32 -out b.pem
-//   openssl pkey -in a.pem -pubout -outform DER          (OPENSSL_PSS_SPKI)
-//   openssl dgst -sha512 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:64 \
-//     -sigopt rsa_mgf1_md:sha512 -sign a.pem msg         (OPENSSL_PSS_SHA512_SIG)
+//   openssl pkey -in a.pem -pubout -outform DER        (OPENSSL_PSS_SPKI)
+//   openssl dgst -sha512 -sigopt rsa_padding_mode:pss \
+//     -sigopt rsa_pss_saltlen:64 -sigopt rsa_mgf1_md:sha512 \
+//     -sign a.pem msg                                  (OPENSSL_PSS_SHA512_SIG)
 //
 // and likewise for b.pem with SHA-256 and a 32-byte salt.
 const OPENSSL_MSG: &[u8] = b"browntls RSASSA-PSS test vector";

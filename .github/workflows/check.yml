@@ -29,6 +29,9 @@ jobs:
       - name: Check Markdown links and anchors
         run: python3 -B tests/scripts/check_markdown_links.py --repo-root .
 
+      - name: Check Markdown and Rust comment line width
+        run: python3 -B tests/scripts/check_line_width.py --repo-root .
+
       - name: Check the facade crate's features
         run: python3 -B tests/scripts/check_facade_features.py --repo-root .
 

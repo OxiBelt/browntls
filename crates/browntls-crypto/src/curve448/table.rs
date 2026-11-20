@@ -2,8 +2,8 @@
 //!
 //! Each entry is an affine point `[x, y]` with field elements as eight
 //! 56-bit limbs (least significant first), fully reduced.
-//! Regenerate with
-//! `cargo test -p browntls-crypto --lib curve448::edwards::tests::regenerate_tables -- --ignored`;
+//! Regenerate with `cargo test -p browntls-crypto --lib
+//! curve448::edwards::tests::regenerate_tables -- --ignored`;
 //! the test `edwards::tests::tables_are_reproducible` checks this file.
 
 /// `BASE[i][j] = (j + 1) * 256^i * B` for `i < 56`, `j < 8` (radix-16 comb).

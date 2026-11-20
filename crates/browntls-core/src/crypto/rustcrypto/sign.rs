@@ -56,7 +56,8 @@ pub fn any_eddsa_type(
     Ed25519SigningKey::new(der.secret_der()).map(|k| Arc::new(k) as Arc<dyn SigningKey>)
 }
 
-/// Whether a PKCS#8 blob names `rsaEncryption`, so the failure can be explained.
+/// Whether a PKCS#8 blob names `rsaEncryption`, so the failure can be
+/// explained.
 fn looks_like_rsa_pkcs8(der: &[u8]) -> bool {
     const RSA_OID: &[u8] = &[
         0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
@@ -123,7 +124,8 @@ macro_rules! ecdsa_key {
 
         impl Signer for $signer {
             fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
-                // RFC 6979 deterministic nonces: no randomness is consumed here.
+                // RFC 6979 deterministic nonces: no randomness is consumed
+                // here.
                 let sig: $krate::ecdsa::Signature = self.key.sign(message);
                 Ok(sig.to_der().as_bytes().to_vec())
             }

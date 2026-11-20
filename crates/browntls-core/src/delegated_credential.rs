@@ -696,7 +696,8 @@ mod validate_tests {
                 err(PeerMisbehaved::DelegatedCredentialWithoutDelegationUsage)
             );
         }
-        // 5: signed by the certificate key, over this certificate and credential.
+        // 5: signed by the certificate key, over this certificate and
+        // credential.
         let (other, _) = cert(true, true);
         let mut forged = credential(&other, &*key, now + 3600);
         forged.credential.valid_time = dc.credential.valid_time;

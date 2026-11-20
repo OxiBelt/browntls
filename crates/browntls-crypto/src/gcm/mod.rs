@@ -662,9 +662,9 @@ mod tests {
 
     #[test]
     fn polyval_key_matches_rfc8452_relation() {
-        // GHASH(H, X) == ByteReverse(POLYVAL(mulX(ByteReverse(H)), ByteReverse(X)))
-        // is exercised indirectly by every hardware backend; here check mulX
-        // on a value with the top bit set.
+        // GHASH(H, X) == ByteReverse(POLYVAL(mulX(ByteReverse(H)),
+        // ByteReverse(X))) is exercised indirectly by every hardware backend;
+        // here check mulX on a value with the top bit set.
         let mut h = [0u8; 16];
         h[0] = 0x80; // after reversal: bit 127 of the little-endian integer
         let k = polyval_key(&h);

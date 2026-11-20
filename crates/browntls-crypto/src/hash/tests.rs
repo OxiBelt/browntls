@@ -551,7 +551,8 @@ fn hash_types_match_backend_dispatch() {
 }
 
 /// Rough throughput of every available backend (run with
-/// `cargo test --release -p browntls-crypto --lib throughput -- --ignored --nocapture`).
+/// `cargo test --release -p browntls-crypto --lib throughput -- --ignored
+/// --nocapture`).
 /// Each figure is the best of several trials, to reduce noise on shared
 /// machines.
 #[test]

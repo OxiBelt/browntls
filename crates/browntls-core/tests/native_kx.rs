@@ -156,9 +156,9 @@ fn mlkem1024_interoperates_with_ml_kem_crate() {
 
 #[test]
 fn secp384r1mlkem1024_interoperates_with_composed_oracle() {
-    // draft-ietf-tls-ecdhe-mlkem: client share = P-384 point (97) || ML-KEM-1024
-    // encapsulation key (1568); server share = P-384 point || ciphertext
-    // (1568); secret = ECDH secret (48) || ML-KEM secret (32).
+    // draft-ietf-tls-ecdhe-mlkem: client share = P-384 point (97) ||
+    // ML-KEM-1024 encapsulation key (1568); server share = P-384 point ||
+    // ciphertext (1568); secret = ECDH secret (48) || ML-KEM secret (32).
     let group = native::kx_group::SECP384R1MLKEM1024;
     assert_eq!(
         group.name(),

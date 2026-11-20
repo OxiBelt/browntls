@@ -25,7 +25,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core.process_new_packets(&mut self.deframer_buffer)
     }
 
-    /// Supplies the result of the current OCSP query and processes any buffered input.
+    /// Supplies the result of the current OCSP query and processes any buffered
+    /// input.
     pub fn resolve_peer_revocation(
         &mut self,
         id: u64,
@@ -585,7 +586,8 @@ impl Connection {
         }
     }
 
-    /// Supplies the result of the current OCSP query and processes any buffered input.
+    /// Supplies the result of the current OCSP query and processes any buffered
+    /// input.
     pub fn resolve_peer_revocation(
         &mut self,
         id: u64,

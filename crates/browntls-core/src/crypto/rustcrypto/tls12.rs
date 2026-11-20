@@ -112,7 +112,8 @@ pub static TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: SupportedCipherSuite =
         record: Tls12RecordProtection::Aead(&AES_256_GCM),
     });
 
-/// AES-GCM in TLS 1.2: a 4-byte fixed IV plus an 8-byte explicit per-record nonce.
+/// AES-GCM in TLS 1.2: a 4-byte fixed IV plus an 8-byte explicit per-record
+/// nonce.
 pub(crate) struct Gcm<A> {
     kind: Kind,
     _alg: PhantomData<A>,
@@ -298,7 +299,8 @@ impl<A: TlsAead> MessageDecrypter for GcmDecrypter<A> {
     }
 }
 
-/// ChaCha20-Poly1305 in TLS 1.2 (RFC 7905): a 12-byte IV XORed with the sequence number.
+/// ChaCha20-Poly1305 in TLS 1.2 (RFC 7905): a 12-byte IV XORed with the
+/// sequence number.
 pub(crate) struct ChaCha {
     kind: Kind,
 }

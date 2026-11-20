@@ -216,7 +216,8 @@ macro_rules! curve_tests {
                     std::str::from_utf8(v.msg).unwrap()
                 );
                 $curve::verify(&pk, v.hash, v.msg, sig.as_der()).unwrap();
-                // Hedging with randomness must change the signature but keep it valid.
+                // Hedging with randomness must change the signature but keep it
+                // valid.
                 let rng = XorShiftRng::new(0x9e37_79b9_7f4a_7c15);
                 let hedged = signer.sign(v.hash, v.msg, &rng).unwrap();
                 assert_ne!(hedged, sig);
@@ -288,7 +289,8 @@ macro_rules! curve_tests {
                 );
                 let shared_back = other.diffie_hellman(&ours.public_key()).unwrap();
                 assert_eq!(shared_ours, shared_back);
-                // Deterministic signatures are bit-identical (RFC 6979 with the curve's hash).
+                // Deterministic signatures are bit-identical (RFC 6979 with the
+                // curve's hash).
                 let their_signer = ::$rc::ecdsa::SigningKey::from(&theirs);
                 let their_vk = ::$rc::ecdsa::VerifyingKey::from(&their_signer);
                 let our_signer = $curve::SigningKey::new(ours.clone());
@@ -321,7 +323,8 @@ macro_rules! curve_tests {
                         &theirs_sig.to_bytes(),
                     )
                     .unwrap();
-                    // Cross-hash: SHA-512 and SHA-224 over this curve, checked via prehash.
+                    // Cross-hash: SHA-512 and SHA-224 over this curve, checked
+                    // via prehash.
                     for alg in [
                         HashAlgorithm::Sha512,
                         HashAlgorithm::Sha224,
@@ -404,7 +407,8 @@ macro_rules! curve_tests {
             let pk = sk.public_key().to_uncompressed();
             assert_eq!(&pk[1..1 + $fl], &g[1..1 + $fl]);
             assert_ne!(&pk[1 + $fl..], &g[1 + $fl..]);
-            // Public key validation: identity, off-curve, coordinate >= p, hybrid, truncated.
+            // Public key validation: identity, off-curve, coordinate >= p,
+            // hybrid, truncated.
             assert!($curve::PublicKey::from_sec1_bytes(&[0]).is_err());
             assert!($curve::PublicKey::from_sec1_bytes(&[]).is_err());
             let mut off = pk;
@@ -419,7 +423,8 @@ macro_rules! curve_tests {
             hybrid[0] = 0x06 | (pk[pk.len() - 1] & 1);
             assert!($curve::PublicKey::from_sec1_bytes(&hybrid).is_err());
             assert!($curve::PublicKey::from_sec1_bytes(&pk[..pk.len() - 1]).is_err());
-            // A failing RNG surfaces as RandomFailure for generation and hedged signing.
+            // A failing RNG surfaces as RandomFailure for generation and hedged
+            // signing.
             assert_eq!(
                 $curve::SecretKey::generate(&FixedRng::new(&[])).unwrap_err(),
                 browntls_crypto::Error::RandomFailure
@@ -445,7 +450,8 @@ macro_rules! curve_tests {
                     .unwrap_err(),
                 browntls_crypto::Error::InvalidLength
             );
-            // Signature parsing: r = 0, s = n, trailing byte, wrong length fixed form.
+            // Signature parsing: r = 0, s = n, trailing byte, wrong length
+            // fixed form.
             let der = a.as_der();
             assert!($curve::Signature::from_der(&[der, &[0]].concat()).is_err());
             let mut zero_r = a.fixed().to_vec();
@@ -533,7 +539,8 @@ fn curve_mismatch_is_rejected() {
 }
 
 /// Rough operation rates on the host (release build recommended):
-/// `cargo test --release -p browntls-crypto --test nist_differential -- --ignored --nocapture throughput`
+/// `cargo test --release -p browntls-crypto --test nist_differential --
+/// --ignored --nocapture throughput`
 #[test]
 #[ignore = "throughput measurement"]
 fn throughput() {

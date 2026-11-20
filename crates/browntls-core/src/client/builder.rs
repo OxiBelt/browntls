@@ -58,7 +58,8 @@ pub(super) mod danger {
     use crate::sync::Arc;
     use crate::{ClientConfig, ConfigBuilder, WantsVerifier, verify};
 
-    /// A builder that accepts any [`ServerCertVerifier`](verify::ServerCertVerifier).
+    /// A builder that accepts any
+    /// [`ServerCertVerifier`](verify::ServerCertVerifier).
     #[derive(Debug)]
     pub struct DangerousClientConfigBuilder {
         /// The wrapped builder.
@@ -115,7 +116,8 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
         self.with_client_cert_resolver(Arc::new(handy::FailResolveClientCert {}))
     }
 
-    /// Picks the client certificate per connection with `client_auth_cert_resolver`.
+    /// Picks the client certificate per connection with
+    /// `client_auth_cert_resolver`.
     pub fn with_client_cert_resolver(
         self,
         client_auth_cert_resolver: Arc<dyn ResolvesClientCert>,

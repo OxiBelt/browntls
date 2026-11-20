@@ -11,7 +11,8 @@ assignees: ''
 Describe the use case, desired behavior, alternatives, compatibility effects,
 and relevant security boundaries. Architecture is still under design.
 Report undisclosed vulnerabilities through
-[private vulnerability reporting](https://github.com/OxiBelt/browntls/security/advisories/new).
+[private vulnerability
+reporting](https://github.com/OxiBelt/browntls/security/advisories/new).
 
 ## Assistance
 

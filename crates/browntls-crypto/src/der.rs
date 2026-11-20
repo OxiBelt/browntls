@@ -87,7 +87,8 @@ impl<'a> Reader<'a> {
             for &b in &rest[..n] {
                 len = (len << 8) | usize::from(b);
             }
-            // Minimal encoding: no leading zero byte, and long form only >= 128.
+            // Minimal encoding: no leading zero byte, and long form
+            // only >= 128.
             if rest[0] == 0 || len < 0x80 {
                 return Err(Error::InvalidEncoding);
             }
@@ -160,7 +161,8 @@ impl<'a> Reader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEncoding`] for negative, non-minimal or large values.
+    /// Returns [`Error::InvalidEncoding`] for negative, non-minimal or large
+    /// values.
     pub fn read_small_integer(&mut self) -> Result<u64, Error> {
         let v = self.read_positive_integer()?;
         if v.len() > 8 {
@@ -173,7 +175,8 @@ impl<'a> Reader<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidEncoding`] if bits are unused or encoding is bad.
+    /// Returns [`Error::InvalidEncoding`] if bits are unused or encoding is
+    /// bad.
     pub fn read_bit_string_octets(&mut self) -> Result<&'a [u8], Error> {
         match self.read(tag::BIT_STRING)? {
             [0, rest @ ..] => Ok(rest),

@@ -12,8 +12,8 @@ through the paths an application uses.
 [`.github/workflows/e2e.yml`](../../.github/workflows/e2e.yml) runs them in CI.
 
 They complement, and do not replace, the in-process handshake suites and the
-loopback OpenSSL interop tests in `crates/browntls-core/tests/`. A passing run is
-evidence for the configurations listed here only.
+loopback OpenSSL interop tests in `crates/browntls-core/tests/`. A passing run
+is evidence for the configurations listed here only.
 
 ## Matrix
 

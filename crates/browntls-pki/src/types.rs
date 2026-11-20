@@ -317,7 +317,8 @@ pub trait SignatureVerificationAlgorithm: Send + Sync + fmt::Debug {
         signature: &[u8],
     ) -> Result<(), InvalidSignature>;
 
-    /// The `AlgorithmIdentifier` that must appear in the `SubjectPublicKeyInfo`.
+    /// The `AlgorithmIdentifier` that must appear in the
+    /// `SubjectPublicKeyInfo`.
     fn public_key_alg_id(&self) -> AlgorithmIdentifier;
 
     /// The `AlgorithmIdentifier` that must appear as the signature algorithm.

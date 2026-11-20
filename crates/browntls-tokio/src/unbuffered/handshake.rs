@@ -332,8 +332,8 @@ impl fmt::Debug for TlsAcceptor {
 /// A client handshake in progress; resolves to the [`ClientTlsStream`].
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData`, wraps the
-/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and is
-/// reported once the alert describing it was written or the transport
+/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and
+/// is reported once the alert describing it was written or the transport
 /// refused it. Creating the connection can fail too, before any I/O: that
 /// error has kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
@@ -392,8 +392,8 @@ impl<IO> fmt::Debug for FallibleConnect<IO> {
 /// A server handshake in progress; resolves to the [`ServerTlsStream`].
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData`, wraps the
-/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and is
-/// reported once the alert describing it was written or the transport
+/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and
+/// is reported once the alert describing it was written or the transport
 /// refused it. Creating the connection can fail too, before any I/O: that
 /// error has kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]

@@ -132,7 +132,8 @@ macro_rules! wycheproof_curve {
                         match t["result"].as_str().unwrap() {
                             "valid" => {
                                 assert!(ok, "{file} tcId {id} ({comment}): rejected valid signature");
-                                // The fixed form must round-trip and verify too.
+                                // The fixed form must round-trip and verify
+                                // too.
                                 let parsed = $curve::Signature::from_der(&sig).unwrap();
                                 assert_eq!(parsed.as_der(), sig.as_slice(), "non-canonical DER accepted");
                                 $curve::verify_fixed(&pk, hash, &msg, parsed.fixed()).unwrap();

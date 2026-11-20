@@ -410,7 +410,8 @@ fn rejected_early_data_charges_every_skipped_record() {
         {
             continue;
         }
-        // AES-GCM, AES-CCM, ChaCha20-Poly1305: a 16-byte tag and the content type.
+        // AES-GCM, AES-CCM, ChaCha20-Poly1305: a 16-byte tag and the content
+        // type.
         let expansion = 1 + 16;
         let cases = [
             (16, 0, 1000),

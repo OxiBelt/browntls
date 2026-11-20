@@ -372,7 +372,8 @@ fn wycheproof_aes_gcm() {
          {skipped_iv} skipped (non-96-bit IV), {skipped_key} skipped (AES-192)",
         pairs.len()
     );
-    // The file holds 79 valid and 54 invalid AES-128/256 vectors with 96-bit IVs.
+    // The file holds 79 valid and 54 invalid AES-128/256 vectors with 96-bit
+    // IVs.
     assert!(
         valid >= 79 && invalid >= 54,
         "unexpectedly few vectors exercised"

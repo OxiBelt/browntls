@@ -43,7 +43,8 @@ use crate::x509;
 /// Handshake messages may be at most this many bytes.
 pub(crate) const MAX_HANDSHAKE_SIZE: u32 = 0xffff;
 
-/// A certificate payload (chain or single certificate) may be at most this long.
+/// A certificate payload (chain or single certificate) may be at most this
+/// long.
 pub(crate) const MAX_CERTIFICATE_SIZE_LIMIT: usize = 0x1_0000;
 
 /// At most this many extensions are accepted in one extension block.
@@ -196,7 +197,8 @@ impl DistinguishedName {
         Self(PayloadU16::new(der))
     }
 
-    /// Wraps the contents of a `Name` (without the outer SEQUENCE) in a SEQUENCE.
+    /// Wraps the contents of a `Name` (without the outer SEQUENCE) in a
+    /// SEQUENCE.
     pub fn in_sequence(contents: &[u8]) -> Self {
         Self::new(x509::wrap_in_sequence(contents))
     }
@@ -397,11 +399,13 @@ pub(crate) fn read_payload<'a>(
         HandshakeType::Finished => Finished(Payload::read(sub)),
         HandshakeType::CertificateStatus => CertificateStatus(certs::CertificateStatus::read(sub)?),
         HandshakeType::MessageHash => {
-            // A MessageHash is a transcript-only construct and never appears on the wire.
+            // A MessageHash is a transcript-only construct and never appears on
+            // the wire.
             return Err(InvalidMessage::UnexpectedMessage("MessageHash"));
         }
         HandshakeType::HelloRetryRequest => {
-            // A HelloRetryRequest is always encoded as a ServerHello (RFC 8446 §4.1.4).
+            // A HelloRetryRequest is always encoded as a ServerHello
+            // (RFC 8446 §4.1.4).
             return Err(InvalidMessage::UnexpectedMessage("HelloRetryRequest"));
         }
         _ => Unknown((typ, Payload::read(sub))),

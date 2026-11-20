@@ -7,7 +7,8 @@ use core::fmt::Debug;
 /// Secrets written through this trait defeat the confidentiality of the
 /// connection; enable it only in debugging builds.
 pub trait KeyLog: Debug + Send + Sync {
-    /// Logs `secret` for the connection identified by `client_random` under `label`.
+    /// Logs `secret` for the connection identified by `client_random` under
+    /// `label`.
     fn log(&self, label: &str, client_random: &[u8], secret: &[u8]);
 
     /// Whether `log` would do anything for `label`; lets callers skip work.

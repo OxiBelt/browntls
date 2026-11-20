@@ -106,7 +106,8 @@ impl ZvkgKey {
 }
 
 /// Shift-based Montgomery reduction of the 256-bit product `t` (least
-/// significant limb first) by `x^128` modulo `x^128 + x^127 + x^126 + x^121 + 1`.
+/// significant limb first) by `x^128` modulo
+/// `x^128 + x^127 + x^126 + x^121 + 1`.
 #[inline(always)]
 fn reduce(t: [u64; 4]) -> (u64, u64) {
     let [v0, mut v1, mut v2, mut v3] = t;
@@ -225,8 +226,10 @@ impl ZvbcKey {
                     options(nomem, nostack),
                 );
             }
-            // a = lo(xlo*hlo)  b = hi(xlo*hlo)  c = lo(xlo*hhi)  d = hi(xlo*hhi)
-            // e = lo(xhi*hlo)  f = hi(xhi*hlo)  g = lo(xhi*hhi)  h = hi(xhi*hhi)
+            // a = lo(xlo*hlo)  b = hi(xlo*hlo)
+            // c = lo(xlo*hhi)  d = hi(xlo*hhi)
+            // e = lo(xhi*hlo)  f = hi(xhi*hlo)
+            // g = lo(xhi*hhi)  h = hi(xhi*hhi)
             [a, b ^ c ^ e, d ^ f ^ g, h]
         });
     }

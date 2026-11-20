@@ -580,9 +580,10 @@ pub fn alert_from_crypto_error(code: u64) -> Option<AlertDescription> {
 /// The Retry Integrity Tag of a Retry packet (RFC 9001 §5.8).
 ///
 /// `aes_128_gcm` is a provider's TLS_AES_128_GCM_SHA256 suite, whose AEAD
-/// the tag uses; any other suite is an error. `retry_without_tag` is the Retry packet up to, not including, the tag;
-/// `original_dst_connection_id` is the Destination Connection ID of the
-/// client's Initial packet that the Retry answers (at most 20 bytes).
+/// the tag uses; any other suite is an error. `retry_without_tag` is the Retry
+/// packet up to, not including, the tag; `original_dst_connection_id` is the
+/// Destination Connection ID of the client's Initial packet that the Retry
+/// answers (at most 20 bytes).
 pub fn retry_integrity_tag(
     version: Version,
     aes_128_gcm: &Suite,

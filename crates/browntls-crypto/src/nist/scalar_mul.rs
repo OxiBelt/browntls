@@ -13,9 +13,10 @@
 //!   width-6 (base point) and width-5 (public key) wNAF.
 //!
 //! Scalars are plain little-endian limbs `< n`. Booth recoding is used for all
-//! three constant-time variants: the `(w + 1)`-bit window starting one bit below the
-//! digit's position is mapped to a signed digit in `[-2^(w-1), 2^(w-1)]`, so
-//! tables only need positive multiples and negation is a masked `Y` flip.
+//! three constant-time variants: the `(w + 1)`-bit window starting one bit
+//! below the digit's position is mapped to a signed digit in
+//! `[-2^(w-1), 2^(w-1)]`, so tables only need positive multiples and negation
+//! is a masked `Y` flip.
 
 use super::curve::{Affine, Curve, Projective, add, add_mixed, double, fe_neg};
 use super::jacobian::{self, Jacobian};

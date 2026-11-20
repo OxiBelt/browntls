@@ -1,6 +1,6 @@
 //! Streams over `browntls-core`'s unbuffered connection API
-//! ([`browntls_core::unbuffered`]): records are decrypted where the transport put
-//! them and encrypted straight into the bytes the transport is given.
+//! ([`browntls_core::unbuffered`]): records are decrypted where the transport
+//! put them and encrypted straight into the bytes the transport is given.
 //!
 //! [`TlsConnector`] and [`TlsAcceptor`] here are used like the ones at the
 //! crate root, and return a [`TlsStream`] over an
@@ -34,8 +34,8 @@
 //! # What differs from the streams at the crate root
 //!
 //! The streams at the crate root keep each connection's records in the
-//! queues of a buffered [`ClientConnection`](browntls_core::ClientConnection) or
-//! [`ServerConnection`](browntls_core::ServerConnection): the plaintext of a
+//! queues of a buffered [`ClientConnection`](browntls_core::ClientConnection)
+//! or [`ServerConnection`](browntls_core::ServerConnection): the plaintext of a
 //! received record is copied out of the connection's receive buffer into
 //! an allocation of its own, which [`AsyncBufRead`] lends and
 //! [`AsyncRead`] copies into the caller's buffer. Here the stream owns two

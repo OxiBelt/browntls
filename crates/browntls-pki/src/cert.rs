@@ -89,11 +89,11 @@ impl<'a> TryFrom<&'a CertificateDer<'a>> for Cert<'a> {
     /// # Errors
     ///
     /// [`Error::BadDer`] or [`Error::TrailingData`] for malformed DER,
-    /// [`Error::UnsupportedCertVersion`], [`Error::SignatureAlgorithmMismatch`],
-    /// [`Error::BadDerTime`], [`Error::UnsupportedCriticalExtension`],
-    /// [`Error::MalformedExtensions`] (including a duplicate decoded
-    /// extension), [`Error::ExtensionValueInvalid`] or
-    /// [`Error::MalformedNameConstraint`].
+    /// [`Error::UnsupportedCertVersion`],
+    /// [`Error::SignatureAlgorithmMismatch`], [`Error::BadDerTime`],
+    /// [`Error::UnsupportedCriticalExtension`], [`Error::MalformedExtensions`]
+    /// (including a duplicate decoded extension),
+    /// [`Error::ExtensionValueInvalid`] or [`Error::MalformedNameConstraint`].
     fn try_from(cert: &'a CertificateDer<'a>) -> Result<Self, Error> {
         Self::from_der(cert.as_ref())
     }

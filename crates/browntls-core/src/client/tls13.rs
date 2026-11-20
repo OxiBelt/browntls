@@ -94,7 +94,8 @@ pub(super) fn derive_early_traffic_secret(
     trace!("Starting early data traffic");
 }
 
-/// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446 appendix D.4).
+/// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446
+/// appendix D.4).
 ///
 /// Never on QUIC, which has no such record (RFC 9001 §8.4).
 pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {

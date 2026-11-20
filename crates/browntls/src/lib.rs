@@ -28,12 +28,14 @@
 //!
 //! # Layout of the root
 //!
-//! * [`crypto`]: the provider mount point (cipher suites, key exchange, signing,
-//!   randomness) and the providers shipped with the library.
-//! * [`client`] / [`server`]: configuration ([`ClientConfig`], [`ServerConfig`])
-//!   and connections (`ClientConnection`, `ServerConnection`).
+//! * [`crypto`]: the provider mount point (cipher suites, key exchange,
+//!   signing, randomness) and the providers shipped with the library.
+//! * [`client`] / [`server`]: configuration ([`ClientConfig`],
+//!   [`ServerConfig`]) and connections (`ClientConnection`,
+//!   `ServerConnection`).
 //! * [`ConnectionCommon`]: the buffered connection API shared by both sides.
-//! * [`unbuffered`]: the caller-buffer-driven API, also available without `std`.
+//! * [`unbuffered`]: the caller-buffer-driven API, also available without
+//!   `std`.
 //! * [`kernel`]: what a kernel TLS implementation needs from a connection
 //!   (the `ktls` feature's module drives Linux with it).
 //! * [`Error`] and its sub-enums describe every failure the library reports.

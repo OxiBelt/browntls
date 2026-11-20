@@ -134,7 +134,8 @@ impl RevocationQuery {
         }
     }
 
-    /// Identifies this pending request. Use it only with its originating connection.
+    /// Identifies this pending request. Use it only with its originating
+    /// connection.
     pub fn id(&self) -> u64 {
         self.id
     }

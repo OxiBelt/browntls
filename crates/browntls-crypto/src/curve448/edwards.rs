@@ -637,7 +637,8 @@ mod tests {
         }
         s.push_str(
             "];\n\n\
-             /// `ODD[i] = (2 i + 1) * B` for `i < 64` (width-8 NAF, verification only).\n\
+             /// `ODD[i] = (2 i + 1) * B` for `i < 64` (width-8 NAF, \
+             verification only).\n\
              #[rustfmt::skip]\n\
              pub(super) static ODD: [[[u64; 8]; 2]; 64] = [\n",
         );
@@ -656,8 +657,8 @@ mod tests {
 //!
 //! Each entry is an affine point `[x, y]` with field elements as eight
 //! 56-bit limbs (least significant first), fully reduced.
-//! Regenerate with
-//! `cargo test -p browntls-crypto --lib curve448::edwards::tests::regenerate_tables -- --ignored`;
+//! Regenerate with `cargo test -p browntls-crypto --lib
+//! curve448::edwards::tests::regenerate_tables -- --ignored`;
 //! the test `edwards::tests::tables_are_reproducible` checks this file.
 
 ";

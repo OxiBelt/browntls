@@ -633,7 +633,8 @@ fn check_windows(p: &Packed, r: &mut Report) {
     let lambda = pairs / space;
     let tail = ALPHA / (2.0 * wcount as f64);
     let hi = poisson_upper_crit(lambda, tail);
-    // Collision entropy H2 = -log2(sum p_i^2), estimated as log2(pairs / collisions).
+    // Collision entropy H2 = -log2(sum p_i^2), estimated as
+    // log2(pairs / collisions).
     let h2_floor = (pairs / hi as f64).log2();
 
     // Window values, one column per window.

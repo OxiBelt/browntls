@@ -7,7 +7,8 @@ assignees: ''
 ---
 
 Do not post undisclosed vulnerabilities here. Use
-[private vulnerability reporting](https://github.com/OxiBelt/browntls/security/advisories/new).
+[private vulnerability
+reporting](https://github.com/OxiBelt/browntls/security/advisories/new).
 
 ## Problem
 

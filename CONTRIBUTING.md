@@ -25,13 +25,17 @@ State explicitly when a command must run outside the repository root.
    this repository's initial maintenance setup.
 3. Add regression coverage for changed behavior, especially security-sensitive
    checks. Do not remove or suppress tests merely to make CI pass.
-4. Update documentation for behavior, compatibility, tooling, and workflow changes.
-5. Run applicable checks and report failures, omissions, and environmental limits.
-6. Clean up generated files and resources; review the complete diff before landing.
+4. Update documentation for behavior, compatibility, tooling, and workflow
+   changes.
+5. Run applicable checks and report failures, omissions, and environmental
+   limits.
+6. Clean up generated files and resources; review the complete diff before
+   landing.
 
 Contributors normally use a branch and pull request. Maintainers may land
 explicitly authorized work directly on `main`; the same signing, attribution,
-review, and validation rules apply. No automatic merge or publication is implied.
+review, and validation rules apply. No automatic merge or publication is
+implied.
 
 ## Local checks
 
@@ -41,6 +45,7 @@ Run from the repository root with Python 3.11 or newer, Git, and
 ```sh
 python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
 python3 -B tests/scripts/check_markdown_links.py --repo-root .
+python3 -B tests/scripts/check_line_width.py --repo-root .
 python3 -B tests/scripts/check_rust_line_count.py --repo-root .
 python3 -B tests/scripts/check_facade_features.py --repo-root .
 actionlint -shellcheck= -pyflakes=
@@ -61,6 +66,16 @@ by the total error count. CI runs the same checks (whitespace with
 actionlint archive by SHA-256. Optional shellcheck and pyflakes integrations
 are disabled so the documented actionlint result does not depend on
 host-installed analyzers.
+
+The line width check fails when a line of a Git-tracked Markdown file, or a
+full-line `//`, `///` or `//!` comment of a Git-tracked `.rs` file, is wider
+than 80 characters and could be wrapped. A longer line passes when it holds a
+single word after its indentation and list marker, such as a long URL or
+intra-doc link. YAML front matter, fenced code blocks (also in doc comments),
+table rows, headings and link reference definitions are not checked, since
+wrapping them would change what renders. Rust code and trailing comments stay
+with rustfmt, whose `wrap_comments` option is not available on the stable
+toolchain.
 
 The line count check fails when a Git-tracked `.rs` file has more than 1000
 lines. It counts every line, including comments, blank lines, tests and
@@ -145,7 +160,8 @@ git verify-commit HEAD
 ```
 
 Verify hosted signatures after pushing. Release tags must also be signed and
-verified; see the [release prerequisites](docs/Maintenance.md#release-prerequisites).
+verified; see the
+[release prerequisites](docs/Maintenance.md#release-prerequisites).
 
 ## LLM assistance notices
 
@@ -169,13 +185,15 @@ include an equivalent visible notice, such as `Assisted-by: Codex
 ## Security requirements
 
 Follow [SECURITY.md](SECURITY.md) for undisclosed findings. Do not expose an
-unpatched vulnerability through public issues, PRs, logs, or commit descriptions.
+unpatched vulnerability through public issues, PRs, logs, or commit
+descriptions.
 
 Treat peer-controlled TLS data and caller-controlled configuration as untrusted.
 For relevant changes, describe the trust boundary, attacker-controlled inputs,
-failure behavior, compatibility effects, and remaining risks. Preserve certificate
-and peer verification, key isolation, protocol state, and bounded resource use.
-Never weaken a security default without explicit review, tests, and documentation.
+failure behavior, compatibility effects, and remaining risks. Preserve
+certificate and peer verification, key isolation, protocol state, and bounded
+resource use. Never weaken a security default without explicit review, tests,
+and documentation.
 
 Do not add externally reachable panics or silently ignore security-sensitive
 errors. Split Rust modules by responsibility, keep protocol policy separate from
@@ -191,9 +209,10 @@ evidence with applicability limits. Architecture and supported platforms must be
 established before claiming those boundaries are safe.
 
 Review direct and transitive dependencies, features, sources, build scripts,
-licenses, maintenance, and unsafe code. Security-critical additions and exceptions
-need a named owner and tracking issue. Exceptions must be exact, justified, and
-time-bounded. Never invent cargo-vet audits or use wildcard exemptions.
+licenses, maintenance, and unsafe code. Security-critical additions and
+exceptions need a named owner and tracking issue. Exceptions must be exact,
+justified, and time-bounded. Never invent cargo-vet audits or use wildcard
+exemptions.
 
 ## Independent review
 
@@ -224,8 +243,8 @@ it does not waive contribution, review, signing, or disclosure requirements.
 ## Tests and temporary resources
 
 Generate test certificates, keys, configurations, and logs per run in temporary
-directories. Clean them up on failure where practical. Do not commit real secrets,
-generated private keys, build artifacts, or security scan evidence.
+directories. Clean them up on failure where practical. Do not commit real
+secrets, generated private keys, build artifacts, or security scan evidence.
 
 Docker and Kubernetes checks must be reproducible
 locally and in CI. Rootful and rootless Docker may be used where available;
@@ -242,4 +261,5 @@ Never use broad prune commands or delete unrelated minikube workloads.
 - Review dependency, unsafe-code, and release requirements when applicable.
 - Remove temporary artifacts and confirm resource cleanup.
 
-Public contributions are made under the repository's [Apache-2.0 license](LICENSE).
+Public contributions are made under the repository's
+[Apache-2.0 license](LICENSE).

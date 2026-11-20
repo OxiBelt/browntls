@@ -288,7 +288,8 @@ pub(in crate::client) fn start_handshake(
     )
 }
 
-/// Builds and sends a ClientHello (the first, or the answer to a HelloRetryRequest).
+/// Builds and sends a ClientHello (the first, or the answer to a
+/// HelloRetryRequest).
 ///
 /// `committed_suite` is the suite a HelloRetryRequest fixed, which the
 /// ServerHello must then repeat.
@@ -413,7 +414,8 @@ pub(super) fn emit_client_hello_for_retry(
             && config.enable_post_handshake_auth
             && config.client_auth_cert_resolver.has_certs())
         .then_some(()),
-        // RFC 7250: raw public keys instead of certificates, in either direction.
+        // RFC 7250: raw public keys instead of certificates, in either
+        // direction.
         client_certificate_types: config
             .client_auth_cert_resolver
             .only_raw_public_keys()
@@ -521,7 +523,8 @@ pub(super) fn emit_client_hello_for_retry(
         }
     }
 
-    // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in below.
+    // RFC 9846 §4.3.11: offer the TLS 1.3 session as a PSK, binder filled in
+    // below.
     let tls13_session = match &input.resuming {
         Some(retrieved) if supports_tls13 => retrieved.map(|v| match v {
             ClientSessionValue::Tls13(inner) => Some(inner),

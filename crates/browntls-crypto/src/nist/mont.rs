@@ -32,7 +32,8 @@ pub(crate) const fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
     (t as u64, (t >> 64) as u64)
 }
 
-/// `a - b - borrow` with `borrow` in `{0, 1}`; returns `(difference, borrow_out)`.
+/// `a - b - borrow` with `borrow` in `{0, 1}`; returns
+/// `(difference, borrow_out)`.
 #[inline(always)]
 pub(crate) const fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
     let t = (a as u128)
@@ -300,8 +301,9 @@ pub(crate) fn from_mont<const N: usize>(a: &[u64; N], m: &[u64; N], m_inv: u64) 
     mont_mul(a, &one, m, m_inv)
 }
 
-/// `count <= 57` consecutive bits of `a` starting at bit `start`, as an integer.
-/// Bits beyond the top limb read as zero. `start` and `count` must be public.
+/// `count <= 57` consecutive bits of `a` starting at bit `start`, as an
+/// integer. Bits beyond the top limb read as zero. `start` and `count` must be
+/// public.
 #[inline]
 pub(crate) const fn bits<const N: usize>(a: &[u64; N], start: usize, count: usize) -> u64 {
     let limb = start / 64;
@@ -316,7 +318,8 @@ pub(crate) const fn bits<const N: usize>(a: &[u64; N], start: usize, count: usiz
 /// `base^exp` in the Montgomery domain of `m`, where `one` is `R mod m`.
 ///
 /// The exponent is **public** (a curve constant such as `p - 2`): the operation
-/// sequence depends only on it, never on `base`. Left-to-right with 4-bit windows.
+/// sequence depends only on it, never on `base`. Left-to-right with 4-bit
+/// windows.
 pub(crate) fn pow_pubexp<const N: usize>(
     base: &[u64; N],
     exp: &[u64; N],

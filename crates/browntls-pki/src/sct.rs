@@ -293,8 +293,8 @@ impl Default for SctOptions {
 pub struct CtPolicy<'a> {
     /// The trusted logs. The first log with a given ID is used.
     pub logs: &'a [CtLog<'a>],
-    /// Algorithms for log signatures. A log signs with ECDSA or RSASSA-PKCS1-v1_5,
-    /// both over SHA-256 ([`alg_id::ECDSA_SHA256`],
+    /// Algorithms for log signatures. A log signs with ECDSA or
+    /// RSASSA-PKCS1-v1_5, both over SHA-256 ([`alg_id::ECDSA_SHA256`],
     /// [`alg_id::RSA_PKCS1_SHA256`]); an algorithm is chosen by these
     /// identifiers and the log key's, as for certificate signatures.
     pub supported_sig_algs: &'a [&'a dyn SignatureVerificationAlgorithm],

@@ -107,20 +107,34 @@ builds, run their `speed` binaries alternately with `--only <names>`.
 
 Backends selected for the accelerated column:
 
-- SHA-256: SHA-NI [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- SHA-512: x86-64-v3 (AVX2+BMI2) [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- Keccak: BMI1/BMI2 [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
-- Keccak x4: AVX-512VL [uses SIMD] (policy: SIMD preferred, dedicated preferred; available: SIMD)
-- AES: VAES (AVX-512) [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- GHASH: VPCLMULQDQ (AVX-512) [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- ChaCha20: AVX-512 [uses SIMD] (policy: SIMD preferred, dedicated preferred; available: SIMD)
-- Poly1305: AVX2 + BMI2/ADX [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- X25519: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
-- P-256: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
-- RSA: AVX-512 IFMA + BMI2/ADX [uses SIMD+dedicated] (policy: SIMD preferred, dedicated preferred; available: SIMD+dedicated)
-- ML-KEM: AVX2 [uses SIMD] (policy: SIMD preferred, dedicated preferred; available: SIMD)
-- P-384: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
-- P-521: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred; available: dedicated)
+- SHA-256: SHA-NI [uses dedicated] (policy: SIMD preferred, dedicated preferred;
+  available: SIMD+dedicated)
+- SHA-512: x86-64-v3 (AVX2+BMI2) [uses SIMD+dedicated] (policy: SIMD preferred,
+  dedicated preferred; available: SIMD+dedicated)
+- Keccak: BMI1/BMI2 [uses dedicated] (policy: SIMD preferred, dedicated
+  preferred; available: dedicated)
+- Keccak x4: AVX-512VL [uses SIMD] (policy: SIMD preferred, dedicated preferred;
+  available: SIMD)
+- AES: VAES (AVX-512) [uses SIMD+dedicated] (policy: SIMD preferred, dedicated
+  preferred; available: SIMD+dedicated)
+- GHASH: VPCLMULQDQ (AVX-512) [uses SIMD+dedicated] (policy: SIMD preferred,
+  dedicated preferred; available: SIMD+dedicated)
+- ChaCha20: AVX-512 [uses SIMD] (policy: SIMD preferred, dedicated preferred;
+  available: SIMD)
+- Poly1305: AVX2 + BMI2/ADX [uses SIMD+dedicated] (policy: SIMD preferred,
+  dedicated preferred; available: SIMD+dedicated)
+- X25519: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated
+  preferred; available: dedicated)
+- P-256: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred;
+  available: dedicated)
+- RSA: AVX-512 IFMA + BMI2/ADX [uses SIMD+dedicated] (policy: SIMD preferred,
+  dedicated preferred; available: SIMD+dedicated)
+- ML-KEM: AVX2 [uses SIMD] (policy: SIMD preferred, dedicated preferred;
+  available: SIMD)
+- P-384: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred;
+  available: dedicated)
+- P-521: BMI2/ADX [uses dedicated] (policy: SIMD preferred, dedicated preferred;
+  available: dedicated)
 
 ## Observations
 

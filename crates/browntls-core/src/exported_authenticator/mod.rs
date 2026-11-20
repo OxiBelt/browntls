@@ -23,15 +23,15 @@
 //! same signatures, checks and errors: `ClientConnection` and
 //! `ServerConnection` (with the `std` feature), and
 //! [`UnbufferedClientConnection`](crate::client::UnbufferedClientConnection)
-//! and [`UnbufferedServerConnection`](crate::server::UnbufferedServerConnection)
-//! (also without `std`). Both APIs run the same code on the connection's
-//! state machine, so the checks below hold for both; an unbuffered
-//! connection is used between calls to `process_tls_records`, since the
-//! messages never touch its records. QUIC connections do not offer
-//! exported authenticators. Without `std` the configurations' default time
-//! provider has no clock, so `validate_authenticator` fails with
-//! [`Error::FailedToGetCurrentTime`] unless one is configured
-//! (`builder_with_details`).
+//! and
+//! [`UnbufferedServerConnection`](crate::server::UnbufferedServerConnection)
+//! (also without `std`). Both APIs run the same code on the connection's state
+//! machine, so the checks below hold for both; an unbuffered connection is used
+//! between calls to `process_tls_records`, since the messages never touch its
+//! records. QUIC connections do not offer exported authenticators. Without
+//! `std` the configurations' default time provider has no clock, so
+//! `validate_authenticator` fails with [`Error::FailedToGetCurrentTime`] unless
+//! one is configured (`builder_with_details`).
 //!
 //! The `Handshake Context` and `Finished MAC Key` come from the exporter
 //! (RFC 9261 §5.1) with the labels `EXPORTER-{client,server} authenticator

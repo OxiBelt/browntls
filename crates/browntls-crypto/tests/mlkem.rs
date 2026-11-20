@@ -437,7 +437,8 @@ fn constants_and_backends() {
 }
 
 // ---------------------------------------------------------------------------
-// Throughput (`cargo test --release -p browntls-crypto --test mlkem -- --ignored --nocapture`).
+// Throughput (`cargo test --release -p browntls-crypto --test mlkem --
+// --ignored --nocapture`).
 // ---------------------------------------------------------------------------
 
 fn bench<P: ParameterSet>(b: Backend) {

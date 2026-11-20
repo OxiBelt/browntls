@@ -5,8 +5,8 @@
 //! (`setsockopt(TCP_ULP, "tls")`, `TLS_TX`, `TLS_RX`), which then encrypts
 //! and decrypts application data itself, so that `sendfile`, `splice` and
 //! plain `read`/`write` on the socket carry TLS ([`KtlsStream::sendfile`]
-//! sends a file that way and keeps the stream's counts). Every record that is not
-//! application data (TLS 1.3 KeyUpdate and NewSessionTicket messages,
+//! sends a file that way and keeps the stream's counts). Every record that is
+//! not application data (TLS 1.3 KeyUpdate and NewSessionTicket messages,
 //! post-handshake authentication, alerts) comes back to the stream, which
 //! hands it to the connection's [`browntls_core::kernel::KernelConnection`] and
 //! carries out what that asks for: records to send, new keys to install.

@@ -99,7 +99,8 @@ macro_rules! kernel {
                     ".option push",
                     concat!(".option arch, ", $arch),
                     "vsetvli {vl}, {n}, e32, m1, ta, ma",
-                    // Initial state: broadcast words, counter lanes += lane index.
+                    // Initial state: broadcast words, counter lanes += lane
+                    // index.
                     "lw {t}, 0({st})", "vmv.v.x v0, {t}",
                     "lw {t}, 4({st})", "vmv.v.x v1, {t}",
                     "lw {t}, 8({st})", "vmv.v.x v2, {t}",
@@ -182,7 +183,8 @@ pub(super) fn xor_rvv(key: &[u32; 8], counter: u32, nonce: &[u32; 3], data: &mut
     while !rest.is_empty() {
         let blocks = rest.len().div_ceil(BLOCK).min(MAX_BLOCKS);
         let vl = if zvkb {
-            // SAFETY: RVV 1.0 and Zvkb were detected; 1 <= blocks <= MAX_BLOCKS.
+            // SAFETY: RVV 1.0 and Zvkb were detected;
+            // 1 <= blocks <= MAX_BLOCKS.
             unsafe { keystream_zvkb(&state, blocks, &mut buf) }
         } else {
             // SAFETY: RVV 1.0 was detected; 1 <= blocks <= MAX_BLOCKS.
@@ -236,7 +238,8 @@ mod tests {
                 assert_eq!(out.0[..vl * BLOCK], want[..vl * BLOCK], "base {blocks}");
                 if f.rv_zvkb() {
                     let mut out2 = KeystreamBuf([0; MAX_BLOCKS * BLOCK]);
-                    // SAFETY: RVV 1.0 and Zvkb detected; 1 <= blocks <= MAX_BLOCKS.
+                    // SAFETY: RVV 1.0 and Zvkb detected;
+                    // 1 <= blocks <= MAX_BLOCKS.
                     let vl2 = unsafe { keystream_zvkb(&state, blocks, &mut out2) };
                     assert_eq!(vl, vl2);
                     assert_eq!(out2.0[..vl * BLOCK], want[..vl * BLOCK], "zvkb {blocks}");

@@ -18,7 +18,8 @@ pub struct ClientConnection {
 }
 
 impl ClientConnection {
-    /// Starts a connection to `name` with `config`; the ClientHello is queued immediately.
+    /// Starts a connection to `name` with `config`; the ClientHello is queued
+    /// immediately.
     pub fn new(config: Arc<ClientConfig>, name: ServerName<'static>) -> Result<Self, Error> {
         let alpn = config.alpn_protocols.clone();
         Self::new_with_alpn(config, name, alpn)

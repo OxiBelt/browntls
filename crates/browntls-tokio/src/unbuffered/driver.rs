@@ -5,10 +5,10 @@
 //! bytes, so records are decrypted where the transport put them; writes,
 //! flushes and shutdowns pass no input, so they never decrypt a record the
 //! reader has not asked for (at most, the connection goes on with a
-//! handshake message it had already taken in whole). Whatever the connection queues (handshake
-//! messages, alerts, KeyUpdates) is encoded into the one outgoing buffer at
-//! once, in the order the connection sequenced it, ahead of or behind the
-//! application data records encrypted into the same buffer.
+//! handshake message it had already taken in whole). Whatever the connection
+//! queues (handshake messages, alerts, KeyUpdates) is encoded into the one
+//! outgoing buffer at once, in the order the connection sequenced it, ahead of
+//! or behind the application data records encrypted into the same buffer.
 //!
 //! A connection that waits on a certificate status query
 //! (`ConnectionState::PendingRevocation`) is answered by the operation

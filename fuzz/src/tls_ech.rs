@@ -1,18 +1,18 @@
 //! Encrypted Client Hello (`fuzz_targets/tls_ech.rs`).
 //!
-//! Reaches every public function of `browntls_core::ech` and `browntls_core::ech::svcb`:
-//! `ECHConfigList` parsing of fuzzed bytes ([`EchConfig::new`]), server keys
-//! from fuzz-chosen `ECHConfig` fields ([`EchServerKey::new`]) and generated
-//! ones ([`EchServerKey::generate`]), [`EchServerConfig`] lists, GREASE
-//! settings, the SVCB/HTTPS record helpers, and TLS 1.3 handshakes between a
-//! client and a server in the same process: ECH accepted (optionally after a
-//! HelloRetryRequest), rejected with retry configurations and retried,
-//! rejected by a server without ECH, and GREASE, optionally with a byte of
-//! the client's first flight altered; and the same through split mode
-//! (RFC 9849 §3.1): a [`ClientFacing`] server forwarding to a back-end
-//! server ([`ServerConfig::ech_backend`]) or completing the handshake
-//! locally, fed in fuzz-chosen pieces, optionally with trial decryption,
-//! random configuration identifiers and the public name check.
+//! Reaches every public function of `browntls_core::ech` and
+//! `browntls_core::ech::svcb`: `ECHConfigList` parsing of fuzzed bytes
+//! ([`EchConfig::new`]), server keys from fuzz-chosen `ECHConfig` fields
+//! ([`EchServerKey::new`]) and generated ones ([`EchServerKey::generate`]),
+//! [`EchServerConfig`] lists, GREASE settings, the SVCB/HTTPS record helpers,
+//! and TLS 1.3 handshakes between a client and a server in the same process:
+//! ECH accepted (optionally after a HelloRetryRequest), rejected with retry
+//! configurations and retried, rejected by a server without ECH, and GREASE,
+//! optionally with a byte of the client's first flight altered; and the same
+//! through split mode (RFC 9849 §3.1): a [`ClientFacing`] server forwarding to
+//! a back-end server ([`ServerConfig::ech_backend`]) or completing the
+//! handshake locally, fed in fuzz-chosen pieces, optionally with trial
+//! decryption, random configuration identifiers and the public name check.
 //!
 //! Checked properties: the configuration parsers agree with an independent
 //! model of RFC 9849 §4 (version, mandatory extensions, public name rules of

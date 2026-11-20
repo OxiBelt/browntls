@@ -139,7 +139,8 @@ fn resumption_with_tickets_and_session_cache() {
     let mut server = ServerConnection::new(server_config.clone()).unwrap();
     do_handshake(&mut client, &mut server).unwrap();
     assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
-    // tickets arrive after the handshake, in the server's first flight of traffic
+    // tickets arrive after the handshake, in the server's first flight of
+    // traffic
     transfer(&mut server, &mut client);
     client.process_new_packets().unwrap();
     assert_eq!(client.tls13_tickets_received(), 2);

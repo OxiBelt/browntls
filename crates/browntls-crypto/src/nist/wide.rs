@@ -4,8 +4,8 @@
 //! [`mul`] returns the `2N`-limb product of two `N`-limb values as a
 //! row-wise schoolbook multiplication built from `64x64->128`-bit products
 //! (squaring uses it too); `wide_x86` provides BMI2/ADX multiplication and
-//! squaring kernels for six and nine limbs. Neither the instruction sequence nor the memory
-//! accesses depend on the operands.
+//! squaring kernels for six and nine limbs. Neither the instruction sequence
+//! nor the memory accesses depend on the operands.
 //!
 //! [`invert`] wraps the generic Bernstein–Yang inversion of
 //! `rsa::bigint::inv`, whose running time depends only on the limb count.

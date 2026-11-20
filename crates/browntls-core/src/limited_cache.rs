@@ -27,7 +27,8 @@ where
         }
     }
 
-    /// Fetches `k`, inserting a default value if absent, and lets `edit` modify it.
+    /// Fetches `k`, inserting a default value if absent, and lets `edit` modify
+    /// it.
     pub(crate) fn get_or_insert_default_and_edit(&mut self, k: K, edit: impl FnOnce(&mut V)) {
         let inserted_new_item = match self.map.entry(k) {
             std::collections::hash_map::Entry::Occupied(value) => {

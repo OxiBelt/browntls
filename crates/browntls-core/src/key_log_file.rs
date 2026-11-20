@@ -91,7 +91,8 @@ impl Debug for KeyLogFileInner {
 pub struct KeyLogFile(Mutex<KeyLogFileInner>);
 
 impl KeyLogFile {
-    /// Reads `SSLKEYLOGFILE` and opens the file (with owner-only permissions on Unix).
+    /// Reads `SSLKEYLOGFILE` and opens the file (with owner-only permissions on
+    /// Unix).
     pub fn new() -> Self {
         let var = std::env::var_os("SSLKEYLOGFILE");
         Self(Mutex::new(KeyLogFileInner::new(var)))

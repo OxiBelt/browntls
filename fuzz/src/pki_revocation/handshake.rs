@@ -1,4 +1,5 @@
-//! Exercises connection-bound OCSP continuations after a real certificate flight.
+//! Exercises connection-bound OCSP continuations after a real certificate
+//! flight.
 
 use std::sync::{Arc, OnceLock};
 

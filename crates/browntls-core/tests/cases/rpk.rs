@@ -73,7 +73,8 @@ fn server_raw_public_key_every_key_type_and_version() {
             do_handshake(&mut client, &mut server)
                 .unwrap_or_else(|e| panic!("{v:?} {key_type:?}: {e}"));
             assert_eq!(client.protocol_version(), Some(v));
-            // The "certificate" the client saw is the bare SubjectPublicKeyInfo.
+            // The "certificate" the client saw is the bare
+            // SubjectPublicKeyInfo.
             assert_eq!(
                 client.peer_certificates().unwrap(),
                 [browntls_core::pki_types::CertificateDer::from(

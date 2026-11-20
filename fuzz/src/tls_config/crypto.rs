@@ -21,7 +21,8 @@ use sha2::Digest as _;
 use super::{KNOWN_SCHEMES, provider_name};
 use crate::input::Input;
 
-// The oracle crates under names that do not clash with `browntls_core::crypto::hmac`.
+// The oracle crates under names that do not clash with
+// `browntls_core::crypto::hmac`.
 mod hmac_oracle {
     pub(super) use ::hmac::{Hmac, KeyInit, Mac};
 }

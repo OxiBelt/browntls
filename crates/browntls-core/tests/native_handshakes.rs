@@ -567,7 +567,8 @@ fn hello_retry_request_into_each_mlkem1024_group() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);
     for group in mlkem1024_groups() {
-        // The client's single key share is X25519; the server only takes `group`.
+        // The client's single key share is X25519; the server only takes
+        // `group`.
         let (mut client, mut server) = connect(
             client_with(
                 ProtocolVersion::TLSv1_3,

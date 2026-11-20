@@ -701,7 +701,9 @@ pub(super) fn emit_client_hello_for_retry(
     }
     // A ClientHello must fit in a handshake message, and its extension
     // block in a two-byte length; a large `trusted_ca_keys` list or ALPN
-    // offer could break either, which would send a malformed message.
+    // offer could break either, which would send a malformed message. With
+    // an ECH offer this checks the inner ClientHello; the outer one is
+    // built from it later.
     if chp.get_encoding().len() > MAX_HANDSHAKE_SIZE as usize {
         return Err(Error::general(
             "the ClientHello is longer than a handshake message may be",

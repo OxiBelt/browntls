@@ -610,17 +610,20 @@ compares one with a CA certificate. A certificate resolver reads the list
 with `ClientHello::trusted_ca_keys()`, whatever version is negotiated, and
 calls `ClientHello::acknowledge_trusted_ca_keys()` when the list guided its
 choice; `server::ResolvesServerCertUsingTrustedCaKeys` does both, serving
-the first registered chain that shares an identifier with the list and
-signs with one of the client's schemes, and its fallback resolver
-otherwise. The server answers with the empty extension only in a full
-TLS 1.2 handshake, to a client that sent the list, after an
-acknowledgement: never in TLS 1.3, never when resuming a session (no chain
-is sent then), and an `Accepted` view's acknowledgement does nothing. A
-client accepts the answer only in TLS 1.2 and only after sending the list
-(`unsupported_extension` otherwise, `decode_error` for a body), and reports
-it through `trusted_ca_keys_acknowledged()` on the buffered and unbuffered
-client connections. The list travels in the clear and reveals which roots
-the client trusts (RFC 6066 §11.4). No peer of the end-to-end
+a registered chain that shares an identifier with the list and signs with
+one of the client's schemes, and its fallback resolver otherwise. Since a
+name may be shared by several roots (a CA key rollover keeps it), a
+certificate hash match wins over a key hash match, which wins over a name
+or `pre_agreed` match; among equals the first chain registered wins. The
+server answers with the empty extension only in a full TLS 1.2 handshake,
+to a client that sent the list, after an acknowledgement: never in TLS 1.3,
+never when resuming a session (no chain is sent then), and an `Accepted`
+view's acknowledgement does nothing. A client accepts the answer only in
+TLS 1.2 and only after sending the list (otherwise `unsupported_extension`
+in TLS 1.2 and `illegal_parameter` in TLS 1.3; `decode_error` for a body),
+and reports it through `trusted_ca_keys_acknowledged()` on the buffered and
+unbuffered client connections. The list travels in the clear and reveals
+which roots the client trusts (RFC 6066 §11.4). No peer of the end-to-end
 interoperability matrix implements the extension (OpenSSL, GnuTLS and Go
 ignore it), so it is tested between browntls peers only, on both
 providers, with the Tokio streams and through the `browntls` facade.

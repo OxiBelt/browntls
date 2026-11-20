@@ -214,6 +214,37 @@ fn a_tls13_only_client_does_not_send_the_list() {
     assert_eq!(trusted_ca_keys_ext(&take_flight(&mut client), true), None);
 }
 
+/// QUIC carries TLS 1.3 only (RFC 9001 §4.2), so a QUIC client sends no
+/// `trusted_ca_keys` even when its configuration also allows TLS 1.2.
+#[cfg(feature = "tls12")]
+#[test]
+fn a_quic_client_does_not_send_the_list() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut config = client_trusting(
+        &[&chain],
+        &[&version::TLS13, &version::TLS12],
+        Some(ids_for(&chain)),
+    );
+    config.alpn_protocols = vec![b"h3".to_vec()];
+    let mut client = browntls_core::quic::ClientConnection::new(
+        Arc::new(config),
+        browntls_core::quic::Version::V1,
+        server_name(),
+        b"params".to_vec(),
+    )
+    .unwrap();
+    let mut hello = Vec::new();
+    client.write_hs(&mut hello);
+    assert_eq!(hello[0], 1, "not a ClientHello");
+    // Put the handshake message in a record so the wire helpers read it.
+    let mut record = vec![22, 3, 3];
+    record.extend(u16::try_from(hello.len()).unwrap().to_be_bytes());
+    record.extend(hello);
+    let types = hello_extension_types(&record, true);
+    assert!(types.contains(&0x0039), "no QUIC transport parameters");
+    assert!(!types.contains(&EXT_TRUSTED_CA_KEYS), "{types:x?}");
+}
+
 /// A list that a server would refuse, or that cannot be encoded, fails
 /// connection creation, on the buffered and the unbuffered API.
 #[test]

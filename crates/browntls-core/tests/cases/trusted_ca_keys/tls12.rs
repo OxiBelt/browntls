@@ -216,6 +216,37 @@ mod tls12 {
         }
     }
 
+    /// The roots of A and B share their subject name, as an old and a new
+    /// root do after a CA key rollover. A hash the client lists wins over
+    /// the name, wherever it stands in either list; the name alone selects
+    /// the first chain registered.
+    #[test]
+    fn a_hash_match_wins_over_a_shared_name() {
+        let s = setup();
+        let name = TrustedAuthority::x509_name(&s.b.ca).unwrap();
+        assert_eq!(name, TrustedAuthority::x509_name(&s.a.ca).unwrap());
+        let mut roots = RootCertStore::empty();
+        roots.add(s.b.ca.clone()).unwrap();
+        let key_b = TrustedAuthority::key_sha1_hash_of_anchor(&roots.roots[0], sha1).unwrap();
+        let cases = [
+            (
+                vec![
+                    name.clone(),
+                    TrustedAuthority::cert_sha1_hash(&s.b.ca, sha1),
+                ],
+                &s.b,
+            ),
+            (vec![name.clone(), key_b], &s.b),
+            (vec![name], &s.a),
+        ];
+        for (list, chain) in cases {
+            let (mut client, mut server) = connect(s.client(Some(list.clone())), s.server());
+            handshake(&mut client, &mut server);
+            assert!(client.trusted_ca_keys_acknowledged(), "{list:?}");
+            assert_eq!(served(&client), chain.end_entity, "{list:?}");
+        }
+    }
+
     /// No list, an empty list, or a list naming none of the registered
     /// roots: the fallback chain, without acknowledgement.
     #[test]

@@ -115,6 +115,11 @@ impl TrustedAuthority {
     /// compares the DER bytes of the subject name. `pre_agreed` names no
     /// certificate and never matches; neither does a certificate that
     /// cannot be parsed, for the identifiers that need parsing.
+    ///
+    /// Each call hashes or parses `ca_cert` again. To compare a client's
+    /// list, which may hold up to 1024 entries, with known roots on every
+    /// handshake, derive the roots' identifiers once and compare them with
+    /// `==` instead.
     pub fn matches_certificate(
         &self,
         ca_cert: &CertificateDer<'_>,

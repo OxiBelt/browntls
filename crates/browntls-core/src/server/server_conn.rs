@@ -236,6 +236,21 @@ pub struct ServerConfig {
     /// [`crate::cached_info`].
     pub cached_info: crate::cached_info::ServerCachedInfoPolicy,
 
+    /// Whether to send GREASE values (RFC 8701 §4.1) in the two TLS 1.3
+    /// messages whose extension points a server offers. A
+    /// CertificateRequest, during the handshake or after it, then lists a
+    /// GREASE signature scheme first in `signature_algorithms` and carries
+    /// two GREASE extensions (an empty one first, a one-byte one last); a
+    /// NewSessionTicket carries the same two extensions. The values are
+    /// random per message. TLS 1.2 messages carry none.
+    ///
+    /// Off by default, like [`ClientConfig::enable_grease`]: a client
+    /// that mishandles unknown values would fail client authentication or
+    /// lose its tickets.
+    ///
+    /// [`ClientConfig::enable_grease`]: crate::ClientConfig::enable_grease
+    pub enable_grease: bool,
+
     pub(super) versions: EnabledVersions,
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,

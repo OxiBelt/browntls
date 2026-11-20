@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use super::client_auth::client_auth_sigschemes;
 use crate::common_state::{CommonState, ConnectionRandoms};
 use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{AlertDescription, CertificateType, ProtocolVersion, SignatureScheme};
@@ -13,6 +14,7 @@ use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, NamedGroup};
+use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
     ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
@@ -266,21 +268,27 @@ pub(super) fn emit_certificate_req_tls13(
 }
 
 /// A CertificateRequest with `context` (empty during the handshake, RFC
-/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities.
+/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities,
+/// and GREASE values (RFC 8701 §4.1) when the configuration enables them.
 pub(super) fn certificate_request_message(
     config: &ServerConfig,
     context: Vec<u8>,
 ) -> Result<Message<'static>, Error> {
-    let schemes: Vec<SignatureScheme> = config
-        .verifier
-        .supported_verify_schemes()
-        .into_iter()
-        .filter(SignatureScheme::supported_in_tls13)
-        .collect();
+    let mut schemes = client_auth_sigschemes(config);
     if schemes.is_empty() {
         return Err(Error::general(
             "client certificate verifier supports no TLS 1.3 signature schemes",
         ));
+    }
+    // The GREASE scheme is only in the message: a CertificateVerify is
+    // checked against `client_auth_sigschemes`, which never holds one, so
+    // a client that signs with it is refused like any scheme not offered.
+    let grease = config
+        .enable_grease
+        .then(|| ServerGreaseValues::random(config.provider.secure_random))
+        .transpose()?;
+    if let Some(grease) = &grease {
+        schemes.insert(0, SignatureScheme::Unknown(grease.signature_scheme));
     }
     let authorities = config.verifier.root_hint_subjects();
     // RFC 8446 §4.4.2.1: ask for the client's OCSP responses, and its SCTs,
@@ -297,6 +305,8 @@ pub(super) fn certificate_request_message(
             ),
             status_request: evidence,
             sct_request: evidence,
+            grease_first: grease.map(|g| g.first_extension),
+            grease_last: grease.map(|g| g.last_extension),
             ..Default::default()
         },
     };

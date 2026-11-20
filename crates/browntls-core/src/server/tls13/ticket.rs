@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::hash_hs::HandshakeHash;
 use crate::log::{trace, warning};
 use crate::msgs::codec::Codec;
+use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     HandshakeMessagePayload, HandshakePayload, NewSessionTicketPayloadTls13,
 };
@@ -67,6 +68,13 @@ pub(super) fn emit_ticket(
     let rng = config.provider.secure_random;
     let nonce = crate::rand::random_vec(rng, 32)?;
     let age_add = crate::rand::random_u32(rng)?;
+    // RFC 8701 §4.1: GREASE extensions, fresh for every ticket. Drawn with
+    // the other random values, before the session is stored: nothing that
+    // can fail follows the store.
+    let grease = config
+        .enable_grease
+        .then(|| ServerGreaseValues::random(rng))
+        .transpose()?;
     let secret = key_schedule
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
@@ -122,6 +130,10 @@ pub(super) fn emit_ticket(
         } else {
             payload.exts.max_early_data_size = Some(config.max_early_data_size);
         }
+    }
+    if let Some(grease) = grease {
+        payload.exts.grease_first = Some(grease.first_extension);
+        payload.exts.grease_last = Some(grease.last_extension);
     }
     let m = Message {
         version: ProtocolVersion::TLSv1_3,

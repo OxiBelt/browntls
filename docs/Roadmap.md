@@ -147,6 +147,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   `extended_master_secret` is accepted, as RFC 7627 §5.3 allows, instead of
   being refused; and renegotiation is never performed (a HelloRequest after
   the handshake is answered with `no_renegotiation`, RFC 5746 §4.2).
+- The RFC 6066 `truncated_hmac` extension is recognised but never offered or
+  acknowledged, on purpose (RFC 9325 §4.6 forbids its use); see
+  [Architecture](Architecture.md#tls-12-only-extensions-of-rfc-6066).
 - Known deviations from RFC 9846 in the TLS 1.3 implementation, deliberate:
   a peer that sends more than eight `update_requested` KeyUpdates without
   non-empty application data in between is cut off with `unexpected_message`

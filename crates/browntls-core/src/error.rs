@@ -204,6 +204,9 @@ pub enum InvalidMessage {
     /// A `transparency_info` extension whose body is not a well-formed
     /// `TransItemList` (RFC 9162 §6.3, §6.5).
     InvalidTransItemList,
+    /// A `trusted_ca_keys` entry of an identifier type RFC 6066 §6 does not
+    /// define. Such an entry has no length of its own and cannot be skipped.
+    UnknownTrustedAuthorityType,
 }
 
 impl From<InvalidMessage> for Error {

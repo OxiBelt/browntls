@@ -5,6 +5,7 @@ mod extensions;
 mod hello;
 mod kx;
 mod tickets;
+mod trusted_ca;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -31,6 +32,9 @@ pub(crate) use kx::{
     ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangeParams,
 };
 pub(crate) use tickets::{NewSessionTicketPayload, NewSessionTicketPayloadTls13};
+pub(crate) use trusted_ca::{
+    TrustedAuthority, encode_trusted_authorities, read_trusted_authorities,
+};
 
 use super::base::{Payload, PayloadU16};
 use super::codec::{Codec, Reader, u24};

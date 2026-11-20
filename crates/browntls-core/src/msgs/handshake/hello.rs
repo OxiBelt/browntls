@@ -6,7 +6,8 @@ use super::extensions::{encode_extension, read_extensions};
 use super::{
     CertificateStatusRequest, ClientSessionTicket, ClientTicketRequest, DistinguishedName,
     HandshakePayload, KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random,
-    ServerExtensions, ServerNamePayload, SessionId, read_payload,
+    ServerExtensions, ServerNamePayload, SessionId, TrustedAuthority, encode_trusted_authorities,
+    read_payload, read_trusted_authorities,
 };
 use crate::ech::codec::EchClientHello;
 use crate::enums::{
@@ -46,6 +47,15 @@ pub(crate) struct ClientExtensions {
     pub(crate) extended_master_secret: Option<()>,
     /// RFC 7366: an empty `encrypt_then_mac` extension.
     pub(crate) encrypt_then_mac: Option<()>,
+    /// RFC 6066 §5: an empty `client_certificate_url` extension (TLS 1.2).
+    pub(crate) client_certificate_url: Option<()>,
+    /// RFC 6066 §6: the root keys the client says it possesses (TLS 1.2).
+    /// The list may be empty.
+    pub(crate) trusted_ca_keys: Option<Vec<TrustedAuthority>>,
+    /// RFC 6066 §7: an empty `truncated_hmac` extension. Parsed so that a
+    /// malformed one is refused; never sent and never acknowledged
+    /// (RFC 9325 §4.6).
+    pub(crate) truncated_hmac: Option<()>,
     pub(crate) session_ticket: Option<ClientSessionTicket>,
     pub(crate) supported_versions: Option<Vec<ProtocolVersion>>,
     pub(crate) key_shares: Option<Vec<KeyShareEntry>>,
@@ -141,6 +151,12 @@ impl ClientExtensions {
             self.encrypt_then_mac.is_some(),
             ExtensionType::EncryptThenMac,
         );
+        add(
+            self.client_certificate_url.is_some(),
+            ExtensionType::ClientCertificateUrl,
+        );
+        add(self.trusted_ca_keys.is_some(), ExtensionType::TrustedCAKeys);
+        add(self.truncated_hmac.is_some(), ExtensionType::TruncatedHMAC);
         add(self.session_ticket.is_some(), ExtensionType::SessionTicket);
         add(
             self.supported_versions.is_some(),
@@ -265,6 +281,17 @@ impl Codec<'_> for ClientExtensions {
         }
         if self.encrypt_then_mac.is_some() {
             encode_extension(ExtensionType::EncryptThenMac, out, |_| {});
+        }
+        if self.client_certificate_url.is_some() {
+            encode_extension(ExtensionType::ClientCertificateUrl, out, |_| {});
+        }
+        if let Some(authorities) = &self.trusted_ca_keys {
+            encode_extension(ExtensionType::TrustedCAKeys, out, |b| {
+                encode_trusted_authorities(authorities, b);
+            });
+        }
+        if self.truncated_hmac.is_some() {
+            encode_extension(ExtensionType::TruncatedHMAC, out, |_| {});
         }
         if let Some(ticket) = &self.session_ticket {
             encode_extension(ExtensionType::SessionTicket, out, |b| match ticket {
@@ -402,6 +429,11 @@ impl Codec<'_> for ClientExtensions {
                 ExtensionType::TransparencyInfo => out.transparency_info = Some(()),
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
                 ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
+                ExtensionType::ClientCertificateUrl => out.client_certificate_url = Some(()),
+                ExtensionType::TrustedCAKeys => {
+                    out.trusted_ca_keys = Some(read_trusted_authorities(body)?);
+                }
+                ExtensionType::TruncatedHMAC => out.truncated_hmac = Some(()),
                 ExtensionType::SessionTicket => {
                     out.session_ticket = Some(if body.any_left() {
                         ClientSessionTicket::Offer(Payload::read(body).into_owned())

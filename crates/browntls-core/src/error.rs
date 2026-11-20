@@ -102,6 +102,21 @@ pub enum Error {
     /// sent `ech_required`. The error carries the server's retry
     /// configurations, if any, for a new connection.
     RejectedEch(crate::ech::RejectedEch),
+
+    /// A value given to
+    /// [`ExternalSessionId::new`](crate::external_binding::ExternalSessionId::new)
+    /// is not 20 to 255 bytes long (RFC 8844 §4.3).
+    BadExternalSessionIdLength,
+
+    /// A client [`ExternalBinding`](crate::external_binding::ExternalBinding)
+    /// expects the server's `external_session_id` without a `session_id` of
+    /// its own: the server only answers an extension the client sent, so
+    /// the expectation could never be met.
+    InconsistentExternalBinding,
+
+    /// The client certificate chain named by URL could not be used (RFC 6066
+    /// §5).
+    CertificateUrl(crate::certificate_url::CertificateUrlError),
 }
 
 /// Reasons a private key and certificate may not go together.
@@ -185,6 +200,23 @@ pub enum InvalidMessage {
     DisallowedCertificateExtension,
     /// A malformed `ECHConfigList` or `ECHConfig` (RFC 9849 §4).
     InvalidEchConfig,
+    /// An `external_id_hash` whose hash is neither empty nor 32 bytes long
+    /// (RFC 8844 §3.2).
+    InvalidExternalIdHash,
+    /// An `external_session_id` outside 20 to 255 bytes (RFC 8844 §4.3).
+    InvalidExternalSessionId,
+    /// A `transparency_info` extension whose body is not a well-formed
+    /// `TransItemList` (RFC 9162 §6.3, §6.5).
+    InvalidTransItemList,
+    /// A `trusted_ca_keys` entry of an identifier type RFC 6066 §6 does not
+    /// define. Such an entry has no length of its own and cannot be skipped.
+    UnknownTrustedAuthorityType,
+    /// A CertificateURL of a `CertChainType` RFC 6066 §5 does not define.
+    UnknownCertChainType,
+    /// A CertificateURL `padding` byte other than 0x01 (RFC 6066 §5).
+    IllegalCertificateUrlPadding,
+    /// A `pkipath` CertificateURL with other than one URL (RFC 6066 §5).
+    IllegalPkiPathUrlCount,
 }
 
 impl From<InvalidMessage> for Error {
@@ -208,6 +240,8 @@ impl From<InvalidMessage> for AlertDescription {
             // RFC 9846 §5: a change_cipher_spec record whose value is not
             // 0x01 MUST abort the handshake with unexpected_message.
             InvalidMessage::InvalidCcs => Self::UnexpectedMessage,
+            InvalidMessage::IllegalCertificateUrlPadding
+            | InvalidMessage::IllegalPkiPathUrlCount => Self::IllegalParameter,
             _ => Self::DecodeError,
         }
     }
@@ -358,6 +392,12 @@ pub enum PeerMisbehaved {
     /// offer `post_handshake_auth` (RFC 9846 §4.7.2).
     UnsolicitedPostHandshakeCertificateRequest,
     UnsolicitedSctList,
+    /// A `transparency_info` extension the client did not offer, in a
+    /// CertificateEntry (RFC 9162 §6.5).
+    UnsolicitedTransparencyInfo,
+    /// A TLS 1.2 ServerHello resuming a session carried
+    /// `transparency_info` (RFC 9162 §6.5, §8.1.1).
+    TransparencyInfoOnResumption,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
     /// The server accepted 0-RTT although it did not select the first PSK
@@ -369,6 +409,21 @@ pub enum PeerMisbehaved {
     /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
+    /// The peer's `external_id_hash` differs from the one expected
+    /// (RFC 8844 §3.2).
+    ExternalIdHashMismatch,
+    /// The peer's `external_session_id` differs from the one expected
+    /// (RFC 8844 §4.3).
+    ExternalSessionIdMismatch,
+    /// The second ClientHello changed, added or dropped an RFC 8844
+    /// extension of the first (RFC 9846 §4.1.2).
+    ExternalBindingChangedOnRetry,
+    /// The server's `cached_info` listed a type we offered no object of, or
+    /// a type twice (RFC 7924 §4).
+    SelectedUnofferedCachedInfo,
+    /// A Certificate or CertificateRequest in hash form carried a hash we
+    /// did not offer (RFC 7924 §4.1, §4.2).
+    UnofferedCachedInfoFingerprint,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -414,6 +469,16 @@ pub enum PeerIncompatible {
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).
     ExternalPskRequired,
+    /// The peer sent no `external_id_hash` although one is expected and
+    /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §3.2).
+    ///
+    /// [`ExternalBinding::require_peer_support`]: crate::external_binding::ExternalBinding::require_peer_support
+    ExternalIdHashExtensionRequired,
+    /// The peer sent no `external_session_id` although one is expected and
+    /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §4.3).
+    ///
+    /// [`ExternalBinding::require_peer_support`]: crate::external_binding::ExternalBinding::require_peer_support
+    ExternalSessionIdExtensionRequired,
 }
 
 impl From<PeerIncompatible> for Error {
@@ -484,6 +549,20 @@ pub enum CertificateError {
     ApplicationVerificationFailure,
     /// Some other reason.
     Other(OtherError),
+    /// The certificate's Certificate Transparency 2.0 evidence (RFC 9162
+    /// §8.1.6) does not meet the verifier's requirements: too few SCTs
+    /// counted, or from too few distinct logs. When the requirements ask
+    /// for inclusion, only SCTs with proven inclusion are counted.
+    InsufficientTransparency {
+        /// The SCTs that counted.
+        counted_scts: usize,
+        /// The distinct logs of the SCTs that counted.
+        distinct_logs: usize,
+    },
+    /// Certificate Transparency 2.0 evidence (RFC 9162) could not be
+    /// verified: a list is malformed or too large, or verification went
+    /// over one of its budgets.
+    InvalidTransparencyEvidence(browntls_pki::transparency::TransparencyError),
 }
 
 impl From<CertificateError> for AlertDescription {
@@ -506,7 +585,8 @@ impl From<CertificateError> for AlertDescription {
             BadSignature | UnsupportedSignatureAlgorithm => Self::DecryptError,
             InvalidPurpose => Self::UnsupportedCertificate,
             ApplicationVerificationFailure => Self::AccessDenied,
-            Other(..) => Self::CertificateUnknown,
+            InvalidTransparencyEvidence(_) => Self::BadCertificate,
+            Other(..) | InsufficientTransparency { .. } => Self::CertificateUnknown,
         }
     }
 }
@@ -681,9 +761,16 @@ impl fmt::Display for Error {
             Self::BadTls13TicketLimit => {
                 f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
             }
+            Self::BadExternalSessionIdLength => {
+                f.write_str("the supplied external_session_id is not 20 to 255 bytes long")
+            }
+            Self::InconsistentExternalBinding => {
+                f.write_str("a client expecting the server's external_session_id must send its own")
+            }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),
             Self::Other(err) => write!(f, "other error: {err}"),
+            Self::CertificateUrl(e) => write!(f, "client certificate URL: {e}"),
             Self::RejectedEch(r) => write!(
                 f,
                 "server rejected encrypted client hello ({})",

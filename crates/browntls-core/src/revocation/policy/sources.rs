@@ -25,24 +25,10 @@ pub(super) mod digests {
         out
     }
 
-    #[cfg(feature = "native")]
-    pub(in super::super) fn native_sha1(data: &[u8]) -> [u8; 20] {
-        use browntls_crypto::hash::{HashFunction, Sha1};
-        let mut out = [0u8; 20];
-        out.copy_from_slice(Sha1::digest(data).as_ref());
-        out
-    }
-
     #[cfg(feature = "rustcrypto")]
     pub(in super::super) fn rustcrypto_sha256(data: &[u8]) -> [u8; 32] {
         use sha2::Digest;
         sha2::Sha256::digest(data).into()
-    }
-
-    #[cfg(feature = "rustcrypto")]
-    pub(in super::super) fn rustcrypto_sha1(data: &[u8]) -> [u8; 20] {
-        use sha1::Digest;
-        sha1::Sha1::digest(data).into()
     }
 }
 

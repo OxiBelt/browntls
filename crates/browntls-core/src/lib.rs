@@ -74,6 +74,8 @@ mod msgs;
 #[macro_use]
 mod check;
 mod builder;
+pub mod cached_info;
+pub mod certificate_url;
 mod common_state;
 pub mod compress;
 mod conn;
@@ -84,6 +86,7 @@ pub mod ech;
 mod enums;
 mod error;
 pub mod exported_authenticator;
+pub mod external_binding;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -107,6 +110,8 @@ pub mod ticketer;
 #[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
+pub mod transparency;
+mod trusted_ca_keys;
 pub mod unbuffered;
 mod vecbuf;
 mod verify;
@@ -132,6 +137,7 @@ pub use crate::key_log::{KeyLog, NoKeyLog};
 pub use crate::key_log_file::KeyLogFile;
 pub use crate::msgs::enums::NamedGroup;
 pub use crate::msgs::handshake::DistinguishedName;
+pub use crate::msgs::handshake::TrustedAuthority;
 #[cfg(feature = "std")]
 pub use crate::stream::{Stream, StreamOwned};
 pub use crate::suites::{
@@ -154,6 +160,7 @@ pub mod client {
     #[cfg(feature = "tls12")]
     mod tls12;
     pub(crate) mod tls13;
+    mod transparency;
 
     pub use builder::WantsClientCert;
     pub use client_conn::{
@@ -197,6 +204,7 @@ pub mod server {
     #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
+    mod trusted_ca;
 
     pub use builder::WantsServerCert;
     pub use handy::NoServerSessionStorage;
@@ -209,6 +217,8 @@ pub mod server {
         ServerConnectionData, StoresServerSessions, UnbufferedAcceptStatus, UnbufferedAccepted,
         UnbufferedAcceptedAlert, UnbufferedAcceptor, UnbufferedServerConnection,
     };
+
+    pub use trusted_ca::ResolvesServerCertUsingTrustedCaKeys;
 
     pub use crate::verify::NoClientAuth;
     pub use crate::webpki::{

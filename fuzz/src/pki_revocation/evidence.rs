@@ -65,6 +65,7 @@ pub(super) fn ocsp(fixture: &Fixture, bytes: &[u8]) {
     assert_eq!(single.this_update(), time(THIS_UPDATE));
     assert_eq!(single.next_update(), Some(time(NEXT_UPDATE)));
     assert_eq!(single.sct_list(), Some(fixture.scts.as_slice()));
+    assert_eq!(single.transparency_info(), None);
     assert_eq!(basic.produced_at(), time(THIS_UPDATE));
     assert!(matches!(basic.responder_id(), ResponderId::ByKey(key) if key.len() == 20));
     assert_eq!(basic.certificates().count(), 0);

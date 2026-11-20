@@ -1,5 +1,7 @@
 //! The server handshake up to version and suite negotiation.
 
+mod select;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -13,8 +15,8 @@ use crate::common_state::{ConnectionRandoms, KxState};
 use crate::conn::{Context, State};
 use crate::crypto::{KeyExchangeAlgorithm, SupportedKxGroup};
 use crate::enums::{
-    AlertDescription, CertificateType, CipherSuite, HandshakeType, ProtocolVersion,
-    SignatureAlgorithm, SignatureScheme,
+    AlertDescription, CipherSuite, HandshakeType, ProtocolVersion, SignatureAlgorithm,
+    SignatureScheme,
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
@@ -29,6 +31,11 @@ use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
+
+pub(super) use select::{
+    NegotiatedCertTypes, kx_groups_by_preference, record_size_limit_ack, tls13_tickets_to_send,
+};
+use select::{choose_kx_group, negotiate_cert_type};
 
 pub(super) type NextState = Box<dyn State<ServerConnectionData>>;
 pub(super) type NextStateOrError = Result<NextState, Error>;
@@ -406,14 +413,16 @@ impl ExpectClientHello {
         // Choose the certificate. RFC 9846 §4.3.3: a client that wants
         // certificate authentication sends signature_algorithms; one that
         // offered only a PSK may omit it (see `process_client_hello`).
+        // The resolver may say it chose with the client's trusted_ca_keys
+        // (RFC 6066 §6); only a full TLS 1.2 handshake acts on that.
+        let trusted_ca_keys_ack = core::sync::atomic::AtomicBool::new(false);
         let certkey = if sig_schemes.is_empty() {
             None
         } else {
-            self.config.cert_resolver.resolve(ClientHello::new(
-                cx.data.sni.as_ref(),
-                &sig_schemes,
-                client_hello,
-            ))
+            self.config.cert_resolver.resolve(
+                ClientHello::new(cx.data.sni.as_ref(), &sig_schemes, client_hello)
+                    .with_trusted_ca_keys_ack(&trusted_ca_keys_ack),
+            )
         };
         if sig_schemes.is_empty() && !psk_may_authenticate {
             return Err(cx.common.send_fatal_alert(
@@ -732,6 +741,7 @@ impl ExpectClientHello {
                     randoms,
                     send_ticket: self.send_tickets > 0,
                     cert_types,
+                    trusted_ca_keys_ack: trusted_ca_keys_ack.into_inner(),
                 }
                 .handle_client_hello(
                     cx,
@@ -760,137 +770,6 @@ pub(super) fn no_server_certificate(cx: &mut ServerContext<'_>) -> Error {
         },
         Error::general("no server certificate chain resolved"),
     )
-}
-
-/// The `record_size_limit` to send for `version` (RFC 8449 §4): our
-/// configured value, clamped to the protocol maximum, when the client sent
-/// the extension and the configuration has one.
-pub(super) fn record_size_limit_ack(
-    config: &ServerConfig,
-    client_hello: &ClientHelloPayload,
-    version: ProtocolVersion,
-) -> Option<u16> {
-    client_hello.extensions.record_size_limit?;
-    let max = crate::common_state::max_record_size_limit(version == ProtocolVersion::TLSv1_3);
-    config.record_size_limit.map(|limit| limit.min(max))
-}
-
-/// How many TLS 1.3 tickets to send, and the RFC 9149 `expected_count` to
-/// announce in EncryptedExtensions when the client sent `ticket_request`.
-///
-/// RFC 9846 §4.7.1: tickets go only to a client whose ClientHello carried a
-/// suitable `psk_key_exchange_modes`; `psk_dhe_ke` is the only mode we
-/// resume with. RFC 9149 §3: no more tickets than the client asked for, for
-/// a resumed session (`resumption_count`) or a new one
-/// (`new_session_count`, also when we declined the offered PSK), and never
-/// more than `send_tls13_tickets`, our own maximum.
-pub(super) fn tls13_tickets_to_send(
-    config: &ServerConfig,
-    client_hello: &ClientHelloPayload,
-    resumed: bool,
-) -> (usize, Option<u8>) {
-    let client_takes_tickets = client_hello
-        .extensions
-        .psk_modes
-        .as_ref()
-        .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
-    let ours = if client_takes_tickets {
-        config.send_tls13_tickets
-    } else {
-        0
-    };
-    match client_hello.extensions.ticket_request {
-        Some(request) => {
-            let wanted = match resumed {
-                true => request.resumption_count,
-                false => request.new_session_count,
-            };
-            let count = ours.min(usize::from(wanted));
-            // `count` is at most `wanted`, a u8.
-            (count, u8::try_from(count).ok())
-        }
-        None => (ours, None),
-    }
-}
-
-/// The RFC 7250 certificate types to announce, one per direction; `None`
-/// when the client did not raise the question.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct NegotiatedCertTypes {
-    pub(super) client: Option<CertificateType>,
-    pub(super) server: Option<CertificateType>,
-}
-
-/// Picks a certificate type from what the client supports. A side configured
-/// for raw public keys only accepts a client that offers them; otherwise X.509
-/// is used (and the client must allow it when it sent the extension at all).
-fn negotiate_cert_type(
-    client_supports: &[CertificateType],
-    requires_raw_keys: bool,
-    cx: &mut ServerContext<'_>,
-) -> Result<Option<CertificateType>, Error> {
-    let raw = client_supports.contains(&CertificateType::RawPublicKey);
-    let x509 = client_supports.contains(&CertificateType::X509);
-    match (requires_raw_keys, raw, x509) {
-        (true, true, _) => Ok(Some(CertificateType::RawPublicKey)),
-        (false, _, true) => Ok(Some(CertificateType::X509)),
-        (false, false, false) => Ok(None),
-        (true, false, _) | (false, true, false) => Err(cx.common.send_fatal_alert(
-            AlertDescription::HandshakeFailure,
-            PeerIncompatible::IncorrectCertificateTypeExtension,
-        )),
-    }
-}
-
-/// Picks the key exchange group, preferred groups before the non-preferred
-/// tier ([`NamedGroup::is_non_preferred`]): within a tier, for TLS 1.3 the
-/// first of our groups the client sent a key share for, otherwise the first
-/// group both support (a HelloRetryRequest will ask for its share). A key
-/// share for a non-preferred group is therefore not accepted while a
-/// preferred group is mutually supported.
-fn choose_kx_group(
-    ours: &[&'static dyn SupportedKxGroup],
-    theirs: &[NamedGroup],
-    client_hello: &ClientHelloPayload,
-    version: ProtocolVersion,
-) -> Option<&'static dyn SupportedKxGroup> {
-    let usable = |g: &&'static dyn SupportedKxGroup| {
-        theirs.contains(&g.name()) && g.usable_for_version(version)
-    };
-    for non_preferred in [false, true] {
-        let in_tier = |g: &&'static dyn SupportedKxGroup| {
-            usable(g) && g.name().is_non_preferred() == non_preferred
-        };
-        if version == ProtocolVersion::TLSv1_3
-            && let Some(shares) = client_hello.key_shares()
-            && let Some(with_share) = ours
-                .iter()
-                .copied()
-                .find(|g| in_tier(g) && shares.iter().any(|s| s.group == g.name()))
-        {
-            return Some(with_share);
-        }
-        if let Some(group) = ours.iter().copied().find(in_tier) {
-            return Some(group);
-        }
-    }
-    None
-}
-
-/// Our groups usable with `version`, in preference order: the preferred
-/// tier, then the non-preferred one, each in configuration order.
-pub(super) fn kx_groups_by_preference(
-    ours: &[&'static dyn SupportedKxGroup],
-    version: ProtocolVersion,
-) -> Vec<&'static dyn SupportedKxGroup> {
-    [false, true]
-        .into_iter()
-        .flat_map(|non_preferred| {
-            ours.iter().copied().filter(move |g| {
-                g.usable_for_version(version) && g.name().is_non_preferred() == non_preferred
-            })
-        })
-        .collect()
 }
 
 impl State<ServerConnectionData> for ExpectClientHello {

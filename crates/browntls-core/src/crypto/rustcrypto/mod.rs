@@ -44,6 +44,17 @@ pub fn default_provider() -> CryptoProvider {
     }
 }
 
+/// SHA-1 of `data` (FIPS 180-4), in one call.
+///
+/// For the identifiers that older specifications define with SHA-1 and
+/// that only name a key or a certificate: OCSP certificate identifiers
+/// (RFC 5019) and the hashes of RFC 6066 (`trusted_ca_keys`,
+/// `client_certificate_url`). Nothing is signed or authenticated with it.
+pub fn sha1(data: &[u8]) -> [u8; 20] {
+    use ::sha1::Digest;
+    ::sha1::Sha1::digest(data).into()
+}
+
 /// The provider's random source and key loader.
 #[derive(Debug)]
 pub struct RustCrypto;
@@ -179,6 +190,18 @@ pub static SUPPORTED_SIG_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgori
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FIPS 180-4 example: SHA-1("abc").
+    #[test]
+    fn sha1_of_abc() {
+        assert_eq!(
+            sha1(b"abc"),
+            [
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+            ]
+        );
+    }
 
     #[test]
     fn provider_is_consistent() {

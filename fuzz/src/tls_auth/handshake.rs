@@ -166,9 +166,10 @@ pub(super) fn handshake(input: &mut Input) {
     let mut server = ServerConnection::new(Arc::new(server_config)).expect("server");
     let (client_res, server_res) = pump(&mut client, &mut server);
 
-    // The server sends the credential only inside its own window.
+    // The server sends the credential only inside its own window, and
+    // within the certificate's validity.
     let expiry = nb + u64::from(dc.credential.valid_time);
-    let sent = server_now < expiry && expiry <= server_now + week;
+    let sent = server_now < expiry && expiry <= server_now + week && expiry <= na;
     if !sent {
         assert!(
             client_res.is_ok() && server_res.is_ok(),

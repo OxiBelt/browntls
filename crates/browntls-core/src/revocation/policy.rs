@@ -44,7 +44,7 @@ impl RevocationDigests {
     pub fn native() -> Self {
         Self {
             sha256: sources::digests::native_sha256,
-            sha1: Some(sources::digests::native_sha1),
+            sha1: Some(crate::crypto::native::sha1),
         }
     }
 
@@ -53,7 +53,7 @@ impl RevocationDigests {
     pub fn rustcrypto() -> Self {
         Self {
             sha256: sources::digests::rustcrypto_sha256,
-            sha1: Some(sources::digests::rustcrypto_sha1),
+            sha1: Some(crate::crypto::rustcrypto::sha1),
         }
     }
 }

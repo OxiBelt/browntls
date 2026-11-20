@@ -145,6 +145,27 @@ pub struct ClientConfig {
     /// extension. Irrelevant unless the provider offers a CBC suite.
     pub allow_mac_then_encrypt: bool,
 
+    /// The `trusted_ca_keys` extension (RFC 6066 §6): the CA root keys we
+    /// possess, so that a TLS 1.2 server may choose a certificate chain
+    /// ending in one of them. `None` (the default) sends no extension;
+    /// `Some(vec![])` sends an empty list, which claims a set of root keys
+    /// agreed by other means. See [`TrustedAuthority`](crate::TrustedAuthority)
+    /// for building identifiers from certificates or trust anchors.
+    ///
+    /// The extension exists in TLS 1.2 only: it is sent only when TLS 1.2
+    /// is offered (never over QUIC, nor in the inner ClientHello of
+    /// Encrypted Client Hello), and a TLS 1.3 server ignores it. Whether a
+    /// server acknowledged it is
+    /// [`ClientConnection::trusted_ca_keys_acknowledged`](crate::ClientConnection::trusted_ca_keys_acknowledged).
+    /// A list of more than 1024 entries (more than a server built from this
+    /// crate accepts), one that does not fit in a ClientHello, or one that
+    /// holds an empty `x509_name`, makes connection creation fail.
+    ///
+    /// Privacy (RFC 6066 §11.4): the list is sent in the clear and tells
+    /// anyone watching which root keys this client trusts, which can
+    /// identify the client or its configuration.
+    pub trusted_ca_keys: Option<Vec<crate::TrustedAuthority>>,
+
     /// The clock.
     pub time_provider: Arc<dyn TimeProvider>,
 
@@ -183,6 +204,15 @@ pub struct ClientConfig {
     /// Off by default.
     pub enable_delegated_credentials: bool,
 
+    /// Whether to offer the `transparency_info` extension (RFC 9162 §6.5)
+    /// even when the verifier does not ask for it
+    /// ([`ServerCertVerifier::requests_transparency_info`]), to obtain the
+    /// server's Certificate Transparency 2.0 items unverified
+    /// ([`UnbufferedClientConnection::peer_transparency_info`]). Never
+    /// offered when the verifier requires raw public keys. Off by default.
+    /// See [`crate::transparency`].
+    pub request_transparency_info: bool,
+
     /// The `record_size_limit` to announce (RFC 8449): the largest record
     /// plaintext we accept, counting the content type in TLS 1.3. `None`
     /// sends no extension, and then the server's limit is not learnt
@@ -202,6 +232,22 @@ pub struct ClientConfig {
     /// number of tickets.
     pub tls13_ticket_request: Option<TicketRequest>,
 
+    /// External session and identity binding (RFC 8844): our
+    /// `external_id_hash` and `external_session_id` to send, and the
+    /// server's values to expect. `None` (the default) sends neither
+    /// extension. The values belong to one connection: clone the
+    /// configuration per connection. Connection creation fails with
+    /// [`Error::InconsistentExternalBinding`] if the server's session
+    /// identifier is expected without one of ours.
+    ///
+    /// With a binding the connection neither resumes a session nor keeps
+    /// one (RFC 8844 §5: nothing of one TLS connection is used in another,
+    /// even of the same signaling session), and sends no early data, even
+    /// with [`Self::enable_early_data`]: the server would read it before
+    /// its answer is checked. [`Self::external_psks`] are still offered.
+    /// See [`crate::external_binding`].
+    pub external_binding: Option<crate::external_binding::ExternalBinding>,
+
     /// The most valid TLS 1.3 tickets accepted for storage on one
     /// connection, including after kernel handoff. Later tickets are
     /// ignored; zero accepts none. Defaults to 8, and values above 255
@@ -219,6 +265,15 @@ pub struct ClientConfig {
 
     /// How the ClientHello is padded with the `padding` extension (RFC 7685).
     pub client_hello_padding: ClientHelloPadding,
+
+    /// Where TLS 1.2 server Certificate and CertificateRequest messages are
+    /// kept for RFC 7924 `cached_info`; `None` (the default) sends no
+    /// `cached_info` extension. With a store, a ClientHello that offers TLS
+    /// 1.2 carries the fingerprints the store holds for the server name
+    /// (in the clear: they let an observer link connections), and messages
+    /// received in full in completed TLS 1.2 handshakes are stored. See
+    /// [`crate::cached_info`].
+    pub cached_info: Option<Arc<dyn crate::cached_info::ClientCachedInfoStore>>,
 
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
@@ -256,6 +311,19 @@ pub struct ClientConfig {
     /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
     /// once the handshake completes.
     pub require_external_psk: bool,
+
+    /// Whether to offer a TLS 1.2 server certificate URLs in place of the
+    /// client certificate chain (RFC 6066 §5, `client_certificate_url`). Off
+    /// by default.
+    ///
+    /// The extension is sent only when TLS 1.2 is offered and the client
+    /// certificate resolver has certificates; a CertificateURL message only
+    /// when the server acknowledged it, asked for a certificate, and the
+    /// resolved key carries URLs
+    /// ([`CertifiedKey::set_certificate_url`](crate::sign::CertifiedKey::set_certificate_url)).
+    /// The server, not this library, fetches them. See
+    /// [`crate::certificate_url`].
+    pub enable_client_certificate_url: bool,
 }
 
 impl ClientConfig {
@@ -595,6 +663,9 @@ pub struct ClientConnectionData {
     pub(super) post_handshake_auth_responses: u32,
     /// Where Encrypted Client Hello stands.
     pub(super) ech_status: crate::ech::EchStatus,
+    /// Whether a TLS 1.2 server acknowledged our `trusted_ca_keys` in a
+    /// full handshake (RFC 6066 §6).
+    pub(super) trusted_ca_keys_acknowledged: bool,
     /// The server's ECH retry configurations, after a rejection.
     pub(super) ech_retry_configs: Option<Vec<u8>>,
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
@@ -606,6 +677,8 @@ pub struct ClientConnectionData {
     /// The absolute expiry of the delegated credential that authenticated
     /// this connection, including when it was restored from a TLS 1.3 ticket.
     pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The server's Certificate Transparency 2.0 items (RFC 9162).
+    pub(super) transparency: super::transparency::PeerTransparency,
     /// The configuration, for exported authenticators (RFC 9261).
     pub(crate) config: Arc<ClientConfig>,
     pub(crate) authenticators: crate::exported_authenticator::AuthenticatorState,
@@ -619,11 +692,13 @@ impl ClientConnectionData {
             offered_post_handshake_auth: false,
             post_handshake_auth_responses: 0,
             ech_status: crate::ech::EchStatus::NotOffered,
+            trusted_ca_keys_acknowledged: false,
             ech_retry_configs: None,
             session_store: config.resumption.store.clone(),
             server_name,
             delegated_credential: None,
             delegated_credential_expiry: None,
+            transparency: Default::default(),
             config,
             authenticators: Default::default(),
         }
@@ -720,10 +795,12 @@ impl ConnectionCore<ClientConnectionData> {
         if config.max_tls13_tickets_per_connection > 255 {
             return Err(Error::BadTls13TicketLimit);
         }
+        crate::external_binding::handshake::check_client_config(config.external_binding.as_ref())?;
         let mut common_state = CommonState::new(Side::Client);
         common_state.quic = quic.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
+        crate::trusted_ca_keys::check_config(config.trusted_ca_keys.as_deref())?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
         let mut data = ClientConnectionData::new(config.clone(), name.clone());
@@ -772,6 +849,22 @@ impl UnbufferedClientConnection {
         self.inner.core.data.tls13_tickets_received
     }
 
+    /// The `extension_data` of the server's `transparency_info` extension
+    /// (RFC 9162 §6.5) from a full handshake: a `TransItemList`, or empty
+    /// or an empty list, which §6.5 allows. It is well formed but **not
+    /// verified**; see [`Self::peer_transparency_status`].
+    pub fn peer_transparency_info(&self) -> Option<&[u8]> {
+        self.inner.core.data.transparency.info.as_deref()
+    }
+
+    /// What the certificate verifier established about the server
+    /// certificate's Certificate Transparency 2.0 evidence, once the
+    /// certificate is verified; `None` when the verifier reports nothing,
+    /// and after resumption. See [`crate::transparency`].
+    pub fn peer_transparency_status(&self) -> Option<crate::transparency::TransparencyStatus> {
+        self.inner.core.data.transparency.status
+    }
+
     /// The delegated credential (RFC 9345) the server authenticated with,
     /// once its CertificateVerify has been verified with the credential's
     /// key; `None` when the server signed with its certificate key.
@@ -806,6 +899,14 @@ impl UnbufferedClientConnection {
     /// handshake with [`Error::RejectedEch`].
     pub fn ech_status(&self) -> crate::ech::EchStatus {
         self.inner.core.data.ech_status
+    }
+
+    /// Whether the server acknowledged our `trusted_ca_keys` (RFC 6066 §6):
+    /// it negotiated TLS 1.2 in a full handshake and says the list guided
+    /// its choice of certificate chain. Always false in TLS 1.3, and after
+    /// resuming a session. Meaningful once the ServerHello is processed.
+    pub fn trusted_ca_keys_acknowledged(&self) -> bool {
+        self.inner.core.data.trusted_ca_keys_acknowledged
     }
 
     /// See

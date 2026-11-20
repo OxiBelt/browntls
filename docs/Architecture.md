@@ -282,6 +282,9 @@ carries per-certificate staples in CertificateEntry, including client
 authentication when requested. With the policy enabled, the client offers the
 RFC 6962 SCT extension. SCTs from certificates, authenticated OCSP responses,
 and negotiated TLS extensions are verified against configured log keys.
+Version 2 SCTs (RFC 9162) are not fed into this evaluation or CRLite; they
+have their own policy, `browntls::transparency` through the facade (see
+[CT 2.0 in TLS](#ct-20-in-tls)).
 
 CRLite reads Mozilla Clubcard V3 and V4 filters. The application authenticates
 the source and supplies the full filter, ordered deltas, expiry, generation,
@@ -308,6 +311,172 @@ identity only after the response and Finished verify. Pending checks and
 outstanding revocation-aware authentication block kernel handoff. See
 [browntls-tokio](../crates/browntls-tokio/README.md) for application
 integration.
+
+### Certificate Transparency 2.0 (RFC 9162)
+
+`browntls_pki::transparency` holds the TLS-independent part of CT 2.0, beside
+the RFC 6962 code in `browntls_pki::sct`. Like the rest of `browntls-pki` it
+needs only `alloc` and contains no cryptography: SHA-256 and signature
+verification are passed in. `browntls-core` negotiates the TLS extension
+(`transparency_info`, type 52) on top of it; see
+[CT 2.0 in TLS](#ct-20-in-tls) below. Through the facade the TLS side is
+`browntls::transparency` and the PKI module `browntls::pki_types::transparency`.
+
+It serves three callers:
+
+- A TLS client creates a `CtV2Verifier` from a `CtV2Policy` (trusted logs,
+  optionally trusted tree heads, budgets), the end-entity certificate and the
+  issuer's SPKI. It hands over the `TransItemList` of each delivery
+  mechanism: `verify_embedded` (certificate extension 1.3.101.75),
+  `verify_ocsp_response` (the list `SingleResponse::transparency_info` and
+  `VerifiedOcspStatus::transparency_info` return) and
+  `verify_tls_extension`. Each call returns a `CtV2Report` of counters;
+  `verified` lists the SCTs whose signatures verified with their source and,
+  when found, their inclusion evidence. An OCSP response whose single
+  response repeats the Transparency Information extension, or holds one
+  that is not an `OCTET STRING`, does not parse (as for the RFC 6962 SCT
+  list), so it is not usable revocation evidence either.
+- A server or submitter parses and encodes lists and items (`TransItemList`,
+  `TransItem`) and checks `has_sct` before sending a list (§6.4).
+- An auditor verifies tree heads, inclusion proofs and consistency proofs
+  standalone through `CtV2Log` and the `merkle` module.
+
+An SCT is accepted when its log is configured, its timestamp lies in the log's
+window and no later than the verification time (plus a configurable tolerance),
+its extensions are ordered (§4.8) and the log's signature over the `TransItem`
+of the reconstructed entry verifies. The entry binds the timestamp, the issuer
+key hash and the certificate; for a precertificate the TBSCertificate is rebuilt
+without the 1.3.101.75 extension and the RFC 6962 SCT list extension (§8.1.2).
+Signatures are ECDSA P-256 with SHA-256 or Ed25519, derived from the log's key.
+
+Inclusion evidence is recorded for a verified SCT when an inclusion proof of the
+same log verifies its leaf against a tree head of the proof's tree size with a
+timestamp not older than the SCT. The tree head comes from the application
+(`trusted_tree_heads`) or from any delivered list, and its signature is verified
+only when a proof needs it. The proof, the tree head and the SCT may arrive
+through different mechanisms. The tree size is bound only by the signed tree
+head: a path of the same shape verifies for other sizes, so evidence is never
+recorded without a verified or trusted head. Consistency proofs in lists are
+counted as ignored by the verifier; checking them needs two tree heads the
+auditor holds.
+
+Merkle verification follows the algorithms of §2.1.3.2 and §2.1.4.2 step by
+step. Paths longer than 64 (inclusion) or 65 (consistency) nodes are
+rejected before any hashing. The verifier bounds the list length, item count,
+extension and signature lengths, signature verifications and hash
+operations per instance (`CtV2Options`); exceeding a budget is an error, not
+a silent truncation.
+
+§6.3 defines `TransItemList` as non-empty while §6.5 lets a server send an
+empty list in the TLS extension. `verify_tls_extension` accepts an empty
+extension body or an empty list; the strict parser, the certificate
+extension and the OCSP extension reject an empty list.
+
+Not covered: the HTTP API of §5, log operation, monitoring and the final STH
+log parameter (§4.1). No public CT 2.0 log ecosystem and no second
+implementation were available, and RFC 9162 has no test vectors for its
+hashes or items. The tests check the code against independent encoders and a
+reference Merkle tree written from the RFC text in
+`crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
+self-consistency against the RFC text only, not interoperability.
+
+#### CT 2.0 in TLS
+
+`browntls_core::transparency` holds the configuration types; the protocol
+work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
+
+- Server: `CertifiedKey::set_transparency_info` installs an encoded
+  `TransItemList`, refusing one that does not parse, has no SCT (§6.4) or
+  exceeds 65535 octets. The list is sent only when the ClientHello offered
+  the extension and the certificate is X.509 (not a raw public key): in the
+  TLS 1.2 ServerHello, or on the end entity's TLS 1.3 CertificateEntry.
+  A resumed handshake carries none (§6.5).
+- Client offer: an empty extension in the ClientHello when
+  `ServerCertVerifier::requests_transparency_info` says so (the WebPKI
+  verifier does when it has a CT 2.0 policy) or when
+  `ClientConfig::request_transparency_info` is set, and never with a
+  verifier that requires raw public keys. Whether a server's extension
+  was solicited is decided by the ClientHello actually sent. A verifier
+  that wraps another must forward `requests_transparency_info`: otherwise
+  nothing is offered while the wrapped policy still runs on the
+  certificate and the staple alone, which §8.1.6 forbids but which fails
+  closed.
+- Client policy: `ServerCertVerifierBuilder::with_certificate_transparency`
+  takes `CtV2Requirements` (trusted logs as `CtV2LogConfig`, trusted tree
+  heads, `min_verified_scts`, `min_distinct_logs`, `require_inclusion`,
+  `CtV2Options` budgets and the SHA-256 of `RevocationDigests`); `build`
+  checks every log key and refuses two logs sharing an ID or a key, the key
+  compared in a normalised form (complete `SubjectPublicKeyInfo` or its
+  contents, compressed or uncompressed point): an SCT's signature does not
+  cover its log ID, so one SCT could otherwise count for two logs. For the
+  same reason distinct logs are counted by key. Every SCT signs the hash
+  of the end entity's issuer key (§4.7): the first intermediate of the
+  validated path, or its trust anchor. Without a revocation policy that
+  path is the one the verifier validated; a revocation policy may leave
+  several candidate paths to a live query, so the verifier then validates
+  the path once more, without revocation, to learn the issuer. It runs
+  `CtV2Verifier` over three sources: the certificate's Transparency
+  Information extension, the list in a stapled OCSP response
+  (only when that response authenticates against the issuer) and the TLS
+  extension. Too few SCTs or logs fail with
+  `CertificateError::InsufficientTransparency` (`certificate_unknown`); an
+  evidence error such as an exceeded budget with
+  `InvalidTransparencyEvidence` (`bad_certificate`). Called directly,
+  `verify_server_cert` enforces the policy with the certificate and the
+  staple only.
+- What a connection reports: `peer_transparency_info` (the extension body,
+  unverified, also without a policy) and `peer_transparency_status`
+  (`TransparencyStatus` counts) on `ClientConnection` and
+  `UnbufferedClientConnection`. A custom verifier receives the body in
+  `CertificateEvidence::transparency_info` and reports a status through
+  `ServerCertVerifier::verify_server_cert_with_transparency`, whose default
+  reports none.
+- Peer errors: a list that does not parse is `decode_error` in the codec (an
+  empty body and an empty list are accepted, §6.5), as is a non-empty body
+  in the ClientHello; an extension the client did not offer is
+  `unsupported_extension`; one in a resuming TLS 1.2 ServerHello is
+  `illegal_parameter` (§8.1.1). In TLS 1.3 only the end entity's entry is
+  read; the extension on another entry is ignored.
+- Resumption: the certificate is not evaluated again, so a resumed
+  connection reports neither items nor a status; the policy held when the
+  session was established.
+- Client certificates: RFC 9162 defines no CT for them. The extension is
+  never requested in a CertificateRequest, and a client Certificate that
+  carries it is refused as unsolicited.
+
+Interactions with other features:
+
+- Encrypted Client Hello: the outer ClientHello carries the offer like the
+  inner one. When ECH is accepted the policy applies to the hidden name's
+  certificate. When it is rejected the policy also applies to the public
+  name's certificate that authenticates the rejection, so a client-facing
+  server without CT 2.0 evidence makes the client fail with
+  `InsufficientTransparency` rather than return its retry configurations:
+  they are authenticated by that certificate, and CT is what would reveal
+  a mis-issued one.
+- QUIC uses the TLS 1.3 handshake unchanged, extension and policy
+  included; it has no CT test of its own.
+- Early data is sent only on resumption or with an external PSK, before
+  any server certificate arrives. A resumption evaluates no certificate;
+  an RFC 8773 handshake (certificate with an external PSK) evaluates the
+  certificate like a full handshake, after the 0-RTT data was sent.
+- Delegated credentials (RFC 9345): the policy covers the end-entity
+  certificate that signs the credential; the credential is not logged.
+- `Acceptor`, `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`: the
+  configuration chosen after the ClientHello supplies the list through
+  its certificate resolver, and the offer is read from that ClientHello.
+- Exported authenticators (RFC 9261) are verified through
+  `verify_server_cert` with no OCSP response, and an authenticator whose
+  entry carries `transparency_info` is refused as unsolicited. Under a CT
+  2.0 policy an authenticator therefore passes only with SCTs embedded in
+  its certificate.
+
+The tests (`crates/browntls-core/tests/transparency*.rs`,
+`crates/browntls-tokio/tests/transparency.rs`) run browntls against itself
+on both providers, buffered and unbuffered, with run-time generated logs
+and lists encoded independently of `browntls-pki`. No other implementation
+of the extension is available in the repository's interoperability tooling,
+so there is no third-party test.
 
 ## Crypto provider mount point
 
@@ -404,6 +573,148 @@ cleared (RFC 9325 §3.5), and neither side ever renegotiates. A connection
 that ends with a fatal alert forgets its TLS 1.2 session on both sides
 (RFC 5246 §7.2.2), and a TLS 1.2 server honours the client's curves for its
 ECDSA certificate as well as for key exchange (RFC 8422 §5.3).
+
+### TLS 1.2-only extensions of RFC 6066
+
+RFC 6066 defines three extensions that TLS 1.3 does not have (the IANA
+registry marks them "-" for TLS 1.3): `client_certificate_url` (§5),
+`trusted_ca_keys` (§6) and `truncated_hmac` (§7). All three are parsed in
+a ClientHello, a ServerHello and TLS 1.3 EncryptedExtensions, so a
+malformed body there ends the handshake with `decode_error` whichever
+protocol version is negotiated: the first and the last are empty, and
+`trusted_ca_keys` holds a list (possibly empty) of `pre_agreed`,
+`key_sha1_hash`, `x509_name` and `cert_sha1_hash` entries. An entry of any
+other identifier type cannot be skipped, since it carries no length, and is
+a `decode_error` too, and so is a list of more than 1024 entries (a local
+bound on what an unauthenticated ClientHello may make the server allocate).
+Earlier versions ignored these extensions whatever their bodies held, so a
+peer that sends a malformed one now fails the handshake. In a TLS 1.3
+ServerHello or EncryptedExtensions each of the three is
+`illegal_parameter`, as for every TLS 1.2-only extension; a
+HelloRetryRequest may carry none of them either, and refuses each with
+`illegal_parameter` before its body is looked at.
+
+`trusted_ca_keys`: negotiated in TLS 1.2, off by default. A client sends
+the list of `ClientConfig::trusted_ca_keys` (`None` by default; an empty
+list claims a set of root keys agreed by other means) only when it offers
+TLS 1.2, so never over QUIC nor with an ECH offer, and again after a
+HelloRetryRequest. A list of more than 1024 entries, one with an empty
+`x509_name`, or one that makes the ClientHello longer than a handshake
+message fails connection creation instead of sending a malformed hello.
+`TrustedAuthority` builds identifiers from a CA certificate or a trust
+anchor with a caller-supplied SHA-1 (`crypto::native::sha1` or
+`crypto::rustcrypto::sha1`): the RSA modulus without leading zero bytes,
+the `subjectPublicKey` value for ECDSA and DSA keys and, as a local choice
+the RFC does not make, for other key types too; `matches_certificate`
+compares one with a CA certificate. A certificate resolver reads the list
+with `ClientHello::trusted_ca_keys()`, whatever version is negotiated, and
+calls `ClientHello::acknowledge_trusted_ca_keys()` when the list guided its
+choice; `server::ResolvesServerCertUsingTrustedCaKeys` does both, serving
+a registered chain that shares an identifier with the list and signs with
+one of the client's schemes, and its fallback resolver otherwise. Since a
+name may be shared by several roots (a CA key rollover keeps it), a
+certificate hash match wins over a key hash match, which wins over a name
+or `pre_agreed` match; among equals the first chain registered wins. The
+server answers with the empty extension only in a full TLS 1.2 handshake,
+to a client that sent the list, after an acknowledgement: never in TLS 1.3,
+never when resuming a session (no chain is sent then), and an `Accepted`
+view's acknowledgement does nothing. A client accepts the answer only in
+TLS 1.2 and only after sending the list (otherwise `unsupported_extension`
+in TLS 1.2 and `illegal_parameter` in TLS 1.3; `decode_error` for a body),
+and reports it through `trusted_ca_keys_acknowledged()` on the buffered and
+unbuffered client connections. The list travels in the clear and reveals
+which roots the client trusts (RFC 6066 §11.4). No peer of the end-to-end
+interoperability matrix implements the extension (OpenSSL, GnuTLS and Go
+ignore it), so it is tested between browntls peers only, on both
+providers, with the Tokio streams and through the `browntls` facade.
+
+`client_certificate_url`: negotiated in TLS 1.2 when both sides enable
+it; see [client certificate URLs](#client-certificate-urls-rfc-6066-5)
+below.
+
+`truncated_hmac`: deliberately not implemented, and not planned.
+RFC 9325 §4.6 says implementations MUST NOT use it: its use with the CBC
+suites it applies to has been shown to be insecure, and it has no effect on
+AEAD suites. A client never sends the extension and so refuses
+a ServerHello that carries it (`unsupported_extension`); a server never
+acknowledges it, which RFC 6066 §7 allows, and the connection then uses the
+full HMAC.
+
+#### Client certificate URLs (RFC 6066 §5)
+
+A constrained TLS 1.2 client may name its certificate chain with URLs and
+SHA-1 hashes in a CertificateURL message instead of sending it
+(`browntls_core::certificate_url`). Both sides are off by default.
+
+Client: `ClientConfig::enable_client_certificate_url` offers the empty
+extension when TLS 1.2 is among the offered versions and the client
+certificate resolver has certificates (so never on QUIC or in an ECH
+inner hello, which offer TLS 1.3 only). The URLs belong to the
+`CertifiedKey` (`set_certificate_url`), built with `UrlAndHash` and
+`CertificateUrl` (`individual_certs`, end entity first, or `pkipath`;
+`encode_pki_path` writes the DER `PkiPath ::= SEQUENCE OF Certificate`,
+issuer first). The key may hold no certificate at all. A CertificateURL
+message replaces the Certificate only when a TLS 1.2 server acknowledged
+the extension and sent a CertificateRequest; anywhere else, TLS 1.3
+included, a key without a chain sends an empty Certificate and no
+CertificateVerify. A warning-level `certificate_unobtainable` is logged and
+the handshake goes on (RFC 6066 §5); a fatal one ends it with
+`Error::AlertReceived`.
+
+Server: `ServerConfig::client_certificate_url` takes a
+`ClientCertificateUrlPolicy` (`None` by default) with the caller's SHA-1
+function, the allowed URI schemes (only `http` by default, compared
+without regard to case), at most 8 URLs, 2048 bytes per URL and 64 KiB
+for all fetched objects; zero limits or no valid scheme make connection
+creation fail. The server acknowledges the extension only on a full TLS 1.2
+handshake (not a resumption), with a policy set, a client certificate
+verifier that sends a CertificateRequest, and an X.509 client certificate
+(not an RFC 7250 raw public key). It then takes a CertificateURL message
+in place of the Certificate, into the transcript as received. Without the
+acknowledgement the message is `unexpected_message`, and in TLS 1.3 its
+type stays unknown. An unknown chain type, an empty list or URL and
+trailing bytes are `decode_error`; a padding byte other than 0x01 and a
+`pkipath` list of other than one URL are `illegal_parameter`.
+
+The library never opens a connection to a URL. A client-chosen URL that a
+server fetches is a server-side request forgery vector (RFC 6066 §11.3), so
+the application, or its fetcher, performs and authorizes every fetch.
+Before anything reaches it, URLs beyond the policy's count or length, not
+printable ASCII, without a scheme or with one not allowed, without a `//`
+authority or with an empty one, with userinfo, a fragment or a backslash
+end the handshake with `certificate_unobtainable`. Otherwise the
+connection pauses, like the live OCSP pause and independently of it, with
+a `ClientCertificateUrlQuery`
+(`CommonState::pending_client_certificate_url`,
+`IoState::client_certificate_url_pending`,
+`ConnectionState::PendingClientCertificateUrl` on the unbuffered API). No
+input is processed while it is outstanding: ClientKeyExchange,
+CertificateVerify, ChangeCipherSpec and Finished stay buffered, and
+`read_tls` returns `WouldBlock`. `resolve_client_certificate_url` answers
+it with `ClientCertificateUrlResponse::Fetched` (one object per URL) or
+`Unobtainable`; a wrong id is an error that changes nothing, and buffered
+input is processed as after `resolve_peer_revocation`.
+
+An unobtainable chain, a wrong number of objects or more bytes than the
+limit is `certificate_unobtainable`, always, also when client
+authentication is optional. RFC 6066 §5 lets a server that does not
+require the certificate continue, but the client still sends a
+CertificateVerify that cannot be checked without its key, and this crate
+does not go on with an unverified one: a deliberate narrowing. An object
+whose SHA-1 differs from the client's is `bad_certificate_hash_value`
+(always fatal, also when received as a warning); a malformed `PkiPath`
+(not one DER SEQUENCE of 1 to 16 SEQUENCEs with definite, minimal
+lengths and nothing after it) is `bad_certificate`. The chain, in TLS
+order, then goes through the very path a Certificate message takes: the
+client certificate verifier, the revocation hook, then ClientKeyExchange.
+Nothing about the client is reported as authenticated before its
+CertificateVerify verified.
+
+No peer of the end-to-end matrix implements the extension (OpenSSL,
+GnuTLS and Go do not), so the evidence is self-interoperation on both
+providers (`crates/browntls-core/tests/client_certificate_url*.rs`,
+buffered and unbuffered), the Tokio fetcher tests, and codec and PkiPath
+vectors checked with `openssl asn1parse` and Python `hashlib`.
 
 ### TLS 1.3 protocol rules (RFC 9846)
 
@@ -803,7 +1114,7 @@ RFC 9257 guidance and what browntls enforces:
   including after kernel handoff, and ignores further valid tickets without
   deriving or storing them. Zero disables ticket storage. Invalid ticket
   messages still fail through the ordinary protocol checks.
-- GREASE (RFC 8701, `msgs::grease`), client only, opt-in
+- GREASE (RFC 8701, `msgs::grease`), client, opt-in
   (`ClientConfig::enable_grease`, default off until the GnuTLS end-to-end
   scenarios have run with it): random per-connection GREASE values first in
   the cipher suites, `supported_groups`, `key_share` (a one-byte share),
@@ -815,7 +1126,32 @@ RFC 9257 guidance and what browntls enforces:
   checked against, so a server selecting one fails as for any value not
   offered (`illegal_parameter`, or `unsupported_extension` for an
   extension). ALPN is not GREASEd. A browntls server ignores GREASE values
-  like any unknown value and sends none itself (RFC 8701 §4 is optional).
+  like any unknown value.
+- GREASE (RFC 8701 §4.1), server, opt-in (`ServerConfig::enable_grease`,
+  default off like the client's: a client that mishandles unknown values
+  would fail client authentication or lose its tickets). It covers the two
+  TLS 1.3 messages whose extension points a server offers. A
+  CertificateRequest, in the handshake or after it (also the one an
+  offloaded connection hands to kernel TLS), lists a GREASE signature scheme
+  first in `signature_algorithms` and carries an empty GREASE extension
+  first and a one-byte one last; a NewSessionTicket carries the same two
+  extensions. The values are drawn for each message, and the two extension
+  types of a message differ. The GREASE scheme is never in the list a client
+  CertificateVerify is checked against, so a client signing with it fails as
+  for any scheme not offered (`illegal_parameter`); a Certificate entry
+  extension of a GREASE type is refused like any unknown one. Nothing goes
+  into the ServerHello, HelloRetryRequest, EncryptedExtensions or
+  Certificate, where a client must reject GREASE (§3.1), into TLS 1.2
+  messages (§4.1 names TLS 1.3 only), or into exported authenticator
+  requests (RFC 9261). A browntls client ignores a server's GREASE values
+  like any unknown value: unknown extensions of both messages are skipped,
+  and an unknown signature scheme is passed on with the others to
+  `ResolvesClientCert::resolve` and `SigningKey::choose_scheme`. The
+  built-in keys choose only schemes they implement; a custom key must not
+  choose a scheme it does not know. The option needs no API of its own
+  above the protocol crate: the acceptors of `browntls-tokio` (buffered and
+  unbuffered) take the configuration as it is, and the facade re-exports it
+  as `browntls::ServerConfig::enable_grease`.
 - `padding` (RFC 7685), client: by default
   (`ClientHelloPadding::AvoidProblematicLengths`) a ClientHello handshake
   message of 256 to 511 bytes is padded to 512 bytes, or 513 to 515 bytes
@@ -824,6 +1160,198 @@ RFC 9257 guidance and what browntls enforces:
   `AtLeast(n)` pads to at least `n` bytes first; `Disabled` never pads. The
   extension comes right before `pre_shared_key`, which stays last, and is
   sized with the binders in place. A server ignores its content.
+
+### External session and identity binding (RFC 8844)
+
+`browntls_core::external_binding` implements `external_id_hash` (55) and
+`external_session_id` (56) on both sides, in TLS 1.2 and 1.3, for
+protocols that signal a session out of band (SDP `tls-id`, WebRTC identity
+assertions). The module documentation is the reference; in short:
+
+- `ClientConfig::external_binding` and `ServerConfig::external_binding`
+  (default `None`, feature off) hold an `ExternalBinding`: our hash and
+  `tls-id` to send, the peer's to expect, and `require_peer_support`. The
+  values belong to one connection, so the application clones its base
+  configuration per connection. A server choosing its configuration finds
+  the client's values on the `ClientHello` view of `Acceptor`,
+  `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`.
+- No resumption and no 0-RTT: a connection with a binding neither offers
+  nor accepts a ticket or TLS 1.2 session ID, issues no NewSessionTicket,
+  ticket or cacheable session ID, and stores nothing it receives, so a
+  later connection, bound or not, cannot resume it either. RFC 8844 §5
+  forbids using security-sensitive information from one TLS connection in
+  another, even of the same signaling session, and a resumed handshake
+  would skip the verifier in which applications pin the signaled
+  certificate fingerprint (which §3.2 and §4.3 require in addition). A
+  bound client sends no early data even with `enable_early_data`: it
+  checks the server's answer only in EncryptedExtensions, after the server
+  has read the data. External PSKs, provisioned by the application rather
+  than left by a connection, keep working (without early data).
+- Wire rules: `external_id_hash` is 0 or 32 bytes, `external_session_id`
+  20 to 255 bytes; anything else is `decode_error`, for any server, since
+  the hello decoder parses both. With a binding configured, a client
+  always sends `external_id_hash`, empty without an assertion of its own
+  (RFC 8844 §3.2), and `external_session_id` when it has a `tls-id`. The
+  server answers only what the client sent, in the TLS 1.2 ServerHello or
+  the TLS 1.3 EncryptedExtensions, `external_id_hash` likewise always
+  (empty without an assertion); either extension in a TLS 1.3 ServerHello
+  is `illegal_parameter`, an unsolicited one in a TLS 1.2 ServerHello
+  `unsupported_extension`. After a stateful HelloRetryRequest the second
+  ClientHello must repeat the first's values
+  (`PeerMisbehaved::ExternalBindingChangedOnRetry`); after a stateless one
+  (cookies) the server starts afresh, checks the second ClientHello
+  against its expectations, and the first is bound by the transcript hash
+  the cookie carries.
+- Checks: a mismatch is `illegal_parameter`; an absent extension is
+  accepted unless `require_peer_support` is set (`missing_extension` in TLS
+  1.3, `handshake_failure` in TLS 1.2). Without an expectation nothing is
+  compared, and the application checks the values reported by
+  `peer_external_id_hash` and `peer_external_session_id` itself. A client
+  that expects the server's `tls-id` without sending its own fails
+  connection creation (`Error::InconsistentExternalBinding`).
+- ECH: both values go in the ClientHelloInner only. A client checks
+  nothing after a rejection; a server checks the ClientHello it answers
+  even when it rejects an offer (it cannot tell GREASE from a stale real
+  offer), so a server that requires support refuses a stale offer's outer
+  hello with `missing_extension` instead of sending retry configurations.
+- Security: the extensions bind the connection to the signaling session
+  but do not by themselves authenticate the signaling peer. Without
+  identity assertions, `external_session_id` prevents the session splicing
+  (unknown key-share) attack of RFC 8844 §4, if the signaling channel
+  delivers the `tls-id` values with integrity. Session concatenation (§5)
+  within one connection is prevented by identity systems (WebRTC or SIP
+  identity, that is `external_id_hash` with assertions the application
+  verifies), but two back-to-back connections through an attacker remain
+  possible; defending against concatenation also requires that peers
+  cannot claim other entities' certificate fingerprints (§6). With
+  identity assertions, TLS peer identities cannot be misrepresented even
+  by an attacker that modifies signaling (§6).
+
+### Cached information (RFC 7924)
+
+`cached_info` (module `browntls_core::cached_info`) lets a TLS 1.2 client
+that kept the server's Certificate or CertificateRequest message from an
+earlier handshake offer its fingerprint, and a server whose message has that
+fingerprint send the fingerprint in its place. Both object types are
+implemented: `cert` (1) and `cert_req` (2). TLS 1.3 never uses it: the
+extension may appear in a ClientHello offering both versions, a TLS 1.3
+server ignores it, and in any TLS 1.3 server message it is
+`illegal_parameter` (`tls13/extensions.rs`). Both sides are off by default.
+
+API:
+
+- Client: `ClientConfig::cached_info: Option<Arc<dyn
+  ClientCachedInfoStore>>` (default `None`). The trait has `lookup(server
+  name, type)`, returning the objects to offer, most preferred first, and
+  `insert(server name, object)`. `ClientCachedInfoMemoryCache::new(max
+  servers, per server)` is the built-in store (`std`): it evicts the server
+  name inserted longest ago, and within a name and type the object inserted
+  longest ago; it holds at most `max_servers * per_server * 2` messages of
+  at most 64 KiB each. `CachedObject::new(provider, type, message)` builds
+  an object from a complete TLS 1.2 handshake message (header included) and
+  computes its fingerprint; there is no way to supply a fingerprint, and
+  the message must be exactly one well-formed message of the type (a
+  Certificate with at least one certificate). Applications may provision
+  objects themselves (the constrained-device case of RFC 7924 §1).
+- Server: `ServerConfig::cached_info: ServerCachedInfoPolicy`, one switch
+  per type (`cert`, `cert_req`), both off by default.
+- Both sides and every connection type (buffered, unbuffered,
+  `browntls-tokio`): `CommonState::cached_info_replaced()` reports which
+  messages of this handshake travelled as fingerprints.
+- `cached_info::fingerprint(provider, message)` is the SHA-256 of a complete
+  handshake message (RFC 7924 §5, checked against Appendix A), taken from
+  the provider's cipher suites.
+
+Rules:
+
+- A ClientHello that offers TLS 1.2, with a store configured, carries at
+  most `MAX_OFFERED_PER_TYPE` (4) objects of each type the store returns for
+  the server name (not with an ECH offer, nor on QUIC, which offer TLS 1.3
+  only); a second ClientHello repeats the first one's offer, and there is no
+  extension when the store has none. A TLS 1.2 server that sees an offer
+  computes the fingerprint of the Certificate its resolver selected and of
+  the CertificateRequest it is about to send, and replaces a message by
+  `opaque hash_value<1..255>` (the 32-byte fingerprint) only when its policy
+  allows the type and the client offered exactly that fingerprint; it then
+  lists the type in its ServerHello. Unknown types, hashes of another length
+  and stale fingerprints are skipped: the message goes in full and the type
+  is not listed (RFC 7924 §4). A resumed handshake never answers.
+- The client accepts in the ServerHello only types it offered objects of,
+  each once (otherwise `illegal_parameter`); the extension without an offer
+  is `unsupported_extension`; a malformed extension body is
+  `decode_error`. In a full handshake an acknowledged Certificate or
+  CertificateRequest is read only in its hash form: a full message in its
+  place is `decode_error`, and a fingerprint matching no offered object of
+  that type, or of another length, is `illegal_parameter`. A hash form the
+  server did not acknowledge is parsed as a full message and fails as a
+  malformed one (`decode_error`). An acknowledgement in a resumed handshake,
+  which has neither message, is ignored; a `cert_req` acknowledgement
+  without a CertificateRequest is not an error.
+- Transcript: both sides hash each message as it was sent, the hash form
+  when replaced (RFC 7924 §7, second paragraph), so Finished, the extended
+  master secret session hash and a client CertificateVerify cover the
+  fingerprint, not the restored message.
+- A restored message is processed exactly as a received one: the restored
+  chain is verified at the current time with the configured verifier, as a
+  received chain is, becomes `peer_certificates()` and the peer
+  chain of the session stored for resumption, and its leaf key verifies the
+  ServerKeyExchange signature. A restored CertificateRequest drives client
+  certificate selection like a received one.
+- The client stores messages received in full only after the handshake
+  completed (the server's Finished verified, after the chain): a failed
+  handshake stores nothing, and a restored message is never stored again.
+
+Security analysis:
+
+- The server still proves possession of its private key. browntls has no
+  TLS 1.2 RSA or static Diffie-Hellman key exchange (RFC 10015): every TLS
+  1.2 suite is ECDHE with a signed ServerKeyExchange, which the client
+  checks against the leaf key of the restored chain. A server that has not
+  the key of the cached certificate cannot complete the handshake, whatever
+  fingerprint it sends.
+- Being cached never makes a chain trusted: it is verified as if received,
+  so a chain that has expired or lost its trust anchor since it was cached
+  fails as it would in full. Only the client's own store is consulted, and a
+  fingerprint must equal one the client offered, all 32 bytes.
+- A wrong, injected or replayed fingerprint can only make the handshake
+  fail: it selects among the client's own offered objects (any other is
+  `illegal_parameter`), and an attacker who changes the ServerHello or the
+  hash form changes the transcript, so Finished fails. An attacker
+  substituting one offered object for another still needs the server's
+  key for the ServerKeyExchange signature.
+- Cache poisoning: only messages received in full in a handshake whose
+  Finished verified, after their chain verified, are inserted, so a store
+  holds what an authenticated server sent. An application store may return
+  anything; offering it is harmless for the same reasons, and objects of
+  another type are dropped before the offer.
+- Privacy: fingerprints travel in the clear in the ClientHello, so an
+  observer can link the client's connections to a server and learn which
+  certificate it saw (RFC 7924 §7); the extension is therefore off by
+  default and not offered with ECH (a GREASE ECH extension does not
+  suppress it, since it hides nothing). The memory store keeps fingerprints
+  per server name only in memory.
+- Resource bounds: a server compares one fingerprint per type against at
+  most the 65535 bytes of the client's list, and hashes at most two of its
+  own messages per handshake; the built-in store is bounded as above; a
+  client offers at most eight objects.
+- Interactions: TLS 1.2 OCSP stapling (CertificateStatus) and SCTs (in the
+  ServerHello) are separate messages, never cached; certificate compression,
+  delegated credentials and QUIC are TLS 1.3 only; renegotiation is refused;
+  kernel TLS handoff happens after the handshake and sees nothing of it.
+
+Testing limits: no other implementation the project tests against (OpenSSL,
+GnuTLS, Go crypto/tls, rustls) implements RFC 7924, so there is no
+third-party interoperability test, and the wire format is checked only
+against the RFC text and its Appendix A vector (whose printed message
+header carries a spurious `00 02`: the vector's hash is that of the
+560-byte certificate under the header `0b 00 02 36 00 02 33 00 02 30`).
+In-process tests on both providers (`tests/cached_info*.rs`, cases in
+`tests/cases/cached_info.rs`) cover buffered and unbuffered peers, client
+authentication, stale caches, verification of restored chains, the
+malformed server answers above (forged by rewriting the server's flight)
+and TLS 1.3; `browntls-tokio` has a test through both stream families
+(`tests/cached_info.rs`); the `tls_conn` and `tls_unbuffered` fuzz targets
+offer and answer the extension when the client's resumption is disabled.
 
 ### Connection APIs
 
@@ -898,8 +1426,9 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
   after its ClientHello. The connection-specific accessors of the buffered
   types are there too: `ech_status` on both sides, the server's
-  post-handshake authentication methods, and the client's
-  `delegated_credential` and `post_handshake_auth_responses`.
+  post-handshake authentication methods and `client_delegated_credential`,
+  and the client's `delegated_credential` and
+  `post_handshake_auth_responses`.
 - Acceptors read the first ClientHello before a `ServerConfig` is chosen:
   `Acceptor` (buffered, `std`) and `UnbufferedAcceptor` (no `std`; the
   caller's buffer and `discard`, as `process_tls_records`). Both drive one
@@ -1237,6 +1766,18 @@ nothing per record and copy plaintext at most once:
   transport until a record gives plaintext or the transport waits, so over
   a transport that never waits and does not count, the peer decides how
   long one poll runs. Both are open.
+
+A TLS 1.2 server connection paused for a client certificate URL query
+(RFC 6066 §5) is answered by the acceptor's
+`client_certificate_url_fetcher`, an application closure that takes the
+query and returns the objects (`browntls_tokio::certificate_url`, no Cargo
+feature): `TlsAcceptor`, `LazyConfigAcceptor`, `StartHandshake` and the
+unbuffered counterparts take one, and every place that answers
+certificate status queries (handshakes, early-data paths, reads, the
+unbuffered driver) answers this query first. Without a fetcher it is
+answered `Unobtainable` at once. The fetch runs in the poll that met it
+and is dropped with the handshake future. The fetcher authorizes every
+destination; the module documentation lists what it must check.
 
 ### Kernel TLS offload (`browntls_core::kernel`)
 
@@ -1604,25 +2145,32 @@ there they may be skipped).
 ### Delegated credentials (RFC 9345)
 
 `browntls_core::delegated_credential` holds the `DelegatedCredential` codec,
-signing (`DelegatedCredential::issue`) and validation; the native provider
+signing (`DelegatedCredential::issue`) and validation (`validate`, the
+check both sides run on a received credential, public for callers that
+handle credentials below the handshake); the native provider
 adds `crypto::native::delegated_credential::generate`, which creates an
 ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
-certificate's key sign the credential. A credential is attached to a
-`CertifiedKey` with `with_delegated_credential`, which checks that the
+certificate's key sign the credential. A credential is issued for the side
+that authenticates with it (the signed context string differs, §4) and
+attached to a `CertifiedKey` for that side: `with_delegated_credential` for a
+server, `with_client_delegated_credential` for a client. Both check that the
 certificate carries the `DelegationUsage` extension
 (1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
 `digitalSignature` key usage, and, when the key exposes its public key, that
-it matches the credential's public key. Credential keys may not be
-`rsaEncryption` keys (§4): the
+it matches the credential's public key. A side only presents credentials
+attached for it, so one `CertifiedKey` can serve both roles. Credential keys
+may not be `rsaEncryption` keys (§4): the
 `rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
 (`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
 private field (`delegated_credentials()` reads them), so it can no longer
 be built with a struct literal; `CertifiedKey::new` remains.
 
 - Server: when the ClientHello carries `delegated_credential` and a
-  credential is unexpired, has at most seven days left, uses a
-  `dc_cert_verify_algorithm` the client listed and is signed with a scheme
-  in its `signature_algorithms`, the credential goes on the end-entity
+  credential is unexpired, has at most seven days left and expires before
+  its certificate, uses a `dc_cert_verify_algorithm` the client listed in
+  both `delegated_credential` and `signature_algorithms` (which governs
+  CertificateVerify) and is signed with a scheme in its
+  `signature_algorithms`, the credential goes on the end-entity
   CertificateEntry and its key signs CertificateVerify. Otherwise the
   certificate key signs, as before. Never with raw public keys or TLS 1.2.
 - Client: off unless `ClientConfig::enable_delegated_credentials`. The
@@ -1636,6 +2184,32 @@ be built with a struct literal; `CertifiedKey::new` remains.
   default implementation refuses). `ClientConnection::delegated_credential`
   returns the credential used by a full handshake; it remains `None` on a
   resumed connection.
+- Client credentials (§4.1.2) mirror this with the roles exchanged. A
+  server asks for them only while `ServerConfig::enable_delegated_credentials`
+  is set: its CertificateRequests, in the handshake and after it
+  (`request_client_auth`), then carry `delegated_credential` with the client
+  certificate verifier's TLS 1.3 schemes other than `rsa_pss_rsae_*`. A
+  client whose resolved `CertifiedKey` has a client credential the request
+  accepts (same conditions as for a server, by the client's clock) puts it
+  on its end-entity CertificateEntry and signs CertificateVerify with its
+  key; otherwise the certificate key signs. The credential is tried first,
+  so a client whose certificate key cannot sign (kept offline) still
+  authenticates when the server accepts credentials. The server verifies
+  the chain as usual, validates the credential when CertificateVerify
+  arrives using the real signature and delegated-credential schemes sent
+  in that specific CertificateRequest, and checks the signature with the
+  credential's key through
+  `ClientCertVerifier::verify_tls13_signature_with_delegated_key` (the
+  default implementation refuses; `WebPkiClientVerifier` implements it). It
+  checks the credential's expiry again when the client's Finished arrives.
+  `client_delegated_credential` on `ServerConnection`,
+  `UnbufferedServerConnection` and the server's `KernelConnection` returns
+  the credential of the client's current identity: that of the full
+  handshake, replaced (or cleared) by each successful post-handshake
+  authentication (a declined one leaves it, like `peer_certificates`);
+  `None` on a resumed connection. Never with raw public keys
+  or TLS 1.2. `browntls-tokio` streams reach the accessors through
+  `get_ref`.
 - Resumption: the client and server save the absolute expiry of the delegated
   credential that authenticated the original full handshake. A ticket is not
   offered or accepted, including for 0-RTT, when the current time is at or
@@ -1645,23 +2219,34 @@ be built with a struct literal; `CertifiedKey::new` remains.
   caps its advertised ticket lifetime to the remaining credential lifetime
   and sends no ticket when none remains. This is independent of an RFC 8773
   external-PSK binding; both properties are retained when both authenticated
-  the session.
+  the session. A server keeps the deadline of a client's credential the same
+  way, next to its own: a ticket is passed over at or after either deadline,
+  or when the session's client used a credential and the configuration no
+  longer enables them, the ticket lifetime is capped by both, and the
+  resumed handshake is aborted if the deadline passes before the client's
+  Finished.
 - Persistence: the private client session value carries the deadline without
   changing `ClientSessionStore`. The server session encoding has a mandatory
-  tagged deadline field. Because the old encoding cannot distinguish sessions
-  authenticated with a delegated credential, an upgrade deliberately rejects
-  every pre-change server session value (TLS 1.3 and TLS 1.2); old and new
-  members of a mixed-version fleet therefore cold-miss each other's cached
-  sessions and tickets rather than resuming ambiguous authentication state.
-- Alerts (§4.1.3): an invalid credential is `illegal_parameter`; one the
-  client did not ask for is `unexpected_message`; one on an entry other than
-  the end entity's is `illegal_parameter`; a CertificateVerify that fails
-  under the credential's key gets the same alert as one that fails under a
+  tagged deadline field. Because the encoding from before server credentials
+  cannot distinguish sessions authenticated with a delegated credential, the
+  change that added the field deliberately rejects every server session value
+  written before it (TLS 1.3 and TLS 1.2); old and new members of a
+  mixed-version fleet therefore cold-miss each other's cached sessions and
+  tickets rather than resuming ambiguous authentication state. Client
+  credentials later made the tag a bit mask (1: the server credential's
+  deadline follows, 2: the client credential's). Values with that field
+  written before client credentials (tag 0 or 1) still decode; a server
+  from before client credentials rejects a value that carries a client
+  deadline, so it never resumes a session whose client authentication it
+  cannot bound.
+- Alerts (§4.1.1 to §4.1.3), the same on both sides: an invalid credential
+  is `illegal_parameter`; one the receiver did not ask for is
+  `unexpected_message`; one on an entry other than the end entity's is
+  `illegal_parameter`; a CertificateVerify that fails under the
+  credential's key gets the same alert as one that fails under a
   certificate key (`decrypt_error` for a bad signature).
-- Not implemented: client credentials (the extension is parsed in
-  CertificateRequest but never sent, and a client never presents one; a
-  server answers a client Certificate entry carrying one with
-  `unsupported_extension`, like other unsolicited entry extensions).
+- Exported authenticators (RFC 9261) do not carry delegated credentials: an
+  authenticator's Certificate entry with one is refused.
   No other implementation the project tests against supports delegated
   credentials, so the tests are browntls to browntls only.
 

@@ -1,5 +1,7 @@
 //! A stream's side of certificate status queries: where the answers come
-//! from, and the answer on its way to the connection.
+//! from, and the answer on its way to the connection. The source also
+//! carries the fetcher of client certificates named by URL (RFC 6066 §5),
+//! whose queries are answered separately (`certificate_url.rs`).
 //!
 //! Without the `ocsp` feature there is no fetcher to attach, and every
 //! query is answered `Unavailable` at once.
@@ -9,6 +11,9 @@ use std::task::{Context, Poll};
 
 use browntls_core::revocation::{RevocationQuery, RevocationResponse};
 
+use super::certificate_url::CertificateUrlAnswers;
+use crate::certificate_url::FetchClientCertificateUrl;
+
 #[cfg(feature = "ocsp")]
 use crate::revocation::{Delivered, PendingResponse, RevocationFetcher};
 
@@ -17,14 +22,21 @@ use crate::revocation::{Delivered, PendingResponse, RevocationFetcher};
 pub(crate) struct RevocationSource {
     #[cfg(feature = "ocsp")]
     fetcher: Option<std::sync::Arc<RevocationFetcher>>,
+    /// The application's fetcher of client certificates named by URL.
+    certificate_url: Option<std::sync::Arc<dyn FetchClientCertificateUrl>>,
 }
 
 impl RevocationSource {
     #[cfg(feature = "ocsp")]
-    pub(crate) fn new(fetcher: std::sync::Arc<RevocationFetcher>) -> Self {
-        Self {
-            fetcher: Some(fetcher),
-        }
+    pub(crate) fn set_fetcher(&mut self, fetcher: std::sync::Arc<RevocationFetcher>) {
+        self.fetcher = Some(fetcher);
+    }
+
+    pub(crate) fn set_certificate_url_fetcher(
+        &mut self,
+        fetcher: std::sync::Arc<dyn FetchClientCertificateUrl>,
+    ) {
+        self.certificate_url = Some(fetcher);
     }
 
     /// Whether a fetcher is attached.
@@ -46,6 +58,7 @@ impl RevocationSource {
             fetcher: self.fetcher.clone(),
             #[cfg(feature = "ocsp")]
             flight: None,
+            certificate_url: CertificateUrlAnswers::new(self.certificate_url.clone()),
         }
     }
 }
@@ -54,6 +67,7 @@ impl fmt::Debug for RevocationSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RevocationSource")
             .field("attached", &self.is_attached())
+            .field("certificate_url", &self.certificate_url.is_some())
             .finish()
     }
 }
@@ -65,6 +79,9 @@ pub(crate) struct PeerRevocation {
     fetcher: Option<std::sync::Arc<RevocationFetcher>>,
     #[cfg(feature = "ocsp")]
     flight: Option<Box<Flight>>,
+    /// The fetch of the client certificate chain a CertificateURL message
+    /// named (servers only).
+    pub(crate) certificate_url: CertificateUrlAnswers,
 }
 
 #[cfg(feature = "ocsp")]
@@ -127,6 +144,7 @@ impl fmt::Debug for PeerRevocation {
                 .as_ref()
                 .and_then(|flight| flight.pending.as_ref().map(|(id, _)| id)),
         );
+        debug.field("certificate_url", &self.certificate_url);
         debug.finish_non_exhaustive()
     }
 }

@@ -35,7 +35,13 @@
 //!   rejected; session caches against a model of their eviction;
 //! * a handshake between compatible configurations completes, with the two
 //!   sides agreeing on the suite, version and ALPN protocol, and again on a
-//!   second connection.
+//!   second connection;
+//! * `trusted_ca_keys` (RFC 6066 §6): identifiers from fuzzed certificate
+//!   DER fail without panicking and agree across the certificate, trust
+//!   anchor and SPKI routes; a client list is refused at connection
+//!   creation exactly when it holds an empty name; the server resolver
+//!   acknowledges exactly in a full TLS 1.2 handshake that served a chain
+//!   registered under a listed identifier.
 //!
 //! Keys and certificates come from [`fixtures`], generated once per process.
 
@@ -52,6 +58,7 @@ mod crypto;
 pub(crate) mod fixtures;
 mod misc;
 pub(crate) mod sign;
+mod trusted_ca;
 pub(crate) mod verifiers;
 
 /// 2026-11-15 00:00:00 UTC: inside every fixture's validity and the CRLs'
@@ -131,6 +138,7 @@ const OPS: &[Op] = &[
     (misc::sni_op, 5),
     (misc::compress_op, 7),
     (misc::keylog_enum_op, 1),
+    (trusted_ca::trusted_ca_op, 55),
 ];
 
 /// Operation numbers, as the seeds write them.
@@ -161,6 +169,7 @@ mod op {
     pub(super) const SNI: u8 = 23;
     pub(super) const COMPRESS: u8 = 24;
     pub(super) const KEYLOG: u8 = 25;
+    pub(super) const TRUSTED_CA: u8 = 26;
 }
 
 /// The `tls_config` fuzz target.
@@ -534,6 +543,49 @@ pub fn seeds() -> Vec<Vec<u8>> {
     );
     add(op::KEYLOG, &[&[0, 0, 0, 0xc0, 0x23]]);
     add(op::KEYLOG, &[&[0, 0, 0, 0x13, 0x01]]);
+    // trusted_ca_keys: SHA-1 provider, certificate (fixture or fuzzed),
+    // byte to flip and mask, provider, versions (client, server), a chain
+    // under pre_agreed, then the client list (count, entries).
+    let none = [0xff, 0xff, 0];
+    for seed in [
+        // TLS 1.2, the root's certificate hash: acknowledged.
+        &[1, 0, none[0], none[1], none[2], 0, 1, 1, 0, 1, 3][..],
+        // The key hash after an unregistered certificate hash.
+        &[1, 0, none[0], none[1], none[2], 0, 1, 1, 0, 2, 4, 1],
+        // The root's name, the other provider.
+        &[0, 2, none[0], none[1], none[2], 1, 1, 1, 0, 1, 2],
+        // pre_agreed, a TLS 1.2 server: the P-384 chain.
+        &[1, 1, none[0], none[1], none[2], 0, 0, 1, 1, 1, 0],
+        // TLS 1.3 negotiated: never acknowledged; a changed end entity.
+        &[0, 3, 0, 10, 0x40, 1, 0, 0, 1, 1, 0],
+        // A TLS 1.3-only client sends nothing.
+        &[1, 0, none[0], none[1], none[2], 0, 2, 0, 0, 1, 3],
+        // No list.
+        &[1, 0, none[0], none[1], none[2], 0, 1, 1, 0, 0x80],
+    ] {
+        add(op::TRUSTED_CA, &[seed]);
+    }
+    // An empty name is refused at connection creation.
+    add(
+        op::TRUSTED_CA,
+        &[&[1, 0, 0xff, 0xff, 0, 0, 1, 1, 0, 2, 6, 0, 5], &[0x5a; 20]],
+    );
+    // Fuzzed DER, and a list naming nothing registered: the fallback.
+    add(
+        op::TRUSTED_CA,
+        &[
+            &[1, 4],
+            &field(&[0x30, 0x03, 0x02, 0x01, 0x00]),
+            &[0, 1, 0xff, 1, 1, 1, 0, 1, 6],
+            &short(&[0x30, 0x00]),
+        ],
+    );
+    // An intermediate with a damaged length byte.
+    add(
+        op::TRUSTED_CA,
+        &[&[0, 2, 0, 3, 0xff, 1, 1, 1, 0, 1, 5], &[7; 20]],
+    );
+
     // A program of several operations.
     let program: Vec<u8> = [op::SUITE, op::KEYLOG, op::HASH, op::HELPERS]
         .iter()

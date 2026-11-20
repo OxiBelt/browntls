@@ -119,7 +119,7 @@ impl TlsConnector {
         mut self,
         fetcher: Arc<crate::revocation::RevocationFetcher>,
     ) -> Self {
-        self.revocation = RevocationSource::new(fetcher);
+        self.revocation.set_fetcher(fetcher);
         self
     }
 
@@ -263,7 +263,24 @@ impl TlsAcceptor {
         mut self,
         fetcher: Arc<crate::revocation::RevocationFetcher>,
     ) -> Self {
-        self.revocation = RevocationSource::new(fetcher);
+        self.revocation.set_fetcher(fetcher);
+        self
+    }
+
+    /// Fetches, with `fetcher`, the client certificates that TLS 1.2
+    /// clients of this acceptor name by URL (RFC 6066 §5, with
+    /// [`ServerConfig::client_certificate_url`](browntls_core::ServerConfig::client_certificate_url)
+    /// set). Without one, such a handshake fails with
+    /// `certificate_unobtainable`.
+    ///
+    /// Neither this crate nor `browntls-core` opens a connection to a URL:
+    /// `fetcher` must authorize every destination the client names. See
+    /// [`crate::certificate_url`].
+    pub fn client_certificate_url_fetcher(
+        mut self,
+        fetcher: Arc<dyn crate::certificate_url::FetchClientCertificateUrl>,
+    ) -> Self {
+        self.revocation.set_certificate_url_fetcher(fetcher);
         self
     }
 

@@ -21,6 +21,8 @@ mod matrix;
 mod ocsp;
 #[path = "openssl_interop/psk.rs"]
 mod psk;
+#[path = "openssl_interop/server_grease.rs"]
+mod server_grease;
 #[path = "openssl_interop/tls13_optional.rs"]
 mod tls13_optional;
 

@@ -169,6 +169,32 @@ pub(crate) fn split_spki(spki: &[u8]) -> Result<(&[u8], &[u8]), Error> {
     }
 }
 
+/// The contents of the `OBJECT IDENTIFIER` that starts `alg`, the contents
+/// of an `AlgorithmIdentifier` (without the outer SEQUENCE).
+pub(crate) fn algorithm_oid(alg: &[u8]) -> Result<&[u8], Error> {
+    const TAG_OID: u8 = 0x06;
+    let mut alg = Der { input: alg };
+    alg.expect(TAG_OID)
+        .map(|(oid, _)| oid)
+        .map_err(|()| CertificateError::BadEncoding.into())
+}
+
+/// The `modulus` of a DER `RSAPublicKey` (RFC 8017 §A.1.1), as encoded: a
+/// positive modulus whose top bit is set keeps its leading zero byte.
+pub(crate) fn rsa_modulus(key: &[u8]) -> Result<&[u8], Error> {
+    let parse = || -> Result<&[u8], ()> {
+        let mut outer = Der { input: key };
+        let (body, _) = outer.expect(TAG_SEQUENCE)?;
+        outer.done()?;
+        let mut body = Der { input: body };
+        let (modulus, _) = body.expect(TAG_INTEGER)?;
+        body.expect(TAG_INTEGER)?; // publicExponent
+        body.done()?;
+        Ok(modulus)
+    };
+    parse().map_err(|()| CertificateError::BadEncoding.into())
+}
+
 /// Returns the contents of the `privateKeyAlgorithm` `AlgorithmIdentifier`
 /// of a DER PKCS #8 `PrivateKeyInfo` (RFC 5958 §2) without examining the
 /// rest, or `None` if the structure does not start as one.

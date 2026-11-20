@@ -51,6 +51,15 @@ pub fn seeds() -> Vec<Vec<u8>> {
         seeds.push(Seed::new([flags, auth, 0, 0, 0], &[0]).conversation().0);
     }
 
+    // RFC 7924 cached_info: TLS 1.2 without resumption and with client
+    // authentication, so the second connection gets the server's
+    // Certificate and CertificateRequest as fingerprints.
+    let seed = Seed::new([0x02, 0x21, 0, 0, 0], &[0])
+        .conversation()
+        .op(Op::Reconnect, &[0])
+        .conversation();
+    seeds.push(seed.0);
+
     // Small output buffers, with and without retrying; no done().
     let seed = Seed::new([0x01, 0x40, 0, 0, 0], &[0])
         .step(Op::Step, 0, 0, 10, b"")

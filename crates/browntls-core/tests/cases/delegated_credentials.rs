@@ -1,8 +1,8 @@
 // Shared cases, included by `tests/delegated_credentials.rs` (RustCrypto
 // provider) and `tests/delegated_credentials_native.rs` (native provider):
-// TLS 1.3 server authentication with delegated credentials (RFC 9345),
-// browntls client against browntls server (no other implementation the
-// project tests against supports RFC 9345).
+// TLS 1.3 server and client authentication with delegated credentials (RFC
+// 9345), browntls client against browntls server (no other implementation
+// the project tests against supports RFC 9345).
 
 use std::io::Write;
 use std::sync::Arc;
@@ -86,9 +86,20 @@ fn dc_key(
     (key, spki)
 }
 
-/// A delegated credential for `chain`'s end entity, expiring at `expiry`,
-/// with an ECDSA P-256 or Ed25519 key.
+/// A server's delegated credential for `chain`'s end entity, expiring at
+/// `expiry`, with an ECDSA P-256, P-384 or Ed25519 key.
 fn issue(
+    chain: &Chain,
+    dc_scheme: SignatureScheme,
+    expiry: UnixTime,
+) -> (DelegatedCredential, Arc<dyn SigningKey>) {
+    issue_for(Side::Server, chain, dc_scheme, expiry)
+}
+
+/// A delegated credential with which `side` authenticates as `chain`'s end
+/// entity, expiring at `expiry`, with an ECDSA P-256, P-384 or Ed25519 key.
+fn issue_for(
+    side: Side,
     chain: &Chain,
     dc_scheme: SignatureScheme,
     expiry: UnixTime,
@@ -105,7 +116,7 @@ fn issue(
         .load_private_key(chain.private_key())
         .unwrap();
     let dc = DelegatedCredential::issue(
-        Side::Server,
+        side,
         &chain.end_entity,
         &*cert_key,
         chain.key_type.schemes(),
@@ -152,3 +163,7 @@ fn take_tickets(client: &mut ClientConnection, server: &mut ServerConnection) {
 
 include!("delegated_credentials/handshake.rs");
 include!("delegated_credentials/resumption.rs");
+include!("delegated_credentials/client_auth.rs");
+include!("delegated_credentials/client_auth_selection.rs");
+include!("delegated_credentials/client_auth_post_handshake.rs");
+include!("delegated_credentials/client_auth_resumption.rs");

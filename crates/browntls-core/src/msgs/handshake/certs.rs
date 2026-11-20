@@ -17,6 +17,7 @@ use crate::msgs::codec::{
 use crate::msgs::enums::{CertificateStatusType, ClientCertificateType, ExtensionType};
 
 mod evidence;
+mod transparency;
 
 /// A TLS 1.2 certificate chain: the end entity first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,6 +139,8 @@ pub(crate) struct CertificateEntry<'a> {
     pub(crate) cert: CertificateDer<'a>,
     pub(crate) status: Option<CertificateStatus<'a>>,
     pub(crate) sct_list: Option<Payload<'a>>,
+    /// RFC 9162 §6.5: the `TransItemList` of a server's entry.
+    pub(crate) transparency_info: Option<Payload<'a>>,
     /// RFC 9345 §4.1.1: only meaningful on the end-entity entry.
     pub(crate) delegated_credential: Option<DelegatedCredential>,
 }
@@ -148,6 +151,7 @@ impl<'a> CertificateEntry<'a> {
             cert,
             status: None,
             sct_list: None,
+            transparency_info: None,
             delegated_credential: None,
         }
     }
@@ -157,6 +161,7 @@ impl<'a> CertificateEntry<'a> {
             cert: self.cert.into_owned(),
             status: self.status.map(CertificateStatus::into_owned),
             sct_list: self.sct_list.map(Payload::into_owned),
+            transparency_info: self.transparency_info.map(Payload::into_owned),
             delegated_credential: self.delegated_credential,
         }
     }
@@ -172,6 +177,11 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         if let Some(scts) = &self.sct_list {
             encode_extension(ExtensionType::SCT, list.buf, |b| scts.encode(b));
         }
+        if let Some(info) = &self.transparency_info {
+            encode_extension(ExtensionType::TransparencyInfo, list.buf, |b| {
+                info.encode(b)
+            });
+        }
         if let Some(dc) = &self.delegated_credential {
             encode_extension(ExtensionType::DelegatedCredential, list.buf, |b| {
                 dc.encode(b)
@@ -183,6 +193,7 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         let cert = CertificateDer::read(r)?;
         let mut status = None;
         let mut sct_list = None;
+        let mut transparency_info = None;
         let mut delegated_credential = None;
         read_extensions(r, |typ, body| {
             match typ {
@@ -193,6 +204,13 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
                     let list = body.rest();
                     evidence::validate_sct_list(list)?;
                     sct_list = Some(Payload::Borrowed(list));
+                }
+                // RFC 9162 §6.5: a well-formed list, or an empty one.
+                // Whether we asked for it is checked by the handshake.
+                ExtensionType::TransparencyInfo => {
+                    let list = body.rest();
+                    transparency::validate(list)?;
+                    transparency_info = Some(Payload::Borrowed(list));
                 }
                 // Whether we offered it is checked by the handshake.
                 ExtensionType::DelegatedCredential => {
@@ -217,6 +235,7 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
             cert,
             status,
             sct_list,
+            transparency_info,
             delegated_credential,
         })
     }
@@ -402,12 +421,22 @@ pub(crate) struct CertificateRequestExtensions {
     /// An empty `signed_certificate_timestamp` (RFC 6962 §3.3.1, permitted
     /// in CertificateRequest by RFC 8446 §4.2), asking the client for SCTs.
     pub(crate) sct_request: Option<()>,
+    /// RFC 8701 §4.1: an empty GREASE extension of this type, encoded
+    /// first. Only for encoding; a GREASE extension reads back as an
+    /// unknown one.
+    pub(crate) grease_first: Option<u16>,
+    /// RFC 8701 §4.1: a one-byte GREASE extension of this type, encoded
+    /// last. Only for encoding.
+    pub(crate) grease_last: Option<u16>,
 }
 
 impl Codec<'_> for CertificateRequestExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        if let Some(grease) = self.grease_first {
+            encode_extension(ExtensionType::Unknown(grease), out, |_| {});
+        }
         if let Some(s) = &self.signature_algorithms {
             encode_extension(ExtensionType::SignatureAlgorithms, out, |b| {
                 encode_vec_u16(b, s)
@@ -438,6 +467,10 @@ impl Codec<'_> for CertificateRequestExtensions {
         }
         if self.sct_request.is_some() {
             encode_extension(ExtensionType::SCT, out, |_| {});
+        }
+        if let Some(grease) = self.grease_last {
+            // RFC 8701 §4.1: extensions "with varying length and contents".
+            encode_extension(ExtensionType::Unknown(grease), out, |b| b.push(0));
         }
     }
 
@@ -600,6 +633,32 @@ mod tests {
             CertificateRequestPayloadTls13::read_bytes(&cr13.get_encoding()).unwrap(),
             cr13
         );
+
+        // GREASE extensions (RFC 8701 §4.1) go first and last, and read
+        // back as unknown ones, as a GREASE signature scheme does.
+        let mut greased = cr13.clone();
+        greased.extensions.signature_algorithms = Some(alloc::vec![
+            SignatureScheme::Unknown(0x3a3a),
+            SignatureScheme::ED25519
+        ]);
+        greased.extensions.grease_first = Some(0x1a1a);
+        greased.extensions.grease_last = Some(0x2a2a);
+        let enc = greased.get_encoding();
+        assert_eq!(enc[3..7], [0x1a, 0x1a, 0, 0]);
+        assert_eq!(enc[enc.len() - 5..], [0x2a, 0x2a, 0, 1, 0]);
+        let read = CertificateRequestPayloadTls13::read_bytes(&enc).unwrap();
+        assert_eq!(
+            read.extensions.unknown,
+            [
+                ExtensionType::Unknown(0x1a1a),
+                ExtensionType::Unknown(0x2a2a)
+            ]
+        );
+        assert_eq!(
+            read.extensions.signature_algorithms,
+            greased.extensions.signature_algorithms
+        );
+        assert_eq!(read.extensions.authorities, cr13.extensions.authorities);
     }
 
     #[test]

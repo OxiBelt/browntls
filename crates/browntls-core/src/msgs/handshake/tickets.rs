@@ -43,13 +43,27 @@ impl Codec<'_> for NewSessionTicketPayload {
 pub(crate) struct NewSessionTicketExtensions {
     pub(crate) max_early_data_size: Option<u32>,
     pub(crate) unknown: Vec<ExtensionType>,
+    /// RFC 8701 §4.1: an empty GREASE extension of this type, encoded
+    /// first. Only for encoding; a GREASE extension reads back as an
+    /// unknown one.
+    pub(crate) grease_first: Option<u16>,
+    /// RFC 8701 §4.1: a one-byte GREASE extension of this type, encoded
+    /// last. Only for encoding.
+    pub(crate) grease_last: Option<u16>,
 }
 
 impl Codec<'_> for NewSessionTicketExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
+        if let Some(grease) = self.grease_first {
+            encode_extension(ExtensionType::Unknown(grease), list.buf, |_| {});
+        }
         if let Some(size) = &self.max_early_data_size {
             encode_extension(ExtensionType::EarlyData, list.buf, |b| size.encode(b));
+        }
+        if let Some(grease) = self.grease_last {
+            // RFC 8701 §4.1: extensions "with varying length and contents".
+            encode_extension(ExtensionType::Unknown(grease), list.buf, |b| b.push(0));
         }
     }
 
@@ -143,6 +157,24 @@ mod tests {
         t.exts.max_early_data_size = Some(1024);
         let enc = t.get_encoding();
         assert_eq!(NewSessionTicketPayloadTls13::read_bytes(&enc).unwrap(), t);
+        // GREASE extensions (RFC 8701 §4.1) go first and last, and read
+        // back as unknown ones.
+        let mut greased = t.clone();
+        greased.exts.grease_first = Some(0x1a1a);
+        greased.exts.grease_last = Some(0x2a2a);
+        let enc = greased.get_encoding();
+        let exts = &enc[enc.len() - 19..];
+        assert_eq!(exts[..6], [0, 17, 0x1a, 0x1a, 0, 0]);
+        assert_eq!(exts[14..], [0x2a, 0x2a, 0, 1, 0]);
+        let read = NewSessionTicketPayloadTls13::read_bytes(&enc).unwrap();
+        assert_eq!(
+            read.exts.unknown,
+            [
+                ExtensionType::Unknown(0x1a1a),
+                ExtensionType::Unknown(0x2a2a)
+            ]
+        );
+        assert_eq!(read.exts.max_early_data_size, Some(1024));
         let empty = NewSessionTicketPayloadTls13 {
             ticket: PayloadU16::empty(),
             ..t

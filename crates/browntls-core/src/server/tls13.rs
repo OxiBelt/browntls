@@ -10,7 +10,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use client_auth::{ExpectCertificate, client_auth_sigschemes};
+use client_auth::ExpectCertificate;
 use early_data::{
     EarlyDataDecision, ExpectAndSkipRejectedEarlyData, ExpectEarlyData,
     decide_if_early_data_allowed, decide_if_external_early_data_allowed, max_early_data_size,
@@ -86,6 +86,10 @@ impl CompleteClientHelloHandling {
     }
 
     fn attempt_tls13_ticket_decryption(&self, ticket: &[u8]) -> Option<ServerSessionValue> {
+        // RFC 8844 §5: a bound connection resumes no session.
+        if self.config.external_binding.is_some() {
+            return None;
+        }
         let plain = if self.config.ticketer.enabled() {
             self.config.ticketer.decrypt(ticket)?
         } else {
@@ -109,6 +113,13 @@ impl CompleteClientHelloHandling {
                 PeerIncompatible::KeyShareExtensionRequired,
             )
         })?;
+        // RFC 8844: checked in each ClientHello, the second one included.
+        crate::external_binding::handshake::server_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            true,
+        )?;
 
         // Empty when the client sent no signature_algorithms, which it may
         // only do when offering a PSK (`hs::process_client_hello`); checked
@@ -344,9 +355,24 @@ impl CompleteClientHelloHandling {
                     {
                         continue;
                     }
-                    if resume
-                        .delegated_credential_expiry
-                        .is_some_and(|expiry| now >= expiry)
+                    // Nor one past the deadline of a delegated credential
+                    // that authenticated either side (RFC 9345).
+                    if [
+                        resume.delegated_credential_expiry,
+                        resume.client_delegated_credential_expiry,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|expiry| now >= expiry)
+                    {
+                        continue;
+                    }
+                    // A session whose client authenticated with a delegated
+                    // credential keeps that authentication; only a
+                    // configuration that accepts such credentials resumes
+                    // it.
+                    if resume.client_delegated_credential_expiry.is_some()
+                        && !self.config.enable_delegated_credentials
                     {
                         continue;
                     }
@@ -366,6 +392,8 @@ impl CompleteClientHelloHandling {
                     // Reported once the client's Finished verifies.
                     cx.common.external_psk = resumed_external;
                     cx.data.delegated_credential_expiry = resume.delegated_credential_expiry;
+                    cx.data.client_delegated_credential_expiry =
+                        resume.client_delegated_credential_expiry;
                     resumedata = Some(resume.set_freshness(psk_id.obfuscated_ticket_age, now));
                     break;
                 }
@@ -583,7 +611,10 @@ impl CompleteClientHelloHandling {
         // in EncryptedExtensions when the client sent ticket_request.
         let (mut send_tickets, mut expected_tickets) =
             hs::tls13_tickets_to_send(&self.config, client_hello, resumedata.is_some());
-        if client_revocation_enabled(&self.config) && !cx.data.certificate_free {
+        // RFC 8844 §5: no session of a bound connection is kept for later.
+        if (client_revocation_enabled(&self.config) && !cx.data.certificate_free)
+            || self.config.external_binding.is_some()
+        {
             send_tickets = 0;
             expected_tickets = expected_tickets.map(|_| 0);
         }
@@ -607,9 +638,12 @@ impl CompleteClientHelloHandling {
             expected_tickets,
         );
 
-        let doing_client_auth = if let Some(server_key) = server_key {
-            let client_auth = !defer_client_auth
-                && emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?;
+        let client_auth = if let Some(server_key) = server_key {
+            let offer = if defer_client_auth {
+                None
+            } else {
+                emit_certificate_req_tls13(&mut self.transcript, cx.common, &self.config)?
+            };
             let delegated = choose_delegated_credential(
                 &self.config,
                 &server_key,
@@ -625,6 +659,7 @@ impl CompleteClientHelloHandling {
                 server_key.certified_key(),
                 client_hello,
                 delegated,
+                self.cert_types.server,
             );
             emit_certificate_verify_tls13(
                 &mut self.transcript,
@@ -633,9 +668,9 @@ impl CompleteClientHelloHandling {
                 &sigschemes,
                 delegated,
             )?;
-            client_auth
+            offer
         } else {
-            false
+            None
         };
 
         if let Some(resume) = &resumedata {
@@ -654,23 +689,19 @@ impl CompleteClientHelloHandling {
         // Not ahead of a client certificate whose revocation status is
         // still to be evaluated: nothing is sent to that client before.
         if self.config.send_half_rtt_data
-            && !(doing_client_auth && client_revocation_enabled(&self.config))
+            && !(client_auth.is_some() && client_revocation_enabled(&self.config))
         {
             cx.common.start_outgoing_traffic();
         }
 
-        if doing_client_auth {
-            // RFC 9846 §4.5.2: the client's CertificateVerify must use a
-            // scheme from our CertificateRequest, which lists only the
-            // verifier's TLS 1.3 schemes.
-            let offered_sigschemes = client_auth_sigschemes(&self.config);
+        if let Some(offer) = client_auth {
             Ok(Box::new(ExpectCertificate {
                 config: self.config,
                 transcript: self.transcript,
                 suite: self.suite,
                 key_schedule,
                 send_tickets: self.send_tickets,
-                offered_sigschemes,
+                offer,
             }))
         } else if early_data == EarlyDataDecision::Accepted && !cx.common.is_quic() {
             // RFC 9001 §8.3: on QUIC no EndOfEarlyData ends the early data;

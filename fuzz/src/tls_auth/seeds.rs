@@ -40,6 +40,114 @@ fn issue_seed(
     seed
 }
 
+/// A client-authentication operation: mode flags, the client's clock
+/// twelve days into the certificate, the expiry selector (two days ahead
+/// for 6), the server's skew (2: 128 seconds behind), credential key,
+/// variant (a flipped signature bit for 2) and scheme mask, if any.
+fn client_auth_seed(
+    mode: u8,
+    delta: u8,
+    skew: u8,
+    key: u8,
+    variant: u8,
+    mask: Option<u8>,
+) -> Vec<u8> {
+    let mut seed = vec![8, mode, 0, 0x10, 0, 0, skew];
+    if skew == 2 {
+        seed.push(0);
+    }
+    seed.push(delta);
+    if delta >= 6 {
+        seed.extend_from_slice(&[0, 3, 0xf4, 0x80]);
+    }
+    seed.extend_from_slice(&[key, variant]);
+    if variant == 2 {
+        seed.extend_from_slice(&[0, 3, 1]);
+    }
+    match mask {
+        Some(mask) => seed.extend_from_slice(&[0, mask]),
+        None => seed.push(1),
+    }
+    seed
+}
+
+/// A validation operation; the default is a sound client credential of
+/// the client certificate, presented by the client two days before it
+/// expires, with every scheme offered.
+#[derive(Clone, Copy)]
+struct ValidateSeed {
+    client_cert: bool,
+    /// Issuing side selector: 0 the client, otherwise the server.
+    side: u8,
+    /// Presented certificate: 0 plain, 1 garbage, 2 the other delegation
+    /// certificate, 3 the issuer.
+    cert: u8,
+    /// 0: presented by the other side.
+    side_sel: u8,
+    /// Seconds after the certificate's start.
+    now: u32,
+    /// Expiry selector; 5 is relative to the certificate's end, by
+    /// `at_end` - 128 seconds.
+    delta: u8,
+    at_end: u8,
+    key: u8,
+    /// 0 to 3 tamper; 5 does not.
+    tamper: u8,
+    dc_mask: u8,
+    sig_mask: u8,
+    /// 0: a P-384 CertificateVerify.
+    cv_sel: u8,
+}
+
+impl Default for ValidateSeed {
+    fn default() -> Self {
+        Self {
+            client_cert: true,
+            side: 0,
+            cert: 3,
+            side_sel: 1,
+            now: 0x0010_0000,
+            delta: 6,
+            at_end: 128,
+            key: 0,
+            tamper: 5,
+            dc_mask: 0xff,
+            sig_mask: 0xff,
+            cv_sel: 1,
+        }
+    }
+}
+
+impl ValidateSeed {
+    fn encode(self) -> Vec<u8> {
+        let mut seed = vec![9, u8::from(self.client_cert), self.side, self.cert];
+        if self.cert == 1 {
+            put_short_field(&mut seed, b"\x30\x03\x02\x01\x00");
+        }
+        seed.push(self.side_sel);
+        seed.extend_from_slice(&self.now.to_be_bytes());
+        seed.push(self.delta);
+        match self.delta {
+            5 => seed.push(self.at_end),
+            6.. => seed.extend_from_slice(&[0, 3, 0xf4, 0x80]),
+            _ => {}
+        }
+        seed.extend_from_slice(&[self.key, self.tamper]);
+        match self.tamper {
+            0 => seed.extend_from_slice(&[0, 3, 1]),
+            1 => seed.push(3),
+            // P-384
+            2 | 3 => seed.extend_from_slice(&[1, 2]),
+            _ => {}
+        }
+        seed.extend_from_slice(&[self.dc_mask, self.sig_mask, self.cv_sel]);
+        if self.cv_sel == 0 {
+            seed.extend_from_slice(&[1, 2]);
+        }
+        seed
+    }
+}
+
 /// Starting inputs for `tls_auth`.
 #[must_use]
 pub fn seeds() -> Vec<Vec<u8>> {
@@ -206,5 +314,91 @@ pub fn seeds() -> Vec<Vec<u8>> {
     unbuffered[1] = 6;
     seeds.push(seed);
     seeds.push(unbuffered);
+
+    // 7: client certificate URLs
+    seeds.extend(super::certificate_url::seeds(7));
+
+    // 8: client authentication with a credential: each connection kind
+    // (buffered or unbuffered ends, after the handshake, resumed, a server
+    // that does not ask), each variant, the boundaries, a skewed server
+    // and restricted schemes
+    for mode in [0u8, 1, 2, 3, 4, 8, 10, 16, 19] {
+        seeds.push(client_auth_seed(mode, 6, 0, 0, 5, None));
+    }
+    for (variant, key) in [(0u8, 0u8), (1, 0), (2, 1), (3, 0), (4, 1), (5, 1)] {
+        seeds.push(client_auth_seed(0, 6, 0, key, variant, None));
+    }
+    seeds.push(client_auth_seed(10, 6, 0, 0, 2, None));
+    seeds.push(client_auth_seed(2, 6, 0, 1, 4, None));
+    for delta in 0..6u8 {
+        seeds.push(client_auth_seed(0, delta, 0, 0, 5, None));
+    }
+    seeds.push(client_auth_seed(0, 6, 2, 0, 5, None));
+    seeds.push(client_auth_seed(0, 2, 2, 0, 5, None));
+    // P-256 only, Ed25519 only, P-256 with Ed25519 and RSA-PSS
+    for (mask, key) in [(0x01u8, 1u8), (0x01, 0), (0x02, 1), (0x0b, 1)] {
+        seeds.push(client_auth_seed(0, 6, 0, key, 5, Some(mask)));
+    }
+
+    // 9: validation: sound credentials of both certificates and keys, then
+    // each refusal (tampering, the other side, other certificates,
+    // unoffered schemes, another CertificateVerify scheme, the time
+    // boundaries and the certificate's end)
+    let sound = ValidateSeed::default();
+    seeds.push(sound.encode());
+    seeds.push(ValidateSeed { key: 1, ..sound }.encode());
+    seeds.push(
+        ValidateSeed {
+            client_cert: false,
+            side: 1,
+            ..sound
+        }
+        .encode(),
+    );
+    for tamper in 0..4 {
+        seeds.push(ValidateSeed { tamper, ..sound }.encode());
+    }
+    seeds.push(
+        ValidateSeed {
+            side_sel: 0,
+            ..sound
+        }
+        .encode(),
+    );
+    for cert in 0..3 {
+        seeds.push(ValidateSeed { cert, ..sound }.encode());
+    }
+    seeds.push(
+        ValidateSeed {
+            key: 1,
+            dc_mask: 0x01,
+            ..sound
+        }
+        .encode(),
+    );
+    seeds.push(
+        ValidateSeed {
+            sig_mask: 0x02,
+            ..sound
+        }
+        .encode(),
+    );
+    seeds.push(ValidateSeed { cv_sel: 0, ..sound }.encode());
+    for delta in 0..5 {
+        seeds.push(ValidateSeed { delta, ..sound }.encode());
+    }
+    // three days before the certificate ends, a credential ending with it
+    // and one a second later
+    for at_end in [128u8, 129] {
+        seeds.push(
+            ValidateSeed {
+                now: 0x01dd_3f00,
+                delta: 5,
+                at_end,
+                ..sound
+            }
+            .encode(),
+        );
+    }
     seeds
 }

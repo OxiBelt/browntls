@@ -6,7 +6,8 @@ use super::extensions::{encode_extension, read_extensions};
 use super::{
     CertificateStatusRequest, ClientSessionTicket, ClientTicketRequest, DistinguishedName,
     HandshakePayload, KeyShareEntry, MAX_HANDSHAKE_SIZE, PresharedKeyOffer, ProtocolName, Random,
-    ServerExtensions, ServerNamePayload, SessionId, read_payload,
+    ServerExtensions, ServerNamePayload, SessionId, TrustedAuthority, encode_trusted_authorities,
+    read_payload, read_trusted_authorities,
 };
 use crate::ech::codec::EchClientHello;
 use crate::enums::{
@@ -14,6 +15,7 @@ use crate::enums::{
     SignatureScheme,
 };
 use crate::error::InvalidMessage;
+use crate::external_binding::{ExternalIdHash, ExternalSessionId};
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::codec::{
     Codec, LengthPrefixedBuffer, ListLength, Reader, encode_vec_u8, encode_vec_u16,
@@ -40,9 +42,20 @@ pub(crate) struct ClientExtensions {
     pub(crate) protocols: Option<Vec<ProtocolName>>,
     pub(crate) certificate_status_request: Option<CertificateStatusRequest>,
     pub(crate) sct_request: Option<()>,
+    /// RFC 9162 §6.5: an empty `transparency_info` extension.
+    pub(crate) transparency_info: Option<()>,
     pub(crate) extended_master_secret: Option<()>,
     /// RFC 7366: an empty `encrypt_then_mac` extension.
     pub(crate) encrypt_then_mac: Option<()>,
+    /// RFC 6066 §5: an empty `client_certificate_url` extension (TLS 1.2).
+    pub(crate) client_certificate_url: Option<()>,
+    /// RFC 6066 §6: the root keys the client says it possesses (TLS 1.2).
+    /// The list may be empty.
+    pub(crate) trusted_ca_keys: Option<Vec<TrustedAuthority>>,
+    /// RFC 6066 §7: an empty `truncated_hmac` extension. Parsed so that a
+    /// malformed one is refused; never sent and never acknowledged
+    /// (RFC 9325 §4.6).
+    pub(crate) truncated_hmac: Option<()>,
     pub(crate) session_ticket: Option<ClientSessionTicket>,
     pub(crate) supported_versions: Option<Vec<ProtocolVersion>>,
     pub(crate) key_shares: Option<Vec<KeyShareEntry>>,
@@ -69,6 +82,12 @@ pub(crate) struct ClientExtensions {
     pub(crate) record_size_limit: Option<u16>,
     /// RFC 9149: how many TLS 1.3 tickets we would like.
     pub(crate) ticket_request: Option<ClientTicketRequest>,
+    /// RFC 8844 §3.2: the hash of our identity assertion, or empty.
+    pub(crate) external_id_hash: Option<ExternalIdHash>,
+    /// RFC 8844 §4.3: our external session identifier (SDP `tls-id`).
+    pub(crate) external_session_id: Option<ExternalSessionId>,
+    /// RFC 7924: the fingerprints of cached messages (TLS 1.2).
+    pub(crate) cached_info: Option<crate::cached_info::ClientHelloCachedInfo>,
     /// RFC 8701: an empty GREASE extension of this type, encoded first.
     /// Never part of `present_types`.
     pub(crate) grease_first: Option<u16>,
@@ -121,6 +140,10 @@ impl ClientExtensions {
         );
         add(self.sct_request.is_some(), ExtensionType::SCT);
         add(
+            self.transparency_info.is_some(),
+            ExtensionType::TransparencyInfo,
+        );
+        add(
             self.extended_master_secret.is_some(),
             ExtensionType::ExtendedMasterSecret,
         );
@@ -128,6 +151,12 @@ impl ClientExtensions {
             self.encrypt_then_mac.is_some(),
             ExtensionType::EncryptThenMac,
         );
+        add(
+            self.client_certificate_url.is_some(),
+            ExtensionType::ClientCertificateUrl,
+        );
+        add(self.trusted_ca_keys.is_some(), ExtensionType::TrustedCAKeys);
+        add(self.truncated_hmac.is_some(), ExtensionType::TruncatedHMAC);
         add(self.session_ticket.is_some(), ExtensionType::SessionTicket);
         add(
             self.supported_versions.is_some(),
@@ -174,6 +203,15 @@ impl ClientExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(self.cached_info.is_some(), ExtensionType::CachedInfo);
+        add(
+            self.external_id_hash.is_some(),
+            ExtensionType::ExternalIdHash,
+        );
+        add(
+            self.external_session_id.is_some(),
+            ExtensionType::ExternalSessionId,
+        );
         add(
             self.cert_with_extern_psk.is_some(),
             ExtensionType::TlsCertWithExternPsk,
@@ -235,11 +273,25 @@ impl Codec<'_> for ClientExtensions {
         if self.sct_request.is_some() {
             encode_extension(ExtensionType::SCT, out, |_| {});
         }
+        if self.transparency_info.is_some() {
+            encode_extension(ExtensionType::TransparencyInfo, out, |_| {});
+        }
         if self.extended_master_secret.is_some() {
             encode_extension(ExtensionType::ExtendedMasterSecret, out, |_| {});
         }
         if self.encrypt_then_mac.is_some() {
             encode_extension(ExtensionType::EncryptThenMac, out, |_| {});
+        }
+        if self.client_certificate_url.is_some() {
+            encode_extension(ExtensionType::ClientCertificateUrl, out, |_| {});
+        }
+        if let Some(authorities) = &self.trusted_ca_keys {
+            encode_extension(ExtensionType::TrustedCAKeys, out, |b| {
+                encode_trusted_authorities(authorities, b);
+            });
+        }
+        if self.truncated_hmac.is_some() {
+            encode_extension(ExtensionType::TruncatedHMAC, out, |_| {});
         }
         if let Some(ticket) = &self.session_ticket {
             encode_extension(ExtensionType::SessionTicket, out, |b| match ticket {
@@ -306,6 +358,15 @@ impl Codec<'_> for ClientExtensions {
         if let Some(request) = &self.ticket_request {
             encode_extension(ExtensionType::TicketRequest, out, |b| request.encode(b));
         }
+        if let Some(hash) = &self.external_id_hash {
+            encode_extension(ExtensionType::ExternalIdHash, out, |b| hash.encode(b));
+        }
+        if let Some(id) = &self.external_session_id {
+            encode_extension(ExtensionType::ExternalSessionId, out, |b| id.encode(b));
+        }
+        if let Some(cached) = &self.cached_info {
+            encode_extension(ExtensionType::CachedInfo, out, |b| cached.encode(b));
+        }
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
@@ -363,8 +424,16 @@ impl Codec<'_> for ClientExtensions {
                     out.certificate_status_request = Some(CertificateStatusRequest::read(body)?);
                 }
                 ExtensionType::SCT => out.sct_request = Some(()),
+                // RFC 9162 §6.5: the body must be empty, which
+                // `read_extensions` enforces (decode_error otherwise).
+                ExtensionType::TransparencyInfo => out.transparency_info = Some(()),
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
                 ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
+                ExtensionType::ClientCertificateUrl => out.client_certificate_url = Some(()),
+                ExtensionType::TrustedCAKeys => {
+                    out.trusted_ca_keys = Some(read_trusted_authorities(body)?);
+                }
+                ExtensionType::TruncatedHMAC => out.truncated_hmac = Some(()),
                 ExtensionType::SessionTicket => {
                     out.session_ticket = Some(if body.any_left() {
                         ClientSessionTicket::Offer(Payload::read(body).into_owned())
@@ -421,6 +490,15 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::TicketRequest => {
                     out.ticket_request = Some(ClientTicketRequest::read(body)?);
+                }
+                ExtensionType::ExternalIdHash => {
+                    out.external_id_hash = Some(ExternalIdHash::read(body)?);
+                }
+                ExtensionType::ExternalSessionId => {
+                    out.external_session_id = Some(ExternalSessionId::read(body)?);
+                }
+                ExtensionType::CachedInfo => {
+                    out.cached_info = Some(crate::cached_info::ClientHelloCachedInfo::read(body)?);
                 }
                 ExtensionType::Padding => {
                     // RFC 7685 §3: the server ignores the content.

@@ -184,6 +184,48 @@ fn rejection_is_authenticated_with_the_public_name() {
     );
 }
 
+/// A Certificate Transparency 2.0 policy also covers the public name's
+/// certificate that authenticates a rejection: without CT evidence for it
+/// the client fails closed instead of returning the retry configurations,
+/// which that certificate would otherwise vouch for.
+#[test]
+fn rejection_under_a_transparency_policy_needs_the_evidence() {
+    use browntls_core::revocation::RevocationDigests;
+    use browntls_core::transparency::{CtV2LogConfig, CtV2Requirements};
+    use rcgen::PublicKeyData as _;
+
+    init_logging();
+    let certs = Certs::new();
+    let current = Arc::new(EchServerConfig::new(vec![server_key(2)]).unwrap());
+    let stale = EchServerConfig::new(vec![server_key(1)]).unwrap();
+    let log_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let log = CtV2LogConfig::new([0x2b, 0x65, 0x50, 1], log_key.subject_public_key_info());
+    let verifier = WebPkiServerVerifier::builder_with_provider(certs.roots(), provider())
+        .with_certificate_transparency(CtV2Requirements::new(
+            RevocationDigests::native(),
+            vec![log],
+        ))
+        .build()
+        .unwrap();
+    let mut client = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_webpki_verifier(verifier)
+        .with_no_client_auth();
+    client.ech_mode = enable(stale.ech_config_list());
+    let (mut client, mut server) = connect(client, server_config(&certs, Some(&current), None));
+    let (client_res, _) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        client_res,
+        Err(Error::InvalidCertificate(
+            browntls_core::CertificateError::InsufficientTransparency {
+                counted_scts: 0,
+                distinct_logs: 0,
+            }
+        ))
+    );
+}
+
 #[test]
 fn rejected_client_sends_no_certificate() {
     init_logging();
@@ -592,4 +634,54 @@ fn outer_hello_never_carries_a_cached_tls12_session_id() {
     do_handshake(&mut client, &mut server).unwrap();
     assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
     assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+}
+
+/// A resolver that remembers whether a ClientHello it saw carried
+/// `trusted_ca_keys`.
+#[derive(Debug)]
+struct SeesTrustedCaKeys(
+    Arc<ResolvesServerCertUsingSni>,
+    std::sync::atomic::AtomicBool,
+);
+
+impl browntls_core::server::ResolvesServerCert for SeesTrustedCaKeys {
+    fn resolve(
+        &self,
+        client_hello: browntls_core::server::ClientHello<'_>,
+    ) -> Option<Arc<CertifiedKey>> {
+        if client_hello.trusted_ca_keys().is_some() {
+            self.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.0.resolve(client_hello)
+    }
+}
+
+/// An ECH offer restricts the client to TLS 1.3 (RFC 9849 §6.1), so
+/// neither the outer nor the inner ClientHello carries `trusted_ca_keys`
+/// (RFC 6066 §6, TLS 1.2 only), whatever the configuration lists.
+#[test]
+fn no_trusted_ca_keys_with_an_ech_offer() {
+    use browntls_core::TrustedAuthority;
+    use common::hello_wire::{EXT_TRUSTED_CA_KEYS, give, hello_extension_types, take_flight};
+
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut client = client_config(&certs, enable(ech.ech_config_list()));
+    client.trusted_ca_keys = Some(vec![TrustedAuthority::PreAgreed]);
+    let seen = Arc::new(SeesTrustedCaKeys(
+        certs.resolver(),
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    let mut server = server_config(&certs, Some(&ech), None);
+    server.cert_resolver = seen.clone();
+    let (mut client, mut server) = connect(client, server);
+
+    let outer = take_flight(&mut client);
+    let types = hello_extension_types(&outer, true);
+    assert!(!types.contains(&EXT_TRUSTED_CA_KEYS), "{types:x?}");
+    give(&mut server, &outer);
+    assert_accepted(&mut client, &mut server);
+    // The server resolved its certificate for the inner ClientHello.
+    assert!(!seen.1.load(std::sync::atomic::Ordering::Relaxed));
 }

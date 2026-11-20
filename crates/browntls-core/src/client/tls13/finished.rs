@@ -11,11 +11,14 @@ use super::super::ClientConfig;
 use super::super::client_conn::ClientConnectionData;
 use super::super::common::{ClientAuthDetails, ClientCertificateExtensions};
 use super::super::hs::{ClientContext, NextStateOrError};
-use super::{certificate_request_sigschemes, construct_client_verify_message};
+use super::{
+    certificate_request_sigschemes, construct_client_verify_message, delegated_credential_request,
+};
 use crate::common_state::{CommonState, ConnectionRandoms, Side};
 use crate::conn::State;
 use crate::crypto::hmac;
 use crate::ct::constant_time_eq;
+use crate::delegated_credential::DelegatedCredentialKey;
 use crate::ech::{EchStatus, RejectedEch};
 use crate::enums::{
     AlertDescription, CertificateCompressionAlgorithm, ContentType, HandshakeType, ProtocolVersion,
@@ -50,10 +53,14 @@ const MAX_KEY_UPDATE_REQUESTS: u8 = 8;
 /// local resource bound, not an RFC 9846 rule.
 const MAX_POST_HANDSHAKE_AUTH_REQUESTS: u8 = 8;
 
+/// Sends our Certificate: `certkey`'s chain, with `delegated` (RFC 9345
+/// §4.1.2) on the end entity's entry, or an empty list without `certkey`.
+#[allow(clippy::too_many_arguments)]
 fn emit_certificate_tls13(
     transcript: &mut HandshakeHash,
     config: &ClientConfig,
     certkey: Option<&CertifiedKey>,
+    delegated: Option<&DelegatedCredentialKey>,
     auth_context: Option<Vec<u8>>,
     compression: &[CertificateCompressionAlgorithm],
     extensions: &ClientCertificateExtensions,
@@ -65,6 +72,9 @@ fn emit_certificate_tls13(
         }
         None => CertificatePayloadTls13::new(core::iter::empty(), None),
     };
+    if let (Some(dc), Some(first)) = (delegated, cert_payload.entries.first_mut()) {
+        first.delegated_credential = Some(dc.credential().clone());
+    }
     cert_payload.context = PayloadU8::new(auth_context.unwrap_or_default());
 
     // RFC 8879 §4: compress when the CertificateRequest named an algorithm
@@ -219,6 +229,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         &mut st.transcript,
                         &st.config,
                         None,
+                        None,
                         auth_context_tls13,
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
@@ -229,11 +240,13 @@ impl State<ClientConnectionData> for ExpectFinished {
                     certkey,
                     signer,
                     auth_context_tls13,
+                    delegated,
                 } => {
                     emit_certificate_tls13(
                         &mut st.transcript,
                         &st.config,
                         Some(&certkey),
+                        delegated.as_deref(),
                         auth_context_tls13,
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
@@ -348,6 +361,10 @@ impl ExpectTraffic {
             debug!("Discarding NewSessionTicket with zero lifetime");
             return Ok(());
         }
+        // RFC 8844 §5: nothing of a bound connection is used in another.
+        if self.config.external_binding.is_some() {
+            return Ok(());
+        }
         if self.config.revocation_enabled()
             && (cx.common.peer_certificates.is_some() || cx.common.external_psk.is_none())
         {
@@ -460,6 +477,7 @@ impl ExpectTraffic {
             None,
             &sigschemes,
             Some(certreq.context.0.clone()),
+            delegated_credential_request(&self.config, certreq),
         );
         let compression = certreq
             .extensions
@@ -473,6 +491,7 @@ impl ExpectTraffic {
                     &mut transcript,
                     &self.config,
                     None,
+                    None,
                     auth_context_tls13,
                     &compression,
                     &extensions,
@@ -483,11 +502,13 @@ impl ExpectTraffic {
                 certkey,
                 signer,
                 auth_context_tls13,
+                delegated,
             } => {
                 emit_certificate_tls13(
                     &mut transcript,
                     &self.config,
                     Some(&certkey),
+                    delegated.as_deref(),
                     auth_context_tls13,
                     &compression,
                     &extensions,

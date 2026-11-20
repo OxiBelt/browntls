@@ -3,6 +3,7 @@
 mod accept;
 #[cfg(feature = "std")]
 mod buffered;
+mod client_hello;
 mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
@@ -13,6 +14,7 @@ use browntls_pki::{DnsName, UnixTime};
 
 #[cfg(feature = "std")]
 pub use buffered::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
+pub use client_hello::ClientHello;
 pub use unbuffered_acceptor::{
     UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
 };
@@ -23,11 +25,10 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
-use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureScheme};
+use crate::delegated_credential::DelegatedCredential;
+use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::Error;
 use crate::key_log::KeyLog;
-use crate::msgs::enums::NamedGroup;
-use crate::msgs::handshake::{ClientHelloPayload, DistinguishedName, ProtocolName};
 use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -75,79 +76,6 @@ pub trait ResolvesServerCert: fmt::Debug + Send + Sync {
     /// Whether the resolver only yields raw public keys (RFC 7250).
     fn only_raw_public_keys(&self) -> bool {
         false
-    }
-}
-
-/// What a [`ResolvesServerCert`] sees of the ClientHello.
-#[derive(Debug)]
-pub struct ClientHello<'a> {
-    pub(super) server_name: Option<&'a DnsName<'static>>,
-    pub(super) signature_schemes: &'a [SignatureScheme],
-    pub(super) alpn: Option<&'a [ProtocolName]>,
-    pub(super) cipher_suites: &'a [CipherSuite],
-    pub(super) certificate_authorities: Option<&'a [DistinguishedName]>,
-    pub(super) named_groups: Option<&'a [NamedGroup]>,
-    pub(super) client_cert_types: Option<&'a [CertificateType]>,
-    pub(super) server_cert_types: Option<&'a [CertificateType]>,
-}
-
-impl<'a> ClientHello<'a> {
-    pub(super) fn new(
-        server_name: Option<&'a DnsName<'static>>,
-        signature_schemes: &'a [SignatureScheme],
-        payload: &'a ClientHelloPayload,
-    ) -> Self {
-        Self {
-            server_name,
-            signature_schemes,
-            alpn: payload.alpn_protocols(),
-            cipher_suites: &payload.cipher_suites,
-            certificate_authorities: payload.extensions.certificate_authorities.as_deref(),
-            named_groups: payload.named_groups(),
-            client_cert_types: payload.extensions.client_certificate_types.as_deref(),
-            server_cert_types: payload.extensions.server_certificate_types.as_deref(),
-        }
-    }
-
-    /// The certificate types the client can present (RFC 7250), if it said.
-    pub fn client_cert_types(&self) -> Option<&'a [CertificateType]> {
-        self.client_cert_types
-    }
-
-    /// The certificate types the client accepts from us (RFC 7250), if it said.
-    pub fn server_cert_types(&self) -> Option<&'a [CertificateType]> {
-        self.server_cert_types
-    }
-
-    /// The server name indicated by the client, if any.
-    pub fn server_name(&self) -> Option<&str> {
-        self.server_name.map(|n| n.as_ref())
-    }
-
-    /// The signature schemes the client accepts.
-    pub fn signature_schemes(&self) -> &[SignatureScheme] {
-        self.signature_schemes
-    }
-
-    /// The ALPN protocols the client offered, if any.
-    pub fn alpn(&self) -> Option<impl Iterator<Item = &'a [u8]>> {
-        self.alpn
-            .map(|protocols| protocols.iter().map(ProtocolName::as_ref))
-    }
-
-    /// The cipher suites the client offered.
-    pub fn cipher_suites(&self) -> &[CipherSuite] {
-        self.cipher_suites
-    }
-
-    /// The certificate authorities the client trusts, if it said.
-    pub fn certificate_authorities(&self) -> Option<&'a [DistinguishedName]> {
-        self.certificate_authorities
-    }
-
-    /// The key exchange groups the client offered, if any.
-    pub fn named_groups(&self) -> Option<&'a [NamedGroup]> {
-        self.named_groups
     }
 }
 
@@ -210,6 +138,20 @@ pub struct ServerConfig {
     /// trusts the client. RFC 8740 forbids post-handshake authentication
     /// over HTTP/2; the library leaves that decision to the application.
     pub request_client_auth_after_handshake: bool,
+
+    /// Whether to accept a TLS 1.3 client authenticating with a delegated
+    /// credential (RFC 9345 §4.1.2). Off by default. With it on, every
+    /// CertificateRequest, in the handshake and after it, carries a
+    /// `delegated_credential` extension listing the client certificate
+    /// verifier's TLS 1.3 schemes other than `rsa_pss_rsae_*`.
+    ///
+    /// The client's certificate chain is verified as usual; then the
+    /// credential is validated and CertificateVerify is checked with its
+    /// key, through
+    /// [`ClientCertVerifier::verify_tls13_signature_with_delegated_key`].
+    /// Never with raw public keys (RFC 7250). See
+    /// [`ServerConnection::client_delegated_credential`].
+    pub enable_delegated_credentials: bool,
 
     /// Seals the cookie sent in TLS 1.3 HelloRetryRequests (RFC 9846
     /// §4.3.2), which makes the retry stateless; `None` (the default) sends
@@ -291,6 +233,39 @@ pub struct ServerConfig {
     /// whichever is smaller.
     pub record_size_limit: Option<u16>,
 
+    /// External session and identity binding (RFC 8844): our values to
+    /// answer a client's `external_id_hash` and `external_session_id` with,
+    /// and the client's values to expect. `None` (the default) ignores both
+    /// extensions. The values belong to one connection: clone the
+    /// configuration per connection, or choose it from the ClientHello
+    /// with an acceptor.
+    ///
+    /// With a binding the connection accepts no ticket or session ID and
+    /// issues none (RFC 8844 §5: nothing of one TLS connection is used in
+    /// another, even of the same signaling session); every handshake is a
+    /// full one. [`Self::external_psks`] are still accepted. See
+    /// [`crate::external_binding`].
+    pub external_binding: Option<crate::external_binding::ExternalBinding>,
+    /// Which TLS 1.2 messages are replaced by their fingerprint when the
+    /// client offers it with RFC 7924 `cached_info`; none by default. See
+    /// [`crate::cached_info`].
+    pub cached_info: crate::cached_info::ServerCachedInfoPolicy,
+
+    /// Whether to send GREASE values (RFC 8701 §4.1) in the two TLS 1.3
+    /// messages whose extension points a server offers. A
+    /// CertificateRequest, during the handshake or after it, then lists a
+    /// GREASE signature scheme first in `signature_algorithms` and carries
+    /// two GREASE extensions (an empty one first, a one-byte one last); a
+    /// NewSessionTicket carries the same two extensions. The values are
+    /// random per message. TLS 1.2 messages carry none.
+    ///
+    /// Off by default, like [`ClientConfig::enable_grease`]: a client
+    /// that mishandles unknown values would fail client authentication or
+    /// lose its tickets.
+    ///
+    /// [`ClientConfig::enable_grease`]: crate::ClientConfig::enable_grease
+    pub enable_grease: bool,
+
     pub(super) versions: EnabledVersions,
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,
@@ -319,6 +294,17 @@ pub struct ServerConfig {
     /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
     /// once the handshake completes.
     pub require_external_psk: bool,
+
+    /// Whether, and under which rules, a TLS 1.2 client may send URLs of its
+    /// certificate chain instead of the chain (RFC 6066 §5,
+    /// `client_certificate_url`). `None` (the default) never acknowledges
+    /// the extension.
+    ///
+    /// The library never fetches a URL: the handshake pauses and the
+    /// application authorizes and performs each fetch (server-side request
+    /// forgery, RFC 6066 §11.3). See [`crate::certificate_url`]. Zero limits
+    /// or no valid scheme make connection creation fail.
+    pub client_certificate_url: Option<crate::certificate_url::ClientCertificateUrlPolicy>,
 }
 
 impl ServerConfig {
@@ -420,6 +406,7 @@ impl ServerConfig {
         self.check_ech_role()?;
         common.set_max_fragment_size(self.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
+        crate::certificate_url::check_policy(self.client_certificate_url.as_ref())?;
         common.enable_secret_extraction = self.enable_secret_extraction;
         common.fips = self.fips();
         Ok(())
@@ -569,6 +556,13 @@ pub struct ServerConnectionData {
     /// The absolute expiry of the server delegated credential that
     /// authenticated this TLS 1.3 connection or its resumed ancestor.
     pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The delegated credential (RFC 9345 §4.1.2) the client's current
+    /// identity was authenticated with on this connection.
+    pub(super) client_delegated_credential: Option<DelegatedCredential>,
+    /// The absolute expiry of the delegated credential that authenticated
+    /// the client's current identity, on this TLS 1.3 connection or its
+    /// resumed ancestor.
+    pub(super) client_delegated_credential_expiry: Option<UnixTime>,
     /// The original handshake authenticated with an external PSK alone.
     pub(super) certificate_free: bool,
     /// The session cache entry this TLS 1.2 connection resumed or created,
@@ -634,6 +628,13 @@ impl crate::kernel::KernelConnection<ServerConnectionData> {
     /// or after the handover, or `None` if none was requested.
     pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
         self.core.data.post_handshake_auth
+    }
+
+    /// The delegated credential (RFC 9345 §4.1.2) the client authenticated
+    /// with, before or after the handover; see
+    /// [`ServerConnection::client_delegated_credential`].
+    pub fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.core.data.client_delegated_credential.as_ref()
     }
 }
 
@@ -798,6 +799,12 @@ impl UnbufferedServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// The delegated credential (RFC 9345 §4.1.2) the client authenticated
+    /// with; see [`ServerConnection::client_delegated_credential`].
+    pub fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.inner.core.data.client_delegated_credential.as_ref()
     }
 
     /// What was decided about Encrypted Client Hello. With

@@ -1,16 +1,19 @@
 //! Handshake messages (RFC 8446 §4, RFC 5246 §7.4).
 
+mod certificate_url;
 mod certs;
 mod extensions;
 mod hello;
 mod kx;
 mod tickets;
+mod trusted_ca;
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use browntls_pki::CertificateDer;
 
+pub(crate) use certificate_url::CertificateUrlPayload;
 pub(crate) use certs::{
     CertificateChain, CertificatePayloadTls13, CertificateRequestExtensions,
     CertificateRequestPayload, CertificateRequestPayloadTls13, CertificateStatus,
@@ -31,6 +34,10 @@ pub(crate) use kx::{
     ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangeParams,
 };
 pub(crate) use tickets::{NewSessionTicketPayload, NewSessionTicketPayloadTls13};
+pub use trusted_ca::TrustedAuthority;
+pub(crate) use trusted_ca::{
+    MAX_TRUSTED_AUTHORITIES, encode_trusted_authorities, read_trusted_authorities,
+};
 
 use super::base::{Payload, PayloadU16};
 use super::codec::{Codec, Reader, u24};
@@ -270,6 +277,8 @@ pub(crate) enum HandshakePayload<'a> {
     KeyUpdate(KeyUpdateRequest),
     Finished(Payload<'a>),
     CertificateStatus(CertificateStatus<'a>),
+    /// RFC 6066 §5, TLS 1.2 only.
+    CertificateUrl(CertificateUrlPayload),
     MessageHash(Payload<'a>),
     Unknown((HandshakeType, Payload<'a>)),
 }
@@ -295,6 +304,7 @@ impl<'a> HandshakePayload<'a> {
             Self::KeyUpdate(x) => x.encode(bytes),
             Self::Finished(x) => x.encode(bytes),
             Self::CertificateStatus(x) => x.encode(bytes),
+            Self::CertificateUrl(x) => x.encode(bytes),
             Self::MessageHash(x) => x.encode(bytes),
             Self::Unknown((_, x)) => x.encode(bytes),
         }
@@ -323,6 +333,7 @@ impl<'a> HandshakePayload<'a> {
             Self::KeyUpdate(_) => HandshakeType::KeyUpdate,
             Self::Finished(_) => HandshakeType::Finished,
             Self::CertificateStatus(_) => HandshakeType::CertificateStatus,
+            Self::CertificateUrl(_) => HandshakeType::CertificateURL,
             Self::MessageHash(_) => HandshakeType::MessageHash,
             Self::Unknown((t, _)) => *t,
         }
@@ -351,6 +362,7 @@ impl<'a> HandshakePayload<'a> {
             KeyUpdate(x) => KeyUpdate(x),
             Finished(x) => Finished(x.into_owned()),
             CertificateStatus(x) => CertificateStatus(x.into_owned()),
+            CertificateUrl(x) => CertificateUrl(x),
             MessageHash(x) => MessageHash(x.into_owned()),
             Unknown((t, x)) => Unknown((t, x.into_owned())),
         }
@@ -398,6 +410,11 @@ pub(crate) fn read_payload<'a>(
         HandshakeType::EndOfEarlyData if sub.left() == 0 => EndOfEarlyData,
         HandshakeType::Finished => Finished(Payload::read(sub)),
         HandshakeType::CertificateStatus => CertificateStatus(certs::CertificateStatus::read(sub)?),
+        // RFC 6066 §5: TLS 1.2 only; in TLS 1.3 the type stays unknown.
+        #[cfg(feature = "tls12")]
+        HandshakeType::CertificateURL if vers != ProtocolVersion::TLSv1_3 => {
+            CertificateUrl(CertificateUrlPayload::read(sub)?)
+        }
         HandshakeType::MessageHash => {
             // A MessageHash is a transcript-only construct and never appears on
             // the wire.

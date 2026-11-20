@@ -78,9 +78,10 @@ impl<'a> OcspResponse<'a> {
     ///   [`Error::TrailingData`] or [`Error::BadDerTime`] (times must be
     ///   `GeneralizedTime`) for the encoding, a successful status without
     ///   response bytes, [`Error::UnsupportedCriticalExtension`],
-    ///   [`Error::MalformedExtensions`] for a repeated nonce or timestamp
-    ///   list, [`Error::ExtensionValueInvalid`] for a timestamp list that
-    ///   is not an `OCTET STRING`.
+    ///   [`Error::MalformedExtensions`] for a repeated nonce, SCT list,
+    ///   Transparency Information or timestamp list extension,
+    ///   [`Error::ExtensionValueInvalid`] for an SCT list, Transparency
+    ///   Information or timestamp list that is not an `OCTET STRING`.
     pub fn from_der(der: &'a [u8]) -> Result<Self, OcspError> {
         if der.len() > MAX_RESPONSE_LEN {
             return Err(OcspError::ResponseTooLarge);
@@ -375,6 +376,7 @@ pub struct SingleResponse<'a> {
     pub(crate) this_update: UnixTime,
     pub(crate) next_update: Option<UnixTime>,
     pub(crate) sct_list: Option<&'a [u8]>,
+    pub(crate) transparency_info: Option<&'a [u8]>,
 }
 
 impl<'a> SingleResponse<'a> {
@@ -411,6 +413,17 @@ impl<'a> SingleResponse<'a> {
         self.sct_list
     }
 
+    /// The `TransItemList` of the RFC 9162 Transparency Information single
+    /// extension (the contents of the `OCTET STRING` in the extension
+    /// value), if present. The list itself is not parsed: give it to
+    /// [`CtV2Verifier::verify_ocsp_response`](crate::transparency::CtV2Verifier::verify_ocsp_response)
+    /// once the response is authenticated
+    /// ([`VerifiedOcspStatus`](super::VerifiedOcspStatus)).
+    #[must_use]
+    pub fn transparency_info(&self) -> Option<&'a [u8]> {
+        self.transparency_info
+    }
+
     pub(crate) fn read(reader: &mut Reader<'a>) -> Result<Self, Error> {
         reader.nested(tag::SEQUENCE, |single| {
             let cert_id = ResponseCertId::read(single)?;
@@ -421,11 +434,19 @@ impl<'a> SingleResponse<'a> {
                 None => None,
             };
             let mut sct_list = None;
+            let mut transparency_info = None;
             if let Some(wrapped) = single.optional(tag::context_constructed(1))? {
                 let list = der::read_all(wrapped, |e| e.expect(tag::SEQUENCE))?;
                 extensions::for_each(list, true, |ext| {
-                    if ext.id == oid::SCT_LIST {
-                        set_once(&mut sct_list, || {
+                    let slot = if ext.id == oid::SCT_LIST {
+                        Some(&mut sct_list)
+                    } else if ext.id == oid::TRANSPARENCY_INFO {
+                        Some(&mut transparency_info)
+                    } else {
+                        None
+                    };
+                    if let Some(slot) = slot {
+                        set_once(slot, || {
                             der::read_all(ext.value, |v| v.expect(tag::OCTET_STRING))
                                 .map_err(|_| Error::ExtensionValueInvalid)
                         })
@@ -440,6 +461,7 @@ impl<'a> SingleResponse<'a> {
                 this_update,
                 next_update,
                 sct_list,
+                transparency_info,
             })
         })
     }
@@ -453,6 +475,7 @@ impl fmt::Debug for SingleResponse<'_> {
             .field("this_update", &self.this_update)
             .field("next_update", &self.next_update)
             .field("sct_list", &self.sct_list.map(HexDebug))
+            .field("transparency_info", &self.transparency_info.map(HexDebug))
             .finish()
     }
 }

@@ -3,7 +3,8 @@
 
 use alloc::vec::Vec;
 
-use crate::common_state::{CommonState, ConnectionRandoms};
+use super::client_auth::ClientAuthOffer;
+use crate::common_state::{CommonState, ConnectionRandoms, Side};
 use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{AlertDescription, CertificateType, ProtocolVersion, SignatureScheme};
 use crate::error::{Error, PeerIncompatible};
@@ -13,13 +14,14 @@ use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, NamedGroup};
+use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
     ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
     HelloRetryRequestExtensions, KeyShareEntry, ServerExtensions, ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
-use crate::server::common::ActiveCertifiedKey;
+use crate::server::common::{ActiveCertifiedKey, transparency_info_for};
 use crate::server::hs::{self, ServerContext};
 use crate::server::server_conn::ServerConfig;
 use crate::sign::CertifiedKey;
@@ -202,7 +204,7 @@ pub(super) fn emit_encrypted_extensions(
     retry_configs: Option<Vec<u8>>,
     expected_tickets: Option<u8>,
 ) {
-    let exts = ServerExtensions {
+    let mut exts = ServerExtensions {
         supported_groups,
         encrypted_client_hello: retry_configs,
         alpn: cx
@@ -232,6 +234,12 @@ pub(super) fn emit_encrypted_extensions(
         ticket_request: expected_tickets,
         ..Default::default()
     };
+    // RFC 8844 §3.2, §4.3: answered in EncryptedExtensions.
+    crate::external_binding::handshake::server_answer(
+        config.external_binding.as_ref(),
+        &client_hello.extensions,
+        &mut exts,
+    );
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
@@ -248,33 +256,40 @@ pub(super) fn emit_certificate_req_tls13(
     transcript: &mut HandshakeHash,
     common: &mut CommonState,
     config: &ServerConfig,
-) -> Result<bool, Error> {
+) -> Result<Option<ClientAuthOffer>, Error> {
     if !config.verifier.offer_client_auth() {
-        return Ok(false);
+        return Ok(None);
     }
-    let m = certificate_request_message(config, Vec::new())?;
+    let (m, offer) = certificate_request_message(config, Vec::new())?;
     trace!("Sending CertificateRequest {:?}", m);
     transcript.add_message(&m);
     common.send_msg(m, true);
-    Ok(true)
+    Ok(Some(offer))
 }
 
 /// A CertificateRequest with `context` (empty during the handshake, RFC
-/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities.
+/// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities,
+/// and GREASE values (RFC 8701 §4.1) when the configuration enables them.
+/// Also returns the schemes the server may accept in the answer.
 pub(super) fn certificate_request_message(
     config: &ServerConfig,
     context: Vec<u8>,
-) -> Result<Message<'static>, Error> {
-    let schemes: Vec<SignatureScheme> = config
-        .verifier
-        .supported_verify_schemes()
-        .into_iter()
-        .filter(SignatureScheme::supported_in_tls13)
-        .collect();
+) -> Result<(Message<'static>, ClientAuthOffer), Error> {
+    let offer = ClientAuthOffer::from_config(config);
+    let mut schemes = offer.signature_schemes.clone();
     if schemes.is_empty() {
         return Err(Error::general(
             "client certificate verifier supports no TLS 1.3 signature schemes",
         ));
+    }
+    // GREASE is only in the message. CertificateVerify uses the real
+    // signature schemes recorded in the offer.
+    let grease = config
+        .enable_grease
+        .then(|| ServerGreaseValues::random(config.provider.secure_random))
+        .transpose()?;
+    if let Some(grease) = &grease {
+        schemes.insert(0, SignatureScheme::Unknown(grease.signature_scheme));
     }
     let authorities = config.verifier.root_hint_subjects();
     // RFC 8446 §4.4.2.1: ask for the client's OCSP responses, and its SCTs,
@@ -289,17 +304,23 @@ pub(super) fn certificate_request_message(
                 &config.cert_decompressors,
                 config.cert_decompression_limit,
             ),
+            // RFC 9345 §4.1.2: the schemes accepted for a client's
+            // delegated credential, when those are enabled.
+            delegated_credential: offer.delegated_schemes.clone(),
             status_request: evidence,
             sct_request: evidence,
+            grease_first: grease.map(|g| g.first_extension),
+            grease_last: grease.map(|g| g.last_extension),
             ..Default::default()
         },
     };
-    Ok(Message {
+    let message = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::CertificateRequestTls13(cr),
         )),
-    })
+    };
+    Ok((message, offer))
 }
 
 /// The first delegated credential (RFC 9345) of `server_key` that the
@@ -315,18 +336,14 @@ pub(super) fn choose_delegated_credential<'a>(
     cert_types: hs::NegotiatedCertTypes,
 ) -> Option<&'a DelegatedCredentialKey> {
     let offered = client_hello.extensions.delegated_credential.as_ref()?;
-    let end_entity = server_key.get_cert().first()?;
-    if server_key.get_delegated_credentials().is_empty()
-        || cert_types.server == Some(CertificateType::RawPublicKey)
-    {
+    if cert_types.server == Some(CertificateType::RawPublicKey) {
         return None;
     }
     let now = config.current_time().ok()?;
     server_key
-        .get_delegated_credentials()
-        .iter()
+        .certified_key()
+        .choose_delegated_credential(Side::Server, offered, sigschemes, now)
         .map(|dc| &**dc)
-        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
 }
 
 /// The server's Certificate message for `certified_key`, with what
@@ -337,12 +354,17 @@ fn certificate_body<'a>(
     certified_key: &'a CertifiedKey,
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
+    server_cert_type: Option<CertificateType>,
 ) -> CertificatePayloadTls13<'a> {
     let mut cert_body = CertificatePayloadTls13::from_certified_key(
         certified_key,
         client_hello.extensions.certificate_status_request.is_some(),
         client_hello.extensions.sct_request.is_some(),
     );
+    // RFC 9162 §6.5: the TransItemList goes on the end entity's entry.
+    if let Some(list) = transparency_info_for(certified_key, client_hello, server_cert_type) {
+        cert_body.set_transparency_info(list);
+    }
     // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
     if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
         first.delegated_credential = Some(dc.credential().clone());
@@ -359,8 +381,9 @@ pub(super) fn emit_certificate_tls13(
     certified_key: &CertifiedKey,
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
+    server_cert_type: Option<CertificateType>,
 ) {
-    let cert_body = certificate_body(certified_key, client_hello, delegated);
+    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type);
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression

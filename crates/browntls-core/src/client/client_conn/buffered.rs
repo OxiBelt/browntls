@@ -41,6 +41,22 @@ impl ClientConnection {
         self.inner.core.data.tls13_tickets_received
     }
 
+    /// The `extension_data` of the server's `transparency_info` extension
+    /// (RFC 9162 §6.5) from a full handshake: a `TransItemList`, or empty
+    /// or an empty list, which §6.5 allows. It is well formed but **not
+    /// verified**; see [`Self::peer_transparency_status`].
+    pub fn peer_transparency_info(&self) -> Option<&[u8]> {
+        self.inner.core.data.transparency.info.as_deref()
+    }
+
+    /// What the certificate verifier established about the server
+    /// certificate's Certificate Transparency 2.0 evidence, once the
+    /// certificate is verified; `None` when the verifier reports nothing,
+    /// and after resumption. See [`crate::transparency`].
+    pub fn peer_transparency_status(&self) -> Option<crate::transparency::TransparencyStatus> {
+        self.inner.core.data.transparency.status
+    }
+
     /// The delegated credential (RFC 9345) the server authenticated with,
     /// once its CertificateVerify has been verified with the credential's
     /// key; `None` when the server signed with its certificate key.
@@ -103,6 +119,14 @@ impl ClientConnection {
     /// handshake with [`Error::RejectedEch`].
     pub fn ech_status(&self) -> crate::ech::EchStatus {
         self.inner.core.data.ech_status
+    }
+
+    /// Whether the server acknowledged our `trusted_ca_keys` (RFC 6066 §6):
+    /// it negotiated TLS 1.2 in a full handshake and says the list guided
+    /// its choice of certificate chain. Always false in TLS 1.3, and after
+    /// resuming a session. Meaningful once the ServerHello is processed.
+    pub fn trusted_ca_keys_acknowledged(&self) -> bool {
+        self.inner.core.data.trusted_ca_keys_acknowledged
     }
 
     /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].

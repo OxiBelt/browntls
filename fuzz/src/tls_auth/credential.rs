@@ -1,17 +1,19 @@
 //! Delegated-credential operations of the `tls_auth` target: decoding,
-//! encoding, issuance, native key generation and validity.
+//! encoding, issuance, native key generation, validity and validation.
 
-use browntls_core::SignatureScheme;
 use browntls_core::crypto::native::delegated_credential::generate;
+use browntls_core::crypto::verify_tls13_signature;
 use browntls_core::delegated_credential::{
-    Credential, DelegatedCredential, DelegatedCredentialKey, valid_time_until,
+    Credential, DelegatedCredential, DelegatedCredentialKey, MAX_VALIDITY, Presented,
+    credential_scheme_allowed, valid_time_until,
 };
 use browntls_core::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
+use browntls_core::{Side, SignatureScheme};
 
 use super::{
-    Cert, MAX_SPKI_LEN, credential_bytes, credential_scheme_ok, expected_signed_message, fixture,
-    other_side, parse_dc, pick_cert, pick_cert_schemes, pick_scheme, pick_side, pick_valid_time,
-    signature_verifies, unix,
+    Cert, MAX_SPKI_LEN, Offer, SCHEMES, credential_bytes, credential_refused, credential_scheme_ok,
+    expected_signed_message, expected_validation, fixture, other_side, parse_dc, pick_cert,
+    pick_cert_schemes, pick_scheme, pick_side, pick_valid_time, signature_verifies, unix,
 };
 use crate::input::{Input, put_field};
 
@@ -143,9 +145,17 @@ pub(super) fn issue(input: &mut Input) {
 
     // A credential key matching the credential.
     let matching = scheme == dc_key.scheme && spki == dc_key.spki.as_ref();
-    match DelegatedCredentialKey::new(&end_entity, dc.clone(), dc_key.key.clone()) {
+    // A server's credential through `new`, a client's through `new_for`.
+    let paired = match side {
+        Side::Server => DelegatedCredentialKey::new(&end_entity, dc.clone(), dc_key.key.clone()),
+        Side::Client => {
+            DelegatedCredentialKey::new_for(side, &end_entity, dc.clone(), dc_key.key.clone())
+        }
+    };
+    match paired {
         Ok(key) => {
             assert!(matching, "a mismatched credential key accepted");
+            assert_eq!(key.side(), side);
             assert_eq!(key.credential(), &dc);
             assert_eq!(key.expiry(), expiry);
             assert_eq!(
@@ -293,4 +303,154 @@ pub(super) fn validity(input: &mut Input) {
 /// Whether fuzzed bytes happen to be a certificate.
 fn parses_as_certificate(der: &CertificateDer<'_>) -> bool {
     browntls_core::pki_types::EndEntityCert::try_from(der).is_ok()
+}
+
+/// Up to eight of [`SCHEMES`] chosen by a mask byte.
+fn pick_offered(input: &mut Input) -> Vec<SignatureScheme> {
+    let mask = input.byte();
+    SCHEMES
+        .iter()
+        .take(8)
+        .enumerate()
+        .filter(|(i, _)| mask & (1 << i) != 0)
+        .map(|(_, scheme)| *scheme)
+        .collect()
+}
+
+/// `validate` input: issuing certificate (bit 0: the client's) and side,
+/// presented certificate selector and side selector, clock (32-bit offset
+/// into the certificate's validity), valid time relative to it (selector
+/// and value), credential key, tampering (with its arguments), offered
+/// credential and signature schemes (masks over [`SCHEMES`]), and
+/// CertificateVerify scheme selector.
+pub(super) fn validate(input: &mut Input) {
+    let fixture = fixture();
+    let nb = fixture.not_before;
+    let na = fixture.not_after;
+    let week = MAX_VALIDITY.as_secs();
+    let (issuer, issuer_key) = if input.bool() {
+        (&fixture.client_delegation, &fixture.client_delegation_key)
+    } else {
+        (&fixture.delegation, &fixture.delegation_key)
+    };
+    let side = pick_side(input);
+    let end_entity = match input.choose(8) {
+        0 => fixture.plain.clone(),
+        1 => CertificateDer::from(input.short_field().to_vec()),
+        2 if issuer == &fixture.delegation => fixture.client_delegation.clone(),
+        2 => fixture.delegation.clone(),
+        _ => issuer.clone(),
+    };
+    let presented_side = if input.choose(4) == 0 {
+        other_side(side)
+    } else {
+        side
+    };
+    let now = nb + u64::from(input.u32()) % (na - nb);
+    let delta: i64 = match input.choose(8) {
+        0 => 0,
+        1 => 1,
+        2 => -1,
+        3 => week as i64,
+        4 => week as i64 + 1,
+        5 => i64::try_from(na - now).unwrap_or(0) + i64::from(input.byte()) - 128,
+        _ => i64::from(input.u32() % (9 * 86_400)) - 86_400,
+    };
+    let Some(valid_time) = now
+        .saturating_add_signed(delta)
+        .checked_sub(nb)
+        .filter(|d| *d > 0)
+        .and_then(|d| u32::try_from(d).ok())
+    else {
+        return;
+    };
+    let dc_key = &fixture.dc_keys[input.choose(fixture.dc_keys.len())];
+    let mut dc = DelegatedCredential::issue(
+        side,
+        issuer,
+        &**issuer_key,
+        &[SignatureScheme::ECDSA_NISTP256_SHA256],
+        Credential {
+            valid_time,
+            dc_cert_verify_algorithm: dc_key.scheme,
+            public_key: dc_key.spki.clone(),
+        },
+    )
+    .expect("issue");
+    match input.choose(6) {
+        0 => {
+            let at = usize::from(input.u16()) % dc.signature.len();
+            dc.signature[at] ^= 1 << (input.byte() % 8);
+        }
+        1 => dc.credential.valid_time ^= 1 << (input.byte() % 32),
+        2 => dc.credential.dc_cert_verify_algorithm = pick_scheme(input),
+        3 => dc.algorithm = pick_scheme(input),
+        _ => {}
+    }
+    let dc_schemes = pick_offered(input);
+    let sig_schemes = pick_offered(input);
+    let cert_verify_scheme = if input.choose(4) == 0 {
+        pick_scheme(input)
+    } else {
+        dc.credential.dc_cert_verify_algorithm
+    };
+    // RFC 9345 §4's rule on credential schemes, against the model.
+    for scheme in [dc.credential.dc_cert_verify_algorithm, cert_verify_scheme] {
+        assert_eq!(
+            credential_scheme_allowed(scheme),
+            credential_scheme_ok(scheme)
+        );
+    }
+
+    let presented = Presented {
+        side: presented_side,
+        end_entity: &end_entity,
+        offered_dc_schemes: &dc_schemes,
+        offered_sig_schemes: &sig_schemes,
+        cert_verify_scheme,
+        now: unix(now),
+    };
+    let _ = format!("{presented:?}");
+    let expected = expected_validation(
+        &dc,
+        &Offer {
+            side: presented_side,
+            end_entity: &end_entity,
+            dc_schemes: &dc_schemes,
+            sig_schemes: &sig_schemes,
+            cert_verify_scheme,
+            now,
+        },
+    );
+    let mut calls = 0;
+    let result = browntls_core::delegated_credential::validate(&dc, &presented, |message, dss| {
+        calls += 1;
+        // The signed bytes are those of RFC 9345 §4, for the presenting
+        // side.
+        assert_eq!(
+            message,
+            expected_signed_message(
+                presented_side,
+                end_entity.as_ref(),
+                &dc.credential,
+                dc.algorithm
+            )
+        );
+        assert_eq!(dss.scheme, dc.algorithm);
+        assert_eq!(dss.signature(), &dc.signature[..]);
+        verify_tls13_signature(
+            message,
+            &end_entity,
+            dss,
+            &fixture.provider.signature_verification_algorithms,
+        )
+    });
+    match (result, expected) {
+        (Ok(expiry), Some(expected)) => {
+            assert_eq!(expiry.as_secs(), expected);
+            assert_eq!(calls, 1);
+        }
+        (Err(error), None) => assert!(credential_refused(&error), "{error:?}"),
+        (result, expected) => panic!("validate: {result:?}, expected {expected:?}"),
+    }
 }

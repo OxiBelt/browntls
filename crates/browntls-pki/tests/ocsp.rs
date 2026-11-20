@@ -412,6 +412,46 @@ fn selects_the_matching_single_response() {
     );
 }
 
+/// The RFC 9162 Transparency Information single extension, next to the
+/// RFC 6962 SCT list: exposed unparsed, once each.
+#[test]
+fn transparency_information_single_extension() {
+    let fx = Fixture::new();
+    let key = fx.ca_key();
+    let malformed = |error| Some(OcspError::Malformed(error));
+    let info = |list: &[u8]| extension(oid::TRANSPARENCY_INFO, false, &tlv(0x04, list));
+    let sct = extension(oid::SCT_LIST, false, &tlv(0x04, b"v1 list"));
+    assert_eq!(oid::TRANSPARENCY_INFO, &[0x2b, 0x65, 0x4b]);
+
+    let mut response = fx.response();
+    response.singles[0].extensions = vec![info(b"v2 list"), sct.clone()];
+    let der = response.signed_by(key);
+    let verified = fx.verify(&der, &stapled()).unwrap();
+    assert_eq!(verified.transparency_info, Some(&b"v2 list"[..]));
+    assert_eq!(verified.sct_list, Some(&b"v1 list"[..]));
+    let parsed = OcspResponse::from_der(&der).unwrap();
+    let single = parsed.basic().unwrap().responses().next().unwrap();
+    assert_eq!(single.transparency_info(), Some(&b"v2 list"[..]));
+    assert!(format!("{single:?}").contains("transparency_info"));
+
+    response.singles[0].extensions = vec![sct];
+    let der = response.signed_by(key);
+    let verified = fx.verify(&der, &stapled()).unwrap();
+    assert_eq!(verified.transparency_info, None);
+
+    // Not an OCTET STRING, or repeated.
+    response.singles[0].extensions = vec![extension(oid::TRANSPARENCY_INFO, false, &[0x05, 0x00])];
+    assert_eq!(
+        OcspResponse::from_der(&response.signed_by(key)).err(),
+        malformed(Error::ExtensionValueInvalid)
+    );
+    response.singles[0].extensions = vec![info(b"a"), info(b"b")];
+    assert_eq!(
+        OcspResponse::from_der(&response.signed_by(key)).err(),
+        malformed(Error::MalformedExtensions)
+    );
+}
+
 /// A `CertID` under SHA-384, which this crate does not know.
 fn sha384_cert_id(serial: &[u8]) -> Vec<u8> {
     seq(&[

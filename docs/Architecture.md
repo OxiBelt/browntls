@@ -1426,8 +1426,9 @@ time (`ConnectionCore::process_one`) over a `DeframerBuffer`:
   writes 0-RTT data through `TransmitTlsData::may_encrypt_early_data` right
   after its ClientHello. The connection-specific accessors of the buffered
   types are there too: `ech_status` on both sides, the server's
-  post-handshake authentication methods, and the client's
-  `delegated_credential` and `post_handshake_auth_responses`.
+  post-handshake authentication methods and `client_delegated_credential`,
+  and the client's `delegated_credential` and
+  `post_handshake_auth_responses`.
 - Acceptors read the first ClientHello before a `ServerConfig` is chosen:
   `Acceptor` (buffered, `std`) and `UnbufferedAcceptor` (no `std`; the
   caller's buffer and `discard`, as `process_tls_records`). Both drive one
@@ -2140,25 +2141,32 @@ there they may be skipped).
 ### Delegated credentials (RFC 9345)
 
 `browntls_core::delegated_credential` holds the `DelegatedCredential` codec,
-signing (`DelegatedCredential::issue`) and validation; the native provider
+signing (`DelegatedCredential::issue`) and validation (`validate`, the
+check both sides run on a received credential, public for callers that
+handle credentials below the handshake); the native provider
 adds `crypto::native::delegated_credential::generate`, which creates an
 ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
-certificate's key sign the credential. A credential is attached to a
-`CertifiedKey` with `with_delegated_credential`, which checks that the
+certificate's key sign the credential. A credential is issued for the side
+that authenticates with it (the signed context string differs, §4) and
+attached to a `CertifiedKey` for that side: `with_delegated_credential` for a
+server, `with_client_delegated_credential` for a client. Both check that the
 certificate carries the `DelegationUsage` extension
 (1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
 `digitalSignature` key usage, and, when the key exposes its public key, that
-it matches the credential's public key. Credential keys may not be
-`rsaEncryption` keys (§4): the
+it matches the credential's public key. A side only presents credentials
+attached for it, so one `CertifiedKey` can serve both roles. Credential keys
+may not be `rsaEncryption` keys (§4): the
 `rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
 (`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
 private field (`delegated_credentials()` reads them), so it can no longer
 be built with a struct literal; `CertifiedKey::new` remains.
 
 - Server: when the ClientHello carries `delegated_credential` and a
-  credential is unexpired, has at most seven days left, uses a
-  `dc_cert_verify_algorithm` the client listed and is signed with a scheme
-  in its `signature_algorithms`, the credential goes on the end-entity
+  credential is unexpired, has at most seven days left and expires before
+  its certificate, uses a `dc_cert_verify_algorithm` the client listed in
+  both `delegated_credential` and `signature_algorithms` (which governs
+  CertificateVerify) and is signed with a scheme in its
+  `signature_algorithms`, the credential goes on the end-entity
   CertificateEntry and its key signs CertificateVerify. Otherwise the
   certificate key signs, as before. Never with raw public keys or TLS 1.2.
 - Client: off unless `ClientConfig::enable_delegated_credentials`. The
@@ -2172,6 +2180,28 @@ be built with a struct literal; `CertifiedKey::new` remains.
   default implementation refuses). `ClientConnection::delegated_credential`
   returns the credential used by a full handshake; it remains `None` on a
   resumed connection.
+- Client credentials (§4.1.2) mirror this with the roles exchanged. A
+  server asks for them only while `ServerConfig::enable_delegated_credentials`
+  is set: its CertificateRequests, in the handshake and after it
+  (`request_client_auth`), then carry `delegated_credential` with the client
+  certificate verifier's TLS 1.3 schemes other than `rsa_pss_rsae_*`. A
+  client whose resolved `CertifiedKey` has a client credential the request
+  accepts (same conditions as for a server, by the client's clock) puts it
+  on its end-entity CertificateEntry and signs CertificateVerify with its
+  key; otherwise the certificate key signs. The credential is tried first,
+  so a client whose certificate key cannot sign (kept offline) still
+  authenticates when the server accepts credentials. The server verifies
+  the chain as usual, validates the credential when CertificateVerify
+  arrives and checks that signature with the credential's key through
+  `ClientCertVerifier::verify_tls13_signature_with_delegated_key` (the
+  default implementation refuses; `WebPkiClientVerifier` implements it). It
+  checks the credential's expiry again when the client's Finished arrives.
+  `client_delegated_credential` on `ServerConnection`,
+  `UnbufferedServerConnection` and the server's `KernelConnection` returns
+  the credential of the client's current identity: that of the full
+  handshake, replaced (or cleared) by each completed post-handshake
+  authentication; `None` on a resumed connection. Never with raw public keys
+  or TLS 1.2.
 - Resumption: the client and server save the absolute expiry of the delegated
   credential that authenticated the original full handshake. A ticket is not
   offered or accepted, including for 0-RTT, when the current time is at or
@@ -2181,7 +2211,12 @@ be built with a struct literal; `CertifiedKey::new` remains.
   caps its advertised ticket lifetime to the remaining credential lifetime
   and sends no ticket when none remains. This is independent of an RFC 8773
   external-PSK binding; both properties are retained when both authenticated
-  the session.
+  the session. A server keeps the deadline of a client's credential the same
+  way, next to its own: a ticket is passed over at or after either deadline,
+  or when the session's client used a credential and the configuration no
+  longer enables them, the ticket lifetime is capped by both, and the
+  resumed handshake is aborted if the deadline passes before the client's
+  Finished.
 - Persistence: the private client session value carries the deadline without
   changing `ClientSessionStore`. The server session encoding has a mandatory
   tagged deadline field. Because the old encoding cannot distinguish sessions
@@ -2189,15 +2224,19 @@ be built with a struct literal; `CertifiedKey::new` remains.
   every pre-change server session value (TLS 1.3 and TLS 1.2); old and new
   members of a mixed-version fleet therefore cold-miss each other's cached
   sessions and tickets rather than resuming ambiguous authentication state.
-- Alerts (§4.1.3): an invalid credential is `illegal_parameter`; one the
-  client did not ask for is `unexpected_message`; one on an entry other than
-  the end entity's is `illegal_parameter`; a CertificateVerify that fails
-  under the credential's key gets the same alert as one that fails under a
+  The tag is a bit mask (1: the server credential's deadline follows, 2: the
+  client credential's). Values written before client credentials existed
+  (tag 0 or 1) still decode; a server from before rejects a value that
+  carries a client deadline, so it never resumes a session whose client
+  authentication it cannot bound.
+- Alerts (§4.1.1 to §4.1.3), the same on both sides: an invalid credential
+  is `illegal_parameter`; one the receiver did not ask for is
+  `unexpected_message`; one on an entry other than the end entity's is
+  `illegal_parameter`; a CertificateVerify that fails under the
+  credential's key gets the same alert as one that fails under a
   certificate key (`decrypt_error` for a bad signature).
-- Not implemented: client credentials (the extension is parsed in
-  CertificateRequest but never sent, and a client never presents one; a
-  server answers a client Certificate entry carrying one with
-  `unsupported_extension`, like other unsolicited entry extensions).
+- Exported authenticators (RFC 9261) do not carry delegated credentials: an
+  authenticator's Certificate entry with one is refused.
   No other implementation the project tests against supports delegated
   credentials, so the tests are browntls to browntls only.
 

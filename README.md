@@ -13,8 +13,9 @@ browntls is in initial development. The workspace contains:
   `browntls-core` and, with the `tokio` and `ktls` features, `browntls-tokio`
   (`browntls::tokio`) and `browntls-ktls` (`browntls::ktls`)
   ([README](crates/browntls/README.md)).
-- `crates/browntls-core`: the TLS 1.2 / TLS 1.3 protocol, the crypto provider
-  mount point, and the built-in providers.
+- `crates/browntls-core`: the TLS 1.2 / TLS 1.3 protocol, DTLS 1.3 through a
+  low-level datagram API, the crypto provider mount point, and the built-in
+  providers.
 - `crates/browntls-tokio`: asynchronous TLS streams for Tokio
   ([README](crates/browntls-tokio/README.md)).
 - `crates/browntls-ktls`: Linux kernel TLS offload of browntls connections

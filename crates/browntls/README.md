@@ -8,9 +8,10 @@ asynchronous Tokio streams and its Linux kernel TLS offload behind features.
 > reviewed or audited, and has no published release.
 
 The crate has no code of its own. Its root is
-`browntls-core` (the protocol, the crypto provider mount
-point and the built-in providers), and two features add the project's other
-library crates as modules:
+`browntls-core` (the protocol, DTLS 1.3 as the low-level datagram API of
+`browntls::dtls`, the crypto provider mount point and the built-in
+providers), and two features add the project's other library crates as
+modules:
 
 | Feature | Module | Crate |
 |---|---|---|

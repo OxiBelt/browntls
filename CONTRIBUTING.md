@@ -35,13 +35,14 @@ review, and validation rules apply. No automatic merge or publication is implied
 
 ## Local checks
 
-Run from the repository root with Python 3.10 or newer, Git, and
+Run from the repository root with Python 3.11 or newer, Git, and
 [actionlint](https://github.com/rhysd/actionlint) 1.7.12 installed:
 
 ```sh
 python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
 python3 -B tests/scripts/check_markdown_links.py --repo-root .
 python3 -B tests/scripts/check_rust_line_count.py --repo-root .
+python3 -B tests/scripts/check_facade_features.py --repo-root .
 actionlint -shellcheck= -pyflakes=
 git diff --check
 git diff --cached --check
@@ -66,6 +67,17 @@ lines. It counts every line, including comments, blank lines, tests and
 generated tables, and has no exceptions: split a file that would grow past the
 limit. CI enforces the limit on every push and pull request in the
 `Rust file line limit` job of the repository checks workflow.
+
+The facade feature check reads the manifests of `crates/browntls` and of the
+crates it re-exports (`browntls-core`, `browntls-tokio`, `browntls-ktls`) and
+fails when a feature of one of them is missing from the facade, is not passed
+on, or when the default sets differ. It also fails when a facade feature turns
+on a feature of another name in those crates or one the facade deliberately
+does not offer (`fuzzing`), when a feature that does not enable `tokio` or
+`ktls` names their crate without the `?` of a weak reference
+(`browntls-tokio/tls12` instead of `browntls-tokio?/tls12`), and when a
+default feature enables an optional crate. Add a feature to the facade in the
+same change that adds it to one of those crates.
 
 These checks validate repository maintenance files, not TLS correctness.
 

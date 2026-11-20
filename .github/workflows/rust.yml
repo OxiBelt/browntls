@@ -60,6 +60,20 @@ jobs:
       - name: Clippy (browntls-tokio without coop)
         run: cargo clippy -p browntls-tokio --all-targets --no-default-features --features native,tls12,logging,prefer-post-quantum --locked -- -D warnings
 
+      # The workspace runs above enable every feature. The facade must also
+      # build with each optional crate alone, with neither, without the
+      # optional defaults (the tests need `native`), with the other provider
+      # and without `std`.
+      - name: Clippy (browntls feature sets)
+        run: |
+          cargo clippy -p browntls --all-targets --locked -- -D warnings
+          cargo clippy -p browntls --all-targets --features tokio --locked -- -D warnings
+          cargo clippy -p browntls --all-targets --features ktls --locked -- -D warnings
+          cargo clippy -p browntls --all-targets --no-default-features --features std,native --locked -- -D warnings
+          cargo clippy -p browntls --lib --no-default-features --features std,rustcrypto,tokio,ktls --locked -- -D warnings
+          cargo clippy -p browntls --lib --no-default-features --features native --locked -- -D warnings
+          cargo clippy -p browntls --lib --no-default-features --features rustcrypto --locked -- -D warnings
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -302,6 +316,40 @@ jobs:
 
       - name: Build the end-to-end peer
         run: cargo build -p browntls-e2e --locked
+
+  # The workspace jobs test `browntls` with every feature at once, where
+  # another crate's features can hide one the facade fails to pass on. These
+  # are the sets an application picks: the default one, each optional crate
+  # alone, both, and the smallest one with a provider (no TLS 1.2, X25519
+  # first).
+  facade:
+    name: Facade feature sets
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: scripts/ci/install-rust.sh
+
+      # `browntls::ktls` hands a connection to the runner's kernel.
+      - name: Load the kernel TLS module
+        run: sudo modprobe tls
+
+      - name: Test browntls
+        env:
+          BROWNTLS_KTLS_REQUIRED: '1'
+        run: |
+          cargo test -p browntls --locked
+          cargo test -p browntls --features tokio --locked
+          cargo test -p browntls --features ktls --locked
+          cargo test -p browntls --features tokio,ktls,ocsp --locked
+          cargo test -p browntls --no-default-features --features std,native --locked
 
   # The fuzz targets need a nightly toolchain to be instrumented, which only
   # the Fuzz workflow (fuzz.yml) installs. This job keeps them building on the pinned toolchain

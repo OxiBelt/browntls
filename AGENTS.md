@@ -21,6 +21,9 @@ Current layout:
 - `crates/browntls-crypto/`: primitives and architecture backends (`unsafe`
   confined to backend, CPU-detection, zeroisation and system-call modules).
 - `crates/browntls-pki/`: PKI types and certificate path validation.
+- `crates/browntls/`: the facade applications depend on; no code of its own.
+  It re-exports `browntls-core` and, by feature, `browntls-tokio`
+  (`browntls::tokio`) and `browntls-ktls` (`browntls::ktls`).
 - `crates/browntls-core/`: TLS protocol, provider mount point and providers.
 - `crates/browntls-tokio/`: asynchronous Tokio streams over `browntls-core`
   (`TlsConnector`, `TlsAcceptor`).

@@ -199,6 +199,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// The protocol crate `browntls-core`, re-exported as `browntls`.
+///
+/// This is not the `browntls` facade crate, which re-exports this crate in
+/// turn (as `browntls::tokio`) and whose root holds the same items.
+#[doc(no_inline)]
 pub use browntls_core as browntls;
 use browntls_core::CommonState;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};

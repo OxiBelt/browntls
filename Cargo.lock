@@ -218,6 +218,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "browntls"
+version = "0.1.0-dev"
+dependencies = [
+ "browntls-core",
+ "browntls-ktls",
+ "browntls-tokio",
+ "rcgen",
+ "tokio",
+]
+
+[[package]]
 name = "browntls-core"
 version = "0.1.0-dev"
 dependencies = [

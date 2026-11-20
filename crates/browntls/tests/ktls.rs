@@ -1,0 +1,93 @@
+//! `browntls::ktls` is `browntls-ktls`: a client named through `browntls`
+//! alone hands its connection to the running kernel over loopback TCP.
+//!
+//! Without the kernel's `tls` module the handover must return the
+//! connection and the socket unharmed, and the test goes on in userspace,
+//! unless `BROWNTLS_KTLS_REQUIRED=1` makes the missing module a failure.
+
+#![cfg(target_os = "linux")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod common;
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread;
+
+use browntls::ktls::{HandoffError, KtlsStream};
+use browntls::{ClientConnection, ServerConnection, StreamOwned};
+use common::*;
+
+/// Whether the kernel has the `tls` upper layer protocol loaded.
+fn kernel_tls() -> bool {
+    let loaded = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_ulp")
+        .is_ok_and(|ulps| ulps.split_whitespace().any(|ulp| ulp == "tls"));
+    if !loaded {
+        assert!(
+            std::env::var_os("BROWNTLS_KTLS_REQUIRED").is_none_or(|v| v != "1"),
+            "BROWNTLS_KTLS_REQUIRED=1 but the kernel has no `tls` ULP (sudo modprobe tls)"
+        );
+    }
+    loaded
+}
+
+#[test]
+fn client_hands_its_connection_to_the_kernel() {
+    let pki = Pki::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Built before either side blocks on the socket.
+    let server_config = Arc::new(pki.server_config());
+    let mut client_config = pki.client_config();
+    client_config.enable_secret_extraction = true;
+    let conn = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    // The listener's backlog takes the connection before `accept` runs.
+    let tcp = TcpStream::connect(addr).unwrap();
+
+    thread::scope(|scope| {
+        // A userspace server: only the client side is under test.
+        scope.spawn(|| {
+            let (tcp, _) = listener.accept().unwrap();
+            let conn = ServerConnection::new(server_config).unwrap();
+            let mut tls = StreamOwned::new(conn, tcp);
+            let mut request = [0u8; 5];
+            tls.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"hello");
+            tls.write_all(b"world").unwrap();
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+        });
+
+        let mut reply = Vec::new();
+        match KtlsStream::new(conn, tcp) {
+            // An accepted handover is itself the proof of kernel TLS (the
+            // probe below cannot see it from every network namespace).
+            Ok(mut tls) => {
+                tls.write_all(b"hello").unwrap();
+                tls.read_to_end(&mut reply).unwrap();
+            }
+            Err(HandoffError::Refused {
+                conn,
+                socket,
+                received,
+                error,
+            }) => {
+                assert!(!kernel_tls(), "refused with the `tls` module: {error}");
+                eprintln!("no kernel TLS ({error}): going on in userspace");
+                assert!(received.is_empty());
+                let mut tls = StreamOwned::new(conn, socket);
+                tls.write_all(b"hello").unwrap();
+                tls.read_to_end(&mut reply).unwrap();
+            }
+            Err(HandoffError::Failed(error)) => panic!("handover failed: {error}"),
+        }
+        assert_eq!(reply, b"world");
+    });
+}
+
+/// `native` reaches `browntls-ktls`: its load-aware routing exists.
+#[test]
+fn routing_module_follows_the_native_feature() {
+    let _: fn() -> std::io::Result<()> = browntls::ktls::routing::activate;
+}

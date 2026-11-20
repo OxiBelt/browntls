@@ -4,6 +4,7 @@ members = [
   "crates/browntls-crypto",
   "crates/browntls-pki",
   "crates/browntls-core",
+  "crates/browntls",
   "crates/browntls-tokio",
   "crates/browntls-ktls",
   "crates/browntls-e2e",
@@ -25,6 +26,7 @@ browntls-crypto = { path = "crates/browntls-crypto", version = "=0.1.0-dev", def
 browntls-pki = { path = "crates/browntls-pki", version = "=0.1.0-dev", default-features = false }
 browntls-core = { path = "crates/browntls-core", version = "=0.1.0-dev", default-features = false }
 browntls-tokio = { path = "crates/browntls-tokio", version = "=0.1.0-dev", default-features = false }
+browntls-ktls = { path = "crates/browntls-ktls", version = "=0.1.0-dev", default-features = false }
 # The lower bound is the newest Tokio LTS line (docs/Maintenance.md); crates
 # add the features they need.
 tokio = { version = "1.53", default-features = false }

@@ -23,8 +23,9 @@ brotli = ["std", "dep:brotli"]
 zstd = ["dep:ruzstd"]
 # Unstable entry points for the fuzz targets in `fuzz/`; not a supported API.
 fuzzing = ["std"]
-# The built-in provider backed by `browntls-crypto`.
-native = ["dep:browntls-crypto"]
+# The built-in provider backed by `browntls-crypto`, whose `alloc` feature it
+# needs with or without `std` (HPKE sealing and opening return vectors).
+native = ["dep:browntls-crypto", "browntls-crypto/alloc"]
 # A provider backed by the RustCrypto crates (used by the test-suite).
 rustcrypto = [
   "dep:aes",

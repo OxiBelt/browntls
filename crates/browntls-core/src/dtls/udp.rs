@@ -142,7 +142,8 @@ impl UdpClient {
     /// Blocks until a datagram of application data arrives, copies it to
     /// `buf` and returns its length.
     ///
-    /// Returns 0 once the server closed the connection. Fails with
+    /// Returns 0 once the server closed the connection; empty datagrams
+    /// are skipped. Fails with
     /// [`io::ErrorKind::TimedOut`] when the read timeout passes first,
     /// and with [`io::ErrorKind::InvalidInput`] when `buf` is shorter than
     /// the datagram, which stays queued for a larger buffer.
@@ -279,7 +280,9 @@ impl UdpClient {
                 return Err(io_error(err));
             }
         };
-        for range in received.app_data() {
+        // An empty datagram carries nothing, and `recv` returning 0 means
+        // that the server closed.
+        for range in received.app_data().iter().filter(|r| !r.is_empty()) {
             self.received.push_back(datagram[range.clone()].to_vec());
         }
         Ok(true)

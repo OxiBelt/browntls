@@ -94,6 +94,12 @@ fn a_client_and_a_server_exchange_datagrams() {
     let len = client.recv(&mut buf).unwrap();
     assert_eq!(&buf[..len], b"0123456789");
 
+    // An empty datagram, echoed, is skipped: 0 means only a close.
+    client.send(b"").unwrap();
+    client.send(b"after empty").unwrap();
+    let len = client.recv(&mut buf).unwrap();
+    assert_eq!(&buf[..len], b"after empty");
+
     // Fresh keys in both directions, then more data.
     client.connection_mut().refresh_traffic_keys().unwrap();
     client.send(b"after update").unwrap();
@@ -110,6 +116,8 @@ fn a_client_and_a_server_exchange_datagrams() {
             "two",
             "three",
             "0123456789",
+            "",
+            "after empty",
             "after update",
             "closed"
         ]

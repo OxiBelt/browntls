@@ -2001,9 +2001,8 @@ that starts when the object is made.
   `connect` returns once the handshake completes (`from_connection` pairs a
   connection configured beforehand, for example its MTU, with a socket, and
   `complete_handshake` runs the handshake). Each `send` is one datagram of
-  application data and each `recv` returns one; `recv` returns 0 once the
-  server sent close_notify, and also for an empty datagram
-  (`connection().peer_has_closed()` tells them apart). `connection_mut`
+  application data and each `recv` returns one; `recv` skips empty
+  datagrams and returns 0 once the server sent close_notify. `connection_mut`
   reaches the connection, for example to refresh its keys, and
   `into_parts` returns it with the socket, dropping what was received and
   not yet returned.

@@ -518,7 +518,10 @@ impl State {
         }
         result.expect("send_to a connected client");
         let i = slot.expect("a client");
-        self.clients[i].to_client.push(data.to_vec());
+        // `recv` skips empty datagrams.
+        if !data.is_empty() {
+            self.clients[i].to_client.push(data.to_vec());
+        }
         if follow && !data.is_empty() && !self.clients[i].closed {
             self.await_client(i, data);
         }

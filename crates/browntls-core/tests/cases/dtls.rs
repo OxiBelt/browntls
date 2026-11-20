@@ -610,6 +610,16 @@ fn close_notify_reaches_the_peer() {
     assert!(pair.server.peer_has_closed());
     let mut out = Vec::new();
     assert!(pair.client.send(b"late", &mut out).is_err());
+
+    // The server can still send, but nothing it would retransmit, such
+    // as a KeyUpdate, can be acknowledged by a peer whose records it no
+    // longer reads: it waits for nothing.
+    pair.server.refresh_traffic_keys().unwrap();
+    pair.server.send(b"after close", &mut out).unwrap();
+    sim.to_client.inbox.push_back(out);
+    pair.run(&mut sim, settled).unwrap();
+    assert!(sim.client_received.contains(&b"after close".to_vec()));
+    assert_eq!(pair.server.next_timeout(), None);
 }
 
 #[test]
@@ -747,4 +757,28 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
         Some(HandshakeKind::FullWithHelloRetryRequest)
     );
     pair.exchange(&mut sim, "accepted");
+}
+
+#[test]
+fn a_key_update_lost_before_the_peer_closes_keeps_the_old_keys() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    // The server's KeyUpdate is lost, then the client closes.
+    pair.server.refresh_traffic_keys().unwrap();
+    let mut out = Vec::new();
+    while pair.server.write_datagram(&mut out, sim.now).unwrap() {
+        out.clear();
+    }
+    pair.client.send_close_notify();
+    while pair.client.write_datagram(&mut out, sim.now).unwrap() {
+        pair.server.read_datagram(&mut out, sim.now).unwrap();
+        out.clear();
+    }
+    assert!(pair.server.peer_has_closed());
+    // What the server still sends reaches the client.
+    pair.server.send(b"after close", &mut out).unwrap();
+    sim.to_client.inbox.push_back(out);
+    pair.run(&mut sim, settled).unwrap();
+    assert!(sim.client_received.contains(&b"after close".to_vec()));
 }

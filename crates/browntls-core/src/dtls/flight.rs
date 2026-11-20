@@ -73,8 +73,9 @@ pub(super) struct Outgoing {
     /// the main handshake we queue starts a new flight.
     flight_closed: bool,
     flight_started_this_input: bool,
-    /// After a fatal alert nothing is sent again.
-    abandoned: bool,
+    /// After a fatal alert, or once the peer closed, no handshake message
+    /// is sent again.
+    pub(super) abandoned: bool,
 }
 
 impl Outgoing {

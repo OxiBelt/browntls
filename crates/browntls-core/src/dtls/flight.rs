@@ -17,7 +17,7 @@ use core::time::Duration;
 use super::state::{APPLICATION_EPOCH, Dtls, MAX_ACKS};
 use super::wire::{self, HandshakeHeader, RecordNumber};
 use crate::common_state::Side;
-use crate::enums::ContentType;
+use crate::enums::{AlertDescription, ContentType};
 use crate::error::Error;
 use crate::log::trace;
 
@@ -28,7 +28,7 @@ pub(super) const INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How many consecutive timeouts without any acknowledgement end the
-/// connection: about four minutes with the default timers.
+/// connection: about five minutes with the default timers.
 const MAX_RETRANSMISSIONS: u32 = 9;
 
 /// How many sent records are remembered for matching acknowledgements.
@@ -205,8 +205,8 @@ impl Dtls {
         });
     }
 
-    /// Appends the next datagram to send to `out`: queued alerts, a due
-    /// ACK and handshake fragments, within the datagram size. Returns
+    /// Appends the next datagram to send to `out`: a due ACK, handshake
+    /// fragments and queued alerts, within the datagram size. Returns
     /// whether anything was appended.
     pub(crate) fn write_datagram(
         &mut self,
@@ -220,6 +220,17 @@ impl Dtls {
         let mtu = self.settings.mtu;
         let space = |out: &Vec<u8>| mtu.saturating_sub(out.len() - start);
 
+        if self.ack_due.is_some_and(|due| due <= now) {
+            self.ack_due = None;
+            self.write_ack(out, space(out))?;
+        }
+
+        if self.write_fragments(out, start)? && self.out.deadline.is_none() && !self.is_hrr_only() {
+            self.out.deadline = Some(now + self.out.timeout);
+        }
+
+        // Alerts go last: the peer reads nothing after a close_notify
+        // (RFC 9846 §6.1), so what shares its datagram must come first.
         while let Some(&(level, description)) = self.alerts.front() {
             let epoch = self.write_epoch();
             let fits = self
@@ -235,15 +246,10 @@ impl Dtls {
                 ContentType::Alert,
                 &[u8::from(level), u8::from(description)],
             )?;
-        }
-
-        if self.ack_due.is_some_and(|due| due <= now) {
-            self.ack_due = None;
-            self.write_ack(out, space(out))?;
-        }
-
-        if self.write_fragments(out, start)? && self.out.deadline.is_none() && !self.is_hrr_only() {
-            self.out.deadline = Some(now + self.out.timeout);
+            if description == AlertDescription::CloseNotify {
+                // Nothing we send from now on is read.
+                self.abandon_flights();
+            }
         }
         Ok(out.len() > start)
     }

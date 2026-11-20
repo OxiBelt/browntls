@@ -782,3 +782,46 @@ fn a_key_update_lost_before_the_peer_closes_keeps_the_old_keys() {
     pair.run(&mut sim, settled).unwrap();
     assert!(sim.client_received.contains(&b"after close".to_vec()));
 }
+
+#[test]
+fn a_key_update_read_with_close_notify_is_still_acknowledged() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    let now = sim.now;
+    // The client's KeyUpdate and close_notify arrive together.
+    pair.client.refresh_traffic_keys().unwrap();
+    pair.client.send_close_notify();
+    let mut datagrams = Vec::new();
+    let mut out = Vec::new();
+    while pair.client.write_datagram(&mut out, now).unwrap() {
+        datagrams.push(core::mem::take(&mut out));
+    }
+    // Having closed, the client retransmits nothing.
+    assert_eq!(pair.client.next_timeout(), None);
+    for datagram in &mut datagrams {
+        pair.server.read_datagram(datagram, now).unwrap();
+    }
+    assert!(pair.server.peer_has_closed());
+    // The server still owes, and sends, the ACK.
+    assert!(pair.server.write_datagram(&mut out, now).unwrap());
+}
+
+#[test]
+fn a_key_update_sent_with_close_notify_is_read_first() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    let now = sim.now;
+    pair.server.refresh_traffic_keys().unwrap();
+    pair.server.send_close_notify();
+    let mut out = Vec::new();
+    while pair.server.write_datagram(&mut out, now).unwrap() {
+        pair.client.read_datagram(&mut out, now).unwrap();
+        out.clear();
+    }
+    assert_eq!(pair.server.next_timeout(), None);
+    assert!(pair.client.peer_has_closed());
+    // The KeyUpdate came ahead of close_notify: the client acknowledges it.
+    assert!(pair.client.write_datagram(&mut out, now).unwrap());
+}

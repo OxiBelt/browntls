@@ -147,8 +147,9 @@ impl<Data: SideData> ConnectionCommon<Data> {
         if self.core.common_state.has_received_close_notify {
             // Nothing the peer sends is processed any more, its ACKs
             // included: what we would retransmit could never be
+            // acknowledged. What we owe it an ACK for is still
             // acknowledged.
-            self.dtls_mut().abandon();
+            self.dtls_mut().abandon_flights();
         }
         Ok(received)
     }

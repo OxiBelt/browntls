@@ -239,6 +239,14 @@ impl Dtls {
         self.ack_due = None;
     }
 
+    /// Either side closed: our flights are never retransmitted again, as
+    /// what the peer sends after its close_notify is not read and what we
+    /// send after ours is not read either (RFC 9846 §6.1). An ACK we owe
+    /// is still sent.
+    pub(super) fn abandon_flights(&mut self) {
+        self.out.abandon();
+    }
+
     /// The traffic secret of the next sending epoch: the handshake secret
     /// starts epoch 2, the first application secret epoch 3, and every
     /// later one (a KeyUpdate of ours) the epoch after. The keys of a

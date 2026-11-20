@@ -1944,8 +1944,9 @@ implemented; there is no DTLS 1.2.
   handshake only before the peer has authenticated, and only fatal error
   alerts (not close_notify or user_canceled); unprotected handshake
   fragments are buffered only as the peer's hello at the next expected
-  message sequence before protected records arrive, and otherwise only
-  signal a retransmission, which they earn at most once per timeout.
+  message sequence, while no handshake read keys are installed, and
+  otherwise only signal a retransmission, which they earn at most once per
+  timeout.
   When failed decryptions in an epoch exceed the suite's integrity limit
   the connection fails (§4.5.3), and the confidentiality limit triggers a
   KeyUpdate. Records with a connection ID are refused, since none is
@@ -1955,16 +1956,19 @@ implemented; there is no DTLS 1.2.
   windows, acknowledged per §7 and retransmitted on a timer that starts at
   one second, doubles up to 60 seconds and gives up after nine
   retransmissions. The keys of a KeyUpdate are used only once it is
-  acknowledged (§8), and no second KeyUpdate is sent meanwhile. Once the
-  peer's close_notify arrives nothing it sends is read, so nothing more is
-  retransmitted; application data can still be sent, under the current
-  keys.
+  acknowledged (§8), and no second KeyUpdate is sent meanwhile. Nothing
+  sent after a close_notify is read (RFC 9846 §6.1), so once either side's
+  close_notify is sent or received nothing more is retransmitted. A sent
+  close_notify ends its datagram, after what is still owed to the peer;
+  once the peer's arrives, an ACK still owed and our own close_notify are
+  sent, and application data can still be, under the current keys.
 - Application data is never fragmented: `send` seals one record into one
   datagram and refuses data longer than `max_application_data`.
 - Cookies: `ServerConnection::new` answers a ClientHello without a valid
   cookie with a HelloRetryRequest whose cookie is bound to the
   caller-provided address of the client (opaque bytes, §5.1), so that a
-  spoofed address costs the server one small datagram. It needs
+  spoofed address costs the server one small datagram and one connection
+  object; `dtls::Acceptor` (below) keeps no state at all. It needs
   `ServerConfig::hello_retry_cookies`; the exchange is on by default and
   `new_without_cookie_exchange` turns it off for paths whose address is
   already verified. `dtls::Acceptor` answers first ClientHellos without

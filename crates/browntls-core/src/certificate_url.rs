@@ -18,6 +18,20 @@
 //! (RFC 6066 §5: MUST NOT), bound time and size, and beware of loops back
 //! into the same server over HTTPS.
 //!
+//! Check the host on the URL as parsed by the same parser the HTTP client
+//! uses, or on the address actually dialled after name resolution, never by
+//! matching strings: loopback, private and link-local addresses have many
+//! spellings (IP literals in decimal, octal or hexadecimal, IPv4-mapped
+//! IPv6, names that resolve to them). The policy does not look at hosts at
+//! all and lets IP literals such as `http://[::1]/` through.
+//!
+//! RFC 6066 §11.3 names a second risk: many unauthenticated connections,
+//! each making the server fetch. Bound the fetches the server makes at once
+//! and their rate, answer from a cache keyed by URL and hash where you can
+//! (§5 allows a cached copy whose hash matches), and put a deadline on the
+//! whole handshake: while a fetch runs the connection reads nothing from
+//! its transport, so a slow fetch holds the connection open.
+//!
 //! # Client
 //!
 //! Set [`ClientConfig::enable_client_certificate_url`] and give the
@@ -247,8 +261,14 @@ pub struct ClientCertificateUrlPolicy {
     /// (`crypto::native::sha1` or `crypto::rustcrypto::sha1`).
     pub sha1: fn(&[u8]) -> [u8; SHA1_LEN],
     /// The URI schemes a URL may have, compared without regard to case.
-    /// Only `http` by default: RFC 6066 §5 requires it, and §11.3 asks for
-    /// schemes to be enabled one by one, as few as possible.
+    /// Only `http` by default: RFC 6066 §5 says servers MUST support it, so
+    /// a list without it is the administrator's deviation from the RFC;
+    /// §11.3 asks for further schemes to be enabled one by one, as few as
+    /// possible.
+    ///
+    /// Schemes are all the policy checks of a URL's destination: hosts,
+    /// IP literals included, are for the application to authorize (see the
+    /// [module documentation](self)).
     pub allowed_schemes: Vec<String>,
     /// The most URLs one message may carry (8 by default).
     pub max_urls: usize,
@@ -256,6 +276,11 @@ pub struct ClientCertificateUrlPolicy {
     pub max_url_len: usize,
     /// The most bytes the fetched objects may take together (64 KiB by
     /// default, the bound a Certificate message has).
+    ///
+    /// A Certificate message also bounds each certificate in it to 64 KiB;
+    /// fetched objects have no such bound of their own, so raising this
+    /// above 64 KiB lets one fetched certificate be larger than any a
+    /// Certificate message would be allowed to carry.
     pub max_fetched_len: usize,
 }
 

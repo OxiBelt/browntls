@@ -24,13 +24,24 @@
 //!
 //! - **authorize every destination**: scheme, host and port, and the
 //!   address actually dialled after name resolution (refuse loopback,
-//!   private and link-local ranges unless they are meant);
+//!   private and link-local ranges unless they are meant). Check the URL as
+//!   parsed by the HTTP client's own parser, or the dialled address, never
+//!   by matching strings: the policy lets IP literals such as
+//!   `http://[::1]/` through, and such addresses have many spellings;
 //! - **never follow redirects** (RFC 6066 §5: the server MUST NOT);
 //! - **bound time and size**: the handshake waits for the fetch, and the
 //!   objects may take at most
 //!   [`ClientCertificateUrlPolicy::max_fetched_len`] bytes together;
 //! - **beware of loops**: an `https` URL may lead back into this same
-//!   server, whose handshake then waits for itself.
+//!   server, whose handshake then waits for itself;
+//! - **limit fetches across connections** (RFC 6066 §11.3): every
+//!   unauthenticated client can make the server fetch, so cap the fetches
+//!   in flight and their rate, and answer from a cache by URL and hash
+//!   where possible.
+//!
+//! Put a timeout around the whole accept (for example
+//! `tokio::time::timeout`): while a fetch runs the connection reads nothing
+//! from its transport, so a slow fetch holds the connection open.
 //!
 //! The answer is not trusted either: the connection checks every object
 //! against the hash the client sent (`bad_certificate_hash_value`

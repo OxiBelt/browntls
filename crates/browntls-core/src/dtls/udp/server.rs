@@ -144,8 +144,8 @@ impl UdpServer {
     }
 
     /// Sets how long [`Self::next_event`] waits for an event; `None` (the
-    /// default) waits forever. Even a zero timeout reads the datagrams that
-    /// have already arrived.
+    /// default) waits forever. Even a zero timeout reads what arrives within a
+    /// moment of the deadline, up to 64 datagrams.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }

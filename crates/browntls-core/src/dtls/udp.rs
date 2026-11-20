@@ -189,7 +189,8 @@ impl UdpClient {
 
     /// Sets how long [`Self::recv`] and the handshake wait for the server;
     /// `None` (the default) waits as long as the connection does. Even a
-    /// zero timeout reads the datagrams that have already arrived.
+    /// zero timeout reads what arrives within a moment of the deadline, up
+    /// to 64 datagrams.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }

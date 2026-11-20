@@ -51,7 +51,10 @@ fn revocation_policy_keeps_the_transparency_policy() {
             ..Default::default()
         }]
     }
-    let (without, with) = (evidence(&plain_staple, None), evidence(&plain_staple, Some(&items)));
+    let (without, with) = (
+        evidence(&plain_staple, None),
+        evidence(&plain_staple, Some(&items)),
+    );
     assert_eq!(
         verifier
             .verify_server_cert_with_evidence(ee, &[], &server_name(), &without, now)
@@ -92,7 +95,12 @@ fn revocation_policy_keeps_the_transparency_policy() {
         let (_c, _s, cr, sr) = connect(&client, &without);
         assert_refused(cr, sr, insufficient(0, 0));
         let client = config(revocation_and_ct(&fx.pki, &fx.log_a, false));
-        let with = server(&fx.chain, Some(items.clone()), Some(plain_staple.clone()), v);
+        let with = server(
+            &fx.chain,
+            Some(items.clone()),
+            Some(plain_staple.clone()),
+            v,
+        );
         let (c, _s, cr, sr) = connect(&client, &with);
         cr.unwrap();
         sr.unwrap();
@@ -137,13 +145,7 @@ fn transparency_is_decided_before_a_live_query() {
         Error::InvalidCertificate(insufficient(0, 0))
     );
     let (check, ct) = verifier
-        .verify_server_cert_with_transparency(
-            ee,
-            &[],
-            &server_name(),
-            &evidence(Some(&items)),
-            now,
-        )
+        .verify_server_cert_with_transparency(ee, &[], &server_name(), &evidence(Some(&items)), now)
         .unwrap();
     assert!(matches!(check, RevocationCheck::Pending(_)));
     assert_eq!(ct, Some(status(1, 1, 0)));

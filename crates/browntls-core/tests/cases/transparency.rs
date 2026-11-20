@@ -119,12 +119,20 @@ fn connect(
     (c, s, cr, sr)
 }
 
-fn status(verified_scts: usize, distinct_logs: usize, inclusion_proven: usize) -> TransparencyStatus {
+fn status(
+    verified_scts: usize,
+    distinct_logs: usize,
+    inclusion_proven: usize,
+) -> TransparencyStatus {
     TransparencyStatus::new(verified_scts, distinct_logs, inclusion_proven)
 }
 
 /// Asserts the client refused the certificate with `expected`.
-fn assert_refused(client: Result<(), Error>, server: Result<(), Error>, expected: CertificateError) {
+fn assert_refused(
+    client: Result<(), Error>,
+    server: Result<(), Error>,
+    expected: CertificateError,
+) {
     assert_eq!(client, Err(Error::InvalidCertificate(expected)));
     assert_eq!(
         server,
@@ -321,7 +329,10 @@ fn sct_of_a_wrong_key_or_certificate_does_not_count() {
     for v in VERSIONS {
         // The log's ID with another log's key.
         let mut requirements = fx.requirements(&[]);
-        requirements.logs = vec![CtV2LogConfig::new(fx.log_a.id.clone(), fx.log_b.spki.clone())];
+        requirements.logs = vec![CtV2LogConfig::new(
+            fx.log_a.id.clone(),
+            fx.log_b.spki.clone(),
+        )];
         let client = fx.client(Some(requirements), v);
         let items = list(&[fx.sct(&fx.log_a)]);
         let (_c, _s, cr, sr) = connect(&client, &server(&fx.chain, Some(items), None, v));
@@ -339,9 +350,10 @@ fn sct_of_a_wrong_key_or_certificate_does_not_count() {
 fn verifier_build_checks_the_logs() {
     let fx = Fixture::new();
     let mut requirements = fx.requirements(&[&fx.log_a]);
-    requirements
-        .logs
-        .push(CtV2LogConfig::new(fx.log_b.id.clone(), b"not a key".to_vec()));
+    requirements.logs.push(CtV2LogConfig::new(
+        fx.log_b.id.clone(),
+        b"not a key".to_vec(),
+    ));
     let built = WebPkiServerVerifier::builder_with_provider(fx.pki.roots(), provider())
         .with_certificate_transparency(requirements)
         .build();
@@ -404,13 +416,7 @@ fn verifier_api_enforces_without_the_handshake() {
     assert!(verifier.requests_transparency_info());
     let now = UnixTime::now();
     // The legacy entry point has only the OCSP response.
-    let refused = verifier.verify_server_cert(
-        &fx.chain.end_entity,
-        &[],
-        &server_name(),
-        &[],
-        now,
-    );
+    let refused = verifier.verify_server_cert(&fx.chain.end_entity, &[], &server_name(), &[], now);
     assert_eq!(
         refused.unwrap_err(),
         Error::InvalidCertificate(insufficient(0, 0))
@@ -438,10 +444,12 @@ fn verifier_api_enforces_without_the_handshake() {
             )
             .is_err()
     );
-    assert!(!WebPkiServerVerifier::builder_with_provider(fx.pki.roots(), provider())
-        .build()
-        .unwrap()
-        .requests_transparency_info());
+    assert!(
+        !WebPkiServerVerifier::builder_with_provider(fx.pki.roots(), provider())
+            .build()
+            .unwrap()
+            .requests_transparency_info()
+    );
 }
 
 include!("transparency/resumption.rs");

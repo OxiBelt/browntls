@@ -3,9 +3,9 @@
 
 use std::io::{Read, Write};
 
-use browntls::client::ClientConnectionData;
-use browntls::server::ServerConnectionData;
-use browntls::{Connection, ContentType, ProtocolVersion, SideData, SupportedCipherSuite};
+use browntls_core::client::ClientConnectionData;
+use browntls_core::server::ServerConnectionData;
+use browntls_core::{Connection, ContentType, ProtocolVersion, SideData, SupportedCipherSuite};
 
 use super::sim::{Offloaded, is_key_update};
 use super::{Flow, MAX_OPS};

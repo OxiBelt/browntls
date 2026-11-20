@@ -6,7 +6,7 @@ use std::io::{self, Read as _};
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use browntls::ServerConnection;
+use browntls_core::ServerConnection;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::TlsStream;
@@ -17,7 +17,7 @@ use crate::common::{HandshakeFailure, Stream, StreamState, coop, joint_waker};
 #[derive(Debug)]
 pub(crate) struct EarlyPhase {
     /// The connection sends application data before the client's Finished
-    /// ([`ServerConfig::send_half_rtt_data`](browntls::ServerConfig)), so
+    /// ([`ServerConfig::send_half_rtt_data`](browntls_core::ServerConfig)), so
     /// writes need not wait for the handshake.
     half_rtt: bool,
     /// The handshake failed: every later operation reports it.

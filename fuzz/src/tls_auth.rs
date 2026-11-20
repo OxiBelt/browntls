@@ -1,9 +1,9 @@
 //! Delegated credentials and exported authenticators
 //! (`fuzz_targets/tls_auth.rs`).
 //!
-//! Reaches every public function of `browntls::delegated_credential`,
-//! `browntls::crypto::native::delegated_credential` and
-//! `browntls::exported_authenticator`:
+//! Reaches every public function of `browntls_core::delegated_credential`,
+//! `browntls_core::crypto::native::delegated_credential` and
+//! `browntls_core::exported_authenticator`:
 //!
 //! * [`DelegatedCredential`] decoding of fuzzed bytes and encoding of
 //!   fuzzed fields, issuance ([`DelegatedCredential::issue`] and the native
@@ -32,21 +32,21 @@
 //! Input: up to 32 operations, each an operation byte followed by its
 //! arguments (see [`run`]).
 //!
-//! [`generate`]: browntls::crypto::native::delegated_credential::generate
-//! [`DelegatedCredentialKey`]: browntls::delegated_credential::DelegatedCredentialKey
-//! [`valid_time_until`]: browntls::delegated_credential::valid_time_until
+//! [`generate`]: browntls_core::crypto::native::delegated_credential::generate
+//! [`DelegatedCredentialKey`]: browntls_core::delegated_credential::DelegatedCredentialKey
+//! [`valid_time_until`]: browntls_core::delegated_credential::valid_time_until
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use browntls::crypto::{CryptoProvider, verify_tls13_signature};
-use browntls::delegated_credential::{Credential, DelegatedCredential, MAX_VALIDITY};
-use browntls::pki_types::{
+use browntls_core::crypto::{CryptoProvider, verify_tls13_signature};
+use browntls_core::delegated_credential::{Credential, DelegatedCredential, MAX_VALIDITY};
+use browntls_core::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer, UnixTime,
 };
-use browntls::sign::{CertifiedKey, SigningKey};
-use browntls::time_provider::TimeProvider;
-use browntls::{DigitallySignedStruct, RootCertStore, Side, SignatureScheme};
+use browntls_core::sign::{CertifiedKey, SigningKey};
+use browntls_core::time_provider::TimeProvider;
+use browntls_core::{DigitallySignedStruct, RootCertStore, Side, SignatureScheme};
 
 use self::credential::{decode, encode, issue, native_generate, validity};
 use self::exported::{Ea, exported};
@@ -163,7 +163,7 @@ fn leaf(
 fn fixture() -> &'static Fixture {
     static FIXTURE: OnceLock<Fixture> = OnceLock::new();
     FIXTURE.get_or_init(|| {
-        let provider = Arc::new(browntls::crypto::native::default_provider());
+        let provider = Arc::new(browntls_core::crypto::native::default_provider());
         let load = |pkcs8: &[u8]| {
             provider
                 .key_provider

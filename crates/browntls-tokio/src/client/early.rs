@@ -6,7 +6,7 @@ use std::io::{self, Write as _};
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use browntls::ClientConnection;
+use browntls_core::ClientConnection;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::common::{HandshakeFailure, Stream, StreamState};

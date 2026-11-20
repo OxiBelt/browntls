@@ -218,7 +218,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "browntls"
+name = "browntls-core"
 version = "0.1.0-dev"
 dependencies = [
  "aes",
@@ -286,7 +286,7 @@ dependencies = [
 name = "browntls-e2e"
 version = "0.1.0-dev"
 dependencies = [
- "browntls",
+ "browntls-core",
  "browntls-tokio",
  "tokio",
 ]
@@ -295,7 +295,7 @@ dependencies = [
 name = "browntls-entropy"
 version = "0.1.0-dev"
 dependencies = [
- "browntls",
+ "browntls-core",
  "browntls-crypto",
  "rcgen",
 ]
@@ -304,7 +304,7 @@ dependencies = [
 name = "browntls-ktls"
 version = "0.1.0-dev"
 dependencies = [
- "browntls",
+ "browntls-core",
  "browntls-tokio",
  "libc",
  "rcgen",
@@ -331,7 +331,7 @@ dependencies = [
 name = "browntls-tokio"
 version = "0.1.0-dev"
 dependencies = [
- "browntls",
+ "browntls-core",
  "rcgen",
  "rustls",
  "rustls-pki-types",

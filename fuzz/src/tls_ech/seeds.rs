@@ -1,6 +1,6 @@
 //! Starting inputs of the `tls_ech` target.
 
-use browntls::ech::svcb::ECH_SVC_PARAM_KEY;
+use browntls_core::ech::svcb::ECH_SVC_PARAM_KEY;
 
 use super::{ECH_VERSION, Fields, KEMS, NAMES, base64, config_list, fixture};
 use crate::input::{put_field, put_short_field};

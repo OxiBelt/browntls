@@ -8,7 +8,7 @@ counter or a timestamp, bits forced to a constant, a cached value returned
 twice, or a seed truncated somewhere on the way to the key.
 
 Each test draws millions of values from one public generator of
-`browntls-crypto` or `browntls`, keeps only the bits that the specification
+`browntls-crypto` or `browntls-core`, keeps only the bits that the specification
 leaves free (clamped and range-limited bits are masked out), and runs the
 checks below on every resulting stream. [`entropy.yml`](../../.github/workflows/entropy.yml)
 runs every topic as its own job on one x86-64 runner (`ubuntu-26.04`).

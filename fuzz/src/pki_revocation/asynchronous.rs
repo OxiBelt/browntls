@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::revocation::{RevocationQuery, RevocationResponse, RevocationStatus};
-use browntls::server::{Acceptor, UnbufferedAcceptor};
+use browntls_core::revocation::{RevocationQuery, RevocationResponse, RevocationStatus};
+use browntls_core::server::{Acceptor, UnbufferedAcceptor};
 use browntls_tokio::revocation::{FetchLimits, RevocationFetcher, staple::StapleRefresh};
 use browntls_tokio::unbuffered;
 use browntls_tokio::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
@@ -42,7 +42,7 @@ pub(super) fn run(fixture: &'static Fixture, input: &[u8]) {
 }
 
 async fn handshake(fixture: &'static Fixture, mode: u8, bytes: &[u8]) {
-    let (client, server) = configs(fixture, &browntls::version::TLS13, true, false);
+    let (client, server) = configs(fixture, &browntls_core::version::TLS13, true, false);
     let canned = bytes.is_empty();
     let response = if canned {
         fixture.response.as_slice()

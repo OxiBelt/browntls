@@ -2,11 +2,15 @@
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::client::WebPkiServerVerifier;
-use browntls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use browntls::pki_types::{CertificateDer, ServerName, UnixTime};
-use browntls::revocation::{PeerEvidence, RevocationCheck, RevocationResponse, RevocationStatus};
-use browntls::{
+use browntls_core::client::WebPkiServerVerifier;
+use browntls_core::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
+use browntls_core::revocation::{
+    PeerEvidence, RevocationCheck, RevocationResponse, RevocationStatus,
+};
+use browntls_core::{
     CertificateError, ClientConfig, ClientConnection, ConnectionCommon, DigitallySignedStruct,
     Error, RootCertStore, ServerConfig, ServerConnection, SideData, SignatureScheme,
 };
@@ -105,13 +109,13 @@ pub(super) fn run(identity: &Identity, commands: &[u8]) {
                 .build()
                 .unwrap();
         let client = ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&browntls::version::TLS13])
+            .with_protocol_versions(&[&browntls_core::version::TLS13])
             .unwrap()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(Defer(verifier)))
             .with_no_client_auth();
         let server = ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&browntls::version::TLS13])
+            .with_protocol_versions(&[&browntls_core::version::TLS13])
             .unwrap()
             .with_no_client_auth()
             .with_single_cert(identity.chain.clone(), identity.key())

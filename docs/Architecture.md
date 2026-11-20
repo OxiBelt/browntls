@@ -14,21 +14,21 @@ browntls-crypto   primitives; no_std (alloc and std optional); arch backends;
                   no required dependencies (optional getrandom)
        ^
        | (feature "native", default)
-browntls ----------> browntls-pki   PKI types, PEM, X.509 path validation;
+browntls-core -----> browntls-pki   PKI types, PEM, X.509 path validation;
   crypto::*  (mount point)           no_std + alloc; no cryptography
   crypto::native     (default provider, browntls-crypto)
   crypto::rustcrypto (optional provider, RustCrypto crates)
        ^
        |
-browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls
-browntls-ktls       Linux kernel TLS offload of browntls connections
+browntls-tokio      Tokio AsyncRead/AsyncWrite streams over browntls-core
+browntls-ktls       Linux kernel TLS offload of browntls-core connections
 ```
 
 | Crate | Role | `unsafe` |
 |---|---|---|
 | `browntls-crypto` | Hashes, MACs, KDFs, AEADs, key exchange, signatures, KEM, HPKE, CPU detection, OS entropy | Denied crate-wide; allowed only in architecture backend modules, CPU detection, zeroisation and the system-call trampoline |
 | `browntls-pki` | Certificate/key/name/time types, PEM, X.509 path building, name and revocation checks | Forbidden |
-| `browntls` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
+| `browntls-core` | Record layer, handshake state machines, configuration, provider traits and providers | Forbidden |
 | `browntls-tokio` | Asynchronous client and server streams for Tokio over the buffered connection API, and over the unbuffered one (`browntls_tokio::unbuffered`) | Forbidden |
 | `browntls-ktls` | Hands buffered connections to Linux kernel TLS and drives what follows (`KtlsStream`; `AsyncKtlsStream` on Tokio sockets with the `tokio` feature) | Denied crate-wide; allowed only in `src/sys.rs`: the kernel TLS socket options, `sendmsg`/`recvmsg` control messages, `sendfile` and the other system calls listed under [Linux kernel TLS](#linux-kernel-tls-browntls-ktls) |
 
@@ -138,7 +138,7 @@ outstanding revocation-aware authentication block kernel handoff. See
 
 ## Crypto provider mount point
 
-`browntls::crypto` defines the provider interface, modelled on rustls 0.23 so
+`browntls_core::crypto` defines the provider interface, modelled on rustls 0.23 so
 that existing provider designs map onto it:
 
 - `CryptoProvider`: cipher suites, key-exchange groups, signature
@@ -160,7 +160,7 @@ explicit nonce of the next record: the kernel counts up from the value it is
 given, so it continues the library's sequence exactly. TLS 1.3 and ChaCha20-Poly1305 nonces are the IV XORed
 with the sequence number on both sides.
 
-Providers shipped in the `browntls` crate:
+Providers shipped in the `browntls-core` crate:
 
 | Provider | Feature | Backing |
 |---|---|---|
@@ -169,7 +169,7 @@ Providers shipped in the `browntls` crate:
 
 A provider is plain data (static trait objects), so applications can build a
 mixed provider, for example native AEADs with RustCrypto signatures, or supply
-their own implementation of any trait; `crates/browntls/tests/native_mixed.rs`
+their own implementation of any trait; `crates/browntls-core/tests/native_mixed.rs`
 shows the pattern. When exactly one provider feature is enabled it becomes the
 implicit default; with both enabled, the application installs one explicitly.
 
@@ -485,7 +485,7 @@ connection exists when that ClientHello offers 0-RTT.
 
 ### TLS 1.3 external PSKs
 
-External pre-shared keys (RFC 9846 §4.3.11) live in `browntls::psk`. An
+External pre-shared keys (RFC 9846 §4.3.11) live in `browntls_core::psk`. An
 `ExternalPsk` carries its identity, key, hash (SHA-256 or SHA-384) and
 optional restrictions: one cipher suite, one server name, one ALPN protocol.
 A caller may also attach an opaque local key generation with
@@ -876,7 +876,7 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   connection (RFC 9846 §6.1). The peer's `close_notify` is end of file;
   end of file without it is `UnexpectedEof`.
 - TLS errors surface as `io::Error` of kind `InvalidData` wrapping
-  `browntls::Error`; the alert describing a local failure is written if
+  `browntls_core::Error`; the alert describing a local failure is written if
   the transport takes it at once.
 - With the `coop` feature the streams, the server's `EarlyDataReader`, the
   handshake futures and `LazyConfigAcceptor` take part in Tokio's
@@ -932,7 +932,7 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   `AsyncBufRead`, since the stream's buffer cannot be lent out between two
   polls while the other half uses the stream.
 - `into_kernel_handoff` (`browntls_tokio::kernel`) readies a client or
-  server stream for [kernel TLS offload](#kernel-tls-offload-browntlskernel)
+  server stream for [kernel TLS offload](#kernel-tls-offload-browntls_corekernel)
   without operating system support of its own. `into_inner` would drop what
   only the stream holds (an unfinished 0-RTT phase with the early data to
   send again, a read error kept for the next read), and the connection's
@@ -971,7 +971,7 @@ transport for its duration (`common::Stream`) and drives `read_tls` and
   record. A 0-RTT phase or handshake it completes counts its reads as the
   stream's own operations do, every read after the first in one poll. The
   tests (`crates/browntls-tokio/tests/kernel_handoff.rs`) hand streams to
-  the kernel stand-in of the `browntls` kernel tests, keyed with the
+  the kernel stand-in of the `browntls-core` kernel tests, keyed with the
   extracted secrets, over a transport that cuts records short and holds
   writes back: no byte is lost or read twice in either direction with
   unread plaintext, a partial record, records not yet written, a KeyUpdate
@@ -1057,7 +1057,7 @@ nothing per record and copy plaintext at most once:
   a transport that never waits and does not count, the peer decides how
   long one poll runs. Both are open.
 
-### Kernel TLS offload (`browntls::kernel`)
+### Kernel TLS offload (`browntls_core::kernel`)
 
 Linux can protect the records of a TCP connection itself (kernel TLS):
 `setsockopt(TCP_ULP, "tls")`, then the traffic keys with `TLS_TX` and
@@ -1128,7 +1128,7 @@ records or enforce the record size limit we announced on what it receives.
 
 Tests drive a `KernelConnection` against a userspace stand-in for the kernel
 that protects records with the extracted secrets as Linux does
-(`crates/browntls/tests/cases/kernel.rs`): data in both directions, KeyUpdate
+(`crates/browntls-core/tests/cases/kernel.rs`): data in both directions, KeyUpdate
 from either side, tickets after the handover, post-handshake authentication,
 closure, the blockers, the limits and malformed records, for every suite with a
 kernel form on both providers.
@@ -1422,7 +1422,7 @@ there they may be skipped).
 
 ### Delegated credentials (RFC 9345)
 
-`browntls::delegated_credential` holds the `DelegatedCredential` codec,
+`browntls_core::delegated_credential` holds the `DelegatedCredential` codec,
 signing (`DelegatedCredential::issue`) and validation; the native provider
 adds `crypto::native::delegated_credential::generate`, which creates an
 ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
@@ -1486,7 +1486,7 @@ be built with a struct literal; `CertifiedKey::new` remains.
 
 ### Exported authenticators (RFC 9261)
 
-`browntls::exported_authenticator` adds `request_authenticator`,
+`browntls_core::exported_authenticator` adds `request_authenticator`,
 `authenticator` and `validate_authenticator` to `ClientConnection` and
 `ServerConnection` (with `std`) and to `UnbufferedClientConnection` and
 `UnbufferedServerConnection` (also without `std`); QUIC connections do not
@@ -1538,7 +1538,7 @@ a random 32-byte context.
 
 ### Encrypted Client Hello (RFC 9849)
 
-`browntls::ech` implements ECH on top of the HPKE traits in `crypto::hpke`
+`browntls_core::ech` implements ECH on top of the HPKE traits in `crypto::hpke`
 (`Hpke`, `HpkeSealer`, `HpkeOpener`); the native provider implements them in
 `crypto::native::hpke` for every `browntls_crypto::hpke` suite. The
 RustCrypto provider has no HPKE, so the client and the servers that decrypt
@@ -1654,7 +1654,7 @@ back-end server that terminates it.
 - `ech::svcb` reads the `ech` SvcParam (RFC 9848) from SVCB/HTTPS record
   data or its Base64 presentation form; the crate does no DNS lookups.
 
-Tests: shared and split mode in-process (`crates/browntls/tests/ech_native.rs`:
+Tests: shared and split mode in-process (`crates/browntls-core/tests/ech_native.rs`:
 acceptance with and without a HelloRetryRequest, input fed byte by byte, an
 inner ClientHello spanning records, resumption, rejection completed locally
 with retry configurations and the retry forwarded, GREASE and non-ECH
@@ -1671,7 +1671,7 @@ relays the encrypted handshake unmodified).
 
 ### QUIC-TLS (RFC 9001)
 
-`browntls::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a QUIC
+`browntls_core::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a QUIC
 implementation feeds the contents of CRYPTO frames to `read_hs`, takes the
 bytes to send from `write_hs`, and receives the keys of each encryption level
 as a `KeyChange`. Packets, frames, transport parameters, loss recovery and
@@ -1737,7 +1737,7 @@ supported.
   the §5.8 tag with a provider's TLS_AES_128_GCM_SHA256 suite (any other
   suite is refused).
 
-### Cargo features (`browntls`)
+### Cargo features (`browntls-core`)
 
 | Feature | Default | Effect |
 |---|---|---|
@@ -1755,7 +1755,7 @@ supported.
 
 ### Certificate compression (RFC 8879)
 
-`browntls::compress` defines the `CertCompressor` and `CertDecompressor`
+`browntls_core::compress` defines the `CertCompressor` and `CertDecompressor`
 traits and, behind the `zlib`, `brotli` and `zstd` features, one built-in
 pair per RFC 8879 algorithm (`compress::ZLIB`, `BROTLI`, `ZSTD`). Enabled
 built-ins are the default compressor and decompressor lists of new client and
@@ -1936,7 +1936,7 @@ NTTs are SIMD, and VAES, RISC-V Zvkned/Zvkg/Zvknh\* and the x86-64-v3 SHA-2
 schedule (AVX2 with BMI2) use both.
 
 At run time, `browntls_crypto::accel` (re-exported as
-`browntls::crypto::native::accel`) holds a process-wide `Policy` per
+`browntls_core::crypto::native::accel`) holds a process-wide `Policy` per
 algorithm family (SHA-1, SHA-256, SHA-512, Keccak, four-way Keccak, AES, GHASH,
 ChaCha20, Poly1305, X25519, P-256, RSA, ML-KEM, P-384, P-521) with one level
 per kind:
@@ -2176,7 +2176,7 @@ the share of new connections kept in userspace; the backends' own reports
 buffered connection: it completes the handshake, asks `kernel::place` for
 the negotiated suite's record work, and returns the connection as a
 `KtlsStream` or, in userspace, as a `UserspaceStream` (a
-`browntls::Stream` that reports its writes). A connection that was placed
+`browntls_core::Stream` that reports its writes). A connection that was placed
 with the kernel and that the kernel cannot take (no `tls` module, a suite
 or a configuration without a kernel form, a cipher the running kernel
 lacks) stays in userspace with the refusal recorded, and the application
@@ -2259,7 +2259,7 @@ entropy from the optional `getrandom` crate feature.
   only with the `getrandom` feature) for `browntls-crypto`; `log`
   (optional), the RustCrypto crates (only with `rustcrypto`) and the
   pure-Rust compression crates `miniz_oxide`, `brotli` and `ruzstd` (only
-  with `zlib`, `brotli`, `zstd`) for `browntls`; `tokio` (I/O traits,
+  with `zlib`, `brotli`, `zstd`) for `browntls-core`; `tokio` (I/O traits,
   plus `rt` with the default `coop` feature and `time` with `ocsp`) for
   `browntls-tokio`; `libc` (Linux only) for `browntls-ktls`, plus
   `tokio` with `net` (adding `mio` and `socket2`) and `browntls-tokio` with
@@ -2275,9 +2275,9 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128 with and without vector crypto, and VLEN 256 and 1024 with vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
-| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls` and `browntls-tokio` (`browntls-ktls` is not fuzzed) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
+| Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
 | End-to-end | Release builds of the `browntls-e2e` client and server in containers on a Docker network against OpenSSL 3.5 (Alpine and Ubuntu 26.04, the latter not on native riscv64), OpenSSL 3.0 (Ubuntu 24.04), GnuTLS 3.8, Go `crypto/tls` (Encrypted Client Hello scenarios only) and browntls itself, for x86-64-v3, aarch64, native riscv64 and riscv64 with vector crypto under QEMU: TLS 1.3 and 1.2 suites and groups including X25519MLKEM768, HelloRetryRequest, client authentication, resumption, Encrypt-then-MAC required by default (`tests/e2e/`, [Docker end-to-end tests](../tests/e2e/README.md)) |
 
 Test certificates and keys are generated at run time; no private keys are

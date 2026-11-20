@@ -10,11 +10,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::client::UnbufferedClientConnection;
-use browntls::pki_types::ServerName;
-use browntls::server::UnbufferedServerConnection;
-use browntls::unbuffered::UnbufferedConnectionCommon;
-use browntls::{ClientConfig, ServerConfig, SideData};
+use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::pki_types::ServerName;
+use browntls_core::server::UnbufferedServerConnection;
+use browntls_core::unbuffered::UnbufferedConnectionCommon;
+use browntls_core::{ClientConfig, ServerConfig, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::buffers::{Incoming, Outgoing};
@@ -332,10 +332,10 @@ impl fmt::Debug for TlsAcceptor {
 /// A client handshake in progress; resolves to the [`ClientTlsStream`].
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData`, wraps the
-/// [`browntls::Error`] (which `get_ref` and `downcast_ref` recover), and is
+/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and is
 /// reported once the alert describing it was written or the transport
 /// refused it. Creating the connection can fail too, before any I/O: that
-/// error has kind `Other` and wraps the [`browntls::Error`] the same way.
+/// error has kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
 pub struct Connect<IO>(pub(super) MidHandshake<IO, UnbufferedClientConnection>);
 
@@ -392,10 +392,10 @@ impl<IO> fmt::Debug for FallibleConnect<IO> {
 /// A server handshake in progress; resolves to the [`ServerTlsStream`].
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData`, wraps the
-/// [`browntls::Error`] (which `get_ref` and `downcast_ref` recover), and is
+/// [`browntls_core::Error`] (which `get_ref` and `downcast_ref` recover), and is
 /// reported once the alert describing it was written or the transport
 /// refused it. Creating the connection can fail too, before any I/O: that
-/// error has kind `Other` and wraps the [`browntls::Error`] the same way.
+/// error has kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
 pub struct Accept<IO>(pub(super) MidHandshake<IO, UnbufferedServerConnection>);
 

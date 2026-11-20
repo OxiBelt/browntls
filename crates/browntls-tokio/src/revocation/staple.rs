@@ -46,7 +46,7 @@ use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::revocation::{ServerStapleResolver, StapleInstall};
+use browntls_core::revocation::{ServerStapleResolver, StapleInstall};
 
 use super::{FetchFuture, FetchLimits, FetchRevocation};
 
@@ -76,7 +76,7 @@ pub struct StapleRefreshed {
 #[non_exhaustive]
 pub enum StapleRefreshError {
     /// The resolver could not say what to fetch.
-    Query(browntls::Error),
+    Query(browntls_core::Error),
     /// The application's fetch failed.
     Fetch(std::io::Error),
     /// The fetch did not answer within the deadline.
@@ -88,7 +88,7 @@ pub enum StapleRefreshError {
         len: usize,
     },
     /// The resolver refused the response; the one in use stays.
-    Rejected(browntls::Error),
+    Rejected(browntls_core::Error),
 }
 
 impl fmt::Display for StapleRefreshError {

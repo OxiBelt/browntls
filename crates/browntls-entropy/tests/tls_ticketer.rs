@@ -12,9 +12,9 @@
 
 use std::sync::Mutex;
 
-use browntls::crypto::TicketProducer;
-use browntls::crypto::native::ticketer::AeadTicketProducer as NativeProducer;
-use browntls::crypto::rustcrypto::ticketer::AeadTicketProducer as RustCryptoProducer;
+use browntls_core::crypto::TicketProducer;
+use browntls_core::crypto::native::ticketer::AeadTicketProducer as NativeProducer;
+use browntls_core::crypto::rustcrypto::ticketer::AeadTicketProducer as RustCryptoProducer;
 use browntls_entropy::{Stream, check, err, sample_count};
 
 const NONCE_LEN: usize = 12;

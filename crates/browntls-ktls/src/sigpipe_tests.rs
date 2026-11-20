@@ -16,7 +16,7 @@ use std::os::fd::AsFd;
 use std::sync::{Arc, mpsc};
 use std::thread;
 
-use browntls::{ClientConnection, ServerConnection, StreamOwned, SupportedCipherSuite};
+use browntls_core::{ClientConnection, ServerConnection, StreamOwned, SupportedCipherSuite};
 
 use crate::KtlsStream;
 use crate::common::{Pki, kernel_tls, localhost, offloadable_suites, pattern, tcp_pair, temp_file};

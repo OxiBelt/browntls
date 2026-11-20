@@ -84,7 +84,7 @@ impl AsyncWrite for Gate {
 #[tokio::test]
 async fn reads_wait_for_owed_answers_to_be_written() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(1 << 20);
     let gate = Arc::new(GateState::default());
     let s = Gate {
@@ -175,7 +175,7 @@ async fn a_native_read_half_waiting_for_answers_wakes_when_the_writer_sends_them
 
 async fn split_reader_waiting_for_answers_wakes_when_the_writer_sends_them(native: bool) {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(1 << 20);
     let gate = Arc::new(GateState::default());
     let s = Gate {

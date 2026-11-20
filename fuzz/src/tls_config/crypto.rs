@@ -1,15 +1,15 @@
 //! Provider internals: cipher suites, hashes, HMAC, HKDF, the TLS 1.2 PRF,
 //! key exchange and record protection, for both providers.
 
-use browntls::crypto::cipher::{
+use browntls_core::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, Iv, KeyBlockShape, NONCE_LEN, Nonce, OutboundChunks,
     OutboundPlainMessage, Tls12MacOrder, Tls12RecordProtection, make_tls12_aad, make_tls13_aad,
 };
-use browntls::crypto::hash::{self, HashAlgorithm};
-use browntls::crypto::{
+use browntls_core::crypto::hash::{self, HashAlgorithm};
+use browntls_core::crypto::{
     CryptoProvider, SharedSecret, SupportedKxGroup, hmac, native, rustcrypto, tls13,
 };
-use browntls::{
+use browntls_core::{
     CipherSuite, ConnectionTrafficSecrets, ContentType, NamedGroup, ProtocolVersion,
     SignatureAlgorithm, SignatureScheme, SupportedCipherSuite, Tls12CipherSuite, Tls13CipherSuite,
     version,
@@ -21,7 +21,7 @@ use sha2::Digest as _;
 use super::{KNOWN_SCHEMES, provider_name};
 use crate::input::Input;
 
-// The oracle crates under names that do not clash with `browntls::crypto::hmac`.
+// The oracle crates under names that do not clash with `browntls_core::crypto::hmac`.
 mod hmac_oracle {
     pub(super) use ::hmac::{Hmac, KeyInit, Mac};
 }
@@ -465,7 +465,7 @@ pub(super) fn kx_op(input: &mut Input<'_>) {
         ours.complete_for_tls_version(&theirs.pub_key, &version::TLS13)
     }
     .unwrap_or_else(|e| panic!("{name:?}: genuine share rejected: {e:?}"));
-    let dhe = name.key_exchange_algorithm() == browntls::crypto::KeyExchangeAlgorithm::DHE;
+    let dhe = name.key_exchange_algorithm() == browntls_core::crypto::KeyExchangeAlgorithm::DHE;
     if tls12 && dhe {
         // TLS 1.2 strips the leading zeros of a finite-field secret.
         let zeros = expected.iter().take_while(|b| **b == 0).count();

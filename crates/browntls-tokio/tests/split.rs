@@ -18,7 +18,7 @@ const LIMIT: Duration = Duration::from_secs(30);
 
 async fn pair(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
     size: usize,
 ) -> (
     client::TlsStream<DuplexStream>,
@@ -112,7 +112,7 @@ async fn one_task_uses_both_halves() {
     let pki = Pki::new();
     // A transport smaller than the data: neither direction can finish
     // before the other moves.
-    let (client, server) = pair(&pki, &browntls::version::TLS13, 4096).await;
+    let (client, server) = pair(&pki, &browntls_core::version::TLS13, 4096).await;
     let (mut client_rd, mut client_wr) = client.into_split();
     let (mut server_rd, mut server_wr) = server.into_split();
     let data = pattern(200_000);
@@ -175,7 +175,7 @@ async fn the_write_half_closes_the_session_and_the_read_half_reads_on() {
 #[tokio::test]
 async fn a_dropped_half_leaves_the_other_working() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
 
     let (client, mut server) = pair(&pki, version, 64 * 1024).await;
     let (rd, mut wr) = client.into_split();
@@ -204,7 +204,7 @@ async fn a_dropped_half_leaves_the_other_working() {
 #[tokio::test]
 async fn halves_of_different_streams_do_not_reunite() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (client, server) = pair(&pki, version, 64 * 1024).await;
     let (other, _other_server) = pair(&pki, version, 64 * 1024).await;
 
@@ -230,7 +230,7 @@ async fn halves_of_different_streams_do_not_reunite() {
 #[tokio::test]
 async fn the_unified_stream_splits_too() {
     let pki = Pki::new();
-    let (client, server) = pair(&pki, &browntls::version::TLS13, 64 * 1024).await;
+    let (client, server) = pair(&pki, &browntls_core::version::TLS13, 64 * 1024).await;
     let (mut client_rd, mut client_wr) = TlsStream::from(client).into_split();
     let (mut server_rd, mut server_wr) = TlsStream::from(server).into_split();
 

@@ -3,12 +3,12 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use browntls::RootCertStore;
-use browntls::crypto::CryptoProvider;
-use browntls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-use browntls::revocation::RevocationDigests;
-use browntls::sign::CertifiedKey;
-use browntls::time_provider::TimeProvider;
+use browntls_core::RootCertStore;
+use browntls_core::crypto::CryptoProvider;
+use browntls_core::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use browntls_core::revocation::RevocationDigests;
+use browntls_core::sign::CertifiedKey;
+use browntls_core::time_provider::TimeProvider;
 use browntls_pki::ocsp::{CertId, CertIdHash, CertIdHashers, oid};
 use browntls_pki::{Cert, UnixTime};
 use rcgen::{

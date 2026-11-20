@@ -31,18 +31,18 @@ coop = ["tokio/rt"]
 # stapled response fresh (the `revocation` module). The deadlines need
 # Tokio's `time` feature, which adds no dependency.
 ocsp = ["tokio/time"]
-# Feature pass-through to `browntls`; see its manifest for what each does.
-native = ["browntls/native"]
-rustcrypto = ["browntls/rustcrypto"]
-tls12 = ["browntls/tls12"]
-logging = ["browntls/logging"]
-prefer-post-quantum = ["browntls/prefer-post-quantum"]
-zlib = ["browntls/zlib"]
-brotli = ["browntls/brotli"]
-zstd = ["browntls/zstd"]
+# Feature pass-through to `browntls-core`; see its manifest for what each does.
+native = ["browntls-core/native"]
+rustcrypto = ["browntls-core/rustcrypto"]
+tls12 = ["browntls-core/tls12"]
+logging = ["browntls-core/logging"]
+prefer-post-quantum = ["browntls-core/prefer-post-quantum"]
+zlib = ["browntls-core/zlib"]
+brotli = ["browntls-core/brotli"]
+zstd = ["browntls-core/zstd"]
 
 [dependencies]
-browntls = { workspace = true, features = ["std"] }
+browntls-core = { workspace = true, features = ["std"] }
 # The I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), which
 # need no tokio feature: the runtime is the caller's. The `coop` feature adds
 # `rt` for the task budget.

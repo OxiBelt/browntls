@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::server::{PostHandshakeAuthStatus, ServerSessionMemoryCache};
-use browntls::{HandshakeKind, NamedGroup};
+use browntls_core::server::{PostHandshakeAuthStatus, ServerSessionMemoryCache};
+use browntls_core::{HandshakeKind, NamedGroup};
 use browntls_tokio::unbuffered::{TlsAcceptor, TlsConnector};
 use common::*;
 use rustls_pki_types as rpki;
@@ -73,19 +73,19 @@ async fn tcp_pair() -> (TcpStream, TcpStream) {
 }
 
 fn rustls_versions(
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> &'static [&'static rustls::SupportedProtocolVersion] {
     static TLS13: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS13];
     static TLS12: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS12];
     match version.version {
-        browntls::ProtocolVersion::TLSv1_3 => &TLS13,
+        browntls_core::ProtocolVersion::TLSv1_3 => &TLS13,
         _ => &TLS12,
     }
 }
 
 fn rustls_server(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> tokio_rustls::TlsAcceptor {
     let chain = pki
         .server_chain
@@ -105,7 +105,7 @@ fn rustls_server(
 
 fn rustls_client(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
 ) -> tokio_rustls::TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     roots
@@ -196,7 +196,7 @@ async fn tcp_loopback_with_concurrent_halves() {
 
     let server_pki = pki.clone();
     let server = tokio::spawn(async move {
-        let config = server_pki.server_config(&browntls::version::TLS13);
+        let config = server_pki.server_config(&browntls_core::version::TLS13);
         let (tcp, _) = listener.accept().await.unwrap();
         let tls = TlsAcceptor::from(Arc::new(config))
             .accept(tcp)
@@ -209,7 +209,7 @@ async fn tcp_loopback_with_concurrent_halves() {
     });
 
     let tcp = TcpStream::connect(addr).await.unwrap();
-    let config = pki.client_config(&browntls::version::TLS13);
+    let config = pki.client_config(&browntls_core::version::TLS13);
     let tls = TlsConnector::from(Arc::new(config))
         .connect(localhost(), tcp)
         .await
@@ -241,7 +241,7 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -322,13 +322,13 @@ async fn client_authentication_during_the_handshake() {
 #[tokio::test]
 async fn a_hello_retry_request_over_a_choppy_transport() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut provider = (*provider()).clone();
     provider
         .kx_groups
         .retain(|group| group.name() == NamedGroup::secp256r1);
     assert!(!provider.kx_groups.is_empty());
-    let server_config = browntls::ServerConfig::builder_with_provider(Arc::new(provider))
+    let server_config = browntls_core::ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[version])
         .unwrap()
         .with_no_client_auth()
@@ -365,10 +365,10 @@ async fn a_hello_retry_request_over_a_choppy_transport() {
 /// bytes of 0-RTT data.
 fn resuming_server(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
     cache: &Arc<ServerSessionMemoryCache>,
     max_early_data_size: u32,
-) -> Arc<browntls::ServerConfig> {
+) -> Arc<browntls_core::ServerConfig> {
     let mut config = pki.server_config(version);
     config.max_early_data_size = max_early_data_size;
     config.session_storage = cache.clone();
@@ -409,7 +409,7 @@ async fn sessions_are_resumed() {
             // The resumed TLS 1.3 handshake offered 0-RTT, the server took
             // the offer, and the client closed it with no data in it.
             let offered =
-                expected == HandshakeKind::Resumed && *version == browntls::version::TLS13;
+                expected == HandshakeKind::Resumed && *version == browntls_core::version::TLS13;
             assert_eq!(
                 client.get_ref().1.is_early_data_accepted(),
                 offered,
@@ -422,7 +422,7 @@ async fn sessions_are_resumed() {
 #[tokio::test]
 async fn an_unbuffered_server_collects_accepted_early_data() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let cache = ServerSessionMemoryCache::new(8);
     let server_config = resuming_server(&pki, version, &cache, 1024);
     let mut client_config = pki.client_config(version);
@@ -480,7 +480,7 @@ async fn an_unbuffered_server_collects_accepted_early_data() {
 #[tokio::test]
 async fn a_task_polling_both_directions_does_not_spin_while_answering() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -520,7 +520,7 @@ async fn a_task_polling_both_directions_does_not_spin_while_answering() {
 #[tokio::test]
 async fn a_parked_writer_is_woken_after_a_read_took_its_registration() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -578,7 +578,7 @@ async fn a_parked_writer_is_woken_after_a_read_took_its_registration() {
 #[tokio::test]
 async fn a_corrupt_record_after_the_handshake_fails_the_read_with_an_alert() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     let (client, server) = tokio::join!(
         TlsConnector::from(Arc::new(pki.client_config(version))).connect(localhost(), c),
@@ -596,7 +596,7 @@ async fn a_corrupt_record_after_the_handshake_fails_the_read_with_an_alert() {
     let err = client.read(&mut [0; 16]).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(
-        matches!(tls_error(&err), Some(browntls::Error::DecryptError)),
+        matches!(tls_error(&err), Some(browntls_core::Error::DecryptError)),
         "{err:?}"
     );
     // The client told the server why.
@@ -609,17 +609,17 @@ async fn a_corrupt_record_after_the_handshake_fails_the_read_with_an_alert() {
     let err = client.read(&mut [0; 16]).await.unwrap_err();
     assert!(matches!(
         tls_error(&err),
-        Some(browntls::Error::DecryptError)
+        Some(browntls_core::Error::DecryptError)
     ));
     let err = client.write(b"x").await.unwrap_err();
     assert!(matches!(
         tls_error(&err),
-        Some(browntls::Error::DecryptError)
+        Some(browntls_core::Error::DecryptError)
     ));
     let err = client.flush().await.unwrap_err();
     assert!(matches!(
         tls_error(&err),
-        Some(browntls::Error::DecryptError)
+        Some(browntls_core::Error::DecryptError)
     ));
     client.shutdown().await.unwrap();
     let mut rest = Vec::new();

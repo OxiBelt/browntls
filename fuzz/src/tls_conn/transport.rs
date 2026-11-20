@@ -3,7 +3,7 @@
 
 use std::io::{IoSlice, Read, Write};
 
-use browntls::{ConnectionCommon, SideData, Stream, StreamOwned};
+use browntls_core::{ConnectionCommon, SideData, Stream, StreamOwned};
 
 use crate::input::Input;
 

@@ -78,15 +78,15 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use browntls::client::{ClientHelloPadding, TicketRequest};
-use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
-use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
-use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
-use browntls::pki_types::pem::PemObject;
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use browntls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
-use browntls::sign::CertifiedKey;
-use browntls::{
+use browntls_core::client::{ClientHelloPadding, TicketRequest};
+use browntls_core::crypto::hpke::{HpkeKem, HpkePrivateKey};
+use browntls_core::crypto::{CryptoProvider, SupportedKxGroup, native};
+use browntls_core::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
+use browntls_core::pki_types::pem::PemObject;
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use browntls_core::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use browntls_core::sign::CertifiedKey;
+use browntls_core::{
     ClientConfig, ClientConnection, ConnectionCommon, Error, RootCertStore, ServerConfig,
     ServerConnection, SideData, StreamOwned, SupportedCipherSuite, SupportedProtocolVersion,
     version,
@@ -300,7 +300,7 @@ impl Options {
 
     fn versions(&self) -> &[&'static SupportedProtocolVersion] {
         if self.versions.is_empty() {
-            browntls::DEFAULT_VERSIONS
+            browntls_core::DEFAULT_VERSIONS
         } else {
             &self.versions
         }
@@ -358,7 +358,7 @@ fn read_file(path: &str) -> Result<Vec<u8>> {
 
 /// The native HPKE suites with the X25519 KEM (the one every ECH
 /// implementation supports).
-fn x25519_hpke_suites() -> Vec<&'static dyn browntls::crypto::hpke::Hpke> {
+fn x25519_hpke_suites() -> Vec<&'static dyn browntls_core::crypto::hpke::Hpke> {
     native::hpke::ALL_SUPPORTED_SUITES
         .iter()
         .copied()

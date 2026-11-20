@@ -24,9 +24,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
-use browntls::client::ClientConnectionData;
-use browntls::server::{ServerConnectionData, ServerSessionMemoryCache};
-use browntls::{ClientConfig, ProtocolVersion, ServerConfig, SupportedCipherSuite};
+use browntls_core::client::ClientConnectionData;
+use browntls_core::server::{ServerConnectionData, ServerSessionMemoryCache};
+use browntls_core::{ClientConfig, ProtocolVersion, ServerConfig, SupportedCipherSuite};
 use browntls_ktls::{AsyncKtlsStream, HandoffError, StreamHandoffError};
 use browntls_tokio::{TlsAcceptor, TlsConnector, client, server};
 use common::*;
@@ -116,7 +116,7 @@ async fn server_kernel(
 
 /// Waits until the kernel has given TCP every record of `tls`, which it
 /// does as the peer reads.
-async fn all_sent<Data: browntls::SideData>(tls: &AsyncKtlsStream<Data>) {
+async fn all_sent<Data: browntls_core::SideData>(tls: &AsyncKtlsStream<Data>) {
     timeout(LIMIT, async {
         while tls.unsent().unwrap() != 0 {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -405,7 +405,7 @@ async fn split_halves_carry_data_both_ways_across_key_updates() {
 
     async fn run<Data>(mut tls: AsyncKtlsStream<Data>, send_seed: u8, recv_seed: u8)
     where
-        Data: browntls::SideData + Send + 'static,
+        Data: browntls_core::SideData + Send + 'static,
     {
         // A key refresh ahead of the data, then split for two tasks.
         tls.refresh_traffic_keys().unwrap();

@@ -8,12 +8,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::ServerConfig;
-use browntls::server::{
+use browntls_core::ServerConfig;
+use browntls_core::server::{
     ClientHello, UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert,
     UnbufferedAcceptor, UnbufferedServerConnection,
 };
-use browntls::unbuffered::{EncodeError, InsufficientSizeError};
+use browntls_core::unbuffered::{EncodeError, InsufficientSizeError};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::TlsStream;
@@ -94,7 +94,7 @@ pub struct LazyConfigAcceptor<IO> {
     io: Option<IO>,
     incoming: Incoming,
     /// A refusal whose alert is being written.
-    alert: Option<(browntls::Error, Outgoing)>,
+    alert: Option<(browntls_core::Error, Outgoing)>,
     /// The future already failed (and keeps the transport for `take_io`).
     failed: bool,
     /// Handed on to the [`StartHandshake`].

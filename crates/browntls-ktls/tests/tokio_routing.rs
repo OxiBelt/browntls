@@ -18,9 +18,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::crypto::native::accel::load::{self, Config, Phase, kernel};
-use browntls::server::ServerSessionMemoryCache;
-use browntls::{ProtocolVersion, SupportedCipherSuite};
+use browntls_core::crypto::native::accel::load::{self, Config, Phase, kernel};
+use browntls_core::server::ServerSessionMemoryCache;
+use browntls_core::{ProtocolVersion, SupportedCipherSuite};
 use browntls_ktls::routing::{self, AsyncOffload, AsyncRoutedStream, Place, Records};
 use browntls_tokio::{TlsAcceptor, TlsConnector};
 use common::*;

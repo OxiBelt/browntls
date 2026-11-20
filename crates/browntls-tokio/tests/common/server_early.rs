@@ -5,8 +5,8 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::server::{ServerSessionMemoryCache, StoresServerSessions};
-use browntls::{ClientConfig, ClientConnection, HandshakeKind, ServerConfig};
+use browntls_core::server::{ServerSessionMemoryCache, StoresServerSessions};
+use browntls_core::{ClientConfig, ClientConnection, HandshakeKind, ServerConfig};
 use browntls_tokio::{TlsAcceptor, TlsConnector, server};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex};
 
@@ -25,7 +25,7 @@ pub struct Setup {
 impl Setup {
     pub fn new() -> Self {
         let pki = Pki::new();
-        let mut client_config = pki.client_config(&browntls::version::TLS13);
+        let mut client_config = pki.client_config(&browntls_core::version::TLS13);
         client_config.enable_early_data = true;
         let client_config = Arc::new(client_config);
         Self {
@@ -37,7 +37,7 @@ impl Setup {
     }
 
     pub fn server_config(&self, max_early_data_size: u32, half_rtt: bool) -> Arc<ServerConfig> {
-        let mut config: ServerConfig = self.pki.server_config(&browntls::version::TLS13);
+        let mut config: ServerConfig = self.pki.server_config(&browntls_core::version::TLS13);
         config.max_early_data_size = max_early_data_size;
         config.send_half_rtt_data = half_rtt;
         config.session_storage = self.cache.clone();

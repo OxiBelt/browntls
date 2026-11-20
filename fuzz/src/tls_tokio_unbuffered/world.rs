@@ -9,10 +9,12 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 
-use browntls::client::UnbufferedClientConnection;
-use browntls::crypto::CryptoProvider;
-use browntls::server::{ServerSessionMemoryCache, UnbufferedAcceptor, UnbufferedServerConnection};
-use browntls::{ClientConfig, ServerConfig, version};
+use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::crypto::CryptoProvider;
+use browntls_core::server::{
+    ServerSessionMemoryCache, UnbufferedAcceptor, UnbufferedServerConnection,
+};
+use browntls_core::{ClientConfig, ServerConfig, version};
 use browntls_tokio::unbuffered as ub;
 use browntls_tokio::{client, server};
 use tokio::io::{AsyncBufRead, AsyncWrite, ReadBuf};

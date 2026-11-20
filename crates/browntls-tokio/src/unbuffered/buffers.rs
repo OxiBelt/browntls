@@ -9,7 +9,7 @@ use std::ops::Range;
 /// The size of a record header (RFC 9846 §5.1): type, version, length.
 const HEADER_LEN: usize = 5;
 
-/// The largest record `browntls` accepts, header included: 2^14 bytes of
+/// The largest record `browntls-core` accepts, header included: 2^14 bytes of
 /// plaintext and the 2048 bytes of expansion TLS 1.2 allows a ciphertext
 /// (RFC 5246 §6.2.3), which covers TLS 1.3's 256 too.
 pub(crate) const MAX_RECORD_LEN: usize = HEADER_LEN + 16_384 + 2048;

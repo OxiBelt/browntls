@@ -16,8 +16,8 @@ use std::fmt;
 use std::io;
 use std::os::fd::BorrowedFd;
 
-use browntls::kernel::{KernelConnection, KernelOutput};
-use browntls::{
+use browntls_core::kernel::{KernelConnection, KernelOutput};
+use browntls_core::{
     ConnectionTrafficSecrets, ContentType, Error, ExtractedSecrets, ProtocolVersion, SideData,
 };
 

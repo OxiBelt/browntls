@@ -55,7 +55,7 @@ pub use pki::{pki_cert, pki_crl, pki_pem};
 /// uses a `builder()` without a provider calls this first. Idempotent.
 pub fn init() {
     // Err means a provider is installed already.
-    let _ = browntls::crypto::native::default_provider().install_default();
+    let _ = browntls_core::crypto::native::default_provider().install_default();
 }
 
 /// Splits the next length-prefixed field off `data`: a 16-bit big-endian

@@ -1,6 +1,6 @@
 //! TLS message codecs: handshake messages, records, compressed certificates.
 
-use browntls::fuzzing;
+use browntls_core::fuzzing;
 
 use crate::take_byte;
 
@@ -44,7 +44,7 @@ pub fn cert_decompress(mut data: &[u8]) {
     let limit = match take_byte(&mut data) % 4 {
         0 => 64,
         1 => 4096,
-        2 => browntls::compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
+        2 => browntls_core::compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
         _ => usize::MAX,
     };
     fuzzing::compressed_certificate(limit, data);

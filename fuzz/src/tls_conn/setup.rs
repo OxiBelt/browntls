@@ -8,16 +8,16 @@
 
 use std::sync::{Arc, OnceLock};
 
-use browntls::client::danger::ServerCertVerifier;
-use browntls::client::{
+use browntls_core::client::danger::ServerCertVerifier;
+use browntls_core::client::{
     ClientSessionMemoryCache, Resumption, Tls12Resumption, WebPkiServerVerifier,
 };
-use browntls::compress::CompressionCache;
-use browntls::crypto::{CryptoProvider, native, rustcrypto};
-use browntls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::server::{ServerSessionMemoryCache, WebPkiClientVerifier};
-use browntls::time_provider::DefaultTimeProvider;
-use browntls::{
+use browntls_core::compress::CompressionCache;
+use browntls_core::crypto::{CryptoProvider, native, rustcrypto};
+use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::server::{ServerSessionMemoryCache, WebPkiClientVerifier};
+use browntls_core::time_provider::DefaultTimeProvider;
+use browntls_core::{
     ClientConfig, ConnectionTrafficSecrets, NamedGroup, RootCertStore, ServerConfig,
     SupportedProtocolVersion, version,
 };
@@ -177,7 +177,7 @@ impl Knobs {
         match self.flags & 3 {
             1 => &TLS13,
             2 => &TLS12,
-            _ => browntls::ALL_VERSIONS,
+            _ => browntls_core::ALL_VERSIONS,
         }
     }
 

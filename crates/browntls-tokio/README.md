@@ -165,7 +165,7 @@ offload (the configuration needs `enable_secret_extraction`): it finishes a
 before its end), writes and flushes every queued record, reads exactly up to the
 next record boundary, and sets the plaintext already received aside. The
 `KernelHandoff` it resolves to gives the transport, the connection (for
-`dangerous_into_kernel_connection`, see `browntls::kernel`) and that
+`dangerous_into_kernel_connection`, see `browntls_core::kernel`) and that
 plaintext, which is read before anything the kernel delivers.
 
 ```rust,no_run
@@ -315,7 +315,7 @@ not the connection.
   lock for every poll (a worker thread waits while the other half's poll
   runs, record protection included) and needs Tokio's `io-util` feature.
 - **Errors.** TLS failures are `io::Error`s of kind `InvalidData` wrapping a
-  `browntls::Error` (`err.get_ref()` then `downcast_ref`).
+  `browntls_core::Error` (`err.get_ref()` then `downcast_ref`).
 - **Handshake state.** The handshake futures (`Connect`, `Accept` and their
   fallible forms) give the connection through `connection()` and
   `connection_mut()` while the handshake runs, as `get_ref()` gives the
@@ -351,7 +351,7 @@ not the connection.
 
 `native` (default), `rustcrypto`, `tls12` (default), `logging` (default),
 `prefer-post-quantum` (default), `zlib`, `brotli` and `zstd` are passed through
-to `browntls`.
+to `browntls-core`.
 
 `coop` (default) makes the streams take part in Tokio's cooperative
 scheduling (see above). It enables Tokio's `rt` feature, which is where Tokio

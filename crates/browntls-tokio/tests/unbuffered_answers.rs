@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker, ready};
 use std::time::Duration;
 
-use browntls::server::PostHandshakeAuthStatus;
+use browntls_core::server::PostHandshakeAuthStatus;
 use browntls_tokio::unbuffered::{ClientTlsStream, ServerTlsStream, TlsAcceptor, TlsConnector};
 use common::*;
 use gate::{Gate, GateState};
@@ -121,7 +121,7 @@ async fn asked_for_a_certificate<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut client_config = pki.client_config_with_cert(version);
     client_config.enable_post_handshake_auth = true;
     let mut server_config = pki.server_config_with_client_auth(version);
@@ -277,7 +277,7 @@ async fn a_large_answer_is_sent_after_a_dropped_flush_marked_it_transmitted() {
 async fn a_handshake_reads_while_its_flight_waits_for_the_transport() {
     const PIPE: usize = 4096;
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rpki::CertificateDer::from(pki.ca.as_ref().to_vec()))

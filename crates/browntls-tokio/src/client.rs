@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::pki_types::ServerName;
-use browntls::{ClientConfig, ClientConnection};
+use browntls_core::pki_types::ServerName;
+use browntls_core::{ClientConfig, ClientConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
@@ -194,9 +194,9 @@ impl fmt::Debug for TlsConnectorWithAlpn<'_> {
 /// A client handshake in progress; resolves to the connected [`TlsStream`].
 ///
 /// Errors are `io::Error`s. A TLS failure has kind `InvalidData` and wraps
-/// the [`browntls::Error`], which `get_ref` and `downcast_ref` recover.
+/// the [`browntls_core::Error`], which `get_ref` and `downcast_ref` recover.
 /// Creating the connection can fail too, before any I/O: that error has
-/// kind `Other` and wraps the [`browntls::Error`] the same way.
+/// kind `Other` and wraps the [`browntls_core::Error`] the same way.
 #[must_use = "futures do nothing unless polled"]
 pub struct Connect<IO>(MidHandshake<TlsStream<IO>>);
 

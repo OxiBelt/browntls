@@ -7,7 +7,7 @@ connection's traffic keys to the kernel (`TCP_ULP` `tls`, `TLS_TX`,
 `TLS_RX`), which encrypts and decrypts application data itself. Records
 that are not application data (TLS 1.3 KeyUpdate and NewSessionTicket,
 post-handshake authentication, alerts) come back to the stream and are
-handled by `browntls::kernel::KernelConnection`.
+handled by `browntls_core::kernel::KernelConnection`.
 
 | | |
 |---|---|
@@ -174,11 +174,11 @@ Tokio's `net` only; the runtime is the application's.
 
 With the `native` feature, kernel TLS can be the first place for a
 connection's records under the native provider's load-aware routing
-(`browntls::crypto::native::accel::load`), ahead of the provider's
+(`browntls_core::crypto::native::accel::load`), ahead of the provider's
 backends in their usual order:
 
 ```rust
-use browntls::crypto::native::accel::load;
+use browntls_core::crypto::native::accel::load;
 use browntls_ktls::routing::{self, RoutedStream};
 
 // Once per process. Without kernel TLS everything stays in userspace.

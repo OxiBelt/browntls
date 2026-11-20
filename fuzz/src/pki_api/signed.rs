@@ -3,7 +3,7 @@
 //! or a fuzzed one, against the algorithm model and path validation; and
 //! raw signatures by every fixture key against `RawPublicKeyEntity`.
 
-use browntls::crypto::native;
+use browntls_core::crypto::native;
 use browntls_pki::{
     CertificateDer, EndEntityCert, Error, KeyUsage, RawPublicKeyEntity,
     SignatureVerificationAlgorithm, SignedData, SubjectPublicKeyInfoDer, anchor_from_trusted_cert,

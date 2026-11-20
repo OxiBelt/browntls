@@ -8,7 +8,7 @@
 //! sends a file that way and keeps the stream's counts). Every record that is not
 //! application data (TLS 1.3 KeyUpdate and NewSessionTicket messages,
 //! post-handshake authentication, alerts) comes back to the stream, which
-//! hands it to the connection's [`browntls::kernel::KernelConnection`] and
+//! hands it to the connection's [`browntls_core::kernel::KernelConnection`] and
 //! carries out what that asks for: records to send, new keys to install.
 //!
 //! Supported: TLS 1.2 and TLS 1.3 with AES-128-GCM, AES-256-GCM and
@@ -20,12 +20,12 @@
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let config: std::sync::Arc<browntls::ClientConfig> = unimplemented!();
+//! # let config: std::sync::Arc<browntls_core::ClientConfig> = unimplemented!();
 //! use std::io::{Read, Write};
 //!
 //! // `config` has `enable_secret_extraction` set.
 //! let tcp = std::net::TcpStream::connect("example.com:443")?;
-//! let conn = browntls::ClientConnection::new(config, "example.com".try_into()?)?;
+//! let conn = browntls_core::ClientConnection::new(config, "example.com".try_into()?)?;
 //! // Completes the handshake, then hands the connection to the kernel.
 //! let mut tls = browntls_ktls::KtlsStream::new(conn, tcp).map_err(|e| e.into_io_error())?;
 //! tls.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")?;

@@ -3,18 +3,18 @@
 
 use std::sync::Arc;
 
-use browntls::crypto::{
+use browntls_core::crypto::{
     WebPkiSupportedAlgorithms, native, rustcrypto, verify_tls12_signature,
     verify_tls12_signature_with_raw_key, verify_tls13_signature,
     verify_tls13_signature_with_raw_key,
 };
-use browntls::delegated_credential::{Credential, DelegatedCredential};
-use browntls::pki_types::{
+use browntls_core::delegated_credential::{Credential, DelegatedCredential};
+use browntls_core::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
     RawPublicKeyEntity, SubjectPublicKeyInfoDer, alg_id,
 };
-use browntls::sign::{CertifiedKey, SigningKey, public_key_to_spki};
-use browntls::{
+use browntls_core::sign::{CertifiedKey, SigningKey, public_key_to_spki};
+use browntls_core::{
     DigitallySignedStruct, Error, InconsistentKeys, Side, SignatureAlgorithm, SignatureScheme,
 };
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use browntls::{Error, ProtocolVersion};
+use browntls_core::{Error, ProtocolVersion};
 use browntls_tokio::{TlsStream, client, server};
 use common::*;
 use tokio::io::{
@@ -24,7 +24,7 @@ const LIMIT: Duration = Duration::from_secs(30);
 /// Connects a client and a server over `client_io` and `server_io`.
 async fn pair<C, S>(
     pki: &Pki,
-    version: &'static browntls::SupportedProtocolVersion,
+    version: &'static browntls_core::SupportedProtocolVersion,
     client_io: C,
     server_io: S,
 ) -> (client::TlsStream<C>, server::TlsStream<S>)
@@ -199,7 +199,7 @@ async fn an_untrusted_server_fails_both_handshakes_with_an_alert() {
 async fn fallible_futures_return_the_transport() {
     let pki = Pki::new();
     let stranger = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     let mut connect = stranger.connector(version).connect(localhost(), c);
     assert!(connect.get_ref().is_some());
@@ -223,7 +223,7 @@ async fn eof_during_the_handshake_fails_it() {
     let (c, s) = duplex(64 * 1024);
     drop(s);
     let err = pki
-        .connector(&browntls::version::TLS13)
+        .connector(&browntls_core::version::TLS13)
         .connect(localhost(), c)
         .await
         .unwrap_err();
@@ -239,20 +239,24 @@ async fn eof_during_the_handshake_fails_it() {
 
     let (mut c, s) = duplex(64 * 1024);
     c.shutdown().await.unwrap();
-    let err = timeout(LIMIT, pki.acceptor(&browntls::version::TLS13).accept(s))
-        .await
-        .unwrap()
-        .unwrap_err();
+    let err = timeout(
+        LIMIT,
+        pki.acceptor(&browntls_core::version::TLS13).accept(s),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{err:?}");
 }
 
 #[tokio::test]
 async fn close_notify_in_the_middle_of_a_handshake_ends_it() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut hello = Vec::new();
     let mut raw =
-        browntls::ClientConnection::new(Arc::new(pki.client_config(version)), localhost()).unwrap();
+        browntls_core::ClientConnection::new(Arc::new(pki.client_config(version)), localhost())
+            .unwrap();
     raw.write_tls(&mut hello).unwrap();
     // A plaintext warning-level close_notify alert record.
     hello.extend_from_slice(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x01, 0x00]);
@@ -270,7 +274,7 @@ async fn close_notify_in_the_middle_of_a_handshake_ends_it() {
 #[tokio::test]
 async fn alpn_and_connection_hooks() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut server_config = pki.server_config(version);
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let acceptor = browntls_tokio::TlsAcceptor::from(Arc::new(server_config));
@@ -297,7 +301,7 @@ async fn alpn_and_connection_hooks() {
 async fn key_updates_keep_the_stream_working() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     for round in 0..5u8 {
         server.get_mut().1.refresh_traffic_keys().unwrap();
@@ -320,7 +324,7 @@ async fn key_updates_keep_the_stream_working() {
 async fn buffered_reads_and_vectored_writes() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     let bufs = [
         io::IoSlice::new(b"first line\n"),
@@ -342,7 +346,7 @@ async fn buffered_reads_and_vectored_writes() {
 async fn the_unified_stream_type_dispatches_to_either_side() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (client, server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (client, server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
     let mut client = TlsStream::from(client);
     let mut server = TlsStream::from(server);
     assert!(matches!(client, TlsStream::Client(_)));
@@ -372,7 +376,7 @@ async fn tcp_loopback_with_concurrent_halves() {
 
     let server_pki = pki.clone();
     let server = tokio::spawn(async move {
-        let acceptor = server_pki.acceptor(&browntls::version::TLS13);
+        let acceptor = server_pki.acceptor(&browntls_core::version::TLS13);
         let (tcp, _) = listener.accept().await.unwrap();
         let tls = acceptor.accept(tcp).await.unwrap();
         // Echo until the client closes, then close too.
@@ -383,7 +387,7 @@ async fn tcp_loopback_with_concurrent_halves() {
 
     let tcp = TcpStream::connect(addr).await.unwrap();
     let tls = pki
-        .connector(&browntls::version::TLS13)
+        .connector(&browntls_core::version::TLS13)
         .connect(localhost(), tcp)
         .await
         .unwrap();
@@ -415,7 +419,7 @@ async fn tcp_loopback_with_concurrent_halves() {
 async fn a_corrupt_record_after_the_handshake_fails_the_read_with_an_alert() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
     let (mut transport, _) = server.into_inner();
     // A garbled application-data record: the client cannot decrypt it.
     transport

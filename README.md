@@ -9,7 +9,7 @@ browntls is in initial development. The workspace contains:
   aarch64 (NEON and the Cryptographic Extension) and riscv64 (RVV 1.0 and the
   vector cryptography extensions).
 - `crates/browntls-pki`: PKI types, PEM decoding and X.509 path validation.
-- `crates/browntls`: the TLS 1.2 / TLS 1.3 protocol, the crypto provider
+- `crates/browntls-core`: the TLS 1.2 / TLS 1.3 protocol, the crypto provider
   mount point, and the built-in providers.
 - `crates/browntls-tokio`: asynchronous TLS streams for Tokio
   ([README](crates/browntls-tokio/README.md)).

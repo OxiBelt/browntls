@@ -10,7 +10,7 @@ mod common;
 use std::io::{self, Read as _, Write as _};
 use std::time::Duration;
 
-use browntls::server::Acceptor;
+use browntls_core::server::Acceptor;
 use browntls_tokio::{LazyConfigAcceptor, TlsAcceptor};
 use common::server_early::*;
 use common::*;
@@ -467,7 +467,7 @@ async fn what_the_lazy_acceptor_read_past_the_client_hello_is_checked_at_once() 
                 }
             };
             assert!(
-                matches!(failed, Some(browntls::Error::AlertReceived(_))),
+                matches!(failed, Some(browntls_core::Error::AlertReceived(_))),
                 "{failed:?}"
             );
         };
@@ -662,7 +662,7 @@ async fn a_replayed_first_flight_is_not_accepted_early() {
 #[tokio::test]
 async fn a_tls12_connection_is_accepted_after_its_handshake() {
     let setup = Setup::new();
-    let version = &browntls::version::TLS12;
+    let version = &browntls_core::version::TLS12;
     let mut config = setup.pki.server_config(version);
     config.max_early_data_size = ALLOWANCE;
     config.send_half_rtt_data = true;

@@ -16,8 +16,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use browntls::kernel::KernelOutput;
-use browntls::{
+use browntls_core::kernel::KernelOutput;
+use browntls_core::{
     ClientConnection, ProtocolVersion, ServerConfig, ServerConnection, SupportedCipherSuite,
 };
 
@@ -173,7 +173,7 @@ fn peer(
 }
 
 /// One read on the non-blocking `tls`: `None` when it would block.
-fn read_once<S: AsFd, D: browntls::SideData>(tls: &mut KtlsStream<S, D>) -> Option<usize> {
+fn read_once<S: AsFd, D: browntls_core::SideData>(tls: &mut KtlsStream<S, D>) -> Option<usize> {
     let mut buf = [0; 4096];
     match tls.read(&mut buf) {
         Ok(0) => panic!("unexpected end"),

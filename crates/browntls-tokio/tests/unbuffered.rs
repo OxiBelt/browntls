@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use browntls::unbuffered::ConnectionState;
-use browntls::{Error, HandshakeKind, SupportedProtocolVersion};
+use browntls_core::unbuffered::ConnectionState;
+use browntls_core::{Error, HandshakeKind, SupportedProtocolVersion};
 use browntls_tokio::unbuffered::{ClientTlsStream, ServerTlsStream, TlsAcceptor, TlsConnector};
 use common::*;
 use gate::{Gate, GateState};
@@ -260,7 +260,7 @@ async fn an_untrusted_server_fails_both_handshakes_with_an_alert() {
 async fn fallible_futures_return_the_transport() {
     let pki = Pki::new();
     let stranger = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     let mut connect = connector(&stranger, version).connect(localhost(), c);
     assert!(connect.get_ref().is_some());
@@ -284,7 +284,7 @@ async fn fallible_futures_return_the_transport() {
 #[tokio::test]
 async fn a_configuration_the_connection_refuses_fails_the_future_with_the_transport() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut config = pki.server_config(version);
     // Not a size a record may have (RFC 8449 §4 allows 64 and more).
     config.record_size_limit = Some(1);
@@ -301,7 +301,7 @@ async fn a_configuration_the_connection_refuses_fails_the_future_with_the_transp
 #[tokio::test]
 async fn eof_during_the_handshake_fails_it() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let (c, s) = duplex(64 * 1024);
     drop(s);
     let err = connector(&pki, version)
@@ -330,10 +330,11 @@ async fn eof_during_the_handshake_fails_it() {
 #[tokio::test]
 async fn close_notify_in_the_middle_of_a_handshake_ends_it() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut hello = Vec::new();
     let mut raw =
-        browntls::ClientConnection::new(Arc::new(pki.client_config(version)), localhost()).unwrap();
+        browntls_core::ClientConnection::new(Arc::new(pki.client_config(version)), localhost())
+            .unwrap();
     raw.write_tls(&mut hello).unwrap();
     // A plaintext warning-level close_notify alert record.
     hello.extend_from_slice(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x01, 0x00]);
@@ -351,7 +352,7 @@ async fn close_notify_in_the_middle_of_a_handshake_ends_it() {
 #[tokio::test]
 async fn alpn_and_connection_hooks() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let mut server_config = pki.server_config(version);
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -400,7 +401,7 @@ async fn alpn_and_connection_hooks() {
 async fn key_updates_keep_the_stream_working() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     for round in 0..5u8 {
         // Our own update, with a request for the client's: queued on the
@@ -429,7 +430,7 @@ async fn key_updates_keep_the_stream_working() {
 async fn a_flush_sends_what_was_queued_on_the_connection() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     let status = server.get_mut().1.process_tls_records(&mut []);
     match status.state.unwrap() {
@@ -453,7 +454,7 @@ async fn a_flush_sends_what_was_queued_on_the_connection() {
 async fn buffered_reads_and_vectored_writes() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     let bufs = [
         io::IoSlice::new(b"first line\n"),
@@ -486,7 +487,7 @@ async fn buffered_reads_and_vectored_writes() {
 async fn a_vectored_write_gathers_at_most_one_record() {
     let pki = Pki::new();
     let (c, s) = duplex(1 << 20);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     let data = pattern(40_000);
     let (a, rest) = data.split_at(10_000);
@@ -600,7 +601,7 @@ where
 async fn a_large_write_is_taken_in_parts() {
     let pki = Pki::new();
     let (c, s) = duplex(1 << 20);
-    let (mut client, mut server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, mut server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     let data = pattern(200_000);
     // One call takes four records' worth and no more.
@@ -664,7 +665,7 @@ async fn unwritten_records_come_out_of_into_parts() {
     let (c, s) = duplex(1 << 20);
     let gate = Arc::new(GateState::default());
     let c = Gate::new(c, gate.clone());
-    let (mut client, server) = pair(&pki, &browntls::version::TLS13, c, s).await;
+    let (mut client, server) = pair(&pki, &browntls_core::version::TLS13, c, s).await;
 
     // The transport takes nothing: the write is accepted, and its record
     // waits in the stream.

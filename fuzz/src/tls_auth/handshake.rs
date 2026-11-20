@@ -5,12 +5,12 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use browntls::delegated_credential::{
+use browntls_core::delegated_credential::{
     Credential, DelegatedCredential, MAX_VALIDITY, valid_time_until,
 };
-use browntls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::sign::{CertifiedKey, SingleCertAndKey};
-use browntls::{
+use browntls_core::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
+use browntls_core::{
     ClientConfig, ClientConnection, Error, PeerMisbehaved, ServerConfig, ServerConnection, Side,
     SignatureScheme, version,
 };
@@ -21,9 +21,9 @@ use crate::input::Input;
 // --------------------------------------------------------------- handshakes
 
 /// Moves everything `from` has to send into `to`.
-fn send<A: browntls::SideData, B: browntls::SideData>(
-    from: &mut browntls::ConnectionCommon<A>,
-    to: &mut browntls::ConnectionCommon<B>,
+fn send<A: browntls_core::SideData, B: browntls_core::SideData>(
+    from: &mut browntls_core::ConnectionCommon<A>,
+    to: &mut browntls_core::ConnectionCommon<B>,
 ) {
     let mut buf = Vec::new();
     while from.wants_write() {

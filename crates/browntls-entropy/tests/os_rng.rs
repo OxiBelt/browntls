@@ -53,8 +53,8 @@ fn os_rng_large_fills() {
 
 #[test]
 fn provider_secure_random() {
-    let native = browntls::crypto::native::default_provider().secure_random;
-    let rustcrypto = browntls::crypto::rustcrypto::default_provider().secure_random;
+    let native = browntls_core::crypto::native::default_provider().secure_random;
+    let rustcrypto = browntls_core::crypto::rustcrypto::default_provider().secure_random;
     check(
         "CryptoProvider::secure_random",
         sample_count(1, 1 << 12),

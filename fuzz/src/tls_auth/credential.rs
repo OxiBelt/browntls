@@ -1,12 +1,12 @@
 //! Delegated-credential operations of the `tls_auth` target: decoding,
 //! encoding, issuance, native key generation and validity.
 
-use browntls::SignatureScheme;
-use browntls::crypto::native::delegated_credential::generate;
-use browntls::delegated_credential::{
+use browntls_core::SignatureScheme;
+use browntls_core::crypto::native::delegated_credential::generate;
+use browntls_core::delegated_credential::{
     Credential, DelegatedCredential, DelegatedCredentialKey, valid_time_until,
 };
-use browntls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
+use browntls_core::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
 
 use super::{
     Cert, MAX_SPKI_LEN, credential_bytes, credential_scheme_ok, expected_signed_message, fixture,
@@ -292,5 +292,5 @@ pub(super) fn validity(input: &mut Input) {
 
 /// Whether fuzzed bytes happen to be a certificate.
 fn parses_as_certificate(der: &CertificateDer<'_>) -> bool {
-    browntls::pki_types::EndEntityCert::try_from(der).is_ok()
+    browntls_core::pki_types::EndEntityCert::try_from(der).is_ok()
 }

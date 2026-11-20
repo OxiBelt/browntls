@@ -1,6 +1,6 @@
 //! External pre-shared keys (`fuzz_targets/tls_psk.rs`).
 //!
-//! Reaches every public function of `browntls::psk`: [`ExternalPsk`]
+//! Reaches every public function of `browntls_core::psk`: [`ExternalPsk`]
 //! construction with fuzzed identities, keys and hashes, its builder
 //! methods (cipher suite, server name, ALPN, early data, RFC 9258 import
 //! context) and accessors, [`ImportedIdentity`] encoding and decoding, and
@@ -23,10 +23,12 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
 
-use browntls::crypto::hash::HashAlgorithm;
-use browntls::pki_types::{CertificateDer, DnsName, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls::psk::{ExternalPsk, ImportedIdentity, ResolvesExternalPsk};
-use browntls::{
+use browntls_core::crypto::hash::HashAlgorithm;
+use browntls_core::pki_types::{
+    CertificateDer, DnsName, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
+};
+use browntls_core::psk::{ExternalPsk, ImportedIdentity, ResolvesExternalPsk};
+use browntls_core::{
     CipherSuite, ClientConfig, ClientConnection, Error, HandshakeKind, ProtocolVersion,
     RootCertStore, ServerConfig, ServerConnection, version,
 };
@@ -345,9 +347,9 @@ fn pki() -> &'static Pki {
 }
 
 /// Moves everything `from` has to send into `to`.
-fn send<A: browntls::SideData, B: browntls::SideData>(
-    from: &mut browntls::ConnectionCommon<A>,
-    to: &mut browntls::ConnectionCommon<B>,
+fn send<A: browntls_core::SideData, B: browntls_core::SideData>(
+    from: &mut browntls_core::ConnectionCommon<A>,
+    to: &mut browntls_core::ConnectionCommon<B>,
 ) {
     let mut buf = Vec::new();
     while from.wants_write() {
@@ -533,7 +535,7 @@ fn handshake(input: &mut Input) {
     let early_data = input.short_field();
 
     let pki = pki();
-    let provider = Arc::new(browntls::crypto::native::default_provider());
+    let provider = Arc::new(browntls_core::crypto::native::default_provider());
     let server_psk = shared.build();
     let server_builder = ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&version::TLS13])

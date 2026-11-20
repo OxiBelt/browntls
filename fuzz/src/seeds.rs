@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use browntls::compress::{CertCompressor, CompressionLevel};
-use browntls::pki_types::ServerName;
-use browntls::{ClientConfig, ClientConnection, RootCertStore};
+use browntls_core::compress::{CertCompressor, CompressionLevel};
+use browntls_core::pki_types::ServerName;
+use browntls_core::{ClientConfig, ClientConnection, RootCertStore};
 
 use crate::connection::Identity;
 
@@ -267,9 +267,9 @@ fn cert_decompress() -> Vec<Vec<u8>> {
     }
 
     let compressors: [&dyn CertCompressor; 3] = [
-        &browntls::compress::ZLIB,
-        &browntls::compress::BROTLI,
-        &browntls::compress::ZSTD,
+        &browntls_core::compress::ZLIB,
+        &browntls_core::compress::BROTLI,
+        &browntls_core::compress::ZSTD,
     ];
     let mut seeds = Vec::new();
     for compressor in compressors {

@@ -11,8 +11,8 @@
 
 #[cfg(feature = "native")]
 mod on {
-    use browntls::crypto::native::accel::load::kernel::{self, Place, Records, Sample};
-    use browntls::{CipherSuite, ConnectionTrafficSecrets, SupportedCipherSuite};
+    use browntls_core::crypto::native::accel::load::kernel::{self, Place, Records, Sample};
+    use browntls_core::{CipherSuite, ConnectionTrafficSecrets, SupportedCipherSuite};
 
     use crate::sys;
 
@@ -98,7 +98,7 @@ mod on {
 
 #[cfg(not(feature = "native"))]
 mod off {
-    use browntls::ConnectionTrafficSecrets;
+    use browntls_core::ConnectionTrafficSecrets;
 
     /// Nothing is routed without the native provider.
     #[derive(Clone, Copy, Debug)]

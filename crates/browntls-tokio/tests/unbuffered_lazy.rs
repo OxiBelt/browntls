@@ -11,8 +11,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls::server::{ServerSessionMemoryCache, UnbufferedAcceptor};
-use browntls::{AlertDescription, Error, HandshakeKind};
+use browntls_core::server::{ServerSessionMemoryCache, UnbufferedAcceptor};
+use browntls_core::{AlertDescription, Error, HandshakeKind};
 use browntls_tokio::unbuffered::{LazyConfigAcceptor, StartHandshake, TlsConnector};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
@@ -138,7 +138,7 @@ async fn a_client_hello_split_into_single_bytes_is_assembled() {
 #[tokio::test]
 async fn bytes_behind_the_client_hello_go_to_the_connection() {
     let pki = Pki::new();
-    let version = &browntls::version::TLS13;
+    let version = &browntls_core::version::TLS13;
     let cache = ServerSessionMemoryCache::new(8);
     let mut server_config = pki.server_config(version);
     server_config.max_early_data_size = 1024;
@@ -196,9 +196,9 @@ async fn bytes_behind_the_client_hello_go_to_the_connection() {
 async fn a_configuration_that_cannot_serve_the_hello_sends_an_alert() {
     let pki = Pki::new();
     let (c, s) = duplex(64 * 1024);
-    let connector = TlsConnector::from(Arc::new(pki.client_config(&browntls::version::TLS13)));
+    let connector = TlsConnector::from(Arc::new(pki.client_config(&browntls_core::version::TLS13)));
     // A TLS 1.2-only configuration cannot serve a TLS 1.3-only client.
-    let config = Arc::new(pki.server_config(&browntls::version::TLS12));
+    let config = Arc::new(pki.server_config(&browntls_core::version::TLS12));
     let server = async {
         let start = LazyConfigAcceptor::new(UnbufferedAcceptor::new(), s).await?;
         let mut accept = start.into_stream(config);

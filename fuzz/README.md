@@ -7,8 +7,8 @@ server handshake state machines) and for the whole public API of the four
 library crates other than `browntls-ktls`, through API targets grouped by topic.
 
 The project is not a member of the workspace. It has its own `Cargo.toml` and
-`Cargo.lock`, depends on `browntls` with the `fuzzing` feature (unstable entry
-points into otherwise private codecs, `browntls::fuzzing`; not a supported API)
+`Cargo.lock`, depends on `browntls-core` with the `fuzzing` feature (unstable entry
+points into otherwise private codecs, `browntls_core::fuzzing`; not a supported API)
 and on `rcgen` for certificates generated at start-up. It enables both the
 `native` and the `rustcrypto` providers, so the library has no implicit default
 provider; harnesses call `browntls_fuzz::init()` to install the native one.
@@ -57,7 +57,7 @@ and re-encoding stability.
 | `tls_tokio` | tls-connection | `browntls-tokio`: connector entry points, acceptor, lazy acceptor (including refusals and `take_io`), fallible futures, client and server streams and their accessors, split halves and their reunion, 0-RTT on resumed connections (read by the server after the handshake, or before its end from a stream returned early, with 0.5-RTT answers), the kernel handoff of a stream (a ready stream has no blocker and its connection's handover succeeds; the plaintext set aside continues what was read, with a server's unread 0-RTT data counted in front; a server's stream returned early has its handshake completed first; refused, abandoned and turned-back streams carry on), over an in-memory transport with fuzzed chunk sizes, `Pending` patterns, damaged, inserted and ended bytes |
 | `tls_tokio_unbuffered` | tls-connection | `browntls_tokio::unbuffered`: connector entry points, acceptor, lazy acceptor (`into_stream`, `into_parts` and `from_parts`, refusals, `take_io`), fallible futures, client and server streams against each other and against the buffered streams of the crate root, plain and vectored writes, `poll_read` and `poll_fill_buf`, key updates, post-handshake authentication, 0-RTT data a server accepts, `into_parts` with the connection driven by hand afterwards, over an in-memory transport with fuzzed chunk sizes, `Pending` patterns, capacity, damaged, inserted and ended bytes and failing reads and writes; optionally with identity record protection, so that forged records (KeyUpdate requests, alerts, data) are accepted. On an undisturbed connection nothing may fail or stall and everything written must arrive; a failure must stay one; what a stream buffers must stay bounded |
 | `tls_unbuffered` | tls-connection | The unbuffered API of both sides with fuzzed buffer sizes, damaged delivery, early data, key updates and exporters |
-| `tls_kernel` | tls-connection | Kernel TLS offload (`browntls::kernel`): handover blockers against the handover's result (buffered and unbuffered API, both sides, both providers, suites with and without a kernel form), `bytes_to_record_boundary` against the record headers, then a `KernelConnection` driven through a stand-in for Linux kernel TLS that protects records with the extracted secrets: data, KeyUpdate, close_notify and post-handshake authentication from the peer, `records_sent` around the confidentiality limit, fuzzed `handle_record` input; output order (RxKeys, owed KeyUpdate then TxKeys), nothing but alerts after a failure, no key in `Debug` |
+| `tls_kernel` | tls-connection | Kernel TLS offload (`browntls_core::kernel`): handover blockers against the handover's result (buffered and unbuffered API, both sides, both providers, suites with and without a kernel form), `bytes_to_record_boundary` against the record headers, then a `KernelConnection` driven through a stand-in for Linux kernel TLS that protects records with the extracted secrets: data, KeyUpdate, close_notify and post-handshake authentication from the peer, `records_sent` around the confidentiality limit, fuzzed `handle_record` input; output order (RxKeys, owed KeyUpdate then TxKeys), nothing but alerts after a failure, no key in `Debug` |
 | `tls_ech` | tls-extensions | ECH configuration lists, server keys, SVCB records and handshakes (accepted, rejected with retry configurations, GREASE) in shared and split mode (client-facing server fed in fuzz-chosen pieces, back-end server, trial decryption with random identifiers) |
 | `tls_psk` | tls-extensions | External PSKs, the RFC 9258 importer and RFC 8773, with handshakes using matching and differing PSKs |
 | `tls_quic` | tls-extensions | QUIC-TLS (RFC 9001): Initial keys, packet and header protection, key updates, Retry tags and CRYPTO_ERROR codes against their properties; in-process QUIC handshakes on both providers with fuzzed suites, groups, ALPN, transport parameters, resumption, 0-RTT, split and damaged CRYPTO data, and post-handshake bytes |
@@ -137,7 +137,7 @@ cargo test --manifest-path fuzz/Cargo.toml --locked
 
 ## Public API coverage
 
-Together the targets must reach every `pub fn` of `browntls`,
+Together the targets must reach every `pub fn` of `browntls-core`,
 `browntls-crypto`, `browntls-pki` and `browntls-tokio`. `scripts/fuzz/api_coverage.py` checks
 it: it builds the library tests above with LLVM source-based coverage, runs
 them, and fails for any public function (outside test modules) whose body

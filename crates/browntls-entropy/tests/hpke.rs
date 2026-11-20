@@ -11,8 +11,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use browntls::crypto::hpke::{Hpke, HpkeKem};
-use browntls::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+use browntls_core::crypto::hpke::{Hpke, HpkeKem};
+use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
 use browntls_entropy::{Stream, check, err, sample_count};
 
 /// The first native suite using `kem`.

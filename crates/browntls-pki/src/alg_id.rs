@@ -10,7 +10,7 @@
 //! [`AlgorithmIdentifier::matches_signature`] first map them to a canonical
 //! constant ([`canonical_public_key_alg_id`], [`canonical_signature_alg_id`]).
 //! Certificate path validation and handshake signature verification
-//! (including `browntls`' raw public keys) all match through these two
+//! (including `browntls-core`'s raw public keys) all match through these two
 //! functions.
 
 use core::fmt;

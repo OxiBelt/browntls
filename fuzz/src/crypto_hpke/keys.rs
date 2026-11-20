@@ -2,7 +2,7 @@
 //! AEAD lookups, and key derivation, (de)serialization and generation
 //! against the `hpke` oracle.
 
-use browntls::crypto::hpke::{HpkeAead, HpkeKdf, HpkeKem};
+use browntls_core::crypto::hpke::{HpkeAead, HpkeKdf, HpkeKem};
 use browntls_crypto::Error;
 use browntls_crypto::hpke::{
     Aead, Kdf, Kem, MAX_ENC_LEN, MAX_PRIVATE_KEY_LEN, MAX_PUBLIC_KEY_LEN, NONCE_LEN, PrivateKey,

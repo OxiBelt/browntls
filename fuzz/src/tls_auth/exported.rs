@@ -5,12 +5,14 @@
 
 use std::sync::Arc;
 
-use browntls::client::UnbufferedClientConnection;
-use browntls::exported_authenticator::{AuthenticatorRequestExtensions, authenticator_context};
-use browntls::pki_types::ServerName;
-use browntls::server::{UnbufferedServerConnection, WebPkiClientVerifier};
-use browntls::sign::{CertifiedKey, SingleCertAndKey};
-use browntls::{
+use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::exported_authenticator::{
+    AuthenticatorRequestExtensions, authenticator_context,
+};
+use browntls_core::pki_types::ServerName;
+use browntls_core::server::{UnbufferedServerConnection, WebPkiClientVerifier};
+use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
+use browntls_core::{
     ClientConfig, ClientConnection, DistinguishedName, ServerConfig, ServerConnection,
     SignatureScheme, SupportedProtocolVersion, version,
 };

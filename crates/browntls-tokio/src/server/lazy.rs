@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use browntls::server::{Accepted, AcceptedAlert, Acceptor, ClientHello};
-use browntls::{ServerConfig, ServerConnection};
+use browntls_core::server::{Accepted, AcceptedAlert, Acceptor, ClientHello};
+use browntls_core::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{Accept, EarlyPhase, TlsStream};
@@ -44,7 +44,7 @@ pub struct LazyConfigAcceptor<IO> {
     acceptor: Acceptor,
     io: Option<IO>,
     /// A refusal whose alert is being written.
-    alert: Option<(browntls::Error, AcceptedAlert)>,
+    alert: Option<(browntls_core::Error, AcceptedAlert)>,
     /// The future already failed (and keeps the transport for `take_io`).
     failed: bool,
     /// Handed on to the [`StartHandshake`].

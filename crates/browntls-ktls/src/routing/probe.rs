@@ -13,8 +13,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use browntls::crypto::cipher::{AeadKey, Iv};
-use browntls::{CipherSuite, ConnectionTrafficSecrets, ProtocolVersion, SupportedCipherSuite};
+use browntls_core::crypto::cipher::{AeadKey, Iv};
+use browntls_core::{CipherSuite, ConnectionTrafficSecrets, ProtocolVersion, SupportedCipherSuite};
 
 use crate::crypto_info::CryptoInfo;
 use crate::sys;

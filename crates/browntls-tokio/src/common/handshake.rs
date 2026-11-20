@@ -8,8 +8,8 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use browntls::server::AcceptedAlert;
-use browntls::{ConnectionCommon, SideData};
+use browntls_core::server::AcceptedAlert;
+use browntls_core::{ConnectionCommon, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{Stream, StreamState, coop, poll_send_alert};
@@ -193,7 +193,7 @@ where
 #[derive(Debug)]
 pub(crate) struct HandshakeFailure {
     kind: io::ErrorKind,
-    tls: Option<browntls::Error>,
+    tls: Option<browntls_core::Error>,
     message: String,
 }
 
@@ -203,7 +203,7 @@ impl HandshakeFailure {
             kind: err.kind(),
             tls: err
                 .get_ref()
-                .and_then(|inner| inner.downcast_ref::<browntls::Error>())
+                .and_then(|inner| inner.downcast_ref::<browntls_core::Error>())
                 .cloned(),
             message: err.to_string(),
         }

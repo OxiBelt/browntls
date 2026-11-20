@@ -27,12 +27,12 @@
 
 use std::sync::Arc;
 
-use browntls::server::{
+use browntls_core::server::{
     Acceptor, ClientHello, ServerSessionMemoryCache, UnbufferedAcceptedAlert, UnbufferedAcceptor,
     UnbufferedServerConnection,
 };
-use browntls::unbuffered::{ConnectionState, EncodeError, InsufficientSizeError};
-use browntls::{
+use browntls_core::unbuffered::{ConnectionState, EncodeError, InsufficientSizeError};
+use browntls_core::{
     CipherSuite, ContentType, Error, NamedGroup, PeerMisbehaved, ServerConfig, SignatureScheme,
 };
 
@@ -125,7 +125,7 @@ fn encode_all(alert: &mut UnbufferedAcceptedAlert, short: bool) -> Vec<u8> {
 
 /// The model: a buffered `Acceptor` fed `bytes` in pieces of at most
 /// `step`, or `None` when its receive buffer filled up (not comparable).
-fn model(bytes: &[u8], step: usize) -> Option<Outcome<browntls::server::Accepted>> {
+fn model(bytes: &[u8], step: usize) -> Option<Outcome<browntls_core::server::Accepted>> {
     let mut acceptor = Acceptor::default();
     let mut fed = 0;
     for _ in 0..bytes.len() + 2 {

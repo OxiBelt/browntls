@@ -5,17 +5,17 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use browntls::client::{ClientSessionMemoryCache, ClientSessionStore};
-use browntls::compress::{self, CompressionLevel};
-use browntls::crypto::{GetRandomFailed, TicketProducer, native, rustcrypto};
-use browntls::pki_types::{ServerName, UnixTime};
-use browntls::server::{
+use browntls_core::client::{ClientSessionMemoryCache, ClientSessionStore};
+use browntls_core::compress::{self, CompressionLevel};
+use browntls_core::crypto::{GetRandomFailed, TicketProducer, native, rustcrypto};
+use browntls_core::pki_types::{ServerName, UnixTime};
+use browntls_core::server::{
     ProducesTickets, ResolvesServerCertUsingSni, ServerSessionMemoryCache, StoresServerSessions,
 };
-use browntls::sign::CertifiedKey;
-use browntls::ticketer::TicketRotator;
-use browntls::time_provider::TimeProvider;
-use browntls::{CipherSuite, KeyLog, KeyLogFile, NamedGroup};
+use browntls_core::sign::CertifiedKey;
+use browntls_core::ticketer::TicketRotator;
+use browntls_core::time_provider::TimeProvider;
+use browntls_core::{CipherSuite, KeyLog, KeyLogFile, NamedGroup};
 
 use super::fixtures;
 use super::sign::{load, loadable};
@@ -241,7 +241,7 @@ pub(super) fn server_cache_op(input: &mut Input<'_>) {
             }
         }
     }
-    let none = browntls::server::NoServerSessionStorage {};
+    let none = browntls_core::server::NoServerSessionStorage {};
     assert!(!none.can_cache());
     assert!(!none.put(vec![1], vec![2]) || none.get(&[1]).is_none());
 }

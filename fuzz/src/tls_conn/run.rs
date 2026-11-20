@@ -3,7 +3,7 @@
 
 use std::io::{IoSlice, Write};
 
-use browntls::{CommonState, Connection, ConnectionCommon};
+use browntls_core::{CommonState, Connection, ConnectionCommon};
 
 use super::acceptor::acceptor;
 use super::setup::Knobs;

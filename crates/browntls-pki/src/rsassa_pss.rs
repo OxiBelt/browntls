@@ -22,7 +22,7 @@
 //! # Accepted parameters
 //!
 //! The rules are those of `browntls_crypto::rsa::RsaKeyAlgorithm`, which
-//! parses the same identifiers in keys; `browntls` tests that both agree on
+//! parses the same identifiers in keys; `browntls-core` tests that both agree on
 //! every combination of the fields below.
 //!
 //! * `hashAlgorithm`: SHA-256, SHA-384 or SHA-512, with NULL or absent

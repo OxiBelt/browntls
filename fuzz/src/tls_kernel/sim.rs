@@ -1,5 +1,5 @@
 //! A userspace stand-in for Linux kernel TLS, adapted from the integration
-//! tests (`crates/browntls/tests/cases/kernel/sim.rs`), that also checks
+//! tests (`crates/browntls-core/tests/cases/kernel/sim.rs`), that also checks
 //! what the [`KernelConnection`] asks of it.
 //!
 //! It protects records with the extracted secrets as the kernel does
@@ -11,12 +11,12 @@
 
 use std::fmt::Write as _;
 
-use browntls::crypto::cipher::{
+use browntls_core::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, MessageDecrypter, MessageEncrypter, OutboundChunks,
     OutboundPlainMessage, Tls12RecordProtection,
 };
-use browntls::kernel::{KernelConnection, KernelOutput};
-use browntls::{
+use browntls_core::kernel::{KernelConnection, KernelOutput};
+use browntls_core::{
     ConnectionTrafficSecrets, ContentType, Error, ExtractedSecrets, ProtocolVersion, SideData,
     SupportedCipherSuite,
 };

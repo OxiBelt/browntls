@@ -17,10 +17,10 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use browntls::client::ClientConnectionData;
-use browntls::kernel::KernelHandoffBlocker;
-use browntls::server::ServerConnectionData;
-use browntls::{
+use browntls_core::client::ClientConnectionData;
+use browntls_core::kernel::KernelHandoffBlocker;
+use browntls_core::server::ServerConnectionData;
+use browntls_core::{
     ClientConnection, ProtocolVersion, ServerConnection, StreamOwned, SupportedCipherSuite,
 };
 use browntls_ktls::{HandoffError, KtlsStream};

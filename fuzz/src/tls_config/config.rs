@@ -4,20 +4,22 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use browntls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use browntls::client::{ClientSessionMemoryCache, Resumption, WebPkiServerVerifier};
-use browntls::crypto::hash::HashAlgorithm;
-use browntls::crypto::{CryptoProvider, KeyExchangeAlgorithm};
-use browntls::pki_types::{CertificateDer, ServerName, UnixTime};
-use browntls::psk::ExternalPsk;
-use browntls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use browntls::server::{
+use browntls_core::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use browntls_core::client::{ClientSessionMemoryCache, Resumption, WebPkiServerVerifier};
+use browntls_core::crypto::hash::HashAlgorithm;
+use browntls_core::crypto::{CryptoProvider, KeyExchangeAlgorithm};
+use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
+use browntls_core::psk::ExternalPsk;
+use browntls_core::server::danger::{ClientCertVerified, ClientCertVerifier};
+use browntls_core::server::{
     NoServerSessionStorage, ResolvesServerCertUsingSni, ServerSessionMemoryCache,
     WebPkiClientVerifier,
 };
-use browntls::sign::{CertifiedKey, SingleCertAndKey};
-use browntls::ticketer::TicketRotator;
-use browntls::{
+use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
+use browntls_core::ticketer::TicketRotator;
+use browntls_core::{
     ClientConfig, ClientConnection, ConfigBuilder, DigitallySignedStruct, DistinguishedName, Error,
     KeyLogFile, RootCertStore, ServerConfig, ServerConnection, SignatureScheme,
     SupportedCipherSuite, SupportedProtocolVersion, WantsVersions, version,
@@ -52,7 +54,7 @@ impl ServerCertVerifier for AcceptAnyServerCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        browntls::crypto::verify_tls12_signature(
+        browntls_core::crypto::verify_tls12_signature(
             message,
             cert,
             dss,
@@ -66,7 +68,7 @@ impl ServerCertVerifier for AcceptAnyServerCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        browntls::crypto::verify_tls13_signature(
+        browntls_core::crypto::verify_tls13_signature(
             message,
             cert,
             dss,
@@ -108,7 +110,7 @@ impl ClientCertVerifier for AcceptAnyClientCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        browntls::crypto::verify_tls12_signature(
+        browntls_core::crypto::verify_tls12_signature(
             message,
             cert,
             dss,
@@ -122,7 +124,7 @@ impl ClientCertVerifier for AcceptAnyClientCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        browntls::crypto::verify_tls13_signature(
+        browntls_core::crypto::verify_tls13_signature(
             message,
             cert,
             dss,
@@ -207,13 +209,16 @@ fn versions_ok(provider: &CryptoProvider, versions: &[&SupportedProtocolVersion]
 }
 
 /// Applies the version choice to a builder and checks the outcome.
-fn with_versions<S: browntls::ConfigSide>(
+fn with_versions<S: browntls_core::ConfigSide>(
     builder: ConfigBuilder<S, WantsVersions>,
     provider: &Arc<CryptoProvider>,
     versions: Option<&'static [&'static SupportedProtocolVersion]>,
-) -> Option<ConfigBuilder<S, browntls::WantsVerifier>> {
+) -> Option<ConfigBuilder<S, browntls_core::WantsVerifier>> {
     assert!(Arc::ptr_eq(builder.crypto_provider(), provider));
-    let expected = versions_ok(provider, versions.unwrap_or(browntls::DEFAULT_VERSIONS));
+    let expected = versions_ok(
+        provider,
+        versions.unwrap_or(browntls_core::DEFAULT_VERSIONS),
+    );
     let result = match versions {
         None => builder.with_safe_default_protocol_versions(),
         Some(v) => builder.with_protocol_versions(v),
@@ -362,7 +367,7 @@ pub(super) fn client_config_op(input: &mut Input<'_>) {
         });
     // `with_protocol_versions` accepts TLS 1.2 with only TLS 1.3 groups
     // (FFDHE, ML-KEM, hybrids); the ClientHello then cannot be built.
-    let enabled = versions.unwrap_or(browntls::DEFAULT_VERSIONS);
+    let enabled = versions.unwrap_or(browntls_core::DEFAULT_VERSIONS);
     let groups_ok = provider
         .kx_groups
         .iter()
@@ -489,7 +494,7 @@ pub(super) fn server_config_op(input: &mut Input<'_>) {
         config.session_storage = Arc::new(NoServerSessionStorage {});
     }
     if input.bool() {
-        config.ticketer = browntls::crypto::rustcrypto::Ticketer::new().expect("ticketer");
+        config.ticketer = browntls_core::crypto::rustcrypto::Ticketer::new().expect("ticketer");
     }
     match ServerConnection::new(Arc::new(config)) {
         Ok(conn) => {
@@ -589,13 +594,13 @@ pub(super) fn handshake_op(input: &mut Input<'_>) {
         0 => {}
         1 => {
             server_config.ticketer =
-                browntls::crypto::rustcrypto::Ticketer::new().expect("ticketer")
+                browntls_core::crypto::rustcrypto::Ticketer::new().expect("ticketer")
         }
         _ => {
             server_config.ticketer = Arc::new(
                 TicketRotator::new(3600, || {
                     Ok(Box::new(
-                        browntls::crypto::native::ticketer::AeadTicketProducer::new()?,
+                        browntls_core::crypto::native::ticketer::AeadTicketProducer::new()?,
                     ))
                 })
                 .expect("rotator"),

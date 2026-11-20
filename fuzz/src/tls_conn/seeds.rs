@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use browntls::ClientConnection;
+use browntls_core::ClientConnection;
 
 use super::setup::{Knobs, server_name};
 use super::{ConnectArgs, Op};

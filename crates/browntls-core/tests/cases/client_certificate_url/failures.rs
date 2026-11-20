@@ -274,3 +274,29 @@ fn the_client_survives_a_warning_certificate_unobtainable() {
         );
     }
 }
+
+/// RFC 6066 §5: bad_certificate_hash_value is always fatal, so a
+/// warning-level one ends the client's handshake too.
+#[test]
+fn a_warning_bad_certificate_hash_value_is_fatal() {
+    init_logging();
+    let s = Setup::new();
+    for level in [1u8, 2] {
+        let (mut client, mut server) = connect(
+            s.client(&TLS12, s.key(Some(s.individual()), false), true),
+            s.server(&TLS12, false, policy()),
+        );
+        let (_, flight) = hello_round(&mut client, &mut server);
+        give(&mut client, &flight);
+        client.process_new_packets().unwrap();
+        give(&mut server, &take_flight(&mut client));
+        server.process_new_packets().unwrap();
+        let alert = [21, 3, 3, 0, 2, level, ALERT_BAD_CERTIFICATE_HASH_VALUE];
+        give(&mut client, &alert);
+        assert_eq!(
+            client.process_new_packets().unwrap_err(),
+            Error::AlertReceived(AlertDescription::BadCertificateHashValue),
+            "level {level}"
+        );
+    }
+}

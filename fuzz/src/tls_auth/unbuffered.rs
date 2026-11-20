@@ -1,19 +1,22 @@
 //! Buffered or unbuffered connection ends for the exported-authenticator
-//! operation: a small driver for the unbuffered API, an in-memory
-//! handshake between any two ends, and the authenticator methods forwarded
-//! to whichever connection type an end is.
+//! and client-authentication operations: a small driver for the unbuffered
+//! API, an in-memory handshake between any two ends, and the methods those
+//! operations call forwarded to whichever connection type an end is.
 
 use std::ops::DerefMut;
 
 use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::delegated_credential::DelegatedCredential;
 use browntls_core::exported_authenticator::AuthenticatorRequestExtensions;
 use browntls_core::pki_types::CertificateDer;
-use browntls_core::server::UnbufferedServerConnection;
+use browntls_core::server::{PostHandshakeAuthStatus, UnbufferedServerConnection};
 use browntls_core::sign::CertifiedKey;
 use browntls_core::unbuffered::{
     ConnectionState, EncodeError, InsufficientSizeError, UnbufferedConnectionCommon,
 };
-use browntls_core::{ClientConnection, ConnectionCommon, Error, ServerConnection, SideData};
+use browntls_core::{
+    ClientConnection, ConnectionCommon, Error, HandshakeKind, ServerConnection, SideData,
+};
 
 /// One end of an in-memory connection.
 pub(super) enum End<B, U> {
@@ -70,7 +73,7 @@ where
     }
 
     /// Processes TLS bytes from the peer.
-    fn give_input(&mut self, bytes: &[u8]) -> Result<(), Error> {
+    pub(super) fn give_input(&mut self, bytes: &[u8]) -> Result<(), Error> {
         match self {
             Self::Buffered(conn) => {
                 let mut rest = bytes;
@@ -98,6 +101,23 @@ where
         match self {
             Self::Buffered(conn) => conn.is_handshaking(),
             Self::Unbuffered { conn, .. } => conn.is_handshaking(),
+        }
+    }
+
+    pub(super) fn peer_certificates<'a>(&'a self) -> Option<&'a [CertificateDer<'static>]>
+    where
+        D: 'a,
+    {
+        match self {
+            Self::Buffered(conn) => conn.peer_certificates(),
+            Self::Unbuffered { conn, .. } => conn.peer_certificates(),
+        }
+    }
+
+    pub(super) fn handshake_kind(&self) -> Option<HandshakeKind> {
+        match self {
+            Self::Buffered(conn) => conn.handshake_kind(),
+            Self::Unbuffered { conn, .. } => conn.handshake_kind(),
         }
     }
 }
@@ -193,6 +213,27 @@ impl Client {
 }
 
 impl Server {
+    pub(super) fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        match self {
+            Self::Buffered(conn) => conn.client_delegated_credential(),
+            Self::Unbuffered { conn, .. } => conn.client_delegated_credential(),
+        }
+    }
+
+    pub(super) fn request_client_auth(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Buffered(conn) => conn.request_client_auth(),
+            Self::Unbuffered { conn, .. } => conn.request_client_auth(),
+        }
+    }
+
+    pub(super) fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
+        match self {
+            Self::Buffered(conn) => conn.post_handshake_auth_status(),
+            Self::Unbuffered { conn, .. } => conn.post_handshake_auth_status(),
+        }
+    }
+
     pub(super) fn request_authenticator(
         &mut self,
         context: &[u8],

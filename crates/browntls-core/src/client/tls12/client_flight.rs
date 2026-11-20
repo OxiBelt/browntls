@@ -41,10 +41,10 @@ impl State<ClientConnectionData> for ExpectServerDone {
                 )
             })?;
         let now = st.config.current_time()?;
-        let check = st
+        let (check, transparency_status) = st
             .config
             .verifier()
-            .verify_server_cert_with_evidence(
+            .verify_server_cert_with_transparency(
                 end_entity,
                 intermediates,
                 &st.server_name,
@@ -76,6 +76,8 @@ impl State<ClientConnectionData> for ExpectServerDone {
 
         finish_or_pause(cx, check, move |cx, status| {
             cx.common.peer_revocation_status = status;
+            cx.data.transparency.info = st.server_cert.transparency_info.take();
+            cx.data.transparency.status = transparency_status;
             st.finish_client_flight(cx, sig_verified)
         })
     }

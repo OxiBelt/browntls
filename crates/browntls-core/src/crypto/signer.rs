@@ -61,6 +61,9 @@ pub struct CertifiedKey {
     /// The end entity's encoded `SignedCertificateTimestampList`.
     sct_list: Option<Vec<u8>>,
 
+    /// The end entity's encoded `TransItemList` (RFC 9162 §6.3).
+    transparency_info: Option<Vec<u8>>,
+
     /// Delegated credentials for the end entity (RFC 9345); see
     /// [`Self::delegated_credentials`].
     delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
@@ -89,6 +92,7 @@ impl CertifiedKey {
             ocsp: None,
             intermediate_ocsp: Vec::new(),
             sct_list: None,
+            transparency_info: None,
             delegated_credentials: Vec::new(),
         }
     }
@@ -162,6 +166,41 @@ impl CertifiedKey {
             return Err(Error::general("malformed SignedCertificateTimestampList"));
         }
         self.sct_list = sct_list;
+        Ok(())
+    }
+
+    /// The end entity's Certificate Transparency 2.0 items, as an encoded
+    /// `TransItemList` (RFC 9162 §6.3), if configured.
+    pub fn transparency_info(&self) -> Option<&[u8]> {
+        self.transparency_info.as_deref()
+    }
+
+    /// Sets, or with `None` removes, the end entity's Certificate
+    /// Transparency 2.0 items: an encoded `TransItemList` (RFC 9162 §6.3)
+    /// sent in the `transparency_info` extension (§6.5) to a client that
+    /// offers it, during a full handshake only (in the TLS 1.2 ServerHello,
+    /// or on the end entity's TLS 1.3 CertificateEntry).
+    ///
+    /// The list is sent as given. RFC 9162 §6.5 says a server SHOULD
+    /// leave out items the certificate or its stapled OCSP response
+    /// already carries; the application builds the list accordingly (see
+    /// [`TransItemList`](browntls_pki::transparency::TransItemList)).
+    ///
+    /// Fails unless the list parses and holds at least one SCT
+    /// (`x509_sct_v2` or `precert_sct_v2`, §6.4), or if it is longer than
+    /// an extension body (65535 octets). Items are not verified.
+    pub fn set_transparency_info(&mut self, list: Option<Vec<u8>>) -> Result<(), Error> {
+        if let Some(list) = &list {
+            let parsed = browntls_pki::transparency::TransItemList::parse(list)
+                .map_err(|_| Error::general("malformed TransItemList"))?;
+            if !parsed.has_sct() {
+                return Err(Error::general("TransItemList without an SCT"));
+            }
+            if list.len() > usize::from(u16::MAX) {
+                return Err(Error::general("TransItemList is too large"));
+            }
+        }
+        self.transparency_info = list;
         Ok(())
     }
 

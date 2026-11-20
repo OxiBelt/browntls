@@ -183,6 +183,15 @@ pub struct ClientConfig {
     /// Off by default.
     pub enable_delegated_credentials: bool,
 
+    /// Whether to offer the `transparency_info` extension (RFC 9162 §6.5)
+    /// even when the verifier does not ask for it
+    /// ([`ServerCertVerifier::requests_transparency_info`]), to obtain the
+    /// server's Certificate Transparency 2.0 items unverified
+    /// ([`UnbufferedClientConnection::peer_transparency_info`]). Never
+    /// offered when the verifier requires raw public keys. Off by default.
+    /// See [`crate::transparency`].
+    pub request_transparency_info: bool,
+
     /// The `record_size_limit` to announce (RFC 8449): the largest record
     /// plaintext we accept, counting the content type in TLS 1.3. `None`
     /// sends no extension, and then the server's limit is not learnt
@@ -631,6 +640,8 @@ pub struct ClientConnectionData {
     /// The absolute expiry of the delegated credential that authenticated
     /// this connection, including when it was restored from a TLS 1.3 ticket.
     pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The server's Certificate Transparency 2.0 items (RFC 9162).
+    pub(super) transparency: super::transparency::PeerTransparency,
     /// The configuration, for exported authenticators (RFC 9261).
     pub(crate) config: Arc<ClientConfig>,
     pub(crate) authenticators: crate::exported_authenticator::AuthenticatorState,
@@ -649,6 +660,7 @@ impl ClientConnectionData {
             server_name,
             delegated_credential: None,
             delegated_credential_expiry: None,
+            transparency: Default::default(),
             config,
             authenticators: Default::default(),
         }
@@ -796,6 +808,22 @@ impl UnbufferedClientConnection {
     /// How many valid TLS 1.3 tickets this connection accepted for storage.
     pub fn tls13_tickets_received(&self) -> u32 {
         self.inner.core.data.tls13_tickets_received
+    }
+
+    /// The `extension_data` of the server's `transparency_info` extension
+    /// (RFC 9162 §6.5) from a full handshake: a `TransItemList`, or empty
+    /// or an empty list, which §6.5 allows. It is well formed but **not
+    /// verified**; see [`Self::peer_transparency_status`].
+    pub fn peer_transparency_info(&self) -> Option<&[u8]> {
+        self.inner.core.data.transparency.info.as_deref()
+    }
+
+    /// What the certificate verifier established about the server
+    /// certificate's Certificate Transparency 2.0 evidence, once the
+    /// certificate is verified; `None` when the verifier reports nothing,
+    /// and after resumption. See [`crate::transparency`].
+    pub fn peer_transparency_status(&self) -> Option<crate::transparency::TransparencyStatus> {
+        self.inner.core.data.transparency.status
     }
 
     /// The delegated credential (RFC 9345) the server authenticated with,

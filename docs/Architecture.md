@@ -282,6 +282,9 @@ carries per-certificate staples in CertificateEntry, including client
 authentication when requested. With the policy enabled, the client offers the
 RFC 6962 SCT extension. SCTs from certificates, authenticated OCSP responses,
 and negotiated TLS extensions are verified against configured log keys.
+Version 2 SCTs (RFC 9162) are not fed into this evaluation or CRLite; they
+have their own policy, `browntls::transparency` through the facade (see
+[CT 2.0 in TLS](#ct-20-in-tls)).
 
 CRLite reads Mozilla Clubcard V3 and V4 filters. The application authenticates
 the source and supplies the full filter, ordered deltas, expiry, generation,
@@ -314,8 +317,10 @@ integration.
 `browntls_pki::transparency` holds the TLS-independent part of CT 2.0, beside
 the RFC 6962 code in `browntls_pki::sct`. Like the rest of `browntls-pki` it
 needs only `alloc` and contains no cryptography: SHA-256 and signature
-verification are passed in. No TLS connection uses it yet; the TLS extension
-(`transparency_info`, type 52) is not negotiated by `browntls-core`.
+verification are passed in. `browntls-core` negotiates the TLS extension
+(`transparency_info`, type 52) on top of it; see
+[CT 2.0 in TLS](#ct-20-in-tls) below. Through the facade the TLS side is
+`browntls::transparency` and the PKI module `browntls::pki_types::transparency`.
 
 It serves three callers:
 
@@ -367,13 +372,111 @@ empty list in the TLS extension. `verify_tls_extension` accepts an empty
 extension body or an empty list; the strict parser, the certificate
 extension and the OCSP extension reject an empty list.
 
-Not covered: the HTTP API of §5, log operation, monitoring, the final STH
-log parameter (§4.1) and the TLS extension itself. No public CT 2.0 log
-ecosystem and no second implementation were available, and RFC 9162 has no
-test vectors for its hashes or items. The tests check the code against
-independent encoders and a reference Merkle tree written from the RFC text
-in `crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
+Not covered: the HTTP API of §5, log operation, monitoring and the final STH
+log parameter (§4.1). No public CT 2.0 log ecosystem and no second
+implementation were available, and RFC 9162 has no test vectors for its
+hashes or items. The tests check the code against independent encoders and a
+reference Merkle tree written from the RFC text in
+`crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
 self-consistency against the RFC text only, not interoperability.
+
+#### CT 2.0 in TLS
+
+`browntls_core::transparency` holds the configuration types; the protocol
+work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
+
+- Server: `CertifiedKey::set_transparency_info` installs an encoded
+  `TransItemList`, refusing one that does not parse, has no SCT (§6.4) or
+  exceeds 65535 octets. The list is sent only when the ClientHello offered
+  the extension and the certificate is X.509 (not a raw public key): in the
+  TLS 1.2 ServerHello, or on the end entity's TLS 1.3 CertificateEntry.
+  A resumed handshake carries none (§6.5).
+- Client offer: an empty extension in the ClientHello when
+  `ServerCertVerifier::requests_transparency_info` says so (the WebPKI
+  verifier does when it has a CT 2.0 policy) or when
+  `ClientConfig::request_transparency_info` is set, and never with a
+  verifier that requires raw public keys. Whether a server's extension
+  was solicited is decided by the ClientHello actually sent. A verifier
+  that wraps another must forward `requests_transparency_info`: otherwise
+  nothing is offered while the wrapped policy still runs on the
+  certificate and the staple alone, which §8.1.6 forbids but which fails
+  closed.
+- Client policy: `ServerCertVerifierBuilder::with_certificate_transparency`
+  takes `CtV2Requirements` (trusted logs as `CtV2LogConfig`, trusted tree
+  heads, `min_verified_scts`, `min_distinct_logs`, `require_inclusion`,
+  `CtV2Options` budgets and the SHA-256 of `RevocationDigests`); `build`
+  checks every log key and refuses two logs sharing an ID or a key, the key
+  compared in a normalised form (complete `SubjectPublicKeyInfo` or its
+  contents, compressed or uncompressed point): an SCT's signature does not
+  cover its log ID, so one SCT could otherwise count for two logs. For the
+  same reason distinct logs are counted by key. Every SCT signs the hash
+  of the end entity's issuer key (§4.7): the first intermediate of the
+  validated path, or its trust anchor. Without a revocation policy that
+  path is the one the verifier validated; a revocation policy may leave
+  several candidate paths to a live query, so the verifier then validates
+  the path once more, without revocation, to learn the issuer. It runs
+  `CtV2Verifier` over three sources: the certificate's Transparency
+  Information extension, the list in a stapled OCSP response
+  (only when that response authenticates against the issuer) and the TLS
+  extension. Too few SCTs or logs fail with
+  `CertificateError::InsufficientTransparency` (`certificate_unknown`); an
+  evidence error such as an exceeded budget with
+  `InvalidTransparencyEvidence` (`bad_certificate`). Called directly,
+  `verify_server_cert` enforces the policy with the certificate and the
+  staple only.
+- What a connection reports: `peer_transparency_info` (the extension body,
+  unverified, also without a policy) and `peer_transparency_status`
+  (`TransparencyStatus` counts) on `ClientConnection` and
+  `UnbufferedClientConnection`. A custom verifier receives the body in
+  `CertificateEvidence::transparency_info` and reports a status through
+  `ServerCertVerifier::verify_server_cert_with_transparency`, whose default
+  reports none.
+- Peer errors: a list that does not parse is `decode_error` in the codec (an
+  empty body and an empty list are accepted, §6.5), as is a non-empty body
+  in the ClientHello; an extension the client did not offer is
+  `unsupported_extension`; one in a resuming TLS 1.2 ServerHello is
+  `illegal_parameter` (§8.1.1). In TLS 1.3 only the end entity's entry is
+  read; the extension on another entry is ignored.
+- Resumption: the certificate is not evaluated again, so a resumed
+  connection reports neither items nor a status; the policy held when the
+  session was established.
+- Client certificates: RFC 9162 defines no CT for them. The extension is
+  never requested in a CertificateRequest, and a client Certificate that
+  carries it is refused as unsolicited.
+
+Interactions with other features:
+
+- Encrypted Client Hello: the outer ClientHello carries the offer like the
+  inner one. When ECH is accepted the policy applies to the hidden name's
+  certificate. When it is rejected the policy also applies to the public
+  name's certificate that authenticates the rejection, so a client-facing
+  server without CT 2.0 evidence makes the client fail with
+  `InsufficientTransparency` rather than return its retry configurations:
+  they are authenticated by that certificate, and CT is what would reveal
+  a mis-issued one.
+- QUIC uses the TLS 1.3 handshake unchanged, extension and policy
+  included; it has no CT test of its own.
+- Early data is sent only on resumption or with an external PSK, before
+  any server certificate arrives. A resumption evaluates no certificate;
+  an RFC 8773 handshake (certificate with an external PSK) evaluates the
+  certificate like a full handshake, after the 0-RTT data was sent.
+- Delegated credentials (RFC 9345): the policy covers the end-entity
+  certificate that signs the credential; the credential is not logged.
+- `Acceptor`, `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`: the
+  configuration chosen after the ClientHello supplies the list through
+  its certificate resolver, and the offer is read from that ClientHello.
+- Exported authenticators (RFC 9261) are verified through
+  `verify_server_cert` with no OCSP response, and an authenticator whose
+  entry carries `transparency_info` is refused as unsolicited. Under a CT
+  2.0 policy an authenticator therefore passes only with SCTs embedded in
+  its certificate.
+
+The tests (`crates/browntls-core/tests/transparency*.rs`,
+`crates/browntls-tokio/tests/transparency.rs`) run browntls against itself
+on both providers, buffered and unbuffered, with run-time generated logs
+and lists encoded independently of `browntls-pki`. No other implementation
+of the extension is available in the repository's interoperability tooling,
+so there is no third-party test.
 
 ## Crypto provider mount point
 

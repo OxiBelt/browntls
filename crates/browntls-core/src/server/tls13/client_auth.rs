@@ -104,10 +104,12 @@ pub(super) fn check_client_certificate(
     // RFC 9846 §4.5.1: entry extensions must answer our CertificateRequest.
     // It asks for stapled responses and SCTs exactly when the verifier
     // evaluates revocation, and never for delegated credentials (RFC 9345
-    // client credentials are not supported).
+    // client credentials are not supported), nor for `transparency_info`
+    // (RFC 9162 §6.1 defines no CT for client certificates).
     let evidence_requested = client_revocation_enabled(config);
     if certp.entries.iter().any(|e| {
         e.delegated_credential.is_some()
+            || e.transparency_info.is_some()
             || (!evidence_requested && (e.status.is_some() || e.sct_list.is_some()))
     }) {
         return Err(common.send_fatal_alert(
@@ -125,6 +127,7 @@ pub(super) fn check_client_certificate(
         .map(|(ocsp, scts)| CertificateEvidence {
             ocsp: ocsp.as_deref().filter(|response| !response.is_empty()),
             scts: scts.as_deref(),
+            transparency_info: None,
         })
         .collect();
     let client_cert = certp.clone().into_certificate_chain().into_owned();

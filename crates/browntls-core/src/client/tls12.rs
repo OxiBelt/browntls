@@ -174,6 +174,7 @@ impl CompleteServerHelloHandling {
             if !server_hello.session_id.is_empty() && resuming.session_id == server_hello.session_id
             {
                 debug!("Server agreed to resume");
+                super::transparency::refuse_on_resumption(cx.common, &server_hello.extensions)?;
                 if resuming.suite() != suite {
                     return Err(cx.common.send_fatal_alert(
                         AlertDescription::HandshakeFailure,
@@ -258,6 +259,11 @@ impl CompleteServerHelloHandling {
                 .sct_list
                 .as_ref()
                 .map(|list| list.bytes().to_vec()),
+            transparency_info: server_hello
+                .extensions
+                .transparency_info
+                .as_ref()
+                .map(|list| list.bytes().to_vec()),
             must_issue_new_ticket,
             hello: self.hello,
         }))
@@ -275,6 +281,7 @@ struct ExpectCertificate {
     suite: &'static Tls12CipherSuite,
     may_send_cert_status: bool,
     sct_list: Option<Vec<u8>>,
+    transparency_info: Option<Vec<u8>>,
     must_issue_new_ticket: bool,
     hello: ClientHelloDetails,
 }
@@ -291,6 +298,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             cert_chain: server_cert_chain,
             ocsp: Vec::new(),
             scts: self.sct_list.into_iter().map(Some).collect(),
+            transparency_info: self.transparency_info,
         };
 
         if self.may_send_cert_status {

@@ -17,14 +17,19 @@ pub(super) struct ServerCertDetails {
     pub(super) cert_chain: CertificateChain<'static>,
     pub(super) ocsp: Vec<Option<Vec<u8>>>,
     pub(super) scts: Vec<Option<Vec<u8>>>,
+    /// The end entity's `transparency_info` (RFC 9162 §6.5).
+    pub(super) transparency_info: Option<Vec<u8>>,
 }
 
 impl ServerCertDetails {
     pub(super) fn evidence(&self) -> Vec<CertificateEvidence<'_>> {
-        (0..self.ocsp.len().max(self.scts.len()))
+        let len = self.ocsp.len().max(self.scts.len());
+        let len = len.max(usize::from(self.transparency_info.is_some()));
+        (0..len)
             .map(|index| CertificateEvidence {
                 ocsp: self.ocsp.get(index).and_then(|value| value.as_deref()),
                 scts: self.scts.get(index).and_then(|value| value.as_deref()),
+                transparency_info: self.transparency_info.as_deref().filter(|_| index == 0),
             })
             .collect()
     }

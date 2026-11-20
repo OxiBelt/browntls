@@ -201,6 +201,9 @@ pub enum InvalidMessage {
     InvalidExternalIdHash,
     /// An `external_session_id` outside 20 to 255 bytes (RFC 8844 §4.3).
     InvalidExternalSessionId,
+    /// A `transparency_info` extension whose body is not a well-formed
+    /// `TransItemList` (RFC 9162 §6.3, §6.5).
+    InvalidTransItemList,
 }
 
 impl From<InvalidMessage> for Error {
@@ -374,6 +377,12 @@ pub enum PeerMisbehaved {
     /// offer `post_handshake_auth` (RFC 9846 §4.7.2).
     UnsolicitedPostHandshakeCertificateRequest,
     UnsolicitedSctList,
+    /// A `transparency_info` extension the client did not offer, in a
+    /// CertificateEntry (RFC 9162 §6.5).
+    UnsolicitedTransparencyInfo,
+    /// A TLS 1.2 ServerHello resuming a session carried
+    /// `transparency_info` (RFC 9162 §6.5, §8.1.1).
+    TransparencyInfoOnResumption,
     UnsolicitedServerHelloExtension,
     WrongGroupForKeyShare,
     /// The server accepted 0-RTT although it did not select the first PSK
@@ -525,6 +534,20 @@ pub enum CertificateError {
     ApplicationVerificationFailure,
     /// Some other reason.
     Other(OtherError),
+    /// The certificate's Certificate Transparency 2.0 evidence (RFC 9162
+    /// §8.1.6) does not meet the verifier's requirements: too few SCTs
+    /// counted, or from too few distinct logs. When the requirements ask
+    /// for inclusion, only SCTs with proven inclusion are counted.
+    InsufficientTransparency {
+        /// The SCTs that counted.
+        counted_scts: usize,
+        /// The distinct logs of the SCTs that counted.
+        distinct_logs: usize,
+    },
+    /// Certificate Transparency 2.0 evidence (RFC 9162) could not be
+    /// verified: a list is malformed or too large, or verification went
+    /// over one of its budgets.
+    InvalidTransparencyEvidence(browntls_pki::transparency::TransparencyError),
 }
 
 impl From<CertificateError> for AlertDescription {
@@ -547,7 +570,8 @@ impl From<CertificateError> for AlertDescription {
             BadSignature | UnsupportedSignatureAlgorithm => Self::DecryptError,
             InvalidPurpose => Self::UnsupportedCertificate,
             ApplicationVerificationFailure => Self::AccessDenied,
-            Other(..) => Self::CertificateUnknown,
+            InvalidTransparencyEvidence(_) => Self::BadCertificate,
+            Other(..) | InsufficientTransparency { .. } => Self::CertificateUnknown,
         }
     }
 }

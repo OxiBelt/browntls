@@ -17,6 +17,7 @@ use crate::msgs::codec::{
 use crate::msgs::enums::{CertificateStatusType, ClientCertificateType, ExtensionType};
 
 mod evidence;
+mod transparency;
 
 /// A TLS 1.2 certificate chain: the end entity first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,6 +139,8 @@ pub(crate) struct CertificateEntry<'a> {
     pub(crate) cert: CertificateDer<'a>,
     pub(crate) status: Option<CertificateStatus<'a>>,
     pub(crate) sct_list: Option<Payload<'a>>,
+    /// RFC 9162 §6.5: the `TransItemList` of a server's entry.
+    pub(crate) transparency_info: Option<Payload<'a>>,
     /// RFC 9345 §4.1.1: only meaningful on the end-entity entry.
     pub(crate) delegated_credential: Option<DelegatedCredential>,
 }
@@ -148,6 +151,7 @@ impl<'a> CertificateEntry<'a> {
             cert,
             status: None,
             sct_list: None,
+            transparency_info: None,
             delegated_credential: None,
         }
     }
@@ -157,6 +161,7 @@ impl<'a> CertificateEntry<'a> {
             cert: self.cert.into_owned(),
             status: self.status.map(CertificateStatus::into_owned),
             sct_list: self.sct_list.map(Payload::into_owned),
+            transparency_info: self.transparency_info.map(Payload::into_owned),
             delegated_credential: self.delegated_credential,
         }
     }
@@ -172,6 +177,11 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         if let Some(scts) = &self.sct_list {
             encode_extension(ExtensionType::SCT, list.buf, |b| scts.encode(b));
         }
+        if let Some(info) = &self.transparency_info {
+            encode_extension(ExtensionType::TransparencyInfo, list.buf, |b| {
+                info.encode(b)
+            });
+        }
         if let Some(dc) = &self.delegated_credential {
             encode_extension(ExtensionType::DelegatedCredential, list.buf, |b| {
                 dc.encode(b)
@@ -183,6 +193,7 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
         let cert = CertificateDer::read(r)?;
         let mut status = None;
         let mut sct_list = None;
+        let mut transparency_info = None;
         let mut delegated_credential = None;
         read_extensions(r, |typ, body| {
             match typ {
@@ -193,6 +204,13 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
                     let list = body.rest();
                     evidence::validate_sct_list(list)?;
                     sct_list = Some(Payload::Borrowed(list));
+                }
+                // RFC 9162 §6.5: a well-formed list, or an empty one.
+                // Whether we asked for it is checked by the handshake.
+                ExtensionType::TransparencyInfo => {
+                    let list = body.rest();
+                    transparency::validate(list)?;
+                    transparency_info = Some(Payload::Borrowed(list));
                 }
                 // Whether we offered it is checked by the handshake.
                 ExtensionType::DelegatedCredential => {
@@ -217,6 +235,7 @@ impl<'a> Codec<'a> for CertificateEntry<'a> {
             cert,
             status,
             sct_list,
+            transparency_info,
             delegated_credential,
         })
     }

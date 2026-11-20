@@ -109,3 +109,18 @@ fn certificate_compressors_follow_the_features() {
     assert_eq!(enabled.contains(&Alg::Brotli), cfg!(feature = "brotli"));
     assert_eq!(enabled.contains(&Alg::Zstd), cfg!(feature = "zstd"));
 }
+
+/// Certificate Transparency 2.0 (RFC 9162): the TLS side at the root, the
+/// PKI side under `pki_types`.
+#[test]
+fn transparency_is_nameable() {
+    let requirements = browntls::transparency::CtV2Requirements::new(
+        browntls::revocation::RevocationDigests::native(),
+        Vec::new(),
+    );
+    assert_eq!(requirements.min_verified_scts, 1);
+    // §6.3: a `TransItemList` is not empty.
+    assert!(browntls::pki_types::transparency::TransItemList::parse(&[0, 0]).is_err());
+    let mut config = Pki::new().client_config();
+    config.request_transparency_info = true;
+}

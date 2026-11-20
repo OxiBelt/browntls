@@ -3,6 +3,7 @@
 mod accept;
 #[cfg(feature = "std")]
 mod buffered;
+mod client_hello;
 mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
@@ -13,6 +14,7 @@ use browntls_pki::{DnsName, UnixTime};
 
 #[cfg(feature = "std")]
 pub use buffered::{Accepted, AcceptedAlert, Acceptor, ReadEarlyData, ServerConnection};
+pub use client_hello::ClientHello;
 pub use unbuffered_acceptor::{
     UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
 };
@@ -23,11 +25,9 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
-use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureScheme};
+use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::Error;
 use crate::key_log::KeyLog;
-use crate::msgs::enums::NamedGroup;
-use crate::msgs::handshake::{ClientHelloPayload, DistinguishedName, ProtocolName};
 use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -75,83 +75,6 @@ pub trait ResolvesServerCert: fmt::Debug + Send + Sync {
     /// Whether the resolver only yields raw public keys (RFC 7250).
     fn only_raw_public_keys(&self) -> bool {
         false
-    }
-}
-
-/// What a [`ResolvesServerCert`] sees of the ClientHello.
-#[derive(Debug)]
-pub struct ClientHello<'a> {
-    pub(super) server_name: Option<&'a DnsName<'static>>,
-    pub(super) signature_schemes: &'a [SignatureScheme],
-    pub(super) alpn: Option<&'a [ProtocolName]>,
-    pub(super) cipher_suites: &'a [CipherSuite],
-    pub(super) certificate_authorities: Option<&'a [DistinguishedName]>,
-    pub(super) named_groups: Option<&'a [NamedGroup]>,
-    pub(super) client_cert_types: Option<&'a [CertificateType]>,
-    pub(super) server_cert_types: Option<&'a [CertificateType]>,
-    pub(crate) external_id_hash: Option<&'a crate::external_binding::ExternalIdHash>,
-    pub(crate) external_session_id: Option<&'a crate::external_binding::ExternalSessionId>,
-}
-
-impl<'a> ClientHello<'a> {
-    pub(super) fn new(
-        server_name: Option<&'a DnsName<'static>>,
-        signature_schemes: &'a [SignatureScheme],
-        payload: &'a ClientHelloPayload,
-    ) -> Self {
-        Self {
-            server_name,
-            signature_schemes,
-            alpn: payload.alpn_protocols(),
-            cipher_suites: &payload.cipher_suites,
-            certificate_authorities: payload.extensions.certificate_authorities.as_deref(),
-            named_groups: payload.named_groups(),
-            client_cert_types: payload.extensions.client_certificate_types.as_deref(),
-            server_cert_types: payload.extensions.server_certificate_types.as_deref(),
-            external_id_hash: payload.extensions.external_id_hash.as_ref(),
-            external_session_id: payload.extensions.external_session_id.as_ref(),
-        }
-    }
-
-    /// The certificate types the client can present (RFC 7250), if it said.
-    pub fn client_cert_types(&self) -> Option<&'a [CertificateType]> {
-        self.client_cert_types
-    }
-
-    /// The certificate types the client accepts from us (RFC 7250), if it said.
-    pub fn server_cert_types(&self) -> Option<&'a [CertificateType]> {
-        self.server_cert_types
-    }
-
-    /// The server name indicated by the client, if any.
-    pub fn server_name(&self) -> Option<&str> {
-        self.server_name.map(|n| n.as_ref())
-    }
-
-    /// The signature schemes the client accepts.
-    pub fn signature_schemes(&self) -> &[SignatureScheme] {
-        self.signature_schemes
-    }
-
-    /// The ALPN protocols the client offered, if any.
-    pub fn alpn(&self) -> Option<impl Iterator<Item = &'a [u8]>> {
-        self.alpn
-            .map(|protocols| protocols.iter().map(ProtocolName::as_ref))
-    }
-
-    /// The cipher suites the client offered.
-    pub fn cipher_suites(&self) -> &[CipherSuite] {
-        self.cipher_suites
-    }
-
-    /// The certificate authorities the client trusts, if it said.
-    pub fn certificate_authorities(&self) -> Option<&'a [DistinguishedName]> {
-        self.certificate_authorities
-    }
-
-    /// The key exchange groups the client offered, if any.
-    pub fn named_groups(&self) -> Option<&'a [NamedGroup]> {
-        self.named_groups
     }
 }
 

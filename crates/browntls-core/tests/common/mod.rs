@@ -12,6 +12,7 @@
     clippy::panic
 )]
 
+pub mod hello_wire;
 #[cfg(feature = "native")]
 pub mod native_keys;
 

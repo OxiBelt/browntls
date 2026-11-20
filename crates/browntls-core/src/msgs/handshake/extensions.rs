@@ -330,6 +330,17 @@ pub(crate) struct ServerExtensions {
     pub(crate) extended_master_secret: Option<()>,
     /// RFC 7366: an empty `encrypt_then_mac` extension.
     pub(crate) encrypt_then_mac: Option<()>,
+    /// RFC 6066 §5: an empty `client_certificate_url` extension (TLS 1.2
+    /// ServerHello): the server accepts a CertificateURL message.
+    pub(crate) client_certificate_url: Option<()>,
+    /// RFC 6066 §6: an empty `trusted_ca_keys` extension (TLS 1.2
+    /// ServerHello): the client's list guided the certificate choice.
+    pub(crate) trusted_ca_keys_ack: Option<()>,
+    /// RFC 6066 §7: an empty `truncated_hmac` extension. Parsed so that a
+    /// client can tell it from an extension it does not know; never sent,
+    /// and never offered, so receiving it is always unsolicited (RFC 9325
+    /// §4.6).
+    pub(crate) truncated_hmac: Option<()>,
     pub(crate) session_ticket_ack: Option<()>,
     pub(crate) status_request_ack: Option<()>,
     pub(crate) sct_list: Option<Payload<'static>>,
@@ -393,6 +404,15 @@ impl ServerExtensions {
             self.encrypt_then_mac.is_some(),
             ExtensionType::EncryptThenMac,
         );
+        add(
+            self.client_certificate_url.is_some(),
+            ExtensionType::ClientCertificateUrl,
+        );
+        add(
+            self.trusted_ca_keys_ack.is_some(),
+            ExtensionType::TrustedCAKeys,
+        );
+        add(self.truncated_hmac.is_some(), ExtensionType::TruncatedHMAC);
         add(
             self.session_ticket_ack.is_some(),
             ExtensionType::SessionTicket,
@@ -483,6 +503,15 @@ impl Codec<'_> for ServerExtensions {
         if self.encrypt_then_mac.is_some() {
             encode_extension(ExtensionType::EncryptThenMac, out, |_| {});
         }
+        if self.client_certificate_url.is_some() {
+            encode_extension(ExtensionType::ClientCertificateUrl, out, |_| {});
+        }
+        if self.trusted_ca_keys_ack.is_some() {
+            encode_extension(ExtensionType::TrustedCAKeys, out, |_| {});
+        }
+        if self.truncated_hmac.is_some() {
+            encode_extension(ExtensionType::TruncatedHMAC, out, |_| {});
+        }
         if self.session_ticket_ack.is_some() {
             encode_extension(ExtensionType::SessionTicket, out, |_| {});
         }
@@ -567,6 +596,9 @@ impl Codec<'_> for ServerExtensions {
                 }
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
                 ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
+                ExtensionType::ClientCertificateUrl => out.client_certificate_url = Some(()),
+                ExtensionType::TrustedCAKeys => out.trusted_ca_keys_ack = Some(()),
+                ExtensionType::TruncatedHMAC => out.truncated_hmac = Some(()),
                 ExtensionType::SessionTicket => out.session_ticket_ack = Some(()),
                 ExtensionType::StatusRequest => out.status_request_ack = Some(()),
                 ExtensionType::SCT => out.sct_list = Some(Payload::read(body).into_owned()),
@@ -710,6 +742,36 @@ mod tests {
         );
         assert!(ServerExtensions::default().present_types().is_empty());
         assert_eq!(alloc::format!("{:?}", exts.alpn.unwrap()), "\"h2\"");
+    }
+
+    #[test]
+    fn server_rfc6066_legacy_extensions() {
+        let exts = ServerExtensions {
+            client_certificate_url: Some(()),
+            trusted_ca_keys_ack: Some(()),
+            truncated_hmac: Some(()),
+            ..Default::default()
+        };
+        let enc = exts.get_encoding();
+        assert_eq!(enc, [0, 12, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0]);
+        let back = ServerExtensions::read_bytes(&enc).unwrap();
+        assert_eq!(back, exts);
+        assert!(back.unknown.is_empty());
+        assert_eq!(
+            back.present_types(),
+            [
+                ExtensionType::ClientCertificateUrl,
+                ExtensionType::TrustedCAKeys,
+                ExtensionType::TruncatedHMAC
+            ]
+        );
+        // RFC 6066 §5, §6, §7: each is empty in a ServerHello.
+        for typ in [2, 3, 4] {
+            assert_eq!(
+                ServerExtensions::read_bytes(&[0, 5, 0, typ, 0, 1, 0]),
+                Err(InvalidMessage::TrailingData("extension"))
+            );
+        }
     }
 
     #[test]

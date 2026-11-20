@@ -1968,7 +1968,9 @@ implemented; there is no DTLS 1.2.
   close_notify are sent, and application data can still be, under the
   current keys. Closing before our Finished is queued cancels the
   handshake: the peer, which ignores an unprotected close_notify, gives
-  up on its own timer.
+  up on its own timer. A server that closes before its handshake
+  completes may never complete it, with no timer left, so nothing should
+  wait for the handshake after `send_close_notify`.
 - Application data is never fragmented: `send` seals one record into one
   datagram and refuses data longer than `max_application_data`.
 - Cookies: `ServerConnection::new` answers a ClientHello without a valid

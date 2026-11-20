@@ -226,3 +226,21 @@ fn forged_unprotected_acks_are_ignored() {
     pair.client.handle_timeout(timeout).unwrap();
     assert!(lose(&mut *pair.client, timeout) > 0, "ClientHello resent");
 }
+
+#[test]
+fn a_forged_client_hello_before_the_first_answer_leaves_numbers_to_spare() {
+    let now = Duration::from_secs(1000);
+    let (mut pair, ..) = Pair::default_pair();
+    // Ahead of the real ClientHello, at the highest record number.
+    let mut forged = handshake_fragment((1 << 48) - 1, 1, 0, 300, &[]);
+    pair.server.read_datagram(&mut forged, now).unwrap();
+    // The server's flights are lost a few times: every retransmission
+    // needs fresh record numbers.
+    let mut sim = Sim::new(
+        Link::perfect(),
+        Link::new(|n, _| if n % 2 == 0 && n < 8 { Fate::Drop } else { Fate::Deliver }),
+    );
+    sim.now = now;
+    pair.handshake(&mut sim).unwrap();
+    pair.exchange(&mut sim, "after forgery");
+}

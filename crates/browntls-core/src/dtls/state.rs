@@ -498,7 +498,7 @@ impl Dtls {
             match self.reassembler.push(&header, fragment, number.epoch) {
                 Fragment::Accepted => {
                     accepted = true;
-                    if !authenticated && client_hello {
+                    if !authenticated && client_hello && !fragment.is_empty() {
                         self.note_client_hello_seq(number.seq);
                     }
                 }
@@ -506,7 +506,9 @@ impl Dtls {
                 Fragment::Dropped => {}
             }
         }
-        if accepted || old {
+        // An unprotected repetition proves nothing, so it is not
+        // acknowledged: forged ones cannot crowd out real acknowledgements.
+        if accepted || (old && authenticated) {
             self.saw_handshake = true;
             self.note_ack(number);
         }
@@ -542,6 +544,8 @@ impl Dtls {
             .iter()
             .find(|w| w.epoch == 0)
             .is_none_or(|w| w.next_seq == 0);
+        // Capped, so that a forged number leaves plenty to send with.
+        let seq = seq.min(wire::MAX_SEQ / 2);
         if self.side == Side::Server && unsent {
             self.client_hello_seq = Some(self.client_hello_seq.map_or(seq, |s| s.max(seq)));
         }
@@ -590,6 +594,11 @@ impl Dtls {
     /// decides when to acknowledge what came in (RFC 9147 §7.1) and
     /// whether to retransmit our flight (RFC 9147 §5.8.1).
     pub(crate) fn end_input(&mut self, handshaking: bool, now: Duration) {
+        if self.out.flight_started_this_input() {
+            // A new flight may be retransmitted at the peer's request at
+            // once, whatever happened to the previous one.
+            self.peer_triggered_retransmission = None;
+        }
         if self.saw_retransmission {
             if self.out.has_flight() {
                 // The peer has not seen our answer to what it repeated.

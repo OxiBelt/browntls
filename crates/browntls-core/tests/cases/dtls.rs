@@ -885,3 +885,51 @@ fn close_notify_waits_for_the_messages_queued_before_it() {
         assert_eq!(pair.client.tls13_tickets_received(), 2, "MTU {mtu}");
     }
 }
+
+#[test]
+fn a_closing_client_whose_ack_is_lost_gives_up_quietly() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut now = Duration::from_secs(1000);
+    for _ in 0..2 {
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+    }
+    pair.client.send_close_notify();
+    flush_to(&mut pair.client, &mut pair.server, now);
+    assert!(!pair.server.is_handshaking());
+    assert!(pair.server.peer_has_closed());
+    // Every ACK of the server is lost; having read close_notify, it
+    // acknowledges nothing more.
+    let mut out = Vec::new();
+    for _ in 0..20 {
+        while pair.server.write_datagram(&mut out, now).unwrap() {
+            out.clear();
+        }
+        let Some(timeout) = pair.client.next_timeout() else {
+            return;
+        };
+        now = timeout;
+        pair.client.handle_timeout(now).unwrap();
+        flush_to(&mut pair.client, &mut pair.server, now);
+    }
+    panic!("the client kept retransmitting");
+}
+
+#[test]
+fn a_server_closing_after_its_flight_still_gets_the_finished() {
+    let (mut pair, ..) = Pair::default_pair();
+    let now = Duration::from_secs(1000);
+    flush_to(&mut pair.client, &mut pair.server, now);
+    flush_to(&mut pair.server, &mut pair.client, now);
+    flush_to(&mut pair.client, &mut pair.server, now);
+    // The server's flight, then its close_notify, reach the client
+    // together.
+    pair.server.send_close_notify();
+    flush_to(&mut pair.server, &mut pair.client, now);
+    assert!(!pair.client.is_handshaking());
+    assert!(pair.client.peer_has_closed());
+    // The client still sends its Finished once.
+    flush_to(&mut pair.client, &mut pair.server, now);
+    assert!(!pair.server.is_handshaking());
+    assert_eq!(pair.client.next_timeout(), None);
+}

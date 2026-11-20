@@ -80,6 +80,9 @@ pub(super) struct Outgoing {
     /// We closed with our last flight unacknowledged: that flight alone is
     /// still retransmitted, each time followed by close_notify again.
     pub(super) closing: bool,
+    /// The peer closed in the input that completed our handshake: our
+    /// last flight is sent once, then abandoned.
+    pub(super) sending_last: bool,
 }
 
 impl Outgoing {
@@ -96,6 +99,7 @@ impl Outgoing {
             flight_started_this_input: false,
             abandoned: false,
             closing: false,
+            sending_last: false,
         }
     }
 
@@ -176,7 +180,7 @@ impl Dtls {
         let Some(body) = rest.get(wire::TLS_HANDSHAKE_HEADER_LEN - 1..) else {
             return;
         };
-        if out.abandoned || out.closing {
+        if out.abandoned || out.closing || out.sending_last {
             return;
         }
         let epoch = self.write.last().map_or(0, |w| w.epoch);
@@ -238,6 +242,9 @@ impl Dtls {
         if wrote && self.out.closing && !self.alerts.contains(&close) {
             self.alerts.push_back(close);
         }
+        if self.out.sending_last && !self.out.has_pending() {
+            self.abandon_flights();
+        }
 
         // Alerts go last: the peer reads nothing after a close_notify
         // (RFC 9846 §6.1), so what shares its datagram must come first.
@@ -249,7 +256,10 @@ impl Dtls {
             if !fits && out.len() > start {
                 break;
             }
-            if description == AlertDescription::CloseNotify && wrote && self.out.has_pending() {
+            if description == AlertDescription::CloseNotify
+                && out.len() > start
+                && self.out.has_pending()
+            {
                 // The rest of what was queued before it comes first.
                 break;
             }
@@ -273,19 +283,41 @@ impl Dtls {
     /// handshake: until acknowledged, it is retransmitted with
     /// close_notify after it.
     fn close_sent(&mut self) {
-        let finished = u8::from(HandshakeType::Finished);
-        let last_flight = self.side == Side::Client
-            && self
-                .out
-                .messages
-                .iter()
-                .any(|m| !m.post_handshake && m.typ == finished);
-        if last_flight {
+        if self.holds_last_flight() && !self.out.sending_last {
             self.out.messages.retain(|m| !m.post_handshake);
             self.out.closing = true;
         } else {
             self.abandon_flights();
         }
+    }
+
+    /// The peer's close_notify was read: nothing it sends is read any
+    /// more, its ACKs included, so nothing is retransmitted. A client
+    /// whose handshake this input completed still sends its last flight
+    /// once, so that the server can complete its own. An ACK we owe is
+    /// still sent.
+    pub(super) fn peer_closed(&mut self) {
+        if self.out.sending_last {
+            return;
+        }
+        if self.holds_last_flight() && self.out.flight_started_this_input() && !self.out.closing {
+            self.out.sending_last = true;
+            self.out.deadline = None;
+        } else {
+            self.abandon_flights();
+        }
+    }
+
+    /// Whether we are a client whose unacknowledged flight holds its
+    /// Finished: the last flight of the handshake.
+    fn holds_last_flight(&self) -> bool {
+        let finished = u8::from(HandshakeType::Finished);
+        self.side == Side::Client
+            && self
+                .out
+                .messages
+                .iter()
+                .any(|m| !m.post_handshake && m.typ == finished)
     }
 
     /// Writes an ACK of what is to be acknowledged, if it fits `space`.
@@ -459,6 +491,12 @@ impl Dtls {
         }
         self.out.deadline = None;
         self.out.retransmissions += 1;
+        if self.out.retransmissions > MAX_RETRANSMISSIONS && self.out.closing {
+            // We closed: the server may have finished and read our
+            // close_notify, after which it acknowledges nothing.
+            self.abandon_flights();
+            return Ok(());
+        }
         if self.out.retransmissions > MAX_RETRANSMISSIONS {
             self.out.abandon();
             return Err(Error::General(

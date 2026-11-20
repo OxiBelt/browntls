@@ -1959,12 +1959,16 @@ implemented; there is no DTLS 1.2.
   acknowledged (§8), and no second KeyUpdate is sent meanwhile. Nothing
   sent after a close_notify is read (RFC 9846 §6.1). A close_notify of
   ours is sent after everything queued before it, and nothing is
-  retransmitted after it, except a client's last flight: until it is
-  acknowledged, it is retransmitted with close_notify after it, so that
-  the server completes its handshake. Once the peer's close_notify
-  arrives nothing more is retransmitted; an ACK still owed and our own
+  retransmitted after it, except a client's last flight: it is
+  retransmitted with close_notify after it until acknowledged, or
+  quietly given up after nine retransmissions, so that the server
+  completes its handshake. Once the peer's close_notify arrives nothing
+  more is retransmitted, but a client whose handshake that input
+  completed sends its last flight once; an ACK still owed and our own
   close_notify are sent, and application data can still be, under the
-  current keys.
+  current keys. Closing before our Finished is queued cancels the
+  handshake: the peer, which ignores an unprotected close_notify, gives
+  up on its own timer.
 - Application data is never fragmented: `send` seals one record into one
   datagram and refuses data longer than `max_application_data`.
 - Cookies: `ServerConnection::new` answers a ClientHello without a valid

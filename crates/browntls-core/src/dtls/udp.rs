@@ -51,14 +51,16 @@ impl UdpClient {
     /// handshake.
     ///
     /// A handshake the server never answers fails after its
-    /// retransmissions run out, after about two minutes; set a read
+    /// retransmissions run out, after about five minutes; set a read
     /// timeout with [`Self::from_connection`] and
-    /// [`Self::set_read_timeout`] to give up sooner.
+    /// [`Self::set_read_timeout`] to give up sooner. The socket is put in
+    /// blocking mode.
     pub fn connect(
         config: Arc<crate::ClientConfig>,
         name: ServerName<'static>,
         socket: UdpSocket,
     ) -> io::Result<Self> {
+        socket.set_nonblocking(false)?;
         let conn = ClientConnection::new(config, name).map_err(io_error)?;
         let mut client = Self::from_connection(conn, socket);
         client.complete_handshake()?;
@@ -66,7 +68,8 @@ impl UdpClient {
     }
 
     /// Pairs `conn`, configured as needed (for example its MTU), with
-    /// `socket`, connected to the server, without doing any I/O yet.
+    /// `socket`, connected to the server, without doing any I/O yet. The
+    /// socket must be in blocking mode (the default).
     pub fn from_connection(conn: ClientConnection, socket: UdpSocket) -> Self {
         Self {
             conn,
@@ -85,7 +88,23 @@ impl UdpClient {
     /// first; calling it again continues the handshake.
     pub fn complete_handshake(&mut self) -> io::Result<()> {
         let deadline = self.deadline();
+        self.handshake_until(deadline)
+    }
+
+    fn handshake_until(&mut self, deadline: Option<Duration>) -> io::Result<()> {
         while self.conn.is_handshaking() {
+            if self.conn.peer_has_closed() {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "the server closed the connection during the handshake",
+                ));
+            }
+            if self.conn.pending_revocation().is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "live OCSP checks are not supported by UdpClient",
+                ));
+            }
             self.wait(deadline)?;
         }
         self.flush()
@@ -95,7 +114,10 @@ impl UdpClient {
     /// handshake first if needed.
     ///
     /// `data` must fit one datagram: at most
-    /// [`ConnectionCommon::max_application_data`] bytes.
+    /// [`ConnectionCommon::max_application_data`] bytes. An error the
+    /// network reported for an earlier datagram (such as
+    /// [`io::ErrorKind::ConnectionRefused`]) may surface here, in which
+    /// case this datagram was not sent.
     pub fn send(&mut self, data: &[u8]) -> io::Result<()> {
         self.complete_handshake()?;
         let mut datagram = Vec::new();
@@ -113,8 +135,8 @@ impl UdpClient {
     /// and with [`io::ErrorKind::InvalidInput`] when `buf` is shorter than
     /// the datagram, which stays queued for a larger buffer.
     pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.complete_handshake()?;
         let deadline = self.deadline();
+        self.handshake_until(deadline)?;
         loop {
             if let Some(data) = self.received.front() {
                 let Some(dest) = buf.get_mut(..data.len()) else {
@@ -143,7 +165,8 @@ impl UdpClient {
     }
 
     /// Sets how long [`Self::recv`] and the handshake wait for the server;
-    /// `None` (the default) waits as long as the connection does.
+    /// `None` (the default) waits as long as the connection does. Even a
+    /// zero timeout takes a datagram that has already arrived.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }
@@ -158,7 +181,8 @@ impl UdpClient {
         &self.conn
     }
 
-    /// The connection, for example to refresh its traffic keys.
+    /// The connection, for example to refresh its traffic keys. What the
+    /// change queues is sent by the next call that does I/O.
     pub fn connection_mut(&mut self) -> &mut ClientConnection {
         &mut self.conn
     }
@@ -204,13 +228,15 @@ impl UdpClient {
         {
             return self.conn.handle_timeout(now).map_err(io_error);
         }
-        if deadline.is_some_and(|deadline| deadline <= now) {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
-        }
+        // Once the deadline passed, one last look at the socket.
+        let expired = deadline.is_some_and(|deadline| deadline <= now);
         let wait = wait_until(now, [self.conn.next_timeout(), deadline]);
         self.socket.set_read_timeout(wait)?;
         let len = match self.socket.recv(&mut self.buf) {
             Ok(len) => len,
+            Err(err) if is_transient(&err) && expired => {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
+            }
             // ICMP errors are not authenticated: an unreachable port
             // during the handshake is worth another retransmission.
             Err(err) if is_transient(&err) => return Ok(()),

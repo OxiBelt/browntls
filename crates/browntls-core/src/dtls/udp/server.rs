@@ -52,6 +52,14 @@ pub enum ServerEvent {
 /// [`Self::close`] or [`Self::remove`]; drop the ones that stay silent
 /// for too long.
 ///
+/// Handshakes are bounded, connected clients are not: the application
+/// decides how many to keep. The bound counts addresses, so one host
+/// using many ports can take the place of others' handshakes; filter
+/// such hosts before the server if that matters.
+///
+/// Live OCSP checks ([`crate::revocation`]) are not supported: a
+/// handshake that would wait for one fails.
+///
 /// While a client's connection exists, a new ClientHello from its address
 /// (a client restarted on the same port) is ignored: remove the old
 /// connection to let it connect again.
@@ -61,6 +69,8 @@ pub struct UdpServer {
     peers: HashMap<SocketAddr, Peer>,
     timers: BinaryHeap<Reverse<(Duration, SocketAddr)>>,
     events: VecDeque<ServerEvent>,
+    /// Peers changed through [`Self::connection_mut`], to flush.
+    touched: Vec<SocketAddr>,
     handshakes: usize,
     max_handshakes: usize,
     handshake_timeout: Duration,
@@ -74,35 +84,42 @@ struct Peer {
     conn: ServerConnection,
     /// When its connection was created.
     started: Duration,
+    /// When its handshake times out.
+    expires: Duration,
     /// Whether [`ServerEvent::Connected`] was reported for it.
     connected: bool,
+    /// The due time of its entry in the timer queue, if it has one.
+    scheduled: Option<Duration>,
 }
 
 impl Peer {
     /// When this peer next needs attention: its connection's timer, or
     /// the end of its handshake time.
-    fn next_due(&self, handshake_timeout: Duration) -> Option<Duration> {
+    fn next_due(&self) -> Option<Duration> {
         let timer = self.conn.next_timeout();
         if self.connected {
             return timer;
         }
-        let expiry = self.started.saturating_add(handshake_timeout);
-        Some(timer.map_or(expiry, |timer| timer.min(expiry)))
+        Some(timer.map_or(self.expires, |timer| timer.min(self.expires)))
     }
 }
 
 impl UdpServer {
     /// A server for clients on `socket`, with `config`, which must set
     /// `hello_retry_cookies` (see [`Acceptor::new`]).
+    ///
+    /// The socket is put in blocking mode.
     pub fn new(config: Arc<crate::ServerConfig>, socket: UdpSocket) -> io::Result<Self> {
         let acceptor = Acceptor::new(config)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        socket.set_nonblocking(false)?;
         Ok(Self {
             socket,
             acceptor,
             peers: HashMap::new(),
             timers: BinaryHeap::new(),
             events: VecDeque::new(),
+            touched: Vec::new(),
             handshakes: 0,
             max_handshakes: DEFAULT_MAX_HANDSHAKES,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
@@ -118,13 +135,15 @@ impl UdpServer {
         self.max_handshakes = max.max(1);
     }
 
-    /// Sets how long a handshake may take (30 seconds by default).
+    /// Sets how long a handshake may take (30 seconds by default), from
+    /// the next handshake on.
     pub fn set_handshake_timeout(&mut self, timeout: Duration) {
         self.handshake_timeout = timeout;
     }
 
     /// Sets how long [`Self::next_event`] waits for an event; `None` (the
-    /// default) waits forever.
+    /// default) waits forever. Even a zero timeout takes a datagram that
+    /// has already arrived.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }
@@ -136,23 +155,28 @@ impl UdpServer {
             .read_timeout
             .map(|timeout| self.now().saturating_add(timeout));
         loop {
+            for peer in core::mem::take(&mut self.touched) {
+                self.flush_peer(peer);
+            }
             self.run_timers();
             if let Some(event) = self.events.pop_front() {
                 return Ok(event);
             }
             let now = self.now();
-            if deadline.is_some_and(|deadline| deadline <= now) {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
-            }
+            // Once the deadline passed, one last look at the socket.
+            let expired = deadline.is_some_and(|deadline| deadline <= now);
             let timer = self.timers.peek().map(|Reverse((due, _))| *due);
             self.socket
                 .set_read_timeout(wait_until(now, [timer, deadline]))?;
-            let (len, peer) = match self.socket.recv_from(&mut self.buf) {
-                Ok(received) => received,
-                Err(err) if is_transient(&err) => continue,
+            match self.socket.recv_from(&mut self.buf) {
+                Ok((len, peer)) => self.handle_datagram(peer, len),
+                Err(err) if is_transient(&err) => {
+                    if expired {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
+                    }
+                }
                 Err(err) => return Err(err),
-            };
-            self.handle_datagram(peer, len);
+            }
         }
     }
 
@@ -207,9 +231,13 @@ impl UdpServer {
     }
 
     /// The connection with `peer`, once it connected, for example to
-    /// refresh its traffic keys.
+    /// refresh its traffic keys. What the change queues is sent by the next
+    /// [`Self::next_event`] or [`Self::send_to`].
     pub fn connection_mut(&mut self, peer: SocketAddr) -> Option<&mut ServerConnection> {
         let entry = self.peers.get_mut(&peer).filter(|entry| entry.connected)?;
+        if !self.touched.contains(&peer) {
+            self.touched.push(peer);
+        }
         Some(&mut entry.conn)
     }
 
@@ -255,8 +283,10 @@ impl UdpServer {
                 }
             }
             Ok(Accepted::Connection(conn)) => {
-                if self.handshakes >= self.max_handshakes {
-                    self.drop_oldest_handshake();
+                while self.handshakes >= self.max_handshakes {
+                    if !self.drop_oldest_handshake() {
+                        break;
+                    }
                 }
                 self.handshakes += 1;
                 self.peers.insert(
@@ -264,7 +294,9 @@ impl UdpServer {
                     Peer {
                         conn: *conn,
                         started: now,
+                        expires: now.saturating_add(self.handshake_timeout),
                         connected: false,
+                        scheduled: None,
                     },
                 );
                 // The acceptor processed the datagram, which cannot hold
@@ -293,6 +325,14 @@ impl UdpServer {
                 return;
             }
         };
+        if !entry.connected && entry.conn.pending_revocation().is_some() {
+            // Nothing here would answer the query.
+            self.fail(
+                peer,
+                Error::General("live OCSP checks are not supported by UdpServer".into()),
+            );
+            return;
+        }
         if !entry.connected && !entry.conn.is_handshaking() {
             entry.connected = true;
             self.handshakes -= 1;
@@ -303,13 +343,16 @@ impl UdpServer {
                 .push_back(ServerEvent::Received(peer, self.buf[range].to_vec()));
         }
         self.flush_peer(peer);
-        if self
+        let closed = self
             .peers
             .get(&peer)
-            .is_some_and(|entry| entry.conn.peer_has_closed())
-        {
+            .filter(|entry| entry.conn.peer_has_closed())
+            .map(|entry| entry.connected);
+        if let Some(connected) = closed {
             self.remove(peer);
-            self.events.push_back(ServerEvent::Closed(peer));
+            if connected {
+                self.events.push_back(ServerEvent::Closed(peer));
+            }
         }
     }
 
@@ -343,8 +386,13 @@ impl UdpServer {
             }
             Ok(())
         });
-        if let Some(due) = entry.next_due(self.handshake_timeout) {
-            self.timers.push(Reverse((due, peer)));
+        let due = entry.next_due();
+        let scheduled = due != entry.scheduled && due.is_some();
+        if due != entry.scheduled {
+            entry.scheduled = due;
+            if let Some(due) = due {
+                self.timers.push(Reverse((due, peer)));
+            }
         }
         if let Err(err) = result {
             // Only a connection that cannot seal fails here.
@@ -357,6 +405,9 @@ impl UdpServer {
                     Error::General(alloc::format!("{err}")),
                 ));
             }
+        }
+        if scheduled {
+            self.compact_timers();
         }
     }
 
@@ -373,10 +424,11 @@ impl UdpServer {
             };
             // Each change of a peer's timer pushes a new entry: skip the
             // ones that no longer match.
-            if entry.next_due(self.handshake_timeout) != Some(due) {
+            if entry.scheduled != Some(due) {
                 continue;
             }
-            if !entry.connected && entry.started.saturating_add(self.handshake_timeout) <= now {
+            entry.scheduled = None;
+            if !entry.connected && entry.expires <= now {
                 debug!("DTLS: handshake timed out");
                 self.remove(peer);
                 continue;
@@ -388,18 +440,35 @@ impl UdpServer {
         }
     }
 
-    /// Makes room for one more handshake.
-    fn drop_oldest_handshake(&mut self) {
+    /// Drops the entries of the timer queue that no longer match a
+    /// peer's timer once they outnumber the peers, so that the queue stays
+    /// in proportion to the peers.
+    fn compact_timers(&mut self) {
+        if self.timers.len() <= 2 * self.peers.len() + 64 {
+            return;
+        }
+        self.timers = self
+            .peers
+            .iter()
+            .filter_map(|(addr, entry)| entry.scheduled.map(|due| Reverse((due, *addr))))
+            .collect();
+    }
+
+    /// Makes room for one more handshake; returns whether there was one
+    /// to drop.
+    fn drop_oldest_handshake(&mut self) -> bool {
         let oldest = self
             .peers
             .iter()
             .filter(|(_, entry)| !entry.connected)
             .min_by_key(|(_, entry)| entry.started)
             .map(|(addr, _)| *addr);
-        if let Some(peer) = oldest {
-            debug!("DTLS: too many handshakes, dropping the oldest");
-            self.remove(peer);
-        }
+        let Some(peer) = oldest else {
+            return false;
+        };
+        debug!("DTLS: too many handshakes, dropping the oldest");
+        self.remove(peer);
+        true
     }
 }
 

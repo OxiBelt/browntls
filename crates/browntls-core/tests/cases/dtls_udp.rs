@@ -95,10 +95,7 @@ fn a_client_and_a_server_exchange_datagrams() {
     assert_eq!(&buf[..len], b"0123456789");
 
     // Fresh keys in both directions, then more data.
-    client
-        .connection_mut()
-        .refresh_traffic_keys()
-        .unwrap();
+    client.connection_mut().refresh_traffic_keys().unwrap();
     client.send(b"after update").unwrap();
     let len = client.recv(&mut buf).unwrap();
     assert_eq!(&buf[..len], b"after update");
@@ -186,8 +183,7 @@ fn the_server_sends_close_notify() {
 fn a_silent_server_times_the_client_out() {
     let silent = loopback();
     let chain = server_chain(KeyType::EcdsaP256);
-    let conn =
-        dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let conn = dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
     let mut client = UdpClient::from_connection(conn, client_socket(silent.local_addr().unwrap()));
     client.set_read_timeout(Some(Duration::from_millis(300)));
     let err = client.complete_handshake().unwrap_err();
@@ -205,10 +201,7 @@ fn a_silent_server_times_the_client_out() {
 /// Sends the datagrams the low-level `client` has queued from `socket`.
 fn send_all(client: &mut dtls::ClientConnection, socket: &UdpSocket) {
     let mut out = Vec::new();
-    while client
-        .write_datagram(&mut out, Duration::ZERO)
-        .unwrap()
-    {
+    while client.write_datagram(&mut out, Duration::ZERO).unwrap() {
         socket.send(&out).unwrap();
         out.clear();
     }
@@ -255,4 +248,57 @@ fn a_server_needs_a_cookie_sealer() {
     let chain = server_chain(KeyType::EcdsaP256);
     let err = UdpServer::new(Arc::new(server_config(&chain)), loopback()).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn a_zero_read_timeout_still_takes_a_waiting_datagram() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let server = server(&chain);
+    let addr = server.socket().local_addr().unwrap();
+    let echo = thread::spawn(move || echo(server, 1));
+    let config = Arc::new(client_config(&chain));
+    let mut client = UdpClient::connect(config, server_name(), client_socket(addr)).unwrap();
+    client.send(b"ping").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    client.set_read_timeout(Some(Duration::ZERO));
+    let mut buf = [0; 16];
+    assert_eq!(client.recv(&mut buf).unwrap(), 4);
+    let err = client.recv(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    client.close().unwrap();
+    echo.join().unwrap();
+}
+
+#[test]
+fn a_forged_close_notify_reports_nothing() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut server = server(&chain);
+    server.set_read_timeout(Some(Duration::from_millis(200)));
+    let addr = server.socket().local_addr().unwrap();
+    let socket = client_socket(addr);
+    let mut client =
+        dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // The cookie exchange, then the second ClientHello.
+    send_all(&mut client, &socket);
+    assert!(server.next_event().is_err());
+    let mut buf = vec![0; 65535];
+    let len = socket.recv(&mut buf).unwrap();
+    client
+        .read_datagram(&mut buf[..len], Duration::ZERO)
+        .unwrap();
+    send_all(&mut client, &socket);
+    assert!(server.next_event().is_err());
+    assert_eq!(server.handshakes(), 1);
+    // An unprotected close_notify from the client's address.
+    let mut alert = vec![21, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 2, 1, 0];
+    socket.send(&alert).unwrap();
+    alert.clear();
+    match server.next_event() {
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+        Ok(event) => panic!("{event:?}"),
+    }
+    assert_eq!(server.handshakes(), 1, "the handshake goes on");
 }

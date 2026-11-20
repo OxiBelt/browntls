@@ -45,6 +45,7 @@ Run from the repository root with Python 3.11 or newer, Git, and
 ```sh
 python3 -B -m unittest discover -s tests/scripts -p 'test_*.py'
 python3 -B tests/scripts/check_markdown_links.py --repo-root .
+python3 -B tests/scripts/check_line_width.py --repo-root .
 python3 -B tests/scripts/check_rust_line_count.py --repo-root .
 python3 -B tests/scripts/check_facade_features.py --repo-root .
 actionlint -shellcheck= -pyflakes=
@@ -65,6 +66,16 @@ by the total error count. CI runs the same checks (whitespace with
 actionlint archive by SHA-256. Optional shellcheck and pyflakes integrations
 are disabled so the documented actionlint result does not depend on
 host-installed analyzers.
+
+The line width check fails when a line of a Git-tracked Markdown file, or a
+full-line `//`, `///` or `//!` comment of a Git-tracked `.rs` file, is wider
+than 80 characters and could be wrapped. A longer line passes when it holds a
+single word after its indentation and list marker, such as a long URL or
+intra-doc link. YAML front matter, fenced code blocks (also in doc comments),
+table rows, headings and link reference definitions are not checked, since
+wrapping them would change what renders. Rust code and trailing comments stay
+with rustfmt, whose `wrap_comments` option is not available on the stable
+toolchain.
 
 The line count check fails when a Git-tracked `.rs` file has more than 1000
 lines. It counts every line, including comments, blank lines, tests and

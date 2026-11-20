@@ -140,6 +140,36 @@ mod tests {
         assert_eq!(CertificateUrlPayload::read_bytes(&enc).unwrap(), payload);
     }
 
+    /// TLS 1.2 only: in TLS 1.3 the message type stays unknown, which every
+    /// state refuses with unexpected_message.
+    #[cfg(feature = "tls12")]
+    #[test]
+    fn parsed_in_tls12_only() {
+        use crate::enums::ProtocolVersion;
+        use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
+
+        let body = CertificateUrlPayload {
+            chain_type: CertChainType::PkiPath,
+            entries: alloc::vec![entry(b"http://p", 3)],
+        }
+        .get_encoding();
+        let mut msg = alloc::vec![21, 0, 0, body.len() as u8];
+        msg.extend(&body);
+        let read = |version| {
+            HandshakeMessagePayload::read_version(&mut Reader::init(&msg), version)
+                .unwrap()
+                .0
+        };
+        assert!(matches!(
+            read(ProtocolVersion::TLSv1_2),
+            HandshakePayload::CertificateUrl(_)
+        ));
+        assert!(matches!(
+            read(ProtocolVersion::TLSv1_3),
+            HandshakePayload::Unknown(_)
+        ));
+    }
+
     #[test]
     fn malformed_bodies() {
         let good = entry(b"http://a", 7).get_encoding();

@@ -11,8 +11,10 @@ use crate::enums::{AlertDescription, HandshakeType};
 use crate::error::{Error, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
-use crate::msgs::handshake::{HandshakePayload, SessionId};
-use crate::msgs::message::Message;
+use crate::msgs::handshake::{
+    CertificateChain, HandshakeMessagePayload, HandshakePayload, SessionId,
+};
+use crate::msgs::message::{Message, MessagePayload};
 use crate::revocation::finish_or_pause;
 use crate::server::common::{ClientCertAwaitingProof, verify_client_cert};
 use crate::server::hs::{NextStateOrError, ServerContext};
@@ -21,6 +23,9 @@ use crate::sync::Arc;
 use crate::tls12::{ConnectionSecrets, Tls12CipherSuite};
 
 pub(super) struct ExpectCertificate {
+    /// We acknowledged `client_certificate_url`: a CertificateURL message
+    /// may come in place of the Certificate (RFC 6066 §5).
+    pub(super) certificate_url: bool,
     pub(super) config: Arc<ServerConfig>,
     pub(super) transcript: HandshakeHash,
     pub(super) randoms: ConnectionRandoms,
@@ -34,11 +39,31 @@ pub(super) struct ExpectCertificate {
 
 impl State<ServerConnectionData> for ExpectCertificate {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
+        if self.certificate_url
+            && let MessagePayload::Handshake {
+                parsed: HandshakeMessagePayload(HandshakePayload::CertificateUrl(urls)),
+                ..
+            } = &m.payload
+        {
+            return super::certificate_url::pause(self, cx, &m, urls);
+        }
         let cert_chain =
             require_handshake_msg!(m, HandshakeType::Certificate, HandshakePayload::Certificate)?;
         self.transcript.add_message(&m);
         let cert_chain = cert_chain.clone().into_owned();
+        self.accept_chain(cx, cert_chain)
+    }
+}
 
+impl ExpectCertificate {
+    /// Goes on with the client's chain, from a Certificate message or
+    /// fetched for a CertificateURL one: the transcript already has the
+    /// message.
+    pub(super) fn accept_chain(
+        self: Box<Self>,
+        cx: &mut ServerContext<'_>,
+        cert_chain: CertificateChain<'static>,
+    ) -> NextStateOrError {
         let client_cert = if cert_chain.0.is_empty() {
             // RFC 5246 §7.4.6: an empty list is allowed unless we insist.
             if self.config.verifier.client_auth_mandatory() {

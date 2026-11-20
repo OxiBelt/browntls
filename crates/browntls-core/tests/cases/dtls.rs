@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use browntls_core::dtls;
-use browntls_core::{
-    ClientConfig, Error, HandshakeKind, ProtocolVersion, ServerConfig, SideData,
-};
+use browntls_core::{ClientConfig, Error, HandshakeKind, ProtocolVersion, ServerConfig, SideData};
 use common::*;
 
 // ------------------------------------------------------------- simulation
@@ -310,7 +308,10 @@ impl Pair {
 }
 
 fn assert_dtls13(pair: &Pair) {
-    for common in [&**pair.client as &browntls_core::CommonState, &**pair.server] {
+    for common in [
+        &**pair.client as &browntls_core::CommonState,
+        &**pair.server,
+    ] {
         assert_eq!(common.protocol_version(), Some(ProtocolVersion::DTLSv1_3));
         assert!(!common.is_handshaking());
     }
@@ -558,8 +559,20 @@ fn key_update_survives_loss() {
     let mut sim = Sim::perfect();
     pair.handshake(&mut sim).unwrap();
     let mut lossy = Sim::new(
-        Link::new(|i, _| if i % 3 == 0 { Fate::Drop } else { Fate::Deliver }),
-        Link::new(|i, _| if i % 2 == 0 { Fate::Drop } else { Fate::Deliver }),
+        Link::new(|i, _| {
+            if i % 3 == 0 {
+                Fate::Drop
+            } else {
+                Fate::Deliver
+            }
+        }),
+        Link::new(|i, _| {
+            if i % 2 == 0 {
+                Fate::Drop
+            } else {
+                Fate::Deliver
+            }
+        }),
     );
     lossy.now = sim.now;
     pair.client.refresh_traffic_keys().unwrap();
@@ -678,7 +691,9 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
     // Answering the same ClientHello again keeps nothing either.
     let mut again = Vec::new();
     assert!(matches!(
-        acceptor.accept(&mut first[0], PEER, &mut again, now).unwrap(),
+        acceptor
+            .accept(&mut first[0], PEER, &mut again, now)
+            .unwrap(),
         dtls::Accepted::Retry
     ));
     // Noise is ignored.

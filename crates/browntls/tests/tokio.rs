@@ -74,6 +74,71 @@ async fn server_grease_with_client_authentication_through_the_tokio_module() {
     tokio::join!(server, client);
 }
 
+/// A client authenticates with a delegated credential (RFC 9345 §4.1.2)
+/// through `browntls::tokio`, issued with the native provider, and the
+/// server reads it from the accepted stream.
+#[tokio::test]
+async fn client_delegated_credential_through_the_tokio_module() {
+    use browntls::crypto::native::delegated_credential::generate;
+    use browntls::delegated_credential::valid_time_until;
+    use browntls::pki_types::UnixTime;
+    use browntls::sign::{CertifiedKey, SingleCertAndKey};
+    use browntls::{ClientConfig, Side, SignatureScheme};
+
+    let pki = Pki::with_delegation();
+    let end_entity = &pki.client_chain[0];
+    let cert_key = provider()
+        .key_provider
+        .load_private_key(pki.client_key())
+        .unwrap();
+    let a_day_from_now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+        UnixTime::now().as_secs() + 24 * 3600,
+    ));
+    let issued = generate(
+        Side::Client,
+        end_entity,
+        &*cert_key,
+        &[SignatureScheme::ECDSA_NISTP256_SHA256],
+        SignatureScheme::ED25519,
+        valid_time_until(end_entity, a_day_from_now).unwrap(),
+    )
+    .unwrap();
+    let certified = CertifiedKey::new(pki.client_chain.clone(), cert_key)
+        .with_client_delegated_credential(issued.credential.clone(), issued.signing_key)
+        .unwrap();
+    let client = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(pki.roots())
+        .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
+
+    let mut server = pki.server_config_with_client_auth();
+    server.enable_delegated_credentials = true;
+
+    let acceptor = TlsAcceptor::from(Arc::new(server));
+    let connector = TlsConnector::from(Arc::new(client));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let server = async {
+        let mut tls = acceptor.accept(server_io).await.unwrap();
+        let (_, conn) = tls.get_ref();
+        assert_eq!(conn.client_delegated_credential(), Some(&issued.credential));
+        let mut request = [0u8; 5];
+        tls.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello");
+        tls.write_all(b"world").await.unwrap();
+        tls.shutdown().await.unwrap();
+    };
+    let client = async {
+        let mut tls = connector.connect(localhost(), client_io).await.unwrap();
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut reply = Vec::new();
+        tls.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(reply, b"world");
+    };
+    tokio::join!(server, client);
+}
+
 /// The module's own re-export of the protocol crate names the same items
 /// as this crate's root: a configuration built through one path is the
 /// type the other path expects.

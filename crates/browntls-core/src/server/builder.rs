@@ -115,6 +115,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             client_certificate_url: None,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
             external_binding: None,
+            enable_grease: false,
             ech: None,
             ech_backend: false,
             cached_info: Default::default(),

@@ -1114,7 +1114,7 @@ RFC 9257 guidance and what browntls enforces:
   including after kernel handoff, and ignores further valid tickets without
   deriving or storing them. Zero disables ticket storage. Invalid ticket
   messages still fail through the ordinary protocol checks.
-- GREASE (RFC 8701, `msgs::grease`), client only, opt-in
+- GREASE (RFC 8701, `msgs::grease`), client, opt-in
   (`ClientConfig::enable_grease`, default off until the GnuTLS end-to-end
   scenarios have run with it): random per-connection GREASE values first in
   the cipher suites, `supported_groups`, `key_share` (a one-byte share),
@@ -1126,7 +1126,29 @@ RFC 9257 guidance and what browntls enforces:
   checked against, so a server selecting one fails as for any value not
   offered (`illegal_parameter`, or `unsupported_extension` for an
   extension). ALPN is not GREASEd. A browntls server ignores GREASE values
-  like any unknown value and sends none itself (RFC 8701 §4 is optional).
+  like any unknown value.
+- GREASE (RFC 8701 §4.1), server, opt-in (`ServerConfig::enable_grease`,
+  default off like the client's: a client that mishandles unknown values
+  would fail client authentication or lose its tickets). It covers the two
+  TLS 1.3 messages whose extension points a server offers. A
+  CertificateRequest, in the handshake or after it (also the one an
+  offloaded connection hands to kernel TLS), lists a GREASE signature scheme
+  first in `signature_algorithms` and carries an empty GREASE extension
+  first and a one-byte one last; a NewSessionTicket carries the same two
+  extensions. The values are drawn for each message, and the two extension
+  types of a message differ. The GREASE scheme is never in the list a client
+  CertificateVerify is checked against, so a client signing with it fails as
+  for any scheme not offered (`illegal_parameter`); a Certificate entry
+  extension of a GREASE type is refused like any unknown one. Nothing goes
+  into the ServerHello, HelloRetryRequest, EncryptedExtensions or
+  Certificate, where a client must reject GREASE (§3.1), into TLS 1.2
+  messages (§4.1 names TLS 1.3 only), or into exported authenticator
+  requests (RFC 9261). A browntls client ignores a server's GREASE values
+  like any unknown value: unknown extensions of both messages are skipped,
+  and an unknown signature scheme is passed on with the others to
+  `ResolvesClientCert::resolve` and `SigningKey::choose_scheme`. The
+  built-in keys choose only schemes they implement; a custom key must not
+  choose a scheme it does not know.
 - `padding` (RFC 7685), client: by default
   (`ClientHelloPadding::AvoidProblematicLengths`) a ClientHello handshake
   message of 256 to 511 bytes is padded to 512 bytes, or 513 to 515 bytes

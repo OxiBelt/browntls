@@ -421,12 +421,22 @@ pub(crate) struct CertificateRequestExtensions {
     /// An empty `signed_certificate_timestamp` (RFC 6962 §3.3.1, permitted
     /// in CertificateRequest by RFC 8446 §4.2), asking the client for SCTs.
     pub(crate) sct_request: Option<()>,
+    /// RFC 8701 §4.1: an empty GREASE extension of this type, encoded
+    /// first. Only for encoding; a GREASE extension reads back as an
+    /// unknown one.
+    pub(crate) grease_first: Option<u16>,
+    /// RFC 8701 §4.1: a one-byte GREASE extension of this type, encoded
+    /// last. Only for encoding.
+    pub(crate) grease_last: Option<u16>,
 }
 
 impl Codec<'_> for CertificateRequestExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        if let Some(grease) = self.grease_first {
+            encode_extension(ExtensionType::Unknown(grease), out, |_| {});
+        }
         if let Some(s) = &self.signature_algorithms {
             encode_extension(ExtensionType::SignatureAlgorithms, out, |b| {
                 encode_vec_u16(b, s)
@@ -457,6 +467,10 @@ impl Codec<'_> for CertificateRequestExtensions {
         }
         if self.sct_request.is_some() {
             encode_extension(ExtensionType::SCT, out, |_| {});
+        }
+        if let Some(grease) = self.grease_last {
+            // RFC 8701 §4.1: extensions "with varying length and contents".
+            encode_extension(ExtensionType::Unknown(grease), out, |b| b.push(0));
         }
     }
 
@@ -619,6 +633,32 @@ mod tests {
             CertificateRequestPayloadTls13::read_bytes(&cr13.get_encoding()).unwrap(),
             cr13
         );
+
+        // GREASE extensions (RFC 8701 §4.1) go first and last, and read
+        // back as unknown ones, as a GREASE signature scheme does.
+        let mut greased = cr13.clone();
+        greased.extensions.signature_algorithms = Some(alloc::vec![
+            SignatureScheme::Unknown(0x3a3a),
+            SignatureScheme::ED25519
+        ]);
+        greased.extensions.grease_first = Some(0x1a1a);
+        greased.extensions.grease_last = Some(0x2a2a);
+        let enc = greased.get_encoding();
+        assert_eq!(enc[3..7], [0x1a, 0x1a, 0, 0]);
+        assert_eq!(enc[enc.len() - 5..], [0x2a, 0x2a, 0, 1, 0]);
+        let read = CertificateRequestPayloadTls13::read_bytes(&enc).unwrap();
+        assert_eq!(
+            read.extensions.unknown,
+            [
+                ExtensionType::Unknown(0x1a1a),
+                ExtensionType::Unknown(0x2a2a)
+            ]
+        );
+        assert_eq!(
+            read.extensions.signature_algorithms,
+            greased.extensions.signature_algorithms
+        );
+        assert_eq!(read.extensions.authorities, cr13.extensions.authorities);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use rcgen::{
 
 /// The native provider, named explicitly: a build with both the `native` and
 /// the `rustcrypto` feature has no process default to fall back on.
-fn provider() -> Arc<CryptoProvider> {
+pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(browntls::crypto::native::default_provider())
 }
 
@@ -71,6 +71,20 @@ impl Pki {
             .with_no_client_auth()
             .with_single_cert(self.server_chain.clone(), key)
             .unwrap()
+    }
+
+    /// The CA certificate.
+    pub fn ca(&self) -> &CertificateDer<'static> {
+        &self.ca
+    }
+
+    /// The server chain and its key, loaded with the provider.
+    pub fn certified_key(&self) -> Arc<browntls::sign::CertifiedKey> {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
+        Arc::new(
+            browntls::sign::CertifiedKey::from_der(self.server_chain.clone(), key, &provider())
+                .unwrap(),
+        )
     }
 
     /// A client configuration that trusts the CA.

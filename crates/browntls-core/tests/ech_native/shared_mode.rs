@@ -635,3 +635,53 @@ fn outer_hello_never_carries_a_cached_tls12_session_id() {
     assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_2));
     assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
 }
+
+/// A resolver that remembers whether a ClientHello it saw carried
+/// `trusted_ca_keys`.
+#[derive(Debug)]
+struct SeesTrustedCaKeys(
+    Arc<ResolvesServerCertUsingSni>,
+    std::sync::atomic::AtomicBool,
+);
+
+impl browntls_core::server::ResolvesServerCert for SeesTrustedCaKeys {
+    fn resolve(
+        &self,
+        client_hello: browntls_core::server::ClientHello<'_>,
+    ) -> Option<Arc<CertifiedKey>> {
+        if client_hello.trusted_ca_keys().is_some() {
+            self.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.0.resolve(client_hello)
+    }
+}
+
+/// An ECH offer restricts the client to TLS 1.3 (RFC 9849 §6.1), so
+/// neither the outer nor the inner ClientHello carries `trusted_ca_keys`
+/// (RFC 6066 §6, TLS 1.2 only), whatever the configuration lists.
+#[test]
+fn no_trusted_ca_keys_with_an_ech_offer() {
+    use browntls_core::TrustedAuthority;
+    use common::hello_wire::{EXT_TRUSTED_CA_KEYS, give, hello_extension_types, take_flight};
+
+    init_logging();
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(7)]).unwrap());
+    let mut client = client_config(&certs, enable(ech.ech_config_list()));
+    client.trusted_ca_keys = Some(vec![TrustedAuthority::PreAgreed]);
+    let seen = Arc::new(SeesTrustedCaKeys(
+        certs.resolver(),
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    let mut server = server_config(&certs, Some(&ech), None);
+    server.cert_resolver = seen.clone();
+    let (mut client, mut server) = connect(client, server);
+
+    let outer = take_flight(&mut client);
+    let types = hello_extension_types(&outer, true);
+    assert!(!types.contains(&EXT_TRUSTED_CA_KEYS), "{types:x?}");
+    give(&mut server, &outer);
+    assert_accepted(&mut client, &mut server);
+    // The server resolved its certificate for the inner ClientHello.
+    assert!(!seen.1.load(std::sync::atomic::Ordering::Relaxed));
+}

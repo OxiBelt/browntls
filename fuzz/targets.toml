@@ -83,6 +83,7 @@ sources = [
   "crates/browntls-core/src/versions.rs",
   "crates/browntls-core/src/time_provider*",
   "crates/browntls-core/src/x509.rs",
+  "crates/browntls-core/src/trusted_ca_keys.rs",
 ]
 
 [targets.tls_ech]

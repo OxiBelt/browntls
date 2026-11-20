@@ -14,7 +14,7 @@ const SHA1_LEN: usize = 20;
 /// an unbounded list would let a ClientHello of 64 KiB take 2 MiB before
 /// the handshake is authenticated. A client names the roots it trusts; even
 /// a whole public root store is a few hundred.
-const MAX_TRUSTED_AUTHORITIES: usize = 1024;
+pub(crate) const MAX_TRUSTED_AUTHORITIES: usize = 1024;
 
 /// `IdentifierType` values (RFC 6066 §6).
 const PRE_AGREED: u8 = 0;
@@ -27,8 +27,17 @@ const CERT_SHA1_HASH: u8 = 3;
 ///
 /// SHA-1 only names a key or certificate here; nothing is authenticated
 /// through it (RFC 6066 §11.4).
+///
+/// A client lists these in
+/// [`ClientConfig::trusted_ca_keys`](crate::ClientConfig::trusted_ca_keys);
+/// a server reads them with
+/// [`ClientHello::trusted_ca_keys`](crate::server::ClientHello::trusted_ca_keys).
+/// The constructors that derive an identifier from a CA certificate or a
+/// trust anchor take the SHA-1 function as an argument
+/// (`crypto::native::sha1` or `crypto::rustcrypto::sha1`).
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TrustedAuthority {
+pub enum TrustedAuthority {
     /// `pre_agreed`: no key is named; client and server know the set of
     /// root keys by other means.
     PreAgreed,

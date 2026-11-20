@@ -413,14 +413,16 @@ impl ExpectClientHello {
         // Choose the certificate. RFC 9846 §4.3.3: a client that wants
         // certificate authentication sends signature_algorithms; one that
         // offered only a PSK may omit it (see `process_client_hello`).
+        // The resolver may say it chose with the client's trusted_ca_keys
+        // (RFC 6066 §6); only a full TLS 1.2 handshake acts on that.
+        let trusted_ca_keys_ack = core::sync::atomic::AtomicBool::new(false);
         let certkey = if sig_schemes.is_empty() {
             None
         } else {
-            self.config.cert_resolver.resolve(ClientHello::new(
-                cx.data.sni.as_ref(),
-                &sig_schemes,
-                client_hello,
-            ))
+            self.config.cert_resolver.resolve(
+                ClientHello::new(cx.data.sni.as_ref(), &sig_schemes, client_hello)
+                    .with_trusted_ca_keys_ack(&trusted_ca_keys_ack),
+            )
         };
         if sig_schemes.is_empty() && !psk_may_authenticate {
             return Err(cx.common.send_fatal_alert(
@@ -739,6 +741,7 @@ impl ExpectClientHello {
                     randoms,
                     send_ticket: self.send_tickets > 0,
                     cert_types,
+                    trusted_ca_keys_ack: trusted_ca_keys_ack.into_inner(),
                 }
                 .handle_client_hello(
                     cx,

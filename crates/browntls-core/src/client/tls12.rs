@@ -238,6 +238,11 @@ impl CompleteServerHelloHandling {
             cx.common.handshake_kind = Some(HandshakeKind::Full);
         }
         cached_info::expect_hash_forms(cx.common, self.hello.cached_info.as_ref());
+        // RFC 6066 §6: the server says our trusted_ca_keys guided its
+        // choice of chain (unsolicited, it was refused above). Only a full
+        // handshake sends a chain, so a resumed one never records it.
+        cx.data.trusted_ca_keys_acknowledged =
+            server_hello.extensions.trusted_ca_keys_ack.is_some();
 
         if let Some(list) = &server_hello.extensions.sct_list {
             crate::msgs::handshake::CertificatePayloadTls13::validate_sct_list(list.bytes())

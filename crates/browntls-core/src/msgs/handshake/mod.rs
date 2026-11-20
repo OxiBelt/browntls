@@ -32,8 +32,9 @@ pub(crate) use kx::{
     ClientEcdhParams, ServerEcdhParams, ServerKeyExchange, ServerKeyExchangeParams,
 };
 pub(crate) use tickets::{NewSessionTicketPayload, NewSessionTicketPayloadTls13};
+pub use trusted_ca::TrustedAuthority;
 pub(crate) use trusted_ca::{
-    TrustedAuthority, encode_trusted_authorities, read_trusted_authorities,
+    MAX_TRUSTED_AUTHORITIES, encode_trusted_authorities, read_trusted_authorities,
 };
 
 use super::base::{Payload, PayloadU16};

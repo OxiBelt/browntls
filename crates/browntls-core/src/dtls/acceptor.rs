@@ -10,6 +10,8 @@ use super::connection::ServerConnection;
 use super::wire::{self, HandshakeHeader, Header};
 use crate::enums::{ContentType, HandshakeType};
 use crate::error::Error;
+use crate::msgs::codec::Reader;
+use crate::msgs::enums::ExtensionType;
 use crate::sync::Arc;
 
 /// Answers the datagrams of clients a server has no connection for.
@@ -20,10 +22,11 @@ use crate::sync::Arc;
 /// ClientHello that comes back with the cookie (`message_seq` 1, RFC 9147
 /// §5.2) gets a [`ServerConnection`].
 ///
-/// The cookie of a second ClientHello split over several datagrams can
-/// only be checked once the whole message arrived. Until its handshake
-/// progresses such a connection is unverified: bound how many of those a
-/// server keeps, and drop those that make no progress.
+/// The cookie is checked before anything is kept, also for a second
+/// ClientHello split over several datagrams: its first fragment, which
+/// starts with the cookie, must arrive first. Clients that complete no
+/// handshake still cost a connection each: bound how many a server keeps,
+/// and drop those that make no progress.
 pub struct Acceptor {
     config: Arc<crate::ServerConfig>,
 }
@@ -60,21 +63,37 @@ impl Acceptor {
         out: &mut Vec<u8>,
         now: Duration,
     ) -> Result<Accepted, Error> {
-        let Some(message_seq) = client_hello_seq(datagram) else {
+        let Some((header, fragment)) = first_client_hello(datagram) else {
             return Ok(Accepted::Ignored);
         };
+        let retried = match header.message_seq {
+            0 => false,
+            // Nothing is kept for a second ClientHello unless it starts
+            // with a valid cookie for this address.
+            1 => match cookie_of(&header, fragment) {
+                Some(cookie)
+                    if crate::server::cookie::dtls_cookie_is_valid(
+                        &self.config,
+                        cookie,
+                        peer_address,
+                    ) =>
+                {
+                    true
+                }
+                _ => return Ok(Accepted::Ignored),
+            },
+            _ => return Ok(Accepted::Ignored),
+        };
         let mut conn = ServerConnection::new(self.config.clone(), peer_address)?;
-        if message_seq == 1 {
+        if retried {
             conn.continue_after_stateless_retry();
-        } else if message_seq != 0 {
-            return Ok(Accepted::Ignored);
         }
         // A broken ClientHello fails the connection; its alert is not
         // worth sending to an address nobody verified.
         if conn.read_datagram(datagram, now).is_err() {
             return Ok(Accepted::Ignored);
         }
-        if message_seq == 1 {
+        if retried {
             return Ok(Accepted::Connection(Box::new(conn)));
         }
         if !conn.answered_with_retry() {
@@ -87,9 +106,9 @@ impl Acceptor {
     }
 }
 
-/// The `message_seq` of the ClientHello fragment that starts `datagram`,
-/// if it starts with an unprotected handshake record holding one.
-fn client_hello_seq(datagram: &[u8]) -> Option<u16> {
+/// The ClientHello fragment that starts `datagram`, if it starts with an
+/// unprotected handshake record holding one.
+fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8])> {
     let record = wire::parse_record(datagram, 0)?;
     let Header::Plaintext {
         typ: ContentType::Handshake,
@@ -99,8 +118,39 @@ fn client_hello_seq(datagram: &[u8]) -> Option<u16> {
     else {
         return None;
     };
-    let (header, ..) = HandshakeHeader::read(datagram.get(record.body)?)?;
-    (header.typ == u8::from(HandshakeType::ClientHello)).then_some(header.message_seq)
+    let (header, fragment, _) = HandshakeHeader::read(datagram.get(record.body)?)?;
+    (header.typ == u8::from(HandshakeType::ClientHello)).then_some((header, fragment))
+}
+
+/// The cookie of a ClientHello from its first fragment: browntls clients,
+/// as RFC 9147 §5.1 suggests, send the `cookie` extension first so that it
+/// arrives in that fragment. `None` for any other fragment, or when the
+/// first extension is not a cookie.
+fn cookie_of<'a>(header: &HandshakeHeader, fragment: &'a [u8]) -> Option<&'a [u8]> {
+    if header.fragment_offset != 0 {
+        return None;
+    }
+    let mut r = Reader::init(fragment);
+    // legacy_version, random
+    r.take(2 + 32)?;
+    // legacy_session_id, legacy_cookie, cipher_suites,
+    // legacy_compression_methods
+    for len_bytes in [1, 1, 2, 1] {
+        let len = r.take(len_bytes)?;
+        let len = len.iter().fold(0usize, |acc, b| acc << 8 | usize::from(*b));
+        r.take(len)?;
+    }
+    // extensions<8..2^16-1>, then the first extension's type and length
+    let _extensions_len = r.take(2)?;
+    let typ = r.take(2)?;
+    if typ != u16::from(ExtensionType::Cookie).to_be_bytes() {
+        return None;
+    }
+    let ext_len = r.take(2)?;
+    let ext = r.take(usize::from(u16::from_be_bytes([ext_len[0], ext_len[1]])))?;
+    // struct { opaque cookie<1..2^16-1>; } Cookie;
+    let (len, cookie) = ext.split_first_chunk::<2>()?;
+    (usize::from(u16::from_be_bytes(*len)) == cookie.len() && !cookie.is_empty()).then_some(cookie)
 }
 
 impl fmt::Debug for Acceptor {

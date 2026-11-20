@@ -345,12 +345,12 @@ impl Dtls {
                 .all(|m| m.epoch == 0 && !m.post_handshake)
     }
 
-    /// Processes the record numbers of an ACK received in `ack_epoch`.
-    /// An unprotected ACK, which anyone could have sent, only counts for
-    /// unprotected records.
-    pub(super) fn on_ack(&mut self, numbers: impl Iterator<Item = RecordNumber>, ack_epoch: u64) {
+    /// Processes the record numbers of a protected ACK. Unprotected ACKs,
+    /// which anyone could forge, are ignored: they could only spare us
+    /// retransmitting a hello.
+    pub(super) fn on_ack(&mut self, numbers: impl Iterator<Item = RecordNumber>) {
         let mut newest: Option<RecordNumber> = None;
-        for number in numbers.filter(|n| ack_epoch > 0 || n.epoch == 0) {
+        for number in numbers {
             let Some(at) = self.out.sent.iter().position(|s| s.number == number) else {
                 continue;
             };

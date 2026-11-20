@@ -97,7 +97,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
                         _ => AlertDescription::UnexpectedMessage,
                     };
                     let err = common.send_fatal_alert(desc, err);
-                    return Err(self.core.fail(err));
+                    return Err(self.fail(err));
                 }
             };
             let message = match incoming {
@@ -121,7 +121,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
                         message,
                     ) {
                         Ok(next) => next,
-                        Err(err) => return Err(self.core.fail(err)),
+                        Err(err) => return Err(self.fail(err)),
                     };
                     if core::mem::take(&mut self.core.common_state.app_data_in_place) {
                         received.app_data.push(range);
@@ -137,7 +137,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
                     message,
                 ) {
                     Ok(next) => next,
-                    Err(err) => return Err(self.core.fail(err)),
+                    Err(err) => return Err(self.fail(err)),
                 };
             }
             state = self.deliver_handshake(state)?;
@@ -145,6 +145,13 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core.state = Ok(state);
         self.after_input(now)?;
         Ok(received)
+    }
+
+    /// Fails the connection with `err`: from now on it only sends the
+    /// alerts already queued.
+    fn fail(&mut self, err: Error) -> Error {
+        self.dtls_mut().abandon();
+        self.core.fail(err)
     }
 
     /// Hands the peer's complete handshake messages, in order, to the
@@ -184,7 +191,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 };
             state = match result {
                 Ok(next) => next,
-                Err(err) => return Err(self.core.fail(err)),
+                Err(err) => return Err(self.fail(err)),
             };
         }
     }
@@ -267,7 +274,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// retransmissions.
     pub fn handle_timeout(&mut self, now: Duration) -> Result<(), Error> {
         if let Err(err) = self.dtls_mut().handle_timeout(now) {
-            return Err(self.core.fail(err));
+            return Err(self.fail(err));
         }
         Ok(())
     }

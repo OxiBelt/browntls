@@ -1,6 +1,7 @@
 //! The TLS 1.2 client handshake after the ServerHello (RFC 5246 §7.3,
 //! RFC 8422, RFC 7627, RFC 5077, RFC 5746).
 
+mod certificate_url;
 mod client_flight;
 
 use alloc::boxed::Box;
@@ -249,6 +250,10 @@ impl CompleteServerHelloHandling {
                 .map_err(|e| cx.common.send_fatal_alert(AlertDescription::DecodeError, e))?;
         }
 
+        // RFC 6066 §5; an acknowledgement we did not ask for was refused
+        // above as unsolicited.
+        self.hello.certificate_url_accepted =
+            server_hello.extensions.client_certificate_url.is_some();
         Ok(Box::new(ExpectCertificate {
             config: self.config,
             session_id: server_hello.session_id,

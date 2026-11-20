@@ -117,6 +117,13 @@ sources = [
   "crates/browntls-core/src/delegated_credential.rs",
   "crates/browntls-core/src/crypto/native/delegated_credential.rs",
   "crates/browntls-core/src/exported_authenticator/**",
+  "crates/browntls-core/src/certificate_url.rs",
+  "crates/browntls-core/src/certificate_url/**",
+  "crates/browntls-core/src/conn/certificate_url.rs",
+  "crates/browntls-core/src/client/tls12/certificate_url.rs",
+  "crates/browntls-core/src/server/tls12/certificate_url.rs",
+  "crates/browntls-tokio/src/certificate_url.rs",
+  "crates/browntls-tokio/src/common/certificate_url.rs",
 ]
 
 [targets.pki_cert]

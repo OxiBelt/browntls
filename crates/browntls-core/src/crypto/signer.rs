@@ -67,6 +67,10 @@ pub struct CertifiedKey {
     /// Delegated credentials for the end entity (RFC 9345); see
     /// [`Self::delegated_credentials`].
     delegated_credentials: Vec<Arc<DelegatedCredentialKey>>,
+
+    /// URLs naming the chain, for a TLS 1.2 client (RFC 6066 §5); see
+    /// [`Self::set_certificate_url`].
+    certificate_url: Option<crate::certificate_url::CertificateUrl>,
 }
 
 impl CertifiedKey {
@@ -94,6 +98,7 @@ impl CertifiedKey {
             sct_list: None,
             transparency_info: None,
             delegated_credentials: Vec::new(),
+            certificate_url: None,
         }
     }
 
@@ -222,6 +227,26 @@ impl CertifiedKey {
     /// CertificateVerify with its key; otherwise `key` signs.
     pub fn delegated_credentials(&self) -> &[Arc<DelegatedCredentialKey>] {
         &self.delegated_credentials
+    }
+
+    /// Sets, or with `None` removes, the URLs a TLS 1.2 client sends in
+    /// place of its chain (a CertificateURL message, RFC 6066 §5) when
+    /// [`ClientConfig::enable_client_certificate_url`] is set and the server
+    /// accepted them. [`Self::cert`] may then be empty: a key without a
+    /// chain authenticates only through its URLs, and sends an empty
+    /// Certificate (and no CertificateVerify) to any other server.
+    ///
+    /// The server fetches the URLs; they must name the DER objects whose
+    /// hashes they carry. Servers ignore this.
+    ///
+    /// [`ClientConfig::enable_client_certificate_url`]: crate::ClientConfig::enable_client_certificate_url
+    pub fn set_certificate_url(&mut self, urls: Option<crate::certificate_url::CertificateUrl>) {
+        self.certificate_url = urls;
+    }
+
+    /// The URLs set with [`Self::set_certificate_url`].
+    pub fn certificate_url(&self) -> Option<&crate::certificate_url::CertificateUrl> {
+        self.certificate_url.as_ref()
     }
 
     /// Checks that the key's public half matches the end-entity certificate.

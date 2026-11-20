@@ -151,6 +151,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_with_extern_psk: false,
             require_cert_with_extern_psk: false,
             require_external_psk: false,
+            enable_client_certificate_url: false,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
             tls13_ticket_request: None,
             external_binding: None,

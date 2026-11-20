@@ -16,7 +16,9 @@
 //!   (TLS 1.3 or TLS 1.2, each end buffered or unbuffered): requests with
 //!   fuzzed contexts and extensions, answers with fuzz-chosen certificates
 //!   or declined, spontaneous server authenticators, tampered and replayed
-//!   authenticators, and fuzzed request and authenticator bytes.
+//!   authenticators, and fuzzed request and authenticator bytes;
+//! * RFC 6066 §5 client certificate URLs (`certificate_url`): see
+//!   its module for what it reaches and checks.
 //!
 //! Checked properties: decoding matches an independent parser of RFC 9345
 //! §4 and re-encodes byte for byte; issuance succeeds exactly when the
@@ -53,6 +55,7 @@ use self::exported::{Ea, exported};
 use self::handshake::handshake;
 use crate::input::Input;
 
+mod certificate_url;
 mod credential;
 mod exported;
 mod handshake;
@@ -432,11 +435,12 @@ struct State {
     generations: usize,
     authenticators: usize,
     ea: Option<Ea>,
+    certificate_url_handshakes: usize,
 }
 
 /// The `tls_auth` fuzz target.
 ///
-/// Operations (first byte modulo 7):
+/// Operations (first byte modulo 8):
 ///
 /// 0. decode: a 16-bit-prefixed `DelegatedCredential`;
 /// 1. encode: valid time, schemes, key and signature fields;
@@ -449,7 +453,9 @@ struct State {
 /// 5. handshake with a credential: clock offset, server clock skew, valid
 ///    time, credential key, tampering;
 /// 6. exported authenticators: version and connection APIs (first use),
-///    then one exchange.
+///    then one exchange;
+/// 7. client certificate URLs: a sub-operation and its arguments
+///    (`certificate_url::certificate_url`).
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);
@@ -458,7 +464,7 @@ pub fn run(data: &[u8]) {
         if input.is_empty() {
             break;
         }
-        match input.choose(7) {
+        match input.choose(8) {
             0 => decode(&mut input),
             1 => encode(&mut input),
             2 => issue(&mut input),
@@ -475,11 +481,14 @@ pub fn run(data: &[u8]) {
                     handshake(&mut input);
                 }
             }
-            _ => {
+            6 => {
                 if state.authenticators < MAX_AUTHENTICATORS {
                     state.authenticators += 1;
                     exported(&mut input, &mut state);
                 }
+            }
+            _ => {
+                certificate_url::certificate_url(&mut input, &mut state.certificate_url_handshakes)
             }
         }
     }

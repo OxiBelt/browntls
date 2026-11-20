@@ -132,7 +132,7 @@ fn client_hello_record() -> Vec<u8> {
 fn handshake_message() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
     // every message type, both versions, empty and one-byte bodies
-    for selector in 0..19u8 {
+    for selector in 0..20u8 {
         for tls13 in 0..2u8 {
             seeds.push(vec![2 | tls13, selector]);
             seeds.push(vec![2 | tls13, selector, 0]);
@@ -152,6 +152,14 @@ fn handshake_message() -> Vec<Vec<u8>> {
     server_hello.extend_from_slice(&[7; 32]);
     server_hello.extend_from_slice(&[0, 0xc0, 0x2b, 0, 0, 8, 0, 0x19, 0, 4, 0, 2, 1, 2]);
     seeds.push(server_hello);
+
+    // a TLS 1.2 CertificateURL body (RFC 6066 §5): individual_certs, one
+    // URL and its hash
+    let mut url = vec![0u8];
+    let entry = [&[0, 8][..], b"http://a", &[1], &[7; 20]].concat();
+    url.extend_from_slice(&(entry.len() as u16).to_be_bytes());
+    url.extend_from_slice(&entry);
+    seeds.push([&[2, 19][..], &url].concat());
     seeds
 }
 

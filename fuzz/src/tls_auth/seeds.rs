@@ -206,5 +206,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
     unbuffered[1] = 6;
     seeds.push(seed);
     seeds.push(unbuffered);
+
+    // 7: client certificate URLs
+    seeds.extend(super::certificate_url::seeds(7));
     seeds
 }

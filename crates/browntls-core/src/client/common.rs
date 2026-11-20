@@ -80,6 +80,14 @@ impl ClientAuthDetails {
             .collect();
 
         if let Some(certkey) = resolver.resolve(&acceptable_issuers, sigschemes) {
+            // A key without a chain can authenticate only through its
+            // certificate URLs (RFC 6066 §5), which TLS 1.3 does not have.
+            if certkey.cert.is_empty()
+                && (auth_context_tls13.is_some() || certkey.certificate_url().is_none())
+            {
+                debug!("Client certificate key has no chain to send");
+                return Self::Empty { auth_context_tls13 };
+            }
             // RFC 5246 §7.4.4, RFC 8422 §5.5: ecdsa_sign covers ECDSA and EdDSA
             // keys.
             let wanted = match certkey.key.algorithm() {
@@ -124,6 +132,9 @@ pub(super) struct ClientHelloDetails {
     /// What the store offered for RFC 7924 `cached_info`, if it is in use.
     #[cfg(feature = "tls12")]
     pub(super) cached_info: Option<crate::cached_info::client::ClientCachedInfo>,
+    /// A TLS 1.2 server acknowledged `client_certificate_url` (RFC 6066
+    /// §5): a CertificateURL message may replace our Certificate.
+    pub(super) certificate_url_accepted: bool,
 }
 
 impl ClientHelloDetails {
@@ -134,6 +145,7 @@ impl ClientHelloDetails {
             sent_record_size_limit: None,
             #[cfg(feature = "tls12")]
             cached_info: None,
+            certificate_url_accepted: false,
         }
     }
 

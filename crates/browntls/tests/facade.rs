@@ -89,6 +89,35 @@ fn tls12_is_nameable() {
     assert!(browntls::ALL_VERSIONS.contains(&&browntls::version::TLS12));
 }
 
+/// Client certificate URLs (RFC 6066 §5) are configured through the root:
+/// the PkiPath helpers, the client's URLs and the server's policy.
+#[test]
+fn certificate_url_is_nameable() {
+    use browntls::certificate_url::{
+        CertificateUrl, ClientCertificateUrlPolicy, UrlAndHash, decode_pki_path, encode_pki_path,
+    };
+
+    let chain = [browntls::pki_types::CertificateDer::from(vec![0x30, 0x00])];
+    let path = encode_pki_path(&chain).unwrap();
+    assert_eq!(path, [0x30, 0x02, 0x30, 0x00]);
+    assert_eq!(decode_pki_path(&path).unwrap(), chain);
+    let entry = UrlAndHash::for_object(
+        "http://certs.example/p",
+        &path,
+        browntls::crypto::native::sha1,
+    )
+    .unwrap();
+    let urls = CertificateUrl::pkipath(entry).unwrap();
+
+    let mut client = Pki::new().client_config();
+    client.enable_client_certificate_url = true;
+    let mut server = Pki::new().server_config();
+    server.client_certificate_url = Some(ClientCertificateUrlPolicy::new(
+        browntls::crypto::native::sha1,
+    ));
+    assert_eq!(urls.entries().len(), 1);
+}
+
 #[cfg(not(feature = "tls12"))]
 #[test]
 fn tls12_is_absent() {

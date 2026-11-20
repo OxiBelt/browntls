@@ -113,6 +113,10 @@ pub enum Error {
     /// its own: the server only answers an extension the client sent, so
     /// the expectation could never be met.
     InconsistentExternalBinding,
+
+    /// The client certificate chain named by URL could not be used (RFC 6066
+    /// §5).
+    CertificateUrl(crate::certificate_url::CertificateUrlError),
 }
 
 /// Reasons a private key and certificate may not go together.
@@ -207,6 +211,12 @@ pub enum InvalidMessage {
     /// A `trusted_ca_keys` entry of an identifier type RFC 6066 §6 does not
     /// define. Such an entry has no length of its own and cannot be skipped.
     UnknownTrustedAuthorityType,
+    /// A CertificateURL of a `CertChainType` RFC 6066 §5 does not define.
+    UnknownCertChainType,
+    /// A CertificateURL `padding` byte other than 0x01 (RFC 6066 §5).
+    IllegalCertificateUrlPadding,
+    /// A `pkipath` CertificateURL with other than one URL (RFC 6066 §5).
+    IllegalPkiPathUrlCount,
 }
 
 impl From<InvalidMessage> for Error {
@@ -230,6 +240,8 @@ impl From<InvalidMessage> for AlertDescription {
             // RFC 9846 §5: a change_cipher_spec record whose value is not
             // 0x01 MUST abort the handshake with unexpected_message.
             InvalidMessage::InvalidCcs => Self::UnexpectedMessage,
+            InvalidMessage::IllegalCertificateUrlPadding
+            | InvalidMessage::IllegalPkiPathUrlCount => Self::IllegalParameter,
             _ => Self::DecodeError,
         }
     }
@@ -758,6 +770,7 @@ impl fmt::Display for Error {
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),
             Self::Other(err) => write!(f, "other error: {err}"),
+            Self::CertificateUrl(e) => write!(f, "client certificate URL: {e}"),
             Self::RejectedEch(r) => write!(
                 f,
                 "server rejected encrypted client hello ({})",

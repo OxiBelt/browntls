@@ -55,6 +55,25 @@ fn both_paths_name_the_same_types() {
     takes_root_path(&config);
 }
 
+/// The client certificate URL fetcher (RFC 6066 §5) attaches to an
+/// acceptor named through `browntls::tokio`, with the policy and query
+/// types named through `browntls`.
+#[test]
+fn client_certificate_url_fetcher_is_attachable() {
+    use browntls::certificate_url::{ClientCertificateUrlPolicy, ClientCertificateUrlQuery};
+    use browntls::tokio::certificate_url::FetchClientCertificateUrl;
+
+    let mut config = Pki::new().server_config();
+    config.client_certificate_url = Some(ClientCertificateUrlPolicy::new(
+        browntls::crypto::native::sha1,
+    ));
+    let fetcher: Arc<dyn FetchClientCertificateUrl> =
+        Arc::new(|_: ClientCertificateUrlQuery| async {
+            Err::<Vec<Vec<u8>>, _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+    let _acceptor = TlsAcceptor::from(Arc::new(config)).client_certificate_url_fetcher(fetcher);
+}
+
 /// `ocsp` reaches `browntls-tokio`: its `revocation` module exists.
 #[cfg(feature = "ocsp")]
 #[test]

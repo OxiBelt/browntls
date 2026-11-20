@@ -75,6 +75,7 @@ mod msgs;
 mod check;
 mod builder;
 pub mod cached_info;
+pub mod certificate_url;
 mod common_state;
 pub mod compress;
 mod conn;

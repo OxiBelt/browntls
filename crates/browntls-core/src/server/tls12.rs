@@ -1,6 +1,7 @@
 //! The TLS 1.2 server handshake (RFC 5246 §7.3, RFC 8422, RFC 7627, RFC 5077,
 //! RFC 5746).
 
+mod certificate_url;
 mod client_auth;
 
 use alloc::boxed::Box;
@@ -241,7 +242,10 @@ impl CompleteClientHelloHandling {
         emit_server_hello_done(&mut self.transcript, cx.common);
 
         if doing_client_auth {
+            let certificate_url =
+                certificate_url::acknowledged(&self.config, client_hello, &self.cert_types);
             Ok(Box::new(ExpectCertificate {
+                certificate_url,
                 config: self.config,
                 transcript: self.transcript,
                 randoms: self.randoms,
@@ -369,6 +373,10 @@ impl CompleteClientHelloHandling {
             transparency_info: transparency_info.map(|list| Payload::new(list.to_vec())),
             client_certificate_type: self.cert_types.client,
             server_certificate_type: self.cert_types.server,
+            // RFC 6066 §5: never on resumption, which sends no certificate.
+            client_certificate_url: (!resuming
+                && certificate_url::acknowledged(&self.config, client_hello, &self.cert_types))
+            .then_some(()),
             alpn: cx
                 .common
                 .alpn_protocol

@@ -163,6 +163,20 @@ impl RetryCookie {
     }
 }
 
+/// Whether `cookie` is one of ours, fresh and issued to the DTLS client at
+/// `peer_address`: what a stateless server checks before it keeps any
+/// state for a second ClientHello (RFC 9147 §5.1).
+pub(crate) fn dtls_cookie_is_valid(
+    config: &super::ServerConfig,
+    cookie: &[u8],
+    peer_address: &[u8],
+) -> bool {
+    let (Some(sealer), Ok(now)) = (&config.hello_retry_cookies, config.current_time()) else {
+        return false;
+    };
+    RetryCookie::open(&**sealer, cookie, now.as_secs(), Some(peer_address)).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;

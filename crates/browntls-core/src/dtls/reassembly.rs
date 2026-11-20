@@ -78,9 +78,13 @@ impl Reassembler {
 
     /// The `message_seq` of the next message to deliver; `u16::MAX` once
     /// message 0xffff was delivered (none can follow it).
-    #[cfg(test)]
     pub(crate) fn next_receive_seq(&self) -> u16 {
         u16::try_from(self.next).unwrap_or(u16::MAX)
+    }
+
+    /// Whether message `seq` was delivered already.
+    pub(crate) fn is_old(&self, seq: u16) -> bool {
+        u32::from(seq) < self.next
     }
 
     /// Sets `next_receive_seq`, before anything was pushed: a server that

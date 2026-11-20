@@ -191,7 +191,7 @@ pub use client::ClientConnection;
 pub mod server {
     pub(crate) mod builder;
     mod common;
-    mod cookie;
+    pub(crate) mod cookie;
     pub(crate) mod handy;
     mod hs;
     mod server_conn;

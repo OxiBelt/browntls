@@ -130,6 +130,8 @@ pub(crate) struct Dtls {
     /// a server answering after a stateless HelloRetryRequest does not
     /// reuse its record numbers.
     client_hello_seq: Option<u64>,
+    /// When the peer's repetitions last made us retransmit.
+    peer_triggered_retransmission: Option<Duration>,
     pub(super) out: Outgoing,
     reassembler: Reassembler,
     /// Records of the peer's current flight (or of its post-handshake
@@ -165,6 +167,7 @@ impl Dtls {
             read: Vec::new(),
             peer_authenticated: false,
             client_hello_seq: None,
+            peer_triggered_retransmission: None,
             reassembler: Reassembler::new(MAX_HANDSHAKE_SIZE as usize, MAX_REASSEMBLY_BUFFER),
             acks: Vec::new(),
             ack_due: None,
@@ -224,11 +227,16 @@ impl Dtls {
     /// fatal alert ends every retransmission.
     pub(crate) fn queue_alert(&mut self, level: AlertLevel, description: AlertDescription) {
         if level == AlertLevel::Fatal {
-            self.out.abandon();
-            self.acks.clear();
-            self.ack_due = None;
+            self.abandon();
         }
         self.alerts.push_back((level, description));
+    }
+
+    /// The connection failed: nothing more is sent but queued alerts.
+    pub(super) fn abandon(&mut self) {
+        self.out.abandon();
+        self.acks.clear();
+        self.ack_due = None;
     }
 
     /// The traffic secret of the next sending epoch: the handshake secret
@@ -379,12 +387,6 @@ impl Dtls {
                 ),
                 _ => Incoming::Handled,
             }),
-            ContentType::Ack if !self.peer_authenticated => {
-                if let Some(numbers) = wire::read_ack(body) {
-                    self.on_ack(numbers, 0);
-                }
-                Ok(Incoming::Handled)
-            }
             _ => Ok(Incoming::Handled),
         }
     }
@@ -441,7 +443,7 @@ impl Dtls {
             ContentType::Ack => {
                 let numbers =
                     wire::read_ack(&record[content]).ok_or(InvalidMessage::MessageTooShort)?;
-                self.on_ack(numbers, number.epoch);
+                self.on_ack(numbers);
                 Ok(Incoming::Handled)
             }
             ContentType::Alert => match &record[content] {
@@ -485,23 +487,21 @@ impl Dtls {
                 return Err(InvalidMessage::MessageTooShort.into());
             };
             body = rest;
-            // Only the hellos travel unprotected (RFC 9147 §6.1).
-            if !authenticated
-                && !matches!(
-                    HandshakeType::from(header.typ),
-                    HandshakeType::ClientHello | HandshakeType::ServerHello
-                )
-            {
+            if !authenticated && !self.buffers_plaintext(&header) {
+                // At most a sign that the peer repeats what we have.
+                if self.reassembler.is_old(header.message_seq) {
+                    old = true;
+                }
                 continue;
             }
-            if !authenticated && header.typ == u8::from(HandshakeType::ClientHello) {
-                self.client_hello_seq = Some(
-                    self.client_hello_seq
-                        .map_or(number.seq, |seq| seq.max(number.seq)),
-                );
-            }
+            let client_hello = header.typ == u8::from(HandshakeType::ClientHello);
             match self.reassembler.push(&header, fragment, number.epoch) {
-                Fragment::Accepted => accepted = true,
+                Fragment::Accepted => {
+                    accepted = true;
+                    if !authenticated && client_hello {
+                        self.note_client_hello_seq(number.seq);
+                    }
+                }
                 Fragment::Old => old = true,
                 Fragment::Dropped => {}
             }
@@ -514,6 +514,37 @@ impl Dtls {
             self.saw_retransmission = true;
         }
         Ok(())
+    }
+
+    /// Whether an unprotected fragment may be buffered: only the peer's
+    /// hello (RFC 9147 §6.1), only as the next message we expect, and only
+    /// until protected records arrive, so that forged fragments cannot
+    /// take the place of protected messages or fill the buffer. A forged
+    /// hello that wins the race against the real one can still stall the
+    /// handshake until it times out, as with any unprotected hello.
+    fn buffers_plaintext(&self, header: &HandshakeHeader) -> bool {
+        let hello = match self.side {
+            Side::Client => HandshakeType::ServerHello,
+            Side::Server => HandshakeType::ClientHello,
+        };
+        self.read_epoch() == 0
+            && header.typ == u8::from(hello)
+            && header.message_seq == self.reassembler.next_receive_seq()
+    }
+
+    /// Notes the record number of a fragment of the ClientHello we are
+    /// about to answer: our unprotected records continue after it. Only
+    /// until we sent one, so that later input, which may be forged, never
+    /// moves our numbers.
+    fn note_client_hello_seq(&mut self, seq: u64) {
+        let unsent = self
+            .write
+            .iter()
+            .find(|w| w.epoch == 0)
+            .is_none_or(|w| w.next_seq == 0);
+        if self.side == Side::Server && unsent {
+            self.client_hello_seq = Some(self.client_hello_seq.map_or(seq, |s| s.max(seq)));
+        }
     }
 
     /// Records `number` to acknowledge, keeping the list ordered and
@@ -537,7 +568,12 @@ impl Dtls {
     /// peer acknowledges our previous flight (RFC 9147 §7).
     pub(crate) fn next_message(&mut self) -> Option<(u64, Vec<u8>)> {
         let (epoch, bytes) = self.reassembler.peek()?;
-        if epoch != self.read_epoch() {
+        let read_epoch = self.read_epoch();
+        // A peer keeps sending under its old keys until its KeyUpdate is
+        // acknowledged (RFC 9147 §8), so after the handshake any
+        // application epoch up to the current one will do.
+        let current = epoch == read_epoch || (APPLICATION_EPOCH..read_epoch).contains(&epoch);
+        if !current {
             self.reassembler.drop_next();
             return None;
         }
@@ -557,7 +593,15 @@ impl Dtls {
         if self.saw_retransmission {
             if self.out.has_flight() {
                 // The peer has not seen our answer to what it repeated.
-                self.out.retransmit_flight();
+                // Repetitions, which anyone can forge, earn at most one
+                // retransmission per timeout: no amplification.
+                let due = self
+                    .peer_triggered_retransmission
+                    .is_none_or(|last| now >= last.saturating_add(self.out.timeout()));
+                if due {
+                    self.peer_triggered_retransmission = Some(now);
+                    self.out.retransmit_flight();
+                }
                 return;
             }
             self.ack_due = Some(now);

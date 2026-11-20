@@ -197,12 +197,23 @@ fn client_error_for_server_hello_extension(
     version: &'static SupportedProtocolVersion,
     typ: u16,
 ) -> (Error, Option<u8>) {
+    client_error_for_server_hello_body(chain, version, typ, &[])
+}
+
+/// The client's error when the ServerHello carries an extra extension with
+/// the given body.
+fn client_error_for_server_hello_body(
+    chain: &Chain,
+    version: &'static SupportedProtocolVersion,
+    typ: u16,
+    body: &[u8],
+) -> (Error, Option<u8>) {
     let (mut client, mut server) = connect(client_for(chain, version), server_for(chain, version));
     let hello = take_flight(&mut client);
     give(&mut server, &hello);
     server.process_new_packets().unwrap();
     let mut flight = take_flight(&mut server);
-    add_hello_extension(&mut flight, false, typ, &[]);
+    add_hello_extension(&mut flight, false, typ, body);
     give(&mut client, &flight);
     let err = client.process_new_packets().unwrap_err();
     (err, fatal_alert(&take_flight(&mut client)))
@@ -245,5 +256,26 @@ fn a_tls13_client_refuses_legacy_extensions_in_server_hello() {
             ),
             "{typ:#06x}"
         );
+    }
+}
+
+/// In a ServerHello all three must be empty (RFC 6066 §5, §6, §7): a body
+/// is a decode error before any question of whether the extension was
+/// solicited, in TLS 1.2 and TLS 1.3 alike.
+#[test]
+fn a_client_refuses_a_server_hello_extension_with_a_body() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    for version in versions() {
+        for (typ, _) in legacy_client_extensions() {
+            assert_eq!(
+                client_error_for_server_hello_body(&chain, version, typ, &[0]),
+                (
+                    Error::InvalidMessage(InvalidMessage::TrailingData("extension")),
+                    Some(ALERT_DECODE_ERROR)
+                ),
+                "{version:?}: {typ:#06x}"
+            );
+        }
     }
 }

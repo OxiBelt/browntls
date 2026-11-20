@@ -578,15 +578,21 @@ ECDSA certificate as well as for key exchange (RFC 8422 §5.3).
 
 RFC 6066 defines three extensions that TLS 1.3 does not have (the IANA
 registry marks them "-" for TLS 1.3): `client_certificate_url` (§5),
-`trusted_ca_keys` (§6) and `truncated_hmac` (§7). All three are parsed
-wherever they may appear, so a malformed body ends the handshake with
-`decode_error` whichever protocol version is negotiated: the first and the
-last are empty, and `trusted_ca_keys` holds a list (possibly empty) of
-`pre_agreed`, `key_sha1_hash`, `x509_name` and `cert_sha1_hash` entries. An
-entry of any other identifier type cannot be skipped, since it carries no
-length, and is a `decode_error` too. In a TLS 1.3 ServerHello or
-EncryptedExtensions each of the three is `illegal_parameter`, as for every
-TLS 1.2-only extension.
+`trusted_ca_keys` (§6) and `truncated_hmac` (§7). All three are parsed in
+a ClientHello, a ServerHello and TLS 1.3 EncryptedExtensions, so a
+malformed body there ends the handshake with `decode_error` whichever
+protocol version is negotiated: the first and the last are empty, and
+`trusted_ca_keys` holds a list (possibly empty) of `pre_agreed`,
+`key_sha1_hash`, `x509_name` and `cert_sha1_hash` entries. An entry of any
+other identifier type cannot be skipped, since it carries no length, and is
+a `decode_error` too, and so is a list of more than 1024 entries (a local
+bound on what an unauthenticated ClientHello may make the server allocate).
+Earlier versions ignored these extensions whatever their bodies held, so a
+peer that sends a malformed one now fails the handshake. In a TLS 1.3
+ServerHello or EncryptedExtensions each of the three is
+`illegal_parameter`, as for every TLS 1.2-only extension; a
+HelloRetryRequest may carry none of them either, and refuses each with
+`illegal_parameter` before its body is looked at.
 
 `trusted_ca_keys`: not negotiated. A client never sends it, and a server
 reads the list without using it, so it never acknowledges the extension.

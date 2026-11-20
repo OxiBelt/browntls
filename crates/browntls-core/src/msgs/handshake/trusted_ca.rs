@@ -9,6 +9,13 @@ use crate::msgs::codec::{Codec, ListLength, Reader, encode_vec_u16, read_list};
 /// The length of a SHA-1 digest.
 const SHA1_LEN: usize = 20;
 
+/// The most `TrustedAuthority` entries read from one list. RFC 6066 sets no
+/// limit, but a one-byte `pre_agreed` entry costs 32 bytes once decoded, so
+/// an unbounded list would let a ClientHello of 64 KiB take 2 MiB before
+/// the handshake is authenticated. A client names the roots it trusts; even
+/// a whole public root store is a few hundred.
+const MAX_TRUSTED_AUTHORITIES: usize = 1024;
+
 /// `IdentifierType` values (RFC 6066 §6).
 const PRE_AGREED: u8 = 0;
 const KEY_SHA1_HASH: u8 = 1;
@@ -80,11 +87,12 @@ pub(crate) fn encode_trusted_authorities(authorities: &[TrustedAuthority], bytes
 }
 
 /// Reads `TrustedAuthorities`. An empty list is valid: the client then
-/// claims a set of root keys agreed by other means.
+/// claims a set of root keys agreed by other means. A list of more than
+/// [`MAX_TRUSTED_AUTHORITIES`] entries is refused (`MessageTooLarge`).
 pub(crate) fn read_trusted_authorities(
     r: &mut Reader<'_>,
 ) -> Result<Vec<TrustedAuthority>, InvalidMessage> {
-    read_list(ListLength::U16, r, 0)
+    read_list(ListLength::U16, r, MAX_TRUSTED_AUTHORITIES)
 }
 
 #[cfg(test)]
@@ -129,6 +137,29 @@ mod tests {
         assert_eq!(
             read_trusted_authorities(&mut Reader::init(&bytes)).unwrap(),
             []
+        );
+    }
+
+    /// A list of `n` `pre_agreed` entries, with its length prefix.
+    fn pre_agreed_list(n: usize) -> Vec<u8> {
+        let mut bytes = u16::try_from(n).unwrap().to_be_bytes().to_vec();
+        bytes.resize(2 + n, PRE_AGREED);
+        bytes
+    }
+
+    #[test]
+    fn entry_count_is_bounded() {
+        let at_limit = pre_agreed_list(MAX_TRUSTED_AUTHORITIES);
+        assert_eq!(
+            read_trusted_authorities(&mut Reader::init(&at_limit))
+                .unwrap()
+                .len(),
+            MAX_TRUSTED_AUTHORITIES
+        );
+        let over = pre_agreed_list(MAX_TRUSTED_AUTHORITIES + 1);
+        assert_eq!(
+            read_trusted_authorities(&mut Reader::init(&over)),
+            Err(InvalidMessage::MessageTooLarge)
         );
     }
 

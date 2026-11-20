@@ -655,6 +655,11 @@ impl World {
             assert!(self.server_config.alpn_protocols.iter().any(|p| p == alpn));
         }
         assert_eq!(c.handshake_kind(), s.handshake_kind());
+        setup::check_cached_info(
+            &self.client_config,
+            c.cached_info_replaced(),
+            s.cached_info_replaced(),
+        );
         if let (Some(a), Some(b)) = (
             c.negotiated_key_exchange_group(),
             s.negotiated_key_exchange_group(),

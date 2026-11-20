@@ -116,6 +116,9 @@ pub(super) struct ClientHelloDetails {
     pub(super) offered_sigschemes: Vec<SignatureScheme>,
     /// The `record_size_limit` we announced (RFC 8449), if any.
     pub(super) sent_record_size_limit: Option<u16>,
+    /// What the store offered for RFC 7924 `cached_info`, if it is in use.
+    #[cfg(feature = "tls12")]
+    pub(super) cached_info: Option<crate::cached_info::client::ClientCachedInfo>,
 }
 
 impl ClientHelloDetails {
@@ -124,6 +127,8 @@ impl ClientHelloDetails {
             sent_extensions: Vec::new(),
             offered_sigschemes: Vec::new(),
             sent_record_size_limit: None,
+            #[cfg(feature = "tls12")]
+            cached_info: None,
         }
     }
 

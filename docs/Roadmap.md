@@ -40,6 +40,7 @@ intent.
 | Raw public keys (RFC 7250), certificate compression framework (RFC 8879), OCSP/SCT passthrough, `max_fragment_size`, `Acceptor` | done |
 | OCSP, Must-Staple, and Mozilla CRLite for server and client certificate authentication, with opt-in live queries and Tokio server staple refresh | done: see [certificate revocation](Architecture.md#certificate-revocation) |
 | `record_size_limit` (RFC 8449, both sides, TLS 1.3 and 1.2, on by default), `ticket_request` (RFC 9149), client GREASE (RFC 8701, opt-in) and ClientHello padding (RFC 7685, on by default for 256 to 511-byte hellos): in-memory suites on both providers, rustls 0.23 and OpenSSL 3 interop with all four on; Docker E2E scenarios with all four on, run against OpenSSL, GnuTLS and browntls (see [Architecture](Architecture.md#optional-clienthello-extensions)) | done |
+| Cached information (RFC 7924 `cached_info`), TLS 1.2 only, both sides, both object types (`cert`, `cert_req`), off by default: client store trait with a bounded in-memory store, server policy per type, `cached_info_replaced()` on every connection type; in-process tests on both providers with buffered and unbuffered peers and forged server answers, a `browntls-tokio` test, coverage in the `tls_conn` and `tls_unbuffered` fuzz targets; no interoperability test, since no implementation the project tests against supports it (see [Architecture](Architecture.md#cached-information-rfc-7924)) | done |
 | TLS 1.3 post-handshake client authentication (RFC 9846 §4.7.2, opt-in on both sides), stateless HelloRetryRequest cookies (RFC 9846 §4.3.2, server opt-in, continued by a fresh `ServerConnection`, `UnbufferedServerConnection`, `Acceptor` or `UnbufferedAcceptor`), early exporter (RFC 9846 §7.5, RFC 8448 vector), RFC 9266 `tls-exporter` channel binding; both providers, plus OpenSSL 3 `s_client` interop for post-handshake authentication and the stateless retry | done |
 | Delegated credentials (RFC 9345), server side in TLS 1.3: issuing with the native provider, `DelegationUsage` parsing, client validation with the RFC 9345 alerts, and client/server resumption bounded by the original credential expiry (descendant tickets, 0-RTT and RFC 8773 included); tests on both providers (`crates/browntls-core/tests/delegated_credentials*.rs`), browntls to browntls only. Client credentials not implemented | done |
 | Exported authenticators (RFC 9261) for TLS 1.3 and TLS 1.2 with EMS: requests, authenticators, spontaneous server authenticators, the empty authenticator, validation through the configured verifiers; on buffered and unbuffered connections (the unbuffered ones also without `std`; not QUIC), one implementation for both; tests on both providers (`crates/browntls-core/tests/exported_authenticators*.rs`, every buffered/unbuffered pairing) and a unit test built without `std`, browntls to browntls only | done |
@@ -176,6 +177,11 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   client's GREASE (RFC 8701) is off by default until the Docker E2E GnuTLS
   scenarios have passed with it; server-side GREASE (RFC 8701 §4) is not
   implemented.
+- RFC 7924 `cached_info` has no interoperability evidence (OpenSSL, GnuTLS,
+  Go crypto/tls and rustls do not implement it) and was written from the RFC
+  alone; its Appendix A vector is checked with the message header corrected
+  (the printed header has a spurious `00 02`). TLS 1.3 handshakes do not use
+  it (RFC 7924 predates TLS 1.3 and defines no TLS 1.3 behaviour).
 - Delegated credentials (RFC 9345) have no interoperability evidence: no
   implementation the project tests against (OpenSSL 3, rustls) supports
   them. A server does not check a credential's signature when it is

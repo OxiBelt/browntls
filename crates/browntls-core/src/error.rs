@@ -394,6 +394,12 @@ pub enum PeerMisbehaved {
     /// The second ClientHello changed, added or dropped an RFC 8844
     /// extension of the first (RFC 9846 §4.1.2).
     ExternalBindingChangedOnRetry,
+    /// The server's `cached_info` listed a type we offered no object of, or
+    /// a type twice (RFC 7924 §4).
+    SelectedUnofferedCachedInfo,
+    /// A Certificate or CertificateRequest in hash form carried a hash we
+    /// did not offer (RFC 7924 §4.1, §4.2).
+    UnofferedCachedInfoFingerprint,
 }
 
 impl From<PeerMisbehaved> for Error {

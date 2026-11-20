@@ -228,6 +228,8 @@ pub struct CommonState {
     /// ([`crate::external_binding`]).
     pub(crate) peer_external_binding:
         Option<alloc::boxed::Box<crate::external_binding::PeerExternalBinding>>,
+    /// RFC 7924 state of this handshake ([`crate::cached_info`]).
+    pub(crate) cached_info: crate::cached_info::CachedInfoState,
 }
 
 impl CommonState {
@@ -274,6 +276,7 @@ impl CommonState {
             external_psk_confirmed: false,
             kernel: None,
             peer_external_binding: None,
+            cached_info: Default::default(),
         }
     }
 

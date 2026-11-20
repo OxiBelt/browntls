@@ -74,6 +74,7 @@ mod msgs;
 #[macro_use]
 mod check;
 mod builder;
+pub mod cached_info;
 mod common_state;
 pub mod compress;
 mod conn;

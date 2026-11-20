@@ -167,6 +167,7 @@ impl ExpectServerDone {
             resuming: false,
             cert_verified,
             sig_verified,
+            cached_info: st.hello.cached_info.take(),
         };
         Ok(if st.must_issue_new_ticket {
             Box::new(ExpectNewTicket { next })

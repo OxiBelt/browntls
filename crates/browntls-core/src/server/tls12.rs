@@ -12,6 +12,8 @@ use client_auth::{ExpectCertificate, ExpectCertificateVerify};
 use super::common::{ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled};
 use super::hs::{self, NextStateOrError, ServerContext};
 use super::server_conn::{ServerConfig, ServerConnectionData};
+use crate::cached_info::ServerHelloCachedInfo;
+use crate::cached_info::server::ServerCachedInfo;
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::cipher::Tls12MacOrder;
@@ -184,6 +186,19 @@ impl CompleteClientHelloHandling {
             .sct_request
             .and_then(|()| server_key.get_sct_list());
 
+        // RFC 7924 §4.1, §4.2: the Certificate and CertificateRequest, each
+        // in full or replaced by the fingerprint the client cached.
+        let cached = ServerCachedInfo::new(
+            &self.config.cached_info,
+            &self.config.provider,
+            client_hello.extensions.cached_info.as_ref(),
+            certificate_message(server_key.get_cert()),
+            certificate_request(&self.config)?.map(|request| {
+                HandshakeMessagePayload(HandshakePayload::CertificateRequest(request))
+            }),
+        );
+        cx.common.cached_info.replaced = cached.replaced();
+
         self.emit_server_hello(
             cx,
             client_hello,
@@ -191,8 +206,9 @@ impl CompleteClientHelloHandling {
             ocsp.is_some(),
             sct_list,
             false,
+            cached.extension(),
         );
-        emit_certificate(&mut self.transcript, cx.common, server_key.get_cert());
+        emit_handshake(&mut self.transcript, cx.common, cached.certificate);
         if let Some(ocsp) = ocsp {
             emit_cert_status(&mut self.transcript, cx.common, ocsp);
         }
@@ -204,8 +220,11 @@ impl CompleteClientHelloHandling {
             server_key.get_key(),
             &self.randoms,
         )?;
-        let doing_client_auth =
-            emit_certificate_req(&mut self.transcript, cx.common, &self.config)?;
+        let doing_client_auth = cached.certificate_request.is_some();
+        if let Some(request) = cached.certificate_request {
+            trace!("Sending CertificateRequest {:?}", request);
+            emit_handshake(&mut self.transcript, cx.common, request);
+        }
         emit_server_hello_done(&mut self.transcript, cx.common);
 
         if doing_client_auth {
@@ -268,6 +287,7 @@ impl CompleteClientHelloHandling {
             false,
             None,
             true,
+            None,
         );
 
         let secrets = ConnectionSecrets::new_resume(
@@ -305,6 +325,7 @@ impl CompleteClientHelloHandling {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_server_hello(
         &mut self,
         cx: &mut ServerContext<'_>,
@@ -313,6 +334,7 @@ impl CompleteClientHelloHandling {
         staple_ocsp: bool,
         sct_list: Option<&[u8]>,
         resuming: bool,
+        cached_info: Option<ServerHelloCachedInfo>,
     ) {
         let mut extensions = ServerExtensions {
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
@@ -347,6 +369,8 @@ impl CompleteClientHelloHandling {
                 client_hello,
                 ProtocolVersion::TLSv1_2,
             ),
+            // RFC 7924 §4: the types replaced by their fingerprint.
+            cached_info,
             ..Default::default()
         };
         // RFC 8844 §3.2, §4.3: answered in the TLS 1.2 ServerHello.
@@ -374,22 +398,28 @@ impl CompleteClientHelloHandling {
     }
 }
 
-fn emit_certificate(
-    transcript: &mut HandshakeHash,
-    common: &mut CommonState,
+/// The Certificate message for `certs`.
+fn certificate_message(
     certs: &[browntls_pki::CertificateDer<'static>],
-) {
+) -> HandshakeMessagePayload<'static> {
     let chain = CertificateChain(
         certs
             .iter()
-            .map(|c| browntls_pki::CertificateDer::from_slice(c.as_ref()))
+            .map(|c| browntls_pki::CertificateDer::from_slice(c.as_ref()).into_owned())
             .collect(),
     );
+    HandshakeMessagePayload(HandshakePayload::Certificate(chain))
+}
+
+/// Sends `payload` unprotected and adds it, as sent, to the transcript.
+fn emit_handshake(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    payload: HandshakeMessagePayload<'_>,
+) {
     let m = Message {
         version: ProtocolVersion::TLSv1_2,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
-            chain,
-        ))),
+        payload: MessagePayload::handshake(payload),
     };
     transcript.add_message(&m);
     common.send_msg(m, false);
@@ -445,14 +475,11 @@ fn emit_server_kx(
     Ok(kx)
 }
 
-/// Sends a CertificateRequest if the configuration wants client authentication.
-fn emit_certificate_req(
-    transcript: &mut HandshakeHash,
-    common: &mut CommonState,
-    config: &ServerConfig,
-) -> Result<bool, Error> {
+/// The CertificateRequest, if the configuration wants client
+/// authentication.
+fn certificate_request(config: &ServerConfig) -> Result<Option<CertificateRequestPayload>, Error> {
     if !config.verifier.offer_client_auth() {
-        return Ok(false);
+        return Ok(None);
     }
     let sigschemes = config.verifier.supported_verify_schemes();
     if sigschemes.is_empty() {
@@ -468,16 +495,7 @@ fn emit_certificate_req(
         sigschemes,
         canames: config.verifier.root_hint_subjects().to_vec(),
     };
-    let m = Message {
-        version: ProtocolVersion::TLSv1_2,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::CertificateRequest(cr),
-        )),
-    };
-    trace!("Sending CertificateRequest {:?}", m);
-    transcript.add_message(&m);
-    common.send_msg(m, false);
-    Ok(true)
+    Ok(Some(cr))
 }
 
 fn emit_server_hello_done(transcript: &mut HandshakeHash, common: &mut CommonState) {

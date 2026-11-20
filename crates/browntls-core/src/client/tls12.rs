@@ -12,6 +12,7 @@ use super::client_conn::ClientConnectionData;
 use super::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
 use super::hs::{ClientContext, NextStateOrError};
 use super::{ClientConfig, hs, tls13};
+use crate::cached_info::client::{self as cached_info, ClientCachedInfo};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState, Side};
 use crate::conn::State;
 use crate::crypto::cipher::Tls12MacOrder;
@@ -153,6 +154,12 @@ impl CompleteServerHelloHandling {
             false,
             false,
         )?;
+        // RFC 7924 §4: which messages the server replaces by fingerprints.
+        cached_info::process_server_hello(
+            cx.common,
+            self.hello.cached_info.as_mut(),
+            server_hello.extensions.cached_info.as_ref(),
+        )?;
 
         if self.config.require_ems && !self.using_ems {
             return Err(cx.common.send_fatal_alert(
@@ -209,6 +216,7 @@ impl CompleteServerHelloHandling {
                     resuming: true,
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
+                    cached_info: None,
                 };
                 // RFC 5077 §3.3: a new ticket, if any, precedes
                 // ChangeCipherSpec.
@@ -228,6 +236,7 @@ impl CompleteServerHelloHandling {
         if cx.common.handshake_kind.is_none() {
             cx.common.handshake_kind = Some(HandshakeKind::Full);
         }
+        cached_info::expect_hash_forms(cx.common, self.hello.cached_info.as_ref());
 
         if let Some(list) = &server_hello.extensions.sct_list {
             crate::msgs::handshake::CertificatePayloadTls13::validate_sct_list(list.bytes())
@@ -271,15 +280,12 @@ struct ExpectCertificate {
 }
 
 impl State<ClientConnectionData> for ExpectCertificate {
-    fn handle(
-        mut self: Box<Self>,
-        _cx: &mut ClientContext<'_>,
-        m: Message<'_>,
-    ) -> NextStateOrError {
+    fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 7924 §4.1: the chain may be restored from the cached_info
+        // store; the transcript has the message as sent.
         let server_cert_chain =
-            require_handshake_msg!(m, HandshakeType::Certificate, HandshakePayload::Certificate)?;
+            cached_info::take_certificate(cx.common, self.hello.cached_info.as_mut(), &m)?;
         self.transcript.add_message(&m);
-        let server_cert_chain = server_cert_chain.clone().into_owned();
 
         let server_cert = ServerCertDetails {
             cert_chain: server_cert_chain,
@@ -510,41 +516,57 @@ struct ExpectServerDoneOrCertReq {
     hello: ClientHelloDetails,
 }
 
+impl ExpectServerDoneOrCertReq {
+    fn certificate_request(
+        mut self: Box<Self>,
+        m: &Message<'_>,
+        certreq: &crate::msgs::handshake::CertificateRequestPayload,
+    ) -> NextStateOrError {
+        self.transcript.add_message(m);
+        debug!("Got CertificateRequest {:?}", certreq);
+
+        // RFC 5246 §7.4.4: the schemes must be non-empty (checked by the
+        // codec).
+        let client_auth = ClientAuthDetails::resolve(
+            &*self.config.client_auth_cert_resolver,
+            Some(&certreq.canames),
+            Some(&certreq.certtypes),
+            &certreq.sigschemes,
+            None,
+        );
+        Ok(Box::new(ExpectServerDone {
+            config: self.config,
+            session_id: self.session_id,
+            server_name: self.server_name,
+            randoms: self.randoms,
+            using_ems: self.using_ems,
+            using_etm: self.using_etm,
+            transcript: self.transcript,
+            suite: self.suite,
+            server_cert: self.server_cert,
+            server_kx: self.server_kx,
+            client_auth: Some(client_auth),
+            must_issue_new_ticket: self.must_issue_new_ticket,
+            hello: self.hello,
+        }))
+    }
+}
+
 impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
     fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 7924 §4.2: a CertificateRequest replaced by its fingerprint.
+        if let Some(certreq) = cached_info::restored_certificate_request(
+            cx.common,
+            self.hello.cached_info.as_mut(),
+            &m,
+        )? {
+            return self.certificate_request(&m, &certreq);
+        }
         match &m.payload {
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::CertificateRequest(certreq)),
                 ..
-            } => {
-                self.transcript.add_message(&m);
-                debug!("Got CertificateRequest {:?}", certreq);
-
-                // RFC 5246 §7.4.4: the schemes must be non-empty (checked by
-                // the codec).
-                let client_auth = ClientAuthDetails::resolve(
-                    &*self.config.client_auth_cert_resolver,
-                    Some(&certreq.canames),
-                    Some(&certreq.certtypes),
-                    &certreq.sigschemes,
-                    None,
-                );
-                Ok(Box::new(ExpectServerDone {
-                    config: self.config,
-                    session_id: self.session_id,
-                    server_name: self.server_name,
-                    randoms: self.randoms,
-                    using_ems: self.using_ems,
-                    using_etm: self.using_etm,
-                    transcript: self.transcript,
-                    suite: self.suite,
-                    server_cert: self.server_cert,
-                    server_kx: self.server_kx,
-                    client_auth: Some(client_auth),
-                    must_issue_new_ticket: self.must_issue_new_ticket,
-                    hello: self.hello,
-                }))
-            }
+            } => self.certificate_request(&m, certreq),
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHelloDone),
                 ..
@@ -707,6 +729,7 @@ struct ExpectCcs {
     resuming: bool,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
+    cached_info: Option<ClientCachedInfo>,
 }
 
 impl State<ClientConnectionData> for ExpectCcs {
@@ -734,6 +757,7 @@ impl State<ClientConnectionData> for ExpectCcs {
             resuming: self.resuming,
             cert_verified: self.cert_verified,
             sig_verified: self.sig_verified,
+            cached_info: self.cached_info,
         }))
     }
 }
@@ -750,6 +774,7 @@ struct ExpectFinished {
     resuming: bool,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
+    cached_info: Option<ClientCachedInfo>,
 }
 
 impl ExpectFinished {
@@ -807,6 +832,11 @@ impl State<ClientConnectionData> for ExpectFinished {
             emit_finished(&st.secrets, &mut st.transcript, cx.common);
         }
 
+        // RFC 7924 §7: messages received in full are cached only now that
+        // the handshake has completed.
+        if let Some(cached) = st.cached_info.take() {
+            cached.handshake_completed(&st.config, &st.server_name);
+        }
         st.save_session(cx);
         if let Some(group) = cx.common.negotiated_key_exchange_group() {
             st.config

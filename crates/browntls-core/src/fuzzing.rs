@@ -76,6 +76,7 @@ const HANDSHAKE_TYPES: &[HandshakeType] = &[
     HandshakeType::CompressedCertificate,
     HandshakeType::MessageHash,
     HandshakeType::Unknown(0x63),
+    HandshakeType::CertificateURL,
 ];
 
 /// Decodes `body` as the body of the handshake message type that `selector`

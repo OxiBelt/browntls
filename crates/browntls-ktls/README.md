@@ -9,6 +9,20 @@ that are not application data (TLS 1.3 KeyUpdate and NewSessionTicket,
 post-handshake authentication, alerts) come back to the stream and are
 handled by `browntls_core::kernel::KernelConnection`.
 
+Applications normally reach this crate through
+[`browntls`](../browntls/README.md), whose `ktls` feature re-exports it as
+the module `browntls::ktls`; with that crate's `tokio` feature as well, the
+module includes `AsyncKtlsStream` ([below](#tokio)):
+
+```toml
+[dependencies]
+browntls = { git = "https://github.com/OxiBelt/browntls", features = ["ktls"] }
+```
+
+The items are the same ones: `browntls::ktls::KtlsStream` is
+`browntls_ktls::KtlsStream`, and `browntls::kernel` is
+`browntls_core::kernel`.
+
 | | |
 |---|---|
 | Protocols | TLS 1.2, TLS 1.3 |

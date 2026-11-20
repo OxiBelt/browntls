@@ -297,8 +297,7 @@ dependencies = [
 name = "browntls-e2e"
 version = "0.1.0-dev"
 dependencies = [
- "browntls-core",
- "browntls-tokio",
+ "browntls",
  "tokio",
 ]
 

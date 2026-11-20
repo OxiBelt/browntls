@@ -18,6 +18,17 @@
 //! Linux 6.19 (`TLS_TX_MAX_PAYLOAD_LEN`). The `tls` kernel module must be
 //! available (`modprobe tls`).
 //!
+//! Applications normally reach this crate through the `browntls` crate,
+//! whose `ktls` feature re-exports it as the module `browntls::ktls`
+//! (`browntls::ktls::KtlsStream` is [`KtlsStream`]):
+//!
+//! ```toml
+//! [dependencies]
+//! browntls = { git = "https://github.com/OxiBelt/browntls", features = ["ktls"] }
+//! ```
+//!
+//! The example here names the items through this crate and `browntls_core`.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let config: std::sync::Arc<browntls_core::ClientConfig> = unimplemented!();

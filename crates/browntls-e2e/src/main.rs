@@ -65,6 +65,10 @@
 //! as expected before a retry) and `error`. The exit status is non-zero
 //! after any error.
 //!
+//! The peer depends on the `browntls` facade crate alone, as an application
+//! does: the protocol through its root and the Tokio streams through
+//! `browntls::tokio`.
+//!
 //! This is test tooling: it loads keys from files given on the command line
 //! and has no hardening beyond the library defaults it configures.
 
@@ -78,15 +82,15 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use browntls_core::client::{ClientHelloPadding, TicketRequest};
-use browntls_core::crypto::hpke::{HpkeKem, HpkePrivateKey};
-use browntls_core::crypto::{CryptoProvider, SupportedKxGroup, native};
-use browntls_core::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
-use browntls_core::pki_types::pem::PemObject;
-use browntls_core::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use browntls_core::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
-use browntls_core::sign::CertifiedKey;
-use browntls_core::{
+use browntls::client::{ClientHelloPadding, TicketRequest};
+use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
+use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
+use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
+use browntls::pki_types::pem::PemObject;
+use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use browntls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use browntls::sign::CertifiedKey;
+use browntls::{
     ClientConfig, ClientConnection, ConnectionCommon, Error, RootCertStore, ServerConfig,
     ServerConnection, SideData, StreamOwned, SupportedCipherSuite, SupportedProtocolVersion,
     version,
@@ -300,7 +304,7 @@ impl Options {
 
     fn versions(&self) -> &[&'static SupportedProtocolVersion] {
         if self.versions.is_empty() {
-            browntls_core::DEFAULT_VERSIONS
+            browntls::DEFAULT_VERSIONS
         } else {
             &self.versions
         }
@@ -358,7 +362,7 @@ fn read_file(path: &str) -> Result<Vec<u8>> {
 
 /// The native HPKE suites with the X25519 KEM (the one every ECH
 /// implementation supports).
-fn x25519_hpke_suites() -> Vec<&'static dyn browntls_core::crypto::hpke::Hpke> {
+fn x25519_hpke_suites() -> Vec<&'static dyn browntls::crypto::hpke::Hpke> {
     native::hpke::ALL_SUPPORTED_SUITES
         .iter()
         .copied()

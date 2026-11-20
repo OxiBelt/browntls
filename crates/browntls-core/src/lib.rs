@@ -6,6 +6,16 @@
 //! [`KeyLogFile`], the in-memory session caches and the process-wide default
 //! [`crypto::CryptoProvider`].
 //!
+//! Applications normally depend on the `browntls` crate instead, whose root
+//! re-exports everything here (`browntls::ClientConfig` is [`ClientConfig`])
+//! and which adds the Tokio streams (`browntls::tokio`) and Linux kernel TLS
+//! offload (`browntls::ktls`) behind features of the same names:
+//!
+//! ```toml
+//! [dependencies]
+//! browntls = { git = "https://github.com/OxiBelt/browntls" }
+//! ```
+//!
 //! # Layout
 //!
 //! * [`crypto`]: the provider mount point (cipher suites, key exchange, signing,

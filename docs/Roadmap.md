@@ -56,6 +56,7 @@ intent.
 | Kernel TLS offload, core (`browntls_core::kernel`): handover of buffered and unbuffered connections with blockers instead of data loss, post-handover records (KeyUpdate in both directions, NewSessionTicket, post-handshake client authentication, alerts) through the state machine, confidentiality limit and request budgets kept; tested against a userspace stand-in for Linux kernel TLS (see [Architecture](Architecture.md#kernel-tls-offload-browntls_corekernel)) | done |
 | Linux kernel TLS (`browntls-ktls`): `KtlsStream` hands buffered client and server connections to the kernel after draining them to a record boundary (refusals return the connection), installs keys for TLS 1.2 and 1.3 AES-GCM, ChaCha20-Poly1305 and TLS 1.3 AES-CCM, handles control records and key updates through `browntls_core::kernel`, honours a peer's `record_size_limit` (Linux 6.19); tested against the running kernel over loopback TCP; `AsyncKtlsStream` (feature `tokio`) does the same on Tokio TCP sockets and takes `browntls-tokio` client and server streams, and its `shutdown` sends the FIN only when the kernel's counters show every record with TCP (`unsent`); the kernel's zero-copy options on both streams (`set_tx_zerocopy_sendfile`; `set_rx_expect_no_pad` on Linux 7.2 or later, where a padded record is no longer misplaced in the reader's buffer) and `sendfile`, which sends a file's pages without a pass through userspace and keeps the record count and `unsent` (see [Architecture](Architecture.md#linux-kernel-tls-browntls-ktls)) | done |
 | Kernel TLS in the load-aware routing order (`accel::load::kernel`, `browntls_ktls::routing`): while a driver has activated it, kernel TLS is the first place for the records of a new connection, ahead of the backends in their usual order (dedicated instructions before SIMD alone); with `accel::load` enabled, a stream per kind of record work (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305) compares what writes cost with the kernel and in userspace and keeps a share of the new connections in userspace while the kernel is slower than its baseline and userspace measures cheaper; see [Architecture](Architecture.md#kernel-tls-at-the-head-of-the-order) | done: placement, cost reports, status and fixed shares in `browntls-crypto` (tested with synthetic costs: shift to userspace and back, a slower userspace, fixed shares, disabling, deactivating); `RoutedStream` and `AsyncRoutedStream` in `browntls-ktls` place buffered connections and `browntls-tokio` streams, fall back to userspace when the kernel cannot take a connection, and time writes in both places in processor time of the calling thread (tested over loopback with fixed shares, on kernels with and without the `tls` module). Only new connections move, only writes are timed, and unbuffered connections are not placed. The automatic controller is not exercised through real timings, and no measurement shows a shift away from the kernel paying on real hardware: the benefit is unverified |
+| Facade crate (`browntls`): the one dependency of an application. Its root is `browntls-core`, the `tokio` feature adds `browntls-tokio` as `browntls::tokio` and the `ktls` feature adds `browntls-ktls` as `browntls::ktls`; every feature of the three exists under the same name, except `fuzzing`; the protocol crate was renamed to `browntls-core` for it; see [Architecture](Architecture.md#facade-crate-browntls) | done: no code of its own (re-exports only, so the items are the ones the crates behind it define); a handshake through each of the three paths (`browntls::ktls` against the running kernel), probes of the forwarded features, Clippy with the default set, each optional crate alone, `std` and `native` only, the other provider and without `std`, a CI job for the feature sets an application picks, and a manifest check of the feature tables (`tests/scripts/check_facade_features.py`); the Docker E2E peer depends on it alone. Not published, like the rest of the workspace; the gaps are listed [below](#governance-gaps) |
 | Kernel integration design | in progress: Linux kernel TLS offload (above); other kernel mechanisms not started |
 
 ## Governance gaps
@@ -188,6 +189,26 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   another implementation or published test vectors. Secondary host names
   (the `server_name` request extension) are not supported: a client
   validates server authenticators against the connection's SNI only.
+- The facade crate `browntls` and the crates behind it are unpublished
+  (`publish = false`), so `browntls = "..."` from a registry does not exist
+  yet; an application depends on the Git repository or a path. The manifests
+  of `browntls`, `browntls-tokio` and `browntls-ktls` carry the metadata a
+  crates.io release needs; those of `browntls-core`, `browntls-crypto` and
+  `browntls-pki`, which the facade cannot be published without, do not
+  (no `readme`, `documentation`, `keywords`, `categories`, `include` list or
+  licence file in the crate directory, and no crate README).
+  `browntls::tokio` shares its name with the external `tokio` crate, so
+  `use browntls::*;` or `use browntls::tokio;` makes `#[tokio::main]` and
+  `tokio::` paths meant for the external crate fail to compile in that
+  scope (see [Architecture](Architecture.md#the-name-browntlstokio)). The facade
+  without `std` is linted on the x86-64 host target only: no CI job builds
+  it, or `browntls-core`, for a target without an operating system. Its
+  tests are not run against the Tokio lower bound (that job compiles it with
+  `tokio` through the end-to-end peer and runs the tests of `browntls-tokio`
+  and `browntls-ktls`). The Docker E2E matrix does not reach
+  `browntls::ktls`. The fuzz project, the entropy checks and the Kubernetes
+  revocation test depend on the crates behind the facade directly (the fuzz
+  project needs `fuzzing`, which the facade does not offer).
 - External PSKs: the `psk_ke` mode is not implemented (RFC 9257 recommends
   (EC)DHE); a server examines only the first 16 `pre_shared_key`
   identities; 0-RTT under an external PSK has no anti-replay protection

@@ -12,6 +12,21 @@ implements `AsyncRead`, `AsyncBufRead` and `AsyncWrite` over the plaintext.
 > been independently reviewed or audited, and have no published releases.
 > Do not rely on them to protect real traffic yet.
 
+Applications normally reach this crate through
+[`browntls`](../browntls/README.md), whose `tokio` feature re-exports it as
+the module `browntls::tokio`:
+
+```toml
+[dependencies]
+browntls = { git = "https://github.com/OxiBelt/browntls", features = ["tokio"] }
+```
+
+The items are the same ones (`browntls::tokio::TlsConnector` is
+`browntls_tokio::TlsConnector`), and the features described
+[below](#features) have the same names there. The examples in this file name
+the items through this crate, `browntls_tokio`, and the protocol crate
+through its re-export `browntls_tokio::browntls`.
+
 ## Client
 
 ```rust,no_run

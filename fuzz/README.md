@@ -3,13 +3,17 @@
 A [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) project for the
 untrusted-input surfaces of browntls (message codecs, the record deframer,
 certificate decompression, the PKI parsers and path validation, the client and
-server handshake state machines) and for the whole public API of the four
-library crates other than `browntls-ktls`, through API targets grouped by topic.
+server handshake state machines) and for the whole public API of four
+library crates (`browntls-crypto`, `browntls-pki`, `browntls-core` and
+`browntls-tokio`), through API targets grouped by topic. `browntls-ktls` is
+not fuzzed, and the facade `browntls` has no function of its own.
 
 The project is not a member of the workspace. It has its own `Cargo.toml` and
 `Cargo.lock`, depends on `browntls-core` with the `fuzzing` feature (unstable entry
 points into otherwise private codecs, `browntls_core::fuzzing`; not a supported API)
-and on `rcgen` for certificates generated at start-up. It enables both the
+and on `rcgen` for certificates generated at start-up. It names the library
+crates directly, not through the facade `browntls`, which does not offer
+`fuzzing`. It enables both the
 `native` and the `rustcrypto` providers, so the library has no implicit default
 provider; harnesses call `browntls_fuzz::init()` to install the native one.
 The crypto targets also depend on the RustCrypto crates that `browntls-crypto`
@@ -142,6 +146,8 @@ Together the targets must reach every `pub fn` of `browntls-core`,
 it: it builds the library tests above with LLVM source-based coverage, runs
 them, and fails for any public function (outside test modules) whose body
 never ran. A function defined in a macro must run in every expansion.
+The facade `browntls` is not in the list: it defines no `pub fn`, and the
+functions it re-exports are counted in the crates that define them.
 
 ```sh
 rustup component add llvm-tools

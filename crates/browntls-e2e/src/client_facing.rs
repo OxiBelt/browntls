@@ -4,9 +4,9 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 
-use browntls_core::ech::EchServerConfig;
-use browntls_core::ech::split::{ClientFacing, ClientFacingDecision};
-use browntls_core::{ServerConfig, StreamOwned};
+use browntls::ech::EchServerConfig;
+use browntls::ech::split::{ClientFacing, ClientFacingDecision};
+use browntls::{ServerConfig, StreamOwned};
 
 use super::output::{Value, emit};
 use super::{Options, Result, connect_with_retry, listen, serve, server_config, set_timeouts};

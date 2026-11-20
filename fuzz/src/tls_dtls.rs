@@ -142,7 +142,7 @@ pub fn run(data: &[u8]) {
         match (op, session.as_mut()) {
             (0, _) => session = handshake(&mut input),
             (1, Some(s)) => connect(s, &mut input),
-            (7, _) => fresh(&mut input, session.as_ref().map(|s| &s.configs)),
+            (7, _) => fresh(&mut input, session.as_mut()),
             (_, Some(s)) => match s.pair.as_mut() {
                 Some(pair) if pair.established => match op {
                     2 => application_data(pair, &mut s.net, &mut input),
@@ -682,10 +682,10 @@ fn default_configs() -> &'static Configs {
 
 /// Target (client, server, server without cookies, acceptor), a clock
 /// byte, an 8-bit-prefixed address, then one to three shaped datagrams.
-fn fresh(input: &mut Input, configs: Option<&Configs>) {
-    let configs = match configs {
-        Some(c) if c.compatible && c.cookies => c,
-        _ => default_configs(),
+fn fresh(input: &mut Input, session: Option<&mut Session>) {
+    let (configs, tickets) = match session {
+        Some(s) if s.configs.compatible && s.configs.cookies => (&s.configs, Some(&mut s.tickets)),
+        _ => (default_configs(), None),
     };
     let target = input.choose(4);
     let now = START + Duration::from_millis(u64::from(input.byte()) * 100);
@@ -698,6 +698,10 @@ fn fresh(input: &mut Input, configs: Option<&Configs>) {
         0 => {
             let mut client =
                 dtls::ClientConnection::new(client_config, localhost()).expect("client");
+            // It took a ticket of the session's client, if it held one.
+            if let Some(tickets) = tickets {
+                *tickets = tickets.saturating_sub(1);
+            }
             feed(&mut client, datagrams, now);
         }
         1 | 2 => {

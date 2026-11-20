@@ -236,7 +236,7 @@ fn with_versions<S: browntls_core::ConfigSide>(
     Some(builder)
 }
 
-fn root_store() -> Arc<RootCertStore> {
+pub(super) fn root_store() -> Arc<RootCertStore> {
     let mut roots = RootCertStore::empty();
     roots.add(fixtures::get().ca.clone()).expect("root");
     Arc::new(roots)
@@ -508,7 +508,10 @@ pub(super) fn server_config_op(input: &mut Input<'_>) {
 // --------------------------------------------------------------- handshake
 
 /// Moves records between the two sides until neither has anything to say.
-fn pump(client: &mut ClientConnection, server: &mut ServerConnection) -> Result<(), Error> {
+pub(super) fn pump(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> Result<(), Error> {
     for _ in 0..40 {
         let mut progressed = false;
         let mut buf = Vec::new();

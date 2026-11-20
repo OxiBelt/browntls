@@ -116,6 +116,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             external_binding: None,
             ech: None,
             ech_backend: false,
+            cached_info: Default::default(),
         }
     }
 

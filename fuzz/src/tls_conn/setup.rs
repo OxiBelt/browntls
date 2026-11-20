@@ -8,6 +8,10 @@
 
 use std::sync::{Arc, OnceLock};
 
+use browntls_core::cached_info::{
+    CachedInformationType, CachedInformationTypes, CachedObject, ClientCachedInfoMemoryCache,
+    ServerCachedInfoPolicy, fingerprint,
+};
 use browntls_core::client::danger::ServerCertVerifier;
 use browntls_core::client::{
     ClientSessionMemoryCache, Resumption, Tls12Resumption, WebPkiServerVerifier,
@@ -119,7 +123,9 @@ pub(crate) const ALPN: [&[&[u8]]; 4] = [&[], &[b"fuzz"], &[b"h2", b"fuzz"], &[b"
 /// Byte 1: bits 0-1 client authentication (none, mandatory, optional,
 /// post-handshake only), bit 2 secret extraction, bit 3 client verifier set
 /// through `dangerous()`, bits 4-5 client resumption store, bits 6-7 ALPN
-/// set of the client (the server always offers `fuzz` and `h2`).
+/// set of the client (the server always offers `fuzz` and `h2`). Without
+/// resumption the client also caches the server's messages (RFC 7924
+/// `cached_info`), which the server always answers.
 /// Byte 2: client cipher suite (0: all, otherwise one, by index).
 /// Byte 3: client key exchange groups (low nibble mask) and server groups
 /// (high nibble mask); zero means all.
@@ -256,6 +262,9 @@ impl Knobs {
             2 => Resumption::disabled(),
             _ => Resumption::in_memory_sessions(1).tls12_resumption(Tls12Resumption::Disabled),
         };
+        if (self.auth >> 4) & 3 == 2 {
+            config.cached_info = Some(Arc::new(ClientCachedInfoMemoryCache::new(1, 2)));
+        }
         config.alpn_protocols = ALPN[usize::from(self.auth >> 6)]
             .iter()
             .map(|p| p.to_vec())
@@ -306,11 +315,46 @@ impl Knobs {
         config.max_early_data_size = if self.early_data() { 1024 } else { 0 };
         config.send_half_rtt_data = self.flags & 0x80 != 0;
         config.request_client_auth_after_handshake = self.client_auth() == 3;
+        let mut cached_info = ServerCachedInfoPolicy::default();
+        (cached_info.cert, cached_info.cert_req) = (true, true);
+        config.cached_info = cached_info;
         config.enable_secret_extraction = self.extraction();
         config.max_fragment_size = self.fragment();
         config.cert_compression_cache = compression_cache();
         let _ = (config.fips(), config.crypto_provider());
         Some(config)
+    }
+}
+
+/// Checks RFC 7924 `cached_info` once both sides completed a handshake
+/// with nothing corrupted: they agree on the messages that travelled as
+/// fingerprints, the client restored those from its store, and every stored
+/// object's fingerprint is the SHA-256 of its message.
+pub(crate) fn check_cached_info(
+    client: &ClientConfig,
+    c: CachedInformationTypes,
+    s: CachedInformationTypes,
+) {
+    assert_eq!(c, s, "the peers disagree on the cached_info replacements");
+    let Some(store) = &client.cached_info else {
+        assert!(c.is_empty(), "replaced without a client store");
+        return;
+    };
+    let provider = client.crypto_provider();
+    for typ in [CachedInformationType::Cert, CachedInformationType::CertReq] {
+        let objects = store.lookup(&server_name(), typ);
+        assert!(
+            !c.contains(typ) || !objects.is_empty(),
+            "restored from nothing"
+        );
+        for object in objects {
+            assert_eq!(object.typ(), typ);
+            let again = CachedObject::new(provider, typ, object.message().to_vec())
+                .expect("a stored object holds a valid message");
+            assert_eq!(again.fingerprint(), object.fingerprint());
+            let hash = fingerprint(provider, object.message()).expect("SHA-256");
+            assert_eq!(&hash, object.fingerprint());
+        }
     }
 }
 

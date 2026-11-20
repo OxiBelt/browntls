@@ -156,6 +156,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             enable_grease: false,
             client_hello_padding: super::ClientHelloPadding::default(),
             ech_mode: None,
+            cached_info: None,
         }
     }
 }

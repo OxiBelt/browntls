@@ -45,7 +45,9 @@ use browntls_core::unbuffered::{
 use browntls_core::{ClientConfig, CommonState, ServerConfig, SideData};
 
 use crate::input::{Input, put_short_field};
-use crate::tls_conn::setup::{Knobs, Pki, assert_prefix, assert_same_secrets, server_name};
+use crate::tls_conn::setup::{
+    Knobs, Pki, assert_prefix, assert_same_secrets, check_cached_info, server_name,
+};
 use seeds::Seed;
 pub use seeds::seeds;
 
@@ -736,6 +738,11 @@ impl World {
         );
         assert_eq!(c.alpn_protocol(), s.alpn_protocol());
         assert_eq!(c.handshake_kind(), s.handshake_kind());
+        check_cached_info(
+            &self.client_config,
+            c.cached_info_replaced(),
+            s.cached_info_replaced(),
+        );
         assert_eq!(c.peer_certificates(), Some(&pki.server_chain[..]));
         if let Some(certs) = s.peer_certificates() {
             assert_eq!(certs, &pki.client_chain[..]);

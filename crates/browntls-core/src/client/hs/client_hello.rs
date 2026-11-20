@@ -645,6 +645,20 @@ pub(super) fn emit_client_hello_for_retry(
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 
+    // RFC 7924: fingerprints of cached TLS 1.2 messages. The second
+    // ClientHello after a HelloRetryRequest repeats the first one's offer.
+    #[cfg(feature = "tls12")]
+    {
+        if retryreq.is_none() {
+            input.hello.cached_info = crate::cached_info::client::ClientCachedInfo::offer(
+                config,
+                &input.server_name,
+                supports_tls12,
+            );
+        }
+        exts.cached_info = input.hello.cached_info.as_ref().and_then(|c| c.extension());
+    }
+
     // What the server's choices are checked against: never a GREASE value.
     cx.data.offered_post_handshake_auth = exts.post_handshake_auth.is_some();
     input.hello.offered_sigschemes = offered_sigschemes;

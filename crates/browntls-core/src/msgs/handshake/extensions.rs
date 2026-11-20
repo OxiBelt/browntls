@@ -358,6 +358,9 @@ pub(crate) struct ServerExtensions {
     pub(crate) external_id_hash: Option<ExternalIdHash>,
     /// RFC 8844 §4.3: TLS 1.2 ServerHello, TLS 1.3 EncryptedExtensions.
     pub(crate) external_session_id: Option<ExternalSessionId>,
+    /// RFC 7924 §3: the cached information types the TLS 1.2 ServerHello
+    /// acknowledges.
+    pub(crate) cached_info: Option<crate::cached_info::ServerHelloCachedInfo>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
     /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
@@ -432,6 +435,7 @@ impl ServerExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(self.cached_info.is_some(), ExtensionType::CachedInfo);
         add(
             self.external_id_hash.is_some(),
             ExtensionType::ExternalIdHash,
@@ -527,6 +531,9 @@ impl Codec<'_> for ServerExtensions {
         if let Some(id) = &self.external_session_id {
             encode_extension(ExtensionType::ExternalSessionId, out, |b| id.encode(b));
         }
+        if let Some(cached) = &self.cached_info {
+            encode_extension(ExtensionType::CachedInfo, out, |b| cached.encode(b));
+        }
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
@@ -594,6 +601,9 @@ impl Codec<'_> for ServerExtensions {
                 }
                 ExtensionType::ExternalSessionId => {
                     out.external_session_id = Some(ExternalSessionId::read(body)?);
+                }
+                ExtensionType::CachedInfo => {
+                    out.cached_info = Some(crate::cached_info::ServerHelloCachedInfo::read(body)?);
                 }
                 ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {

@@ -74,6 +74,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) external_id_hash: Option<ExternalIdHash>,
     /// RFC 8844 §4.3: our external session identifier (SDP `tls-id`).
     pub(crate) external_session_id: Option<ExternalSessionId>,
+    /// RFC 7924: the fingerprints of cached messages (TLS 1.2).
+    pub(crate) cached_info: Option<crate::cached_info::ClientHelloCachedInfo>,
     /// RFC 8701: an empty GREASE extension of this type, encoded first.
     /// Never part of `present_types`.
     pub(crate) grease_first: Option<u16>,
@@ -179,6 +181,7 @@ impl ClientExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(self.cached_info.is_some(), ExtensionType::CachedInfo);
         add(
             self.external_id_hash.is_some(),
             ExtensionType::ExternalIdHash,
@@ -325,6 +328,9 @@ impl Codec<'_> for ClientExtensions {
         if let Some(id) = &self.external_session_id {
             encode_extension(ExtensionType::ExternalSessionId, out, |b| id.encode(b));
         }
+        if let Some(cached) = &self.cached_info {
+            encode_extension(ExtensionType::CachedInfo, out, |b| cached.encode(b));
+        }
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
@@ -446,6 +452,9 @@ impl Codec<'_> for ClientExtensions {
                 }
                 ExtensionType::ExternalSessionId => {
                     out.external_session_id = Some(ExternalSessionId::read(body)?);
+                }
+                ExtensionType::CachedInfo => {
+                    out.cached_info = Some(crate::cached_info::ClientHelloCachedInfo::read(body)?);
                 }
                 ExtensionType::Padding => {
                     // RFC 7685 §3: the server ignores the content.

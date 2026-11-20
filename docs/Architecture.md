@@ -891,6 +891,132 @@ assertions). The module documentation is the reference; in short:
   identity assertions, TLS peer identities cannot be misrepresented even
   by an attacker that modifies signaling (§6).
 
+### Cached information (RFC 7924)
+
+`cached_info` (module `browntls_core::cached_info`) lets a TLS 1.2 client
+that kept the server's Certificate or CertificateRequest message from an
+earlier handshake offer its fingerprint, and a server whose message has that
+fingerprint send the fingerprint in its place. Both object types are
+implemented: `cert` (1) and `cert_req` (2). TLS 1.3 never uses it: the
+extension may appear in a ClientHello offering both versions, a TLS 1.3
+server ignores it, and in any TLS 1.3 server message it is
+`illegal_parameter` (`tls13/extensions.rs`). Both sides are off by default.
+
+API:
+
+- Client: `ClientConfig::cached_info: Option<Arc<dyn
+  ClientCachedInfoStore>>` (default `None`). The trait has `lookup(server
+  name, type)`, returning the objects to offer, most preferred first, and
+  `insert(server name, object)`. `ClientCachedInfoMemoryCache::new(max
+  servers, per server)` is the built-in store (`std`): it evicts the server
+  name inserted longest ago, and within a name and type the object inserted
+  longest ago; it holds at most `max_servers * per_server * 2` messages of
+  at most 64 KiB each. `CachedObject::new(provider, type, message)` builds
+  an object from a complete TLS 1.2 handshake message (header included) and
+  computes its fingerprint; there is no way to supply a fingerprint, and
+  the message must be exactly one well-formed message of the type (a
+  Certificate with at least one certificate). Applications may provision
+  objects themselves (the constrained-device case of RFC 7924 §1).
+- Server: `ServerConfig::cached_info: ServerCachedInfoPolicy`, one switch
+  per type (`cert`, `cert_req`), both off by default.
+- Both sides and every connection type (buffered, unbuffered,
+  `browntls-tokio`): `CommonState::cached_info_replaced()` reports which
+  messages of this handshake travelled as fingerprints.
+- `cached_info::fingerprint(provider, message)` is the SHA-256 of a complete
+  handshake message (RFC 7924 §5, checked against Appendix A), taken from
+  the provider's cipher suites.
+
+Rules:
+
+- A ClientHello that offers TLS 1.2, with a store configured, carries at
+  most `MAX_OFFERED_PER_TYPE` (4) objects of each type the store returns for
+  the server name (not with an ECH offer, nor on QUIC, which offer TLS 1.3
+  only); a second ClientHello repeats the first one's offer, and there is no
+  extension when the store has none. A TLS 1.2 server that sees an offer
+  computes the fingerprint of the Certificate its resolver selected and of
+  the CertificateRequest it is about to send, and replaces a message by
+  `opaque hash_value<1..255>` (the 32-byte fingerprint) only when its policy
+  allows the type and the client offered exactly that fingerprint; it then
+  lists the type in its ServerHello. Unknown types, hashes of another length
+  and stale fingerprints are skipped: the message goes in full and the type
+  is not listed (RFC 7924 §4). A resumed handshake never answers.
+- The client accepts in the ServerHello only types it offered objects of,
+  each once (otherwise `illegal_parameter`); the extension without an offer
+  is `unsupported_extension`; a malformed extension body is
+  `decode_error`. In a full handshake an acknowledged Certificate or
+  CertificateRequest is read only in its hash form: a full message in its
+  place is `decode_error`, and a fingerprint matching no offered object of
+  that type, or of another length, is `illegal_parameter`. A hash form the
+  server did not acknowledge is parsed as a full message and fails as a
+  malformed one (`decode_error`). An acknowledgement in a resumed handshake,
+  which has neither message, is ignored; a `cert_req` acknowledgement
+  without a CertificateRequest is not an error.
+- Transcript: both sides hash each message as it was sent, the hash form
+  when replaced (RFC 7924 §7, second paragraph), so Finished, the extended
+  master secret session hash and a client CertificateVerify cover the
+  fingerprint, not the restored message.
+- A restored message is processed exactly as a received one: the restored
+  chain is verified at the current time with the configured verifier, as a
+  received chain is, becomes `peer_certificates()` and the peer
+  chain of the session stored for resumption, and its leaf key verifies the
+  ServerKeyExchange signature. A restored CertificateRequest drives client
+  certificate selection like a received one.
+- The client stores messages received in full only after the handshake
+  completed (the server's Finished verified, after the chain): a failed
+  handshake stores nothing, and a restored message is never stored again.
+
+Security analysis:
+
+- The server still proves possession of its private key. browntls has no
+  TLS 1.2 RSA or static Diffie-Hellman key exchange (RFC 10015): every TLS
+  1.2 suite is ECDHE with a signed ServerKeyExchange, which the client
+  checks against the leaf key of the restored chain. A server that has not
+  the key of the cached certificate cannot complete the handshake, whatever
+  fingerprint it sends.
+- Being cached never makes a chain trusted: it is verified as if received,
+  so a chain that has expired or lost its trust anchor since it was cached
+  fails as it would in full. Only the client's own store is consulted, and a
+  fingerprint must equal one the client offered, all 32 bytes.
+- A wrong, injected or replayed fingerprint can only make the handshake
+  fail: it selects among the client's own offered objects (any other is
+  `illegal_parameter`), and an attacker who changes the ServerHello or the
+  hash form changes the transcript, so Finished fails. An attacker
+  substituting one offered object for another still needs the server's
+  key for the ServerKeyExchange signature.
+- Cache poisoning: only messages received in full in a handshake whose
+  Finished verified, after their chain verified, are inserted, so a store
+  holds what an authenticated server sent. An application store may return
+  anything; offering it is harmless for the same reasons, and objects of
+  another type are dropped before the offer.
+- Privacy: fingerprints travel in the clear in the ClientHello, so an
+  observer can link the client's connections to a server and learn which
+  certificate it saw (RFC 7924 §7); the extension is therefore off by
+  default and not offered with ECH (a GREASE ECH extension does not
+  suppress it, since it hides nothing). The memory store keeps fingerprints
+  per server name only in memory.
+- Resource bounds: a server compares one fingerprint per type against at
+  most the 65535 bytes of the client's list, and hashes at most two of its
+  own messages per handshake; the built-in store is bounded as above; a
+  client offers at most eight objects.
+- Interactions: TLS 1.2 OCSP stapling (CertificateStatus) and SCTs (in the
+  ServerHello) are separate messages, never cached; certificate compression,
+  delegated credentials and QUIC are TLS 1.3 only; renegotiation is refused;
+  kernel TLS handoff happens after the handshake and sees nothing of it.
+
+Testing limits: no other implementation the project tests against (OpenSSL,
+GnuTLS, Go crypto/tls, rustls) implements RFC 7924, so there is no
+third-party interoperability test, and the wire format is checked only
+against the RFC text and its Appendix A vector (whose printed message
+header carries a spurious `00 02`: the vector's hash is that of the
+560-byte certificate under the header `0b 00 02 36 00 02 33 00 02 30`).
+In-process tests on both providers (`tests/cached_info*.rs`, cases in
+`tests/cases/cached_info.rs`) cover buffered and unbuffered peers, client
+authentication, stale caches, verification of restored chains, the
+malformed server answers above (forged by rewriting the server's flight)
+and TLS 1.3; `browntls-tokio` has a test through both stream families
+(`tests/cached_info.rs`); the `tls_conn` and `tls_unbuffered` fuzz targets
+offer and answer the extension when the client's resumption is disabled.
+
 ### Connection APIs
 
 Both APIs drive the same handshake state machines through

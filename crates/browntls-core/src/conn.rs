@@ -378,9 +378,10 @@ impl<Data: SideData> ConnectionCore<Data> {
                 let epoch = self.read_epoch();
                 let bytes = &self.deframer.joiner.buffered()[..len];
                 let parse_version = self.common_state.negotiated_version.unwrap_or(version);
-                let result = match HandshakeMessagePayload::read_version(
-                    &mut CodecReader::init(bytes),
+                let result = match crate::cached_info::read_handshake(
+                    bytes,
                     parse_version,
+                    self.common_state.cached_info.expect_hash_form,
                 ) {
                     Ok(parsed) => {
                         let msg = Message {

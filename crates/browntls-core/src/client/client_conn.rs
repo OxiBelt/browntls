@@ -236,6 +236,15 @@ pub struct ClientConfig {
     /// How the ClientHello is padded with the `padding` extension (RFC 7685).
     pub client_hello_padding: ClientHelloPadding,
 
+    /// Where TLS 1.2 server Certificate and CertificateRequest messages are
+    /// kept for RFC 7924 `cached_info`; `None` (the default) sends no
+    /// `cached_info` extension. With a store, a ClientHello that offers TLS
+    /// 1.2 carries the fingerprints the store holds for the server name
+    /// (in the clear: they let an observer link connections), and messages
+    /// received in full in completed TLS 1.2 handshakes are stored. See
+    /// [`crate::cached_info`].
+    pub cached_info: Option<Arc<dyn crate::cached_info::ClientCachedInfoStore>>,
+
     pub(super) versions: EnabledVersions,
     pub(super) verifier: Arc<dyn ServerCertVerifier>,
     pub(super) provider: Arc<CryptoProvider>,

@@ -308,6 +308,10 @@ pub struct ServerConfig {
     /// full one. [`Self::external_psks`] are still accepted. See
     /// [`crate::external_binding`].
     pub external_binding: Option<crate::external_binding::ExternalBinding>,
+    /// Which TLS 1.2 messages are replaced by their fingerprint when the
+    /// client offers it with RFC 7924 `cached_info`; none by default. See
+    /// [`crate::cached_info`].
+    pub cached_info: crate::cached_info::ServerCachedInfoPolicy,
 
     pub(super) versions: EnabledVersions,
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,

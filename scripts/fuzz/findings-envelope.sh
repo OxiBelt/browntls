@@ -15,7 +15,15 @@
 #         out in plaintext. Prints OUT's size and SHA-256 only.
 # open    decrypts IN with KEY and unpacks it into DIR, which must not exist
 #         yet. The archive is unpacked only after decryption succeeded, which
-#         includes the GCM tag check.
+#         includes the GCM tag check. DIR, any parent directories it creates,
+#         and everything unpacked get owner-only modes (umask 077 throughout,
+#         whatever modes the archive records), since the findings are private.
+#         A default ACL on an existing parent directory overrides the umask:
+#         the parents `open` creates keep what it grants. DIR gets mode 700,
+#         which also clears its ACL mask, before anything is decrypted into
+#         it, so its contents are unreachable through the ACL; DIR and its
+#         subdirectories keep the default ACL, which files created there
+#         later inherit.
 #
 # The Fuzz workflow seals a failing job's findings (inputs, libFuzzer logs,
 # quarantined corpora) to the certificate in the Actions variable
@@ -78,21 +86,52 @@ case "${command}" in
       echo "refusing to unpack into existing ${dir}" >&2
       exit 1
     fi
-    mkdir -p "${dir}"
-    chmod 700 "${dir}"
+    # The findings are private: nothing created from here on may be
+    # accessible to other users, whatever the caller's umask. `seal` archives
+    # DIR's own entry (`.`) and the modes of the files under it, and
+    # --no-same-permissions only applies the umask to those modes, so the
+    # umask must cover the extraction as well as the decryption.
+    umask 077
+    mkdir -p -- "$(dirname -- "${dir}")"
+    # A plain mkdir fails on an existing directory, which the check above
+    # misses for names such as `existing/new/..`.
+    if ! mkdir -- "${dir}"; then
+      echo "cannot create ${dir}, which must not exist yet" >&2
+      exit 1
+    fi
+    # Not redundant with the umask: under a default ACL the umask is ignored,
+    # and mode 700 also clears the ACL mask.
+    chmod 700 -- "${dir}"
+    # Removes DIR even when the archive made parts of it unreadable or
+    # unwritable for its owner (chmod changes a directory before reading it).
+    discard() {
+      chmod -R u+rwX -- "${dir}" 2>/dev/null || true
+      rm -rf -- "${dir}"
+    }
     archive="${dir}/.findings.tar.gz"
-    if ! (umask 077 && openssl cms -decrypt -binary -inform DER -in "${in}" \
-      -inkey "${key}" -recip "${cert}" -out "${archive}"); then
-      rm -rf "${dir}"
+    if ! openssl cms -decrypt -binary -inform DER -in "${in}" \
+      -inkey "${key}" -recip "${cert}" -out "${archive}"; then
+      discard
       echo "decryption failed (wrong key, or the file was modified)" >&2
       exit 1
     fi
-    if ! tar -C "${dir}" -xzf "${archive}" --no-same-owner --no-same-permissions; then
-      rm -rf "${dir}"
+    # The archive cannot replace the decrypted file it is read from.
+    if ! tar -C "${dir}" -xzf "${archive}" --no-same-owner --no-same-permissions \
+      --exclude=.findings.tar.gz; then
+      discard
       echo "unpacking failed (unsafe or malformed archive); nothing was kept" >&2
       exit 1
     fi
-    rm -f "${archive}"
+    # Give the owner access to everything (an archive can record mode 000
+    # entries, DIR's own included) and drop any group or other access that
+    # survived. GNU chmod does not follow symbolic links met while
+    # recursing.
+    if ! chmod -R u+rwX,go-rwx -- "${dir}"; then
+      discard
+      echo "restricting permissions failed; nothing was kept" >&2
+      exit 1
+    fi
+    rm -f -- "${archive}"
     echo "unpacked into ${dir}"
     ;;
 

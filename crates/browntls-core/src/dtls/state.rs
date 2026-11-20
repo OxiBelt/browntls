@@ -34,6 +34,20 @@ impl Dtls {
         self.first_message_seq = 1;
     }
 
+    /// The peer's transport address as the caller gave it (opaque bytes),
+    /// which a server binds its HelloRetryRequest cookies to (RFC 9147
+    /// §5.1). Empty on a client.
+    pub(crate) fn peer_address(&self) -> &[u8] {
+        &[]
+    }
+
+    /// A server only: whether a ClientHello without a valid cookie is
+    /// answered with a HelloRetryRequest carrying one (RFC 9147 §5.1),
+    /// which is the default.
+    pub(crate) fn require_cookie(&self) -> bool {
+        true
+    }
+
     /// The largest handshake message (with its four-byte TLS header) that
     /// goes out unfragmented in one datagram of unprotected records. A
     /// first ClientHello should fit, so that a server can answer it

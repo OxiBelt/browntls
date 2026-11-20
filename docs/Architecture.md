@@ -594,8 +594,36 @@ ServerHello or EncryptedExtensions each of the three is
 HelloRetryRequest may carry none of them either, and refuses each with
 `illegal_parameter` before its body is looked at.
 
-`trusted_ca_keys`: not negotiated. A client never sends it, and a server
-reads the list without using it, so it never acknowledges the extension.
+`trusted_ca_keys`: negotiated in TLS 1.2, off by default. A client sends
+the list of `ClientConfig::trusted_ca_keys` (`None` by default; an empty
+list claims a set of root keys agreed by other means) only when it offers
+TLS 1.2, so never over QUIC nor with an ECH offer, and again after a
+HelloRetryRequest. A list of more than 1024 entries, one with an empty
+`x509_name`, or one that makes the ClientHello longer than a handshake
+message fails connection creation instead of sending a malformed hello.
+`TrustedAuthority` builds identifiers from a CA certificate or a trust
+anchor with a caller-supplied SHA-1 (`crypto::native::sha1` or
+`crypto::rustcrypto::sha1`): the RSA modulus without leading zero bytes,
+the `subjectPublicKey` value for ECDSA and DSA keys and, as a local choice
+the RFC does not make, for other key types too; `matches_certificate`
+compares one with a CA certificate. A certificate resolver reads the list
+with `ClientHello::trusted_ca_keys()`, whatever version is negotiated, and
+calls `ClientHello::acknowledge_trusted_ca_keys()` when the list guided its
+choice; `server::ResolvesServerCertUsingTrustedCaKeys` does both, serving
+the first registered chain that shares an identifier with the list and
+signs with one of the client's schemes, and its fallback resolver
+otherwise. The server answers with the empty extension only in a full
+TLS 1.2 handshake, to a client that sent the list, after an
+acknowledgement: never in TLS 1.3, never when resuming a session (no chain
+is sent then), and an `Accepted` view's acknowledgement does nothing. A
+client accepts the answer only in TLS 1.2 and only after sending the list
+(`unsupported_extension` otherwise, `decode_error` for a body), and reports
+it through `trusted_ca_keys_acknowledged()` on the buffered and unbuffered
+client connections. The list travels in the clear and reveals which roots
+the client trusts (RFC 6066 §11.4). No peer of the end-to-end
+interoperability matrix implements the extension (OpenSSL, GnuTLS and Go
+ignore it), so it is tested between browntls peers only, on both
+providers, with the Tokio streams and through the `browntls` facade.
 
 `client_certificate_url`: not negotiated. A client never sends it, and a
 server never acknowledges it, so no CertificateURL message is accepted.

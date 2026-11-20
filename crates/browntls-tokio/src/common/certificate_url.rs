@@ -16,19 +16,24 @@ use super::Stream;
 use crate::certificate_url::{FetchClientCertificateUrl, FetchFuture};
 
 /// One stream's client certificate URL queries: the fetcher, and the fetch
-/// for the query its connection waits on.
+/// for the query its connection waits on. Boxed, to keep streams without a
+/// fetcher small.
 #[derive(Default)]
-pub(crate) struct CertificateUrlAnswers {
-    fetcher: Option<Arc<dyn FetchClientCertificateUrl>>,
+pub(crate) struct CertificateUrlAnswers(Option<Box<Answers>>);
+
+struct Answers {
+    fetcher: Arc<dyn FetchClientCertificateUrl>,
     pending: Option<(u64, FetchFuture)>,
 }
 
 impl CertificateUrlAnswers {
     pub(crate) fn new(fetcher: Option<Arc<dyn FetchClientCertificateUrl>>) -> Self {
-        Self {
-            fetcher,
-            pending: None,
-        }
+        Self(fetcher.map(|fetcher| {
+            Box::new(Answers {
+                fetcher,
+                pending: None,
+            })
+        }))
     }
 
     /// The answer to `query`, the one the connection waits on: `Pending`
@@ -39,18 +44,18 @@ impl CertificateUrlAnswers {
         cx: &mut Context<'_>,
         query: &ClientCertificateUrlQuery,
     ) -> Poll<ClientCertificateUrlResponse> {
-        let Some(fetcher) = &self.fetcher else {
+        let Some(answers) = &mut self.0 else {
             return Poll::Ready(ClientCertificateUrlResponse::Unobtainable);
         };
         // A fetch begun for an earlier query is given up.
-        if !matches!(&self.pending, Some((id, _)) if *id == query.id()) {
-            self.pending = Some((query.id(), fetcher.fetch(query.clone())));
+        if !matches!(&answers.pending, Some((id, _)) if *id == query.id()) {
+            answers.pending = Some((query.id(), answers.fetcher.fetch(query.clone())));
         }
-        let Some((_, fetch)) = &mut self.pending else {
+        let Some((_, fetch)) = &mut answers.pending else {
             return Poll::Ready(ClientCertificateUrlResponse::Unobtainable);
         };
         let result = ready!(fetch.as_mut().poll(cx));
-        self.pending = None;
+        answers.pending = None;
         Poll::Ready(match result {
             Ok(objects) => ClientCertificateUrlResponse::Fetched(objects),
             Err(_) => ClientCertificateUrlResponse::Unobtainable,
@@ -60,9 +65,11 @@ impl CertificateUrlAnswers {
 
 impl fmt::Debug for CertificateUrlAnswers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let answers = self.0.as_deref();
+        let pending = answers.and_then(|a| a.pending.as_ref().map(|(id, _)| id));
         f.debug_struct("CertificateUrlAnswers")
-            .field("attached", &self.fetcher.is_some())
-            .field("pending", &self.pending.as_ref().map(|(id, _)| id))
+            .field("attached", &answers.is_some())
+            .field("pending", &pending)
             .finish()
     }
 }

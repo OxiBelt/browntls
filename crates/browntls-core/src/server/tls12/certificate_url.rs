@@ -76,6 +76,6 @@ impl State<ServerConnectionData> for WaitForCertificateUrl {
         chain: CertificateChain<'static>,
     ) -> NextStateOrError {
         // RFC 6066 §5: the chain is then processed as usual.
-        self.0.accept_chain(cx, chain)
+        (*self.0).accept_chain(cx, chain)
     }
 }

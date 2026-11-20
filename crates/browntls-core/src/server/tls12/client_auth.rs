@@ -51,7 +51,7 @@ impl State<ServerConnectionData> for ExpectCertificate {
             require_handshake_msg!(m, HandshakeType::Certificate, HandshakePayload::Certificate)?;
         self.transcript.add_message(&m);
         let cert_chain = cert_chain.clone().into_owned();
-        self.accept_chain(cx, cert_chain)
+        (*self).accept_chain(cx, cert_chain)
     }
 }
 
@@ -60,7 +60,7 @@ impl ExpectCertificate {
     /// fetched for a CertificateURL one: the transcript already has the
     /// message.
     pub(super) fn accept_chain(
-        self: Box<Self>,
+        self,
         cx: &mut ServerContext<'_>,
         cert_chain: CertificateChain<'static>,
     ) -> NextStateOrError {

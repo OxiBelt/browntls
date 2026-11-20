@@ -1963,8 +1963,8 @@ implemented; there is no DTLS 1.2.
   retransmitted with close_notify after it until acknowledged, or
   quietly given up after nine retransmissions, so that the server
   completes its handshake. Once the peer's close_notify arrives nothing
-  more is retransmitted, but a client whose handshake that input
-  completed sends its last flight once; an ACK still owed and our own
+  more is retransmitted, but a client whose last flight is not
+  completely sent yet sends it once; an ACK still owed and our own
   close_notify are sent, and application data can still be, under the
   current keys. Closing before our Finished is queued cancels the
   handshake: the peer, which ignores an unprotected close_notify, gives

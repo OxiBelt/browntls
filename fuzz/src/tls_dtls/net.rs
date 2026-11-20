@@ -261,6 +261,10 @@ impl<'a> Net<'a> {
         goal: fn(&dtls::ClientConnection, &dtls::ServerConnection) -> bool,
     ) -> Result<(), Failure> {
         let start = self.now;
+        // Whether the clock was last moved early, with nothing since: the
+        // next move then reaches the timer, so that early moves cannot use
+        // up the steps.
+        let mut early = false;
         for _ in 0..MAX_STEPS {
             let mut moved = self.flush(client, true).map_err(Failure::Client)?;
             moved |= self.flush(server, false).map_err(Failure::Server)?;
@@ -268,6 +272,7 @@ impl<'a> Net<'a> {
             moved |= self.deliver(client, false).map_err(Failure::Client)?;
             moved |= self.revocation(client).map_err(Failure::Client)?;
             if moved {
+                early = false;
                 continue;
             }
             if self.to_server.held.is_some() || self.to_client.held.is_some() {
@@ -283,11 +288,13 @@ impl<'a> Net<'a> {
                 (a, b) => a.or(b).ok_or(Failure::Stalled)?,
             };
             // Early, on time or late, as the clock bytes say.
-            self.now = match self.clock.byte() {
-                0 => self.now.max(next),
-                n @ 1..=127 => self.now + Duration::from_millis(8 * u64::from(n)),
-                n => self.now.max(next) + Duration::from_millis(64 * u64::from(n - 128)),
+            let byte = self.clock.byte();
+            self.now = match byte {
+                n @ 1..=127 if !early => self.now + Duration::from_millis(8 * u64::from(n)),
+                n @ 128.. => self.now.max(next) + Duration::from_millis(64 * u64::from(n - 128)),
+                _ => self.now.max(next),
             };
+            early = !early && (1..=127).contains(&byte);
             if self.now - start > MAX_VIRTUAL {
                 return Err(Failure::Budget);
             }

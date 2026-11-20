@@ -239,6 +239,14 @@ impl Dtls {
         self.ack_due = None;
     }
 
+    /// Either side closed: our flights are never retransmitted again, as
+    /// what the peer sends after its close_notify is not read and what we
+    /// send after ours is not read either (RFC 9846 §6.1). An ACK we owe
+    /// is still sent.
+    pub(super) fn abandon_flights(&mut self) {
+        self.out.abandon();
+    }
+
     /// The traffic secret of the next sending epoch: the handshake secret
     /// starts epoch 2, the first application secret epoch 3, and every
     /// later one (a KeyUpdate of ours) the epoch after. The keys of a
@@ -249,9 +257,10 @@ impl Dtls {
             return;
         };
         let current = self.write_epoch();
-        if current >= APPLICATION_EPOCH && self.out.abandoned {
-            // The KeyUpdate announcing these keys was not sent (the peer
-            // closed, or the connection failed): keep the current ones.
+        if current >= APPLICATION_EPOCH && self.out.stopped() {
+            // The KeyUpdate announcing these keys was not sent (either
+            // side closed, or the connection failed): keep the current
+            // ones.
             return;
         }
         let epoch = match self.pending_write.as_ref() {
@@ -661,7 +670,7 @@ impl Dtls {
         let current = self.write_epoch();
         // Once flights are abandoned nothing gets acknowledged any more:
         // the peer may never have seen the KeyUpdate.
-        if self.out.abandoned || self.out.has_unacknowledged(current) {
+        if self.out.stopped() || self.out.has_unacknowledged(current) {
             return;
         }
         if let Some(next) = self.pending_write.take() {

@@ -782,3 +782,180 @@ fn a_key_update_lost_before_the_peer_closes_keeps_the_old_keys() {
     pair.run(&mut sim, settled).unwrap();
     assert!(sim.client_received.contains(&b"after close".to_vec()));
 }
+
+#[test]
+fn a_key_update_read_with_close_notify_is_still_acknowledged() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    let now = sim.now;
+    // The client's KeyUpdate and close_notify arrive together.
+    pair.client.refresh_traffic_keys().unwrap();
+    pair.client.send_close_notify();
+    let mut datagrams = Vec::new();
+    let mut out = Vec::new();
+    while pair.client.write_datagram(&mut out, now).unwrap() {
+        datagrams.push(core::mem::take(&mut out));
+    }
+    // Having closed, the client retransmits nothing.
+    assert_eq!(pair.client.next_timeout(), None);
+    for datagram in &mut datagrams {
+        pair.server.read_datagram(datagram, now).unwrap();
+    }
+    assert!(pair.server.peer_has_closed());
+    // The server still owes, and sends, the ACK.
+    assert!(pair.server.write_datagram(&mut out, now).unwrap());
+}
+
+#[test]
+fn a_key_update_sent_with_close_notify_is_read_first() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    let now = sim.now;
+    pair.server.refresh_traffic_keys().unwrap();
+    pair.server.send_close_notify();
+    let mut out = Vec::new();
+    while pair.server.write_datagram(&mut out, now).unwrap() {
+        pair.client.read_datagram(&mut out, now).unwrap();
+        out.clear();
+    }
+    assert_eq!(pair.server.next_timeout(), None);
+    assert!(pair.client.peer_has_closed());
+    // The KeyUpdate came ahead of close_notify: the client acknowledges it.
+    assert!(pair.client.write_datagram(&mut out, now).unwrap());
+}
+
+/// Every datagram `from` has to send now, delivered to `to`.
+fn flush_to<A: SideData, B: SideData>(
+    from: &mut dtls::ConnectionCommon<A>,
+    to: &mut dtls::ConnectionCommon<B>,
+    now: Duration,
+) {
+    let mut out = Vec::new();
+    while from.write_datagram(&mut out, now).unwrap() {
+        to.read_datagram(&mut out, now).unwrap();
+        out.clear();
+    }
+}
+
+#[test]
+fn a_client_closing_right_after_its_finished_still_finishes_the_handshake() {
+    let (mut pair, ..) = Pair::default_pair();
+    let now = Duration::from_secs(1000);
+    // ClientHello, HelloRetryRequest, ClientHello, the server's flight.
+    for _ in 0..2 {
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+    }
+    assert!(!pair.client.is_handshaking());
+    pair.client.send_close_notify();
+    // Finished and close_notify are lost.
+    let mut out = Vec::new();
+    while pair.client.write_datagram(&mut out, now).unwrap() {
+        out.clear();
+    }
+    let mut sim = Sim::perfect();
+    sim.now = now;
+    pair.run(&mut sim, |client, server| {
+        !server.handshaking() && client.timeout().is_none() && server.timeout().is_none()
+    })
+    .unwrap();
+    assert!(pair.server.peer_has_closed());
+}
+
+#[test]
+fn close_notify_waits_for_the_messages_queued_before_it() {
+    for mtu in 256..=320 {
+        let (mut pair, ..) = Pair::default_pair();
+        pair.client.set_mtu(mtu).unwrap();
+        pair.server.set_mtu(mtu).unwrap();
+        let now = Duration::from_secs(1000);
+        loop {
+            flush_to(&mut pair.client, &mut pair.server, now);
+            if !pair.server.is_handshaking() {
+                break;
+            }
+            flush_to(&mut pair.server, &mut pair.client, now);
+        }
+        // The server's tickets are queued, then it closes.
+        pair.server.send_close_notify();
+        flush_to(&mut pair.server, &mut pair.client, now);
+        assert!(pair.client.peer_has_closed());
+        assert_eq!(pair.client.tls13_tickets_received(), 2, "MTU {mtu}");
+    }
+}
+
+#[test]
+fn a_closing_client_whose_ack_is_lost_gives_up_quietly() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut now = Duration::from_secs(1000);
+    for _ in 0..2 {
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+    }
+    pair.client.send_close_notify();
+    flush_to(&mut pair.client, &mut pair.server, now);
+    assert!(!pair.server.is_handshaking());
+    assert!(pair.server.peer_has_closed());
+    // Every ACK of the server is lost; having read close_notify, it
+    // acknowledges nothing more.
+    let mut out = Vec::new();
+    for _ in 0..20 {
+        while pair.server.write_datagram(&mut out, now).unwrap() {
+            out.clear();
+        }
+        let Some(timeout) = pair.client.next_timeout() else {
+            return;
+        };
+        now = timeout;
+        pair.client.handle_timeout(now).unwrap();
+        flush_to(&mut pair.client, &mut pair.server, now);
+    }
+    panic!("the client kept retransmitting");
+}
+
+#[test]
+fn a_server_closing_after_its_flight_still_gets_the_finished() {
+    let (mut pair, ..) = Pair::default_pair();
+    let now = Duration::from_secs(1000);
+    flush_to(&mut pair.client, &mut pair.server, now);
+    flush_to(&mut pair.server, &mut pair.client, now);
+    flush_to(&mut pair.client, &mut pair.server, now);
+    // The server's flight, then its close_notify, reach the client
+    // together.
+    pair.server.send_close_notify();
+    flush_to(&mut pair.server, &mut pair.client, now);
+    assert!(!pair.client.is_handshaking());
+    assert!(pair.client.peer_has_closed());
+    // The client still sends its Finished once.
+    flush_to(&mut pair.client, &mut pair.server, now);
+    assert!(!pair.server.is_handshaking());
+    assert_eq!(pair.client.next_timeout(), None);
+}
+
+#[test]
+fn a_server_close_read_in_a_later_datagram_still_gets_the_finished() {
+    for mtu in 256..=320 {
+        let (mut pair, ..) = Pair::default_pair();
+        pair.client.set_mtu(mtu).unwrap();
+        pair.server.set_mtu(mtu).unwrap();
+        let now = Duration::from_secs(1000);
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+        flush_to(&mut pair.client, &mut pair.server, now);
+        pair.server.send_close_notify();
+        // The client reads everything before it writes.
+        flush_to(&mut pair.server, &mut pair.client, now);
+        assert!(pair.client.peer_has_closed(), "MTU {mtu}");
+        // A KeyUpdate that cannot be sent any more changes no keys.
+        pair.client.refresh_traffic_keys().unwrap();
+        flush_to(&mut pair.client, &mut pair.server, now);
+        assert!(!pair.server.is_handshaking(), "MTU {mtu}");
+        assert_eq!(pair.client.next_timeout(), None, "MTU {mtu}");
+        let mut out = Vec::new();
+        pair.client.send(b"after close", &mut out).unwrap();
+        let received = pair.server.read_datagram(&mut out, now).unwrap();
+        assert_eq!(received.app_data().len(), 1, "MTU {mtu}");
+    }
+}

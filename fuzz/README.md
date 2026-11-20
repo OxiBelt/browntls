@@ -223,7 +223,10 @@ runner. A maintainer opens a download with
 scripts/fuzz/findings-envelope.sh open KEY CERT findings.cms NEW-DIRECTORY
 ```
 
-which refuses a modified file before unpacking anything. Anyone can encrypt
+which refuses a modified file before unpacking anything and leaves
+`NEW-DIRECTORY` and everything in it accessible to the caller only, whatever
+the caller's umask or the modes the archive records (a default ACL on a parent
+directory weakens this; see the script's header). Anyone can encrypt
 to the public certificate, so treat what it unpacks as untrusted input, keep
 it out of public places, and handle a finding as a potential vulnerability,
 as described under [Running](#running). The private key is never committed to

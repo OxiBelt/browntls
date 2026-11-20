@@ -39,7 +39,7 @@ impl TlsConnector {
         mut self,
         fetcher: Arc<crate::revocation::RevocationFetcher>,
     ) -> Self {
-        self.revocation = RevocationSource::new(fetcher);
+        self.revocation.set_fetcher(fetcher);
         self
     }
 

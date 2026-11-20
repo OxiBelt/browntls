@@ -11,8 +11,10 @@
 //! or behind the application data records encrypted into the same buffer.
 //!
 //! A connection that waits on a certificate status query
-//! (`ConnectionState::PendingRevocation`) is answered by the operation
-//! that met it, through the stream's fetcher, and takes no input meanwhile.
+//! (`ConnectionState::PendingRevocation`) or on a client certificate URL
+//! query (`ConnectionState::PendingClientCertificateUrl`, RFC 6066 §5) is
+//! answered by the operation that met it, through the stream's fetchers,
+//! and takes no input meanwhile.
 
 use std::io::{self, IoSlice};
 use std::ops::{DerefMut, Range};
@@ -190,7 +192,9 @@ where
             }
             ConnectionState::BlockedHandshake | ConnectionState::WriteTraffic(_) => Step::NeedInput,
             ConnectionState::PeerClosed | ConnectionState::Closed => Step::PeerClosed,
-            ConnectionState::PendingRevocation => Step::Revocation,
+            ConnectionState::PendingRevocation | ConnectionState::PendingClientCertificateUrl => {
+                Step::Revocation
+            }
             _ => {
                 failure = Some(internal("unexpected TLS connection state"));
                 Step::Progress
@@ -228,7 +232,8 @@ where
                     self.peer_closed();
                     return Ok(Queued::Closed);
                 }
-                ConnectionState::PendingRevocation => return Ok(Queued::Revocation),
+                ConnectionState::PendingRevocation
+                | ConnectionState::PendingClientCertificateUrl => return Ok(Queued::Revocation),
                 ConnectionState::BlockedHandshake => {
                     return Err(internal("TLS handshake is not complete"));
                 }
@@ -347,6 +352,13 @@ where
     /// What came of the answer (the next query, the rest of the flight, or
     /// the failure with its alert) is what the connection reports next.
     fn poll_revocation(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(query) = self.conn.pending_client_certificate_url() {
+            // RFC 6066 §5. A failure is the connection's to report next.
+            let id = query.id();
+            let response = ready!(self.revocation.certificate_url.poll_response(cx, query));
+            let _ = self.conn.resolve_client_certificate_url(id, response);
+            return Poll::Ready(Ok(()));
+        }
         let Some(query) = self.conn.pending_revocation() else {
             // Returning as if answered would poll the connection for ever.
             return Poll::Ready(Err(internal(

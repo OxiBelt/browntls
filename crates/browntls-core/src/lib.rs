@@ -203,6 +203,7 @@ pub mod server {
     #[cfg(feature = "tls12")]
     mod tls12;
     mod tls13;
+    mod trusted_ca;
 
     pub use builder::WantsServerCert;
     pub use handy::NoServerSessionStorage;
@@ -215,6 +216,8 @@ pub mod server {
         ServerConnectionData, StoresServerSessions, UnbufferedAcceptStatus, UnbufferedAccepted,
         UnbufferedAcceptedAlert, UnbufferedAcceptor, UnbufferedServerConnection,
     };
+
+    pub use trusted_ca::ResolvesServerCertUsingTrustedCaKeys;
 
     pub use crate::verify::NoClientAuth;
     pub use crate::webpki::{

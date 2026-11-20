@@ -2591,15 +2591,15 @@ that starts when the object is made.
   reaches the connection, for example to refresh its keys, and
   `into_parts` returns it with the socket, dropping what was received and
   not yet returned.
-- `UdpServer` holds many clients on one socket and tells them apart by
-  their address only. `next_event` returns the next `ServerEvent`, and only
-  for clients that completed a handshake: `Connected`, `Received` (one
-  datagram of application data), `Closed` (the client's close_notify; the
-  connection is gone) or `Failed` (likewise). `send_to`, `close`
-  (close_notify, then the connection is forgotten), `remove` (forgotten
-  without a word) and `connection_mut` act on a connected client. A
-  ClientHello from the address of an existing connection, such as a client
-  restarted on the same port, is ignored until that connection is removed.
+- `UdpServer` holds many clients on one socket and tells them apart by their
+  address only. `next_event` returns the next `ServerEvent`, and only for
+  clients that completed a handshake: `Connected`, `Received` (one datagram of
+  application data, empty ones included), `Closed` (the client's close_notify;
+  the connection is gone) or `Failed` (likewise). `send_to`, `close`
+  (close_notify, then the connection is forgotten), `remove` (forgotten without
+  a word) and `connection_mut` act on a connected client. A ClientHello from the
+  address of an existing connection, such as a client restarted on the same
+  port, is ignored until that connection is removed.
 - Cookies: every datagram from an address without a connection goes to a
   `dtls::Acceptor`, so the server configuration needs
   `hello_retry_cookies`, and a client costs nothing but one
@@ -2621,10 +2621,11 @@ that starts when the object is made.
   `recv` and `next_event` wait as long as the connection does (a handshake
   the server never answers fails once its retransmissions run out, after
   about five minutes). With `set_read_timeout` they fail with
-  `io::ErrorKind::TimedOut` once it passes, but still read what has already
-  arrived, up to 64 datagrams: even a zero timeout takes a datagram that is
-  waiting, and a stream of junk cannot hold the timeout off. A handshake
-  that timed out continues with the next call.
+  `io::ErrorKind::TimedOut` once it passes, but still read what arrives
+  within a millisecond of each look, up to 64 datagrams: even a zero
+  timeout takes a datagram that is waiting, and a stream of junk cannot
+  hold the timeout off. A handshake that timed out continues with the next
+  call.
 - Live OCSP checks (`browntls_core::revocation`) are not supported: a
   client's handshake that would wait for one fails with
   `io::ErrorKind::Unsupported`, and a server's is dropped.

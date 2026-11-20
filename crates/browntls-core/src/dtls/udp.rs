@@ -27,8 +27,8 @@ const MAX_DATAGRAM: usize = 65535;
 /// The shortest wait on a socket: a read timeout of zero means "forever".
 const MIN_WAIT: Duration = Duration::from_millis(1);
 
-/// How many datagrams that have already arrived are still read once the
-/// read timeout has passed.
+/// How many datagrams, each waited for at most [`MIN_WAIT`], are still read
+/// once the read timeout has passed.
 const LAST_LOOKS: usize = 64;
 
 /// A DTLS 1.3 client over a UDP socket connected to its server.

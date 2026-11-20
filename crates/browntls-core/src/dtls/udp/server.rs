@@ -30,7 +30,8 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ServerEvent {
     /// A client completed its handshake.
     Connected(SocketAddr),
-    /// A datagram of application data from a connected client.
+    /// A datagram of application data from a connected client, possibly
+    /// empty (only `UdpClient::recv` skips empty datagrams).
     Received(SocketAddr, Vec<u8>),
     /// A connected client sent `close_notify`; its connection is gone.
     Closed(SocketAddr),

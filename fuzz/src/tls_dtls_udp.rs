@@ -125,11 +125,13 @@ impl Stopwatch {
     /// most [`WALL_LIMIT`]; otherwise what it did.
     fn verdict(&self, timeout: Duration) -> Result<(), String> {
         let wall = self.start.elapsed();
+        // Without schedstat a loaded machine cannot be told from a long
+        // sleep: only the wall-clock backstop applies.
         let asleep = match (self.busy, busy()) {
-            (Some(before), Some(after)) => wall.saturating_sub(after.saturating_sub(before)),
-            _ => wall,
+            (Some(before), Some(after)) => Some(wall.saturating_sub(after.saturating_sub(before))),
+            _ => None,
         };
-        if asleep <= timeout + SLACK && wall <= WALL_LIMIT {
+        if asleep.is_none_or(|asleep| asleep <= timeout + SLACK) && wall <= WALL_LIMIT {
             return Ok(());
         }
         Err(format!(

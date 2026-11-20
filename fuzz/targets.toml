@@ -125,7 +125,7 @@ sources = [
 [targets.tls_dtls_udp]
 harness = ["fuzz/src/tls_dtls_udp.rs", "fuzz/src/tls_dtls_udp/**", "fuzz/src/tls_dtls/setup.rs", "fuzz/src/tls_dtls/shape.rs"]
 topic = "tls-extensions"
-sources = ["crates/browntls-core/src/dtls/udp.rs", "crates/browntls-core/src/dtls/udp/**"]
+sources = ["crates/browntls-core/src/dtls/udp.rs", "crates/browntls-core/src/dtls/udp/**", "crates/browntls-core/src/dtls/acceptor.rs"]
 
 [targets.tls_auth]
 topic = "tls-extensions"

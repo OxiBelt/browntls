@@ -110,7 +110,6 @@ impl Client {
         self.udp
             .as_ref()
             .is_some_and(|udp| udp.connection().peer_has_closed())
-            && self.to_client.iter().all(|d| !d.is_empty())
     }
 
     /// One `recv` into a buffer for any datagram; `what` (when not empty)

@@ -102,6 +102,17 @@ pub enum Error {
     /// sent `ech_required`. The error carries the server's retry
     /// configurations, if any, for a new connection.
     RejectedEch(crate::ech::RejectedEch),
+
+    /// A value given to
+    /// [`ExternalSessionId::new`](crate::external_binding::ExternalSessionId::new)
+    /// is not 20 to 255 bytes long (RFC 8844 §4.3).
+    BadExternalSessionIdLength,
+
+    /// A client [`ExternalBinding`](crate::external_binding::ExternalBinding)
+    /// expects the server's `external_session_id` without a `session_id` of
+    /// its own: the server only answers an extension the client sent, so
+    /// the expectation could never be met.
+    InconsistentExternalBinding,
 }
 
 /// Reasons a private key and certificate may not go together.
@@ -185,6 +196,11 @@ pub enum InvalidMessage {
     DisallowedCertificateExtension,
     /// A malformed `ECHConfigList` or `ECHConfig` (RFC 9849 §4).
     InvalidEchConfig,
+    /// An `external_id_hash` whose hash is neither empty nor 32 bytes long
+    /// (RFC 8844 §3.2).
+    InvalidExternalIdHash,
+    /// An `external_session_id` outside 20 to 255 bytes (RFC 8844 §4.3).
+    InvalidExternalSessionId,
 }
 
 impl From<InvalidMessage> for Error {
@@ -369,6 +385,15 @@ pub enum PeerMisbehaved {
     /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
+    /// The peer's `external_id_hash` differs from the one expected
+    /// (RFC 8844 §3.2).
+    ExternalIdHashMismatch,
+    /// The peer's `external_session_id` differs from the one expected
+    /// (RFC 8844 §4.3).
+    ExternalSessionIdMismatch,
+    /// The second ClientHello changed, added or dropped an RFC 8844
+    /// extension of the first (RFC 9846 §4.1.2).
+    ExternalBindingChangedOnRetry,
 }
 
 impl From<PeerMisbehaved> for Error {
@@ -414,6 +439,16 @@ pub enum PeerIncompatible {
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).
     ExternalPskRequired,
+    /// The peer sent no `external_id_hash` although one is expected and
+    /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §3.2).
+    ///
+    /// [`ExternalBinding::require_peer_support`]: crate::external_binding::ExternalBinding::require_peer_support
+    ExternalIdHashExtensionRequired,
+    /// The peer sent no `external_session_id` although one is expected and
+    /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §4.3).
+    ///
+    /// [`ExternalBinding::require_peer_support`]: crate::external_binding::ExternalBinding::require_peer_support
+    ExternalSessionIdExtensionRequired,
 }
 
 impl From<PeerIncompatible> for Error {
@@ -680,6 +715,12 @@ impl fmt::Display for Error {
             }
             Self::BadTls13TicketLimit => {
                 f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
+            }
+            Self::BadExternalSessionIdLength => {
+                f.write_str("the supplied external_session_id is not 20 to 255 bytes long")
+            }
+            Self::InconsistentExternalBinding => {
+                f.write_str("a client expecting the server's external_session_id must send its own")
             }
             Self::InconsistentKeys(why) => write!(f, "keys may not be consistent: {why:?}"),
             Self::General(err) => write!(f, "unexpected error: {err}"),

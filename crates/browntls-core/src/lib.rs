@@ -84,6 +84,7 @@ pub mod ech;
 mod enums;
 mod error;
 pub mod exported_authenticator;
+pub mod external_binding;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;

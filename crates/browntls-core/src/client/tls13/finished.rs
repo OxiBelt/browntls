@@ -348,6 +348,10 @@ impl ExpectTraffic {
             debug!("Discarding NewSessionTicket with zero lifetime");
             return Ok(());
         }
+        // RFC 8844 §5: nothing of a bound connection is used in another.
+        if self.config.external_binding.is_some() {
+            return Ok(());
+        }
         if self.config.revocation_enabled()
             && (cx.common.peer_certificates.is_some() || cx.common.external_psk.is_none())
         {

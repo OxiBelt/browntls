@@ -89,6 +89,8 @@ pub struct ClientHello<'a> {
     pub(super) named_groups: Option<&'a [NamedGroup]>,
     pub(super) client_cert_types: Option<&'a [CertificateType]>,
     pub(super) server_cert_types: Option<&'a [CertificateType]>,
+    pub(crate) external_id_hash: Option<&'a crate::external_binding::ExternalIdHash>,
+    pub(crate) external_session_id: Option<&'a crate::external_binding::ExternalSessionId>,
 }
 
 impl<'a> ClientHello<'a> {
@@ -106,6 +108,8 @@ impl<'a> ClientHello<'a> {
             named_groups: payload.named_groups(),
             client_cert_types: payload.extensions.client_certificate_types.as_deref(),
             server_cert_types: payload.extensions.server_certificate_types.as_deref(),
+            external_id_hash: payload.extensions.external_id_hash.as_ref(),
+            external_session_id: payload.extensions.external_session_id.as_ref(),
         }
     }
 
@@ -290,6 +294,20 @@ pub struct ServerConfig {
     /// send are limited by the client's limit and by `max_fragment_size`,
     /// whichever is smaller.
     pub record_size_limit: Option<u16>,
+
+    /// External session and identity binding (RFC 8844): our values to
+    /// answer a client's `external_id_hash` and `external_session_id` with,
+    /// and the client's values to expect. `None` (the default) ignores both
+    /// extensions. The values belong to one connection: clone the
+    /// configuration per connection, or choose it from the ClientHello
+    /// with an acceptor.
+    ///
+    /// With a binding the connection accepts no ticket or session ID and
+    /// issues none (RFC 8844 §5: nothing of one TLS connection is used in
+    /// another, even of the same signaling session); every handshake is a
+    /// full one. [`Self::external_psks`] are still accepted. See
+    /// [`crate::external_binding`].
+    pub external_binding: Option<crate::external_binding::ExternalBinding>,
 
     pub(super) versions: EnabledVersions,
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,

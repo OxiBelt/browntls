@@ -146,6 +146,13 @@ impl CompleteServerHelloHandling {
             server_hello.extensions.record_size_limit,
             false,
         )?;
+        crate::external_binding::handshake::client_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &server_hello.extensions,
+            false,
+            false,
+        )?;
 
         if self.config.require_ems && !self.using_ems {
             return Err(cx.common.send_fatal_alert(
@@ -747,7 +754,8 @@ struct ExpectFinished {
 
 impl ExpectFinished {
     fn save_session(&mut self, cx: &mut ClientContext<'_>) {
-        if self.config.revocation_enabled() {
+        // RFC 8844 §5: nothing of a bound connection is used in another.
+        if self.config.revocation_enabled() || self.config.external_binding.is_some() {
             return;
         }
         let (ticket, lifetime) = self.ticket.take().unwrap_or_default();

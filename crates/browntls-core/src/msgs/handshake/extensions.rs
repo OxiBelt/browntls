@@ -8,6 +8,7 @@ use browntls_pki::DnsName;
 use super::MAX_EXTENSIONS;
 use crate::enums::{CertificateType, ProtocolVersion};
 use crate::error::InvalidMessage;
+use crate::external_binding::{ExternalIdHash, ExternalSessionId};
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16};
 use crate::msgs::codec::{
     Codec, LengthPrefixedBuffer, ListLength, Reader, encode_vec_u8, read_list_prefix,
@@ -353,6 +354,10 @@ pub(crate) struct ServerExtensions {
     /// RFC 9149 §3: TLS 1.3 EncryptedExtensions only, the number of
     /// tickets the server expects to send (`expected_count`).
     pub(crate) ticket_request: Option<u8>,
+    /// RFC 8844 §3.2: TLS 1.2 ServerHello, TLS 1.3 EncryptedExtensions.
+    pub(crate) external_id_hash: Option<ExternalIdHash>,
+    /// RFC 8844 §4.3: TLS 1.2 ServerHello, TLS 1.3 EncryptedExtensions.
+    pub(crate) external_session_id: Option<ExternalSessionId>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
     /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
@@ -427,6 +432,14 @@ impl ServerExtensions {
             ExtensionType::RecordSizeLimit,
         );
         add(self.ticket_request.is_some(), ExtensionType::TicketRequest);
+        add(
+            self.external_id_hash.is_some(),
+            ExtensionType::ExternalIdHash,
+        );
+        add(
+            self.external_session_id.is_some(),
+            ExtensionType::ExternalSessionId,
+        );
         add(
             self.cert_with_extern_psk.is_some(),
             ExtensionType::TlsCertWithExternPsk,
@@ -508,6 +521,12 @@ impl Codec<'_> for ServerExtensions {
         if let Some(count) = self.ticket_request {
             encode_extension(ExtensionType::TicketRequest, out, |b| count.encode(b));
         }
+        if let Some(hash) = &self.external_id_hash {
+            encode_extension(ExtensionType::ExternalIdHash, out, |b| hash.encode(b));
+        }
+        if let Some(id) = &self.external_session_id {
+            encode_extension(ExtensionType::ExternalSessionId, out, |b| id.encode(b));
+        }
         if self.cert_with_extern_psk.is_some() {
             encode_extension(ExtensionType::TlsCertWithExternPsk, out, |_| {});
         }
@@ -570,6 +589,12 @@ impl Codec<'_> for ServerExtensions {
                     out.record_size_limit = Some(u16::read(body)?);
                 }
                 ExtensionType::TicketRequest => out.ticket_request = Some(u8::read(body)?),
+                ExtensionType::ExternalIdHash => {
+                    out.external_id_hash = Some(ExternalIdHash::read(body)?);
+                }
+                ExtensionType::ExternalSessionId => {
+                    out.external_session_id = Some(ExternalSessionId::read(body)?);
+                }
                 ExtensionType::TlsCertWithExternPsk => out.cert_with_extern_psk = Some(()),
                 other => {
                     out.unknown.push(other);

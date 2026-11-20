@@ -202,7 +202,7 @@ pub(super) fn emit_encrypted_extensions(
     retry_configs: Option<Vec<u8>>,
     expected_tickets: Option<u8>,
 ) {
-    let exts = ServerExtensions {
+    let mut exts = ServerExtensions {
         supported_groups,
         encrypted_client_hello: retry_configs,
         alpn: cx
@@ -232,6 +232,12 @@ pub(super) fn emit_encrypted_extensions(
         ticket_request: expected_tickets,
         ..Default::default()
     };
+    // RFC 8844 §3.2, §4.3: answered in EncryptedExtensions.
+    crate::external_binding::handshake::server_answer(
+        config.external_binding.as_ref(),
+        &client_hello.extensions,
+        &mut exts,
+    );
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(

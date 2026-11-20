@@ -121,6 +121,14 @@ impl ClientConnection {
         self.inner.core.data.ech_status
     }
 
+    /// Whether the server acknowledged our `trusted_ca_keys` (RFC 6066 §6):
+    /// it negotiated TLS 1.2 in a full handshake and says the list guided
+    /// its choice of certificate chain. Always false in TLS 1.3, and after
+    /// resuming a session. Meaningful once the ServerHello is processed.
+    pub fn trusted_ca_keys_acknowledged(&self) -> bool {
+        self.inner.core.data.trusted_ca_keys_acknowledged
+    }
+
     /// See [`crate::ConnectionCommon::dangerous_extract_secrets`].
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()

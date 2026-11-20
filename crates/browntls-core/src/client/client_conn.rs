@@ -145,6 +145,27 @@ pub struct ClientConfig {
     /// extension. Irrelevant unless the provider offers a CBC suite.
     pub allow_mac_then_encrypt: bool,
 
+    /// The `trusted_ca_keys` extension (RFC 6066 §6): the CA root keys we
+    /// possess, so that a TLS 1.2 server may choose a certificate chain
+    /// ending in one of them. `None` (the default) sends no extension;
+    /// `Some(vec![])` sends an empty list, which claims a set of root keys
+    /// agreed by other means. See [`TrustedAuthority`](crate::TrustedAuthority)
+    /// for building identifiers from certificates or trust anchors.
+    ///
+    /// The extension exists in TLS 1.2 only: it is sent only when TLS 1.2
+    /// is offered (never over QUIC, nor in the inner ClientHello of
+    /// Encrypted Client Hello), and a TLS 1.3 server ignores it. Whether a
+    /// server acknowledged it is
+    /// [`ClientConnection::trusted_ca_keys_acknowledged`](crate::ClientConnection::trusted_ca_keys_acknowledged).
+    /// A list of more than 1024 entries (more than a server built from this
+    /// crate accepts), one that does not fit in a ClientHello, or one that
+    /// holds an empty `x509_name`, makes connection creation fail.
+    ///
+    /// Privacy (RFC 6066 §11.4): the list is sent in the clear and tells
+    /// anyone watching which root keys this client trusts, which can
+    /// identify the client or its configuration.
+    pub trusted_ca_keys: Option<Vec<crate::TrustedAuthority>>,
+
     /// The clock.
     pub time_provider: Arc<dyn TimeProvider>,
 
@@ -629,6 +650,9 @@ pub struct ClientConnectionData {
     pub(super) post_handshake_auth_responses: u32,
     /// Where Encrypted Client Hello stands.
     pub(super) ech_status: crate::ech::EchStatus,
+    /// Whether a TLS 1.2 server acknowledged our `trusted_ca_keys` in a
+    /// full handshake (RFC 6066 §6).
+    pub(super) trusted_ca_keys_acknowledged: bool,
     /// The server's ECH retry configurations, after a rejection.
     pub(super) ech_retry_configs: Option<Vec<u8>>,
     /// Where the TLS 1.2 session for `server_name` lives, so a fatal error
@@ -655,6 +679,7 @@ impl ClientConnectionData {
             offered_post_handshake_auth: false,
             post_handshake_auth_responses: 0,
             ech_status: crate::ech::EchStatus::NotOffered,
+            trusted_ca_keys_acknowledged: false,
             ech_retry_configs: None,
             session_store: config.resumption.store.clone(),
             server_name,
@@ -762,6 +787,7 @@ impl ConnectionCore<ClientConnectionData> {
         common_state.quic = quic.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
+        crate::trusted_ca_keys::check_config(config.trusted_ca_keys.as_deref())?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;
         common_state.fips = config.fips();
         let mut data = ClientConnectionData::new(config.clone(), name.clone());
@@ -860,6 +886,14 @@ impl UnbufferedClientConnection {
     /// handshake with [`Error::RejectedEch`].
     pub fn ech_status(&self) -> crate::ech::EchStatus {
         self.inner.core.data.ech_status
+    }
+
+    /// Whether the server acknowledged our `trusted_ca_keys` (RFC 6066 §6):
+    /// it negotiated TLS 1.2 in a full handshake and says the list guided
+    /// its choice of certificate chain. Always false in TLS 1.3, and after
+    /// resuming a session. Meaningful once the ServerHello is processed.
+    pub fn trusted_ca_keys_acknowledged(&self) -> bool {
+        self.inner.core.data.trusted_ca_keys_acknowledged
     }
 
     /// See

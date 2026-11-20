@@ -1,10 +1,14 @@
 //! The view of a ClientHello given to the application.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use browntls_pki::DnsName;
 
 use crate::enums::{CertificateType, CipherSuite, SignatureScheme};
 use crate::msgs::enums::NamedGroup;
-use crate::msgs::handshake::{ClientHelloPayload, DistinguishedName, ProtocolName};
+use crate::msgs::handshake::{
+    ClientHelloPayload, DistinguishedName, ProtocolName, TrustedAuthority,
+};
 
 /// What a [`ResolvesServerCert`](super::ResolvesServerCert) sees of the
 /// ClientHello.
@@ -20,6 +24,10 @@ pub struct ClientHello<'a> {
     pub(in crate::server) server_cert_types: Option<&'a [CertificateType]>,
     pub(crate) external_id_hash: Option<&'a crate::external_binding::ExternalIdHash>,
     pub(crate) external_session_id: Option<&'a crate::external_binding::ExternalSessionId>,
+    pub(in crate::server) trusted_ca_keys: Option<&'a [TrustedAuthority]>,
+    /// Set by [`Self::acknowledge_trusted_ca_keys`]; owned by the handshake
+    /// that asked for a certificate, `None` where none listens.
+    pub(in crate::server) trusted_ca_keys_ack: Option<&'a AtomicBool>,
 }
 
 impl<'a> ClientHello<'a> {
@@ -39,7 +47,15 @@ impl<'a> ClientHello<'a> {
             server_cert_types: payload.extensions.server_certificate_types.as_deref(),
             external_id_hash: payload.extensions.external_id_hash.as_ref(),
             external_session_id: payload.extensions.external_session_id.as_ref(),
+            trusted_ca_keys: payload.extensions.trusted_ca_keys.as_deref(),
+            trusted_ca_keys_ack: None,
         }
+    }
+
+    /// Lets [`Self::acknowledge_trusted_ca_keys`] set `ack`.
+    pub(in crate::server) fn with_trusted_ca_keys_ack(mut self, ack: &'a AtomicBool) -> Self {
+        self.trusted_ca_keys_ack = Some(ack);
+        self
     }
 
     /// The certificate types the client can present (RFC 7250), if it said.
@@ -81,5 +97,38 @@ impl<'a> ClientHello<'a> {
     /// The key exchange groups the client offered, if any.
     pub fn named_groups(&self) -> Option<&'a [NamedGroup]> {
         self.named_groups
+    }
+
+    /// The CA root keys the client says it possesses (the
+    /// `trusted_ca_keys` extension, RFC 6066 §6), if it sent the extension.
+    /// An empty list claims a set of root keys agreed by other means.
+    ///
+    /// The extension exists in TLS 1.2 only, but the list is given whichever
+    /// version the handshake goes on to negotiate. The list is sent in the
+    /// clear (RFC 6066 §11.4).
+    pub fn trusted_ca_keys(&self) -> Option<&'a [TrustedAuthority]> {
+        self.trusted_ca_keys
+    }
+
+    /// Says that the certificate chain chosen for this ClientHello was
+    /// selected with the help of [`Self::trusted_ca_keys`]. A certificate
+    /// resolver calls it from
+    /// [`ResolvesServerCert::resolve`](super::ResolvesServerCert::resolve)
+    /// before returning that chain.
+    ///
+    /// The server then includes an empty `trusted_ca_keys` extension in its
+    /// ServerHello (RFC 6066 §6) when, and only when, the handshake is a
+    /// full TLS 1.2 one and the client sent the extension. In TLS 1.3, and
+    /// when a TLS 1.2 session is resumed, nothing is sent.
+    ///
+    /// Where no handshake is waiting for the answer (the `ClientHello` of
+    /// `Accepted` read by an `Acceptor`, or of an
+    /// [`UnbufferedAccepted`](super::UnbufferedAccepted)) the call does
+    /// nothing: the resolver of the configuration the connection goes on
+    /// with is asked again.
+    pub fn acknowledge_trusted_ca_keys(&self) {
+        if let Some(ack) = self.trusted_ca_keys_ack {
+            ack.store(true, Ordering::Relaxed);
+        }
     }
 }

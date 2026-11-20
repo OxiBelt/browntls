@@ -66,6 +66,9 @@ pub(super) struct CompleteClientHelloHandling {
     pub(super) randoms: ConnectionRandoms,
     pub(super) send_ticket: bool,
     pub(super) cert_types: hs::NegotiatedCertTypes,
+    /// Whether the certificate resolver said it chose with the client's
+    /// `trusted_ca_keys` (RFC 6066 §6).
+    pub(super) trusted_ca_keys_ack: bool,
 }
 
 impl CompleteClientHelloHandling {
@@ -375,6 +378,12 @@ impl CompleteClientHelloHandling {
             server_name_ack: (!resuming)
                 .then(|| client_hello.sni().map(|_| ()))
                 .flatten(),
+            // RFC 6066 §6: an empty trusted_ca_keys when the client's list
+            // guided the chain we send; a resumed session sends no chain.
+            trusted_ca_keys_ack: (!resuming
+                && self.trusted_ca_keys_ack
+                && client_hello.extensions.trusted_ca_keys.is_some())
+            .then_some(()),
             // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
             record_size_limit: hs::record_size_limit_ack(
                 &self.config,

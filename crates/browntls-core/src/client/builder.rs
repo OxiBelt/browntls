@@ -139,6 +139,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             require_ems,
             require_secure_renegotiation: true,
             allow_mac_then_encrypt: false,
+            trusted_ca_keys: None,
             time_provider: self.time_provider,
             cert_compressors: compress::default_cert_compressors().to_vec(),
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),

@@ -110,6 +110,7 @@ pub mod ticketer;
 mod tls12;
 mod tls13;
 pub mod transparency;
+mod trusted_ca_keys;
 pub mod unbuffered;
 mod vecbuf;
 mod verify;
@@ -135,6 +136,7 @@ pub use crate::key_log::{KeyLog, NoKeyLog};
 pub use crate::key_log_file::KeyLogFile;
 pub use crate::msgs::enums::NamedGroup;
 pub use crate::msgs::handshake::DistinguishedName;
+pub use crate::msgs::handshake::TrustedAuthority;
 #[cfg(feature = "std")]
 pub use crate::stream::{Stream, StreamOwned};
 pub use crate::suites::{

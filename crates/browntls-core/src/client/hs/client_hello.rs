@@ -29,8 +29,8 @@ use crate::msgs::handshake::ClientSessionTicket;
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientHelloPayload, ClientTicketRequest,
     HandshakeMessagePayload, HandshakePayload, HelloRetryRequest, KeyShareEntry,
-    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, Random,
-    ServerNamePayload, SessionId,
+    MAX_HANDSHAKE_SIZE, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName,
+    Random, ServerNamePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::Retrieved;
@@ -619,6 +619,9 @@ pub(super) fn emit_client_hello_for_retry(
         .record_size_limit
         .filter(|_| !quic)
         .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    // RFC 6066 §6: a TLS 1.2 extension only; `supports_tls12` is false
+    // over QUIC and with an ECH offer (RFC 9849 §6.1).
+    exts.trusted_ca_keys = config.trusted_ca_keys.clone().filter(|_| supports_tls12);
     // RFC 9149: a TLS 1.3 extension only.
     let ticket_limit = u8::try_from(config.max_tls13_tickets_per_connection).unwrap_or(u8::MAX);
     exts.ticket_request = config
@@ -695,6 +698,14 @@ pub(super) fn emit_client_hello_for_retry(
             config.client_hello_padding,
             HANDSHAKE_HEADER_LEN + chp.get_encoding().len(),
         );
+    }
+    // A ClientHello must fit in a handshake message, and its extension
+    // block in a two-byte length; a large `trusted_ca_keys` list or ALPN
+    // offer could break either, which would send a malformed message.
+    if chp.get_encoding().len() > MAX_HANDSHAKE_SIZE as usize {
+        return Err(Error::general(
+            "the ClientHello is longer than a handshake message may be",
+        ));
     }
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 

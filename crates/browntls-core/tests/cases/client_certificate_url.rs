@@ -9,10 +9,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use browntls_core::cached_info::{CachedInformationType, ClientCachedInfoMemoryCache};
 use browntls_core::certificate_url::{
     CertChainType, CertificateUrl, CertificateUrlError, ClientCertificateUrlPolicy,
     ClientCertificateUrlQuery, ClientCertificateUrlResponse, UrlAndHash, encode_pki_path,
 };
+use browntls_core::client::Resumption;
 use browntls_core::pki_types::CertificateDer;
 use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
 use browntls_core::{
@@ -257,6 +259,40 @@ fn individual_certs_from_a_client_without_a_chain() {
         server.peer_certificates().unwrap(),
         s.client.cert_chain().as_slice()
     );
+}
+
+#[test]
+fn cached_certificate_request_still_fetches_client_chain() {
+    let setup = Setup::new();
+    let urls = setup.individual();
+    let mut client_config = setup.client(&TLS12, setup.key(Some(urls.clone()), false), true);
+    client_config.resumption = Resumption::disabled();
+    client_config.cached_info = Some(Arc::new(ClientCachedInfoMemoryCache::new(8, 2)));
+    let mut server_config = setup.server(&TLS12, true, policy());
+    server_config.cached_info.cert_req = true;
+
+    for request_is_cached in [false, true] {
+        let (mut client, mut server) = connect(client_config.clone(), server_config.clone());
+        let outcome = run(&mut client, &mut server, |query| setup.fetch(query));
+
+        assert!(
+            outcome.server.is_ok() && outcome.client.is_ok(),
+            "{outcome:?}"
+        );
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+        for replaced in [client.cached_info_replaced(), server.cached_info_replaced()] {
+            assert_eq!(
+                replaced.contains(CachedInformationType::CertReq),
+                request_is_cached,
+            );
+        }
+        assert_eq!(outcome.queries.len(), 1);
+        assert_eq!(outcome.queries[0].entries(), urls.entries());
+        assert_eq!(
+            server.peer_certificates().unwrap(),
+            setup.client.cert_chain().as_slice(),
+        );
+    }
 }
 
 #[test]

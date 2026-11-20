@@ -78,7 +78,7 @@ use crate::signed_data::{SignedData, Spki};
 use crate::time::UnixTime;
 use crate::types::SignatureVerificationAlgorithm;
 
-mod precert;
+pub(crate) mod precert;
 mod wire;
 
 use precert::{SignedEntry, SignedInput};
@@ -229,7 +229,7 @@ impl fmt::Debug for CtLog<'_> {
 
 /// Returns `spki` as a complete `SubjectPublicKeyInfo` `SEQUENCE`, adding
 /// the header when only the contents were given.
-fn complete_spki(spki: &[u8]) -> Option<Cow<'_, [u8]>> {
+pub(crate) fn complete_spki(spki: &[u8]) -> Option<Cow<'_, [u8]>> {
     let complete = der::read_all(spki, |r| r.expect(tag::SEQUENCE))
         .and_then(Spki::from_contents)
         .is_ok();

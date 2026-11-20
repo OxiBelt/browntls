@@ -91,6 +91,9 @@ pub mod oid {
     /// The signed certificate timestamp list of an OCSP single response
     /// (1.3.6.1.4.1.11129.2.4.5, RFC 6962 section 3.3).
     pub const SCT_LIST: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x05];
+    /// The Transparency Information extension of an OCSP single response
+    /// (1.3.101.75, RFC 9162 section 7.1.1).
+    pub const TRANSPARENCY_INFO: &[u8] = &[0x2b, 0x65, 0x4b];
     /// `id-sha1` (1.3.14.3.2.26).
     pub const SHA1: &[u8] = &[0x2b, 0x0e, 0x03, 0x02, 0x1a];
     /// `id-sha256` (2.16.840.1.101.3.4.2.1).

@@ -524,20 +524,9 @@ impl CommonState {
     /// messages are queued for CRYPTO frames at the current encryption level
     /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
     /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
-    ///
-    /// On a DTLS connection handshake messages join the flight being
-    /// prepared and alerts are sent once, both under the current sending
-    /// epoch whatever `must_encrypt` says. There is no ChangeCipherSpec in
-    /// DTLS 1.3 (RFC 9147 §5), and application data does not come this way.
+    /// On a DTLS connection see [`Self::send_to_dtls`].
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
-        if let Some(dtls) = &mut self.dtls {
-            match m.payload {
-                MessagePayload::Handshake { encoded, .. } => {
-                    dtls.queue_handshake(encoded.bytes());
-                }
-                MessagePayload::Alert(alert) => dtls.queue_alert(alert.level, alert.description),
-                _ => {}
-            }
+        if self.send_to_dtls(&m.payload) {
             return;
         }
         if let Some(quic) = &mut self.quic {
@@ -569,11 +558,7 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
-        if let Some(dtls) = &mut self.dtls {
-            // Only handshake messages (KeyUpdate) come this way.
-            if m.typ == ContentType::Handshake {
-                dtls.queue_handshake(m.payload.bytes());
-            }
+        if self.send_plain_to_dtls(&m) {
             return;
         }
         if self.send_to_kernel(&m) {

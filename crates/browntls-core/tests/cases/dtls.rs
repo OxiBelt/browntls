@@ -933,3 +933,29 @@ fn a_server_closing_after_its_flight_still_gets_the_finished() {
     assert!(!pair.server.is_handshaking());
     assert_eq!(pair.client.next_timeout(), None);
 }
+
+#[test]
+fn a_server_close_read_in_a_later_datagram_still_gets_the_finished() {
+    for mtu in 256..=320 {
+        let (mut pair, ..) = Pair::default_pair();
+        pair.client.set_mtu(mtu).unwrap();
+        pair.server.set_mtu(mtu).unwrap();
+        let now = Duration::from_secs(1000);
+        flush_to(&mut pair.client, &mut pair.server, now);
+        flush_to(&mut pair.server, &mut pair.client, now);
+        flush_to(&mut pair.client, &mut pair.server, now);
+        pair.server.send_close_notify();
+        // The client reads everything before it writes.
+        flush_to(&mut pair.server, &mut pair.client, now);
+        assert!(pair.client.peer_has_closed(), "MTU {mtu}");
+        // A KeyUpdate that cannot be sent any more changes no keys.
+        pair.client.refresh_traffic_keys().unwrap();
+        flush_to(&mut pair.client, &mut pair.server, now);
+        assert!(!pair.server.is_handshaking(), "MTU {mtu}");
+        assert_eq!(pair.client.next_timeout(), None, "MTU {mtu}");
+        let mut out = Vec::new();
+        pair.client.send(b"after close", &mut out).unwrap();
+        let received = pair.server.read_datagram(&mut out, now).unwrap();
+        assert_eq!(received.app_data().len(), 1, "MTU {mtu}");
+    }
+}

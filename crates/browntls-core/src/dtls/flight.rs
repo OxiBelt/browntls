@@ -80,8 +80,8 @@ pub(super) struct Outgoing {
     /// We closed with our last flight unacknowledged: that flight alone is
     /// still retransmitted, each time followed by close_notify again.
     pub(super) closing: bool,
-    /// The peer closed in the input that completed our handshake: our
-    /// last flight is sent once, then abandoned.
+    /// The peer closed before our last flight was completely sent: it is
+    /// sent once, then abandoned.
     pub(super) sending_last: bool,
 }
 
@@ -164,6 +164,13 @@ impl Outgoing {
         }
     }
 
+    /// Whether no handshake message is queued any more: the connection
+    /// failed or closed. A KeyUpdate would then never be sent, so its keys
+    /// must not be used either.
+    pub(super) fn stopped(&self) -> bool {
+        self.abandoned || self.closing || self.sending_last
+    }
+
     fn has_pending(&self) -> bool {
         self.messages.iter().any(|m| !m.pending.is_empty())
     }
@@ -180,7 +187,7 @@ impl Dtls {
         let Some(body) = rest.get(wire::TLS_HANDSHAKE_HEADER_LEN - 1..) else {
             return;
         };
-        if out.abandoned || out.closing || out.sending_last {
+        if out.stopped() {
             return;
         }
         let epoch = self.write.last().map_or(0, |w| w.epoch);
@@ -235,7 +242,7 @@ impl Dtls {
         }
 
         let wrote = self.write_fragments(out, start)?;
-        if wrote && self.out.deadline.is_none() && !self.is_hrr_only() {
+        if wrote && self.out.deadline.is_none() && !self.is_hrr_only() && !self.out.sending_last {
             self.out.deadline = Some(now + self.out.timeout);
         }
         let close = (AlertLevel::Warning, AlertDescription::CloseNotify);
@@ -293,14 +300,14 @@ impl Dtls {
 
     /// The peer's close_notify was read: nothing it sends is read any
     /// more, its ACKs included, so nothing is retransmitted. A client
-    /// whose handshake this input completed still sends its last flight
-    /// once, so that the server can complete its own. An ACK we owe is
+    /// whose last flight is not completely sent yet still sends it once,
+    /// so that the server can complete its handshake. An ACK we owe is
     /// still sent.
     pub(super) fn peer_closed(&mut self) {
         if self.out.sending_last {
             return;
         }
-        if self.holds_last_flight() && self.out.flight_started_this_input() && !self.out.closing {
+        if self.holds_last_flight() && self.out.has_pending() && !self.out.closing {
             self.out.sending_last = true;
             self.out.deadline = None;
         } else {

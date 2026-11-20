@@ -12,8 +12,8 @@ use super::super::common::{ClientAuthDetails, ClientCertificateExtensions, Serve
 use super::super::hs::{ClientContext, NextStateOrError};
 use super::finished::ExpectFinished;
 use super::{
-    certificate_request_sigschemes, construct_server_verify_message, delegated_credential_schemes,
-    send_cert_path_error_alert, send_cert_verify_error_alert,
+    certificate_request_sigschemes, construct_server_verify_message, delegated_credential_request,
+    delegated_credential_schemes, send_cert_path_error_alert, send_cert_verify_error_alert,
 };
 use crate::common_state::{ConnectionRandoms, Side};
 use crate::conn::State;
@@ -142,6 +142,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
                 None,
                 &compat_sigschemes,
                 Some(certreq.context.0.clone()),
+                delegated_credential_request(&self.config, certreq),
             )
         };
 

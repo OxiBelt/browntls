@@ -156,7 +156,9 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
         // one, may start now. Its ChangeCipherSpec and Finished are read
         // once that completes.
         let st = *self;
-        let ClientCertAwaitingProof { chain, revocation } = st.client_cert;
+        let ClientCertAwaitingProof {
+            chain, revocation, ..
+        } = st.client_cert;
         finish_or_pause(cx, revocation, move |cx, status| {
             cx.common.peer_certificates = Some(chain);
             cx.common.peer_revocation_status = status;

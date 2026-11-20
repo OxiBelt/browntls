@@ -4,9 +4,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use browntls_pki::{AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
+use browntls_pki::{
+    AlgorithmIdentifier, CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime,
+};
 
 use super::CryptoProvider;
+use crate::common_state::Side;
 use crate::delegated_credential::{DelegatedCredential, DelegatedCredentialKey};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::{Error, InconsistentKeys};
@@ -209,22 +212,48 @@ impl CertifiedKey {
         Ok(())
     }
 
-    /// Adds a delegated credential for the end entity, with its private
-    /// `key` (RFC 9345). See [`DelegatedCredentialKey::new`] for the checks.
+    /// Adds a server's delegated credential for the end entity (one issued
+    /// for [`Side::Server`]), with its private `key` (RFC 9345 §4.1.1). See
+    /// [`DelegatedCredentialKey::new_for`] for the checks.
     pub fn with_delegated_credential(
-        mut self,
+        self,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
     ) -> Result<Self, Error> {
-        let dc = DelegatedCredentialKey::new(self.end_entity_cert()?, credential, key)?;
+        self.with_delegated_credential_for(Side::Server, credential, key)
+    }
+
+    /// Adds a client's delegated credential for the end entity (one issued
+    /// for [`Side::Client`]), with its private `key` (RFC 9345 §4.1.2). See
+    /// [`DelegatedCredentialKey::new_for`] for the checks.
+    pub fn with_client_delegated_credential(
+        self,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        self.with_delegated_credential_for(Side::Client, credential, key)
+    }
+
+    fn with_delegated_credential_for(
+        mut self,
+        side: Side,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        let dc = DelegatedCredentialKey::new_for(side, self.end_entity_cert()?, credential, key)?;
         self.delegated_credentials.push(Arc::new(dc));
         Ok(self)
     }
 
     /// The delegated credentials added with
-    /// [`Self::with_delegated_credential`], most preferred first. A TLS 1.3
-    /// server sends the first one the client accepts and signs
-    /// CertificateVerify with its key; otherwise `key` signs.
+    /// [`Self::with_delegated_credential`] and
+    /// [`Self::with_client_delegated_credential`], most preferred first.
+    ///
+    /// In TLS 1.3, a server sends the first of its credentials (those for
+    /// [`Side::Server`]) that the client accepts, and a client the first
+    /// of its own (those for [`Side::Client`]) that the server's
+    /// CertificateRequest accepts; that credential's key then signs
+    /// CertificateVerify. Otherwise `key` signs.
     pub fn delegated_credentials(&self) -> &[Arc<DelegatedCredentialKey>] {
         &self.delegated_credentials
     }
@@ -247,6 +276,23 @@ impl CertifiedKey {
     /// The URLs set with [`Self::set_certificate_url`].
     pub fn certificate_url(&self) -> Option<&crate::certificate_url::CertificateUrl> {
         self.certificate_url.as_ref()
+    }
+
+    /// The first credential with which `side` can authenticate the end
+    /// entity at `now` to a peer that offered `dc_schemes` in its
+    /// `delegated_credential` extension and `sig_schemes` in
+    /// `signature_algorithms`.
+    pub(crate) fn choose_delegated_credential(
+        &self,
+        side: Side,
+        dc_schemes: &[SignatureScheme],
+        sig_schemes: &[SignatureScheme],
+        now: UnixTime,
+    ) -> Option<&Arc<DelegatedCredentialKey>> {
+        let end_entity = self.cert.first()?;
+        self.delegated_credentials
+            .iter()
+            .find(|dc| dc.usable(side, end_entity, dc_schemes, sig_schemes, now))
     }
 
     /// Checks that the key's public half matches the end-entity certificate.

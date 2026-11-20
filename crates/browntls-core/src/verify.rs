@@ -269,6 +269,26 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     fn requires_raw_public_keys(&self) -> bool {
         false
     }
+
+    /// Verifies a TLS 1.3 CertificateVerify signature made with the key of
+    /// a client's delegated credential (RFC 9345 §4.1.2), given as a
+    /// `SubjectPublicKeyInfo`.
+    ///
+    /// The default refuses, so a server with a verifier that does not
+    /// implement this fails a handshake in which the client authenticates
+    /// with a delegated credential; such a verifier should not be combined
+    /// with `ServerConfig::enable_delegated_credentials`.
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        let _ = (message, public_key, dss);
+        Err(Error::General(
+            "this certificate verifier cannot verify delegated credential signatures".into(),
+        ))
+    }
 }
 
 /// A [`ClientCertVerifier`] that never requests client authentication.

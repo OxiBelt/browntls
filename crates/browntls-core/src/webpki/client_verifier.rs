@@ -358,6 +358,20 @@ impl ClientCertVerifier for WebPkiClientVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.supported_algs.supported_schemes()
     }
+
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        super::verify::verify_tls13_signature_with_raw_key(
+            message,
+            public_key,
+            dss,
+            &self.supported_algs,
+        )
+    }
 }
 
 impl fmt::Debug for WebPkiClientVerifier {

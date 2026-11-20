@@ -551,6 +551,7 @@ impl ExpectServerDoneOrCertReq {
             Some(&certreq.certtypes),
             &certreq.sigschemes,
             None,
+            None,
         );
         Ok(Box::new(ExpectServerDone {
             config: self.config,

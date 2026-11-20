@@ -355,9 +355,24 @@ impl CompleteClientHelloHandling {
                     {
                         continue;
                     }
-                    if resume
-                        .delegated_credential_expiry
-                        .is_some_and(|expiry| now >= expiry)
+                    // Nor one past the deadline of a delegated credential
+                    // that authenticated either side (RFC 9345).
+                    if [
+                        resume.delegated_credential_expiry,
+                        resume.client_delegated_credential_expiry,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|expiry| now >= expiry)
+                    {
+                        continue;
+                    }
+                    // A session whose client authenticated with a delegated
+                    // credential keeps that authentication; only a
+                    // configuration that accepts such credentials resumes
+                    // it.
+                    if resume.client_delegated_credential_expiry.is_some()
+                        && !self.config.enable_delegated_credentials
                     {
                         continue;
                     }
@@ -377,6 +392,8 @@ impl CompleteClientHelloHandling {
                     // Reported once the client's Finished verifies.
                     cx.common.external_psk = resumed_external;
                     cx.data.delegated_credential_expiry = resume.delegated_credential_expiry;
+                    cx.data.client_delegated_credential_expiry =
+                        resume.client_delegated_credential_expiry;
                     resumedata = Some(resume.set_freshness(psk_id.obfuscated_ticket_age, now));
                     break;
                 }

@@ -3,8 +3,8 @@
 
 use alloc::vec::Vec;
 
-use super::client_auth::client_auth_sigschemes;
-use crate::common_state::{CommonState, ConnectionRandoms};
+use super::client_auth::{client_auth_sigschemes, client_delegated_credential_schemes};
+use crate::common_state::{CommonState, ConnectionRandoms, Side};
 use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{AlertDescription, CertificateType, ProtocolVersion, SignatureScheme};
 use crate::error::{Error, PeerIncompatible};
@@ -303,6 +303,9 @@ pub(super) fn certificate_request_message(
                 &config.cert_decompressors,
                 config.cert_decompression_limit,
             ),
+            // RFC 9345 §4.1.2: the schemes accepted for a client's
+            // delegated credential, when those are enabled.
+            delegated_credential: client_delegated_credential_schemes(config),
             status_request: evidence,
             sct_request: evidence,
             grease_first: grease.map(|g| g.first_extension),
@@ -331,18 +334,14 @@ pub(super) fn choose_delegated_credential<'a>(
     cert_types: hs::NegotiatedCertTypes,
 ) -> Option<&'a DelegatedCredentialKey> {
     let offered = client_hello.extensions.delegated_credential.as_ref()?;
-    let end_entity = server_key.get_cert().first()?;
-    if server_key.get_delegated_credentials().is_empty()
-        || cert_types.server == Some(CertificateType::RawPublicKey)
-    {
+    if cert_types.server == Some(CertificateType::RawPublicKey) {
         return None;
     }
     let now = config.current_time().ok()?;
     server_key
-        .get_delegated_credentials()
-        .iter()
+        .certified_key()
+        .choose_delegated_credential(Side::Server, offered, sigschemes, now)
         .map(|dc| &**dc)
-        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
 }
 
 /// The server's Certificate message for `certified_key`, with what

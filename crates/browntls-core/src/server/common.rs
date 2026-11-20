@@ -1,16 +1,15 @@
 //! Types shared by the TLS 1.2 and TLS 1.3 server handshakes.
 
-use browntls_pki::CertificateDer;
+use browntls_pki::{CertificateDer, UnixTime};
 
 use super::server_conn::ServerConfig;
 use crate::common_state::CommonState;
-use crate::delegated_credential::DelegatedCredentialKey;
+use crate::delegated_credential::DelegatedCredential;
 use crate::enums::CertificateType;
 use crate::error::Error;
 use crate::msgs::handshake::{CertificateChain, ClientHelloPayload};
 use crate::revocation::{PeerEvidence, RevocationCheck};
 use crate::sign::{CertifiedKey, SigningKey};
-use crate::sync::Arc;
 
 /// The certificate and key chosen for this connection.
 pub(super) struct ActiveCertifiedKey<'a> {
@@ -46,10 +45,6 @@ impl<'a> ActiveCertifiedKey<'a> {
     /// The end entity's encoded `SignedCertificateTimestampList`.
     pub(super) fn get_sct_list(&self) -> Option<&'a [u8]> {
         self.certified_key.sct_list()
-    }
-
-    pub(super) fn get_delegated_credentials(&self) -> &'a [Arc<DelegatedCredentialKey>] {
-        self.certified_key.delegated_credentials()
     }
 }
 
@@ -88,7 +83,15 @@ pub(super) fn client_revocation_enabled(config: &ServerConfig) -> bool {
 pub(super) struct ClientCertAwaitingProof {
     pub(super) chain: CertificateChain<'static>,
     pub(super) revocation: RevocationCheck,
+    /// The delegated credential on the end entity's TLS 1.3
+    /// CertificateEntry (RFC 9345 §4.1.2), not yet validated: with one,
+    /// the proof is made with its key.
+    pub(super) delegated_credential: Option<DelegatedCredential>,
 }
+
+/// A client's delegated credential that passed validation, and its
+/// absolute expiry.
+pub(super) type ValidatedCredential = (DelegatedCredential, UnixTime);
 
 /// Runs the client certificate verifier over the non-empty `chain` and
 /// the `evidence` stapled to it, sending the alert for a failure.
@@ -106,5 +109,9 @@ pub(super) fn verify_client_cert(
         .verifier
         .verify_client_cert_with_evidence(end_entity, intermediates, evidence, now)
         .map_err(|err| crate::client::tls13::send_cert_path_error_alert(common, err))?;
-    Ok(ClientCertAwaitingProof { chain, revocation })
+    Ok(ClientCertAwaitingProof {
+        chain,
+        revocation,
+        delegated_credential: None,
+    })
 }

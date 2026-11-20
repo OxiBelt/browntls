@@ -1,12 +1,16 @@
 //! Client authentication in the TLS 1.3 server handshake: the client's
-//! Certificate and CertificateVerify (RFC 8446 §4.4).
+//! Certificate and CertificateVerify (RFC 8446 §4.4), with or without a
+//! delegated credential (RFC 9345 §4.1.2).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use browntls_pki::UnixTime;
+
 use super::traffic::ExpectFinished;
-use crate::common_state::CommonState;
+use crate::common_state::{CommonState, Side};
 use crate::conn::State;
+use crate::delegated_credential;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, SignatureScheme};
 use crate::error::{Error, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
@@ -14,7 +18,9 @@ use crate::log::{debug, trace};
 use crate::msgs::handshake::{CertificatePayloadTls13, HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{Message, MessagePayload};
 use crate::revocation::{CertificateEvidence, finish_or_pause};
-use crate::server::common::{ClientCertAwaitingProof, client_revocation_enabled};
+use crate::server::common::{
+    ClientCertAwaitingProof, ValidatedCredential, client_revocation_enabled,
+};
 use crate::server::hs::{NextStateOrError, ServerContext};
 use crate::server::server_conn::{ServerConfig, ServerConnectionData};
 use crate::sync::Arc;
@@ -101,15 +107,32 @@ pub(super) fn check_client_certificate(
             PeerMisbehaved::IllegalCertificateRequestContext,
         ));
     }
+    // RFC 9345 §4.1.2: a delegated credential our CertificateRequest did
+    // not ask for is unexpected_message; one on any entry but the end
+    // entity's is illegal_parameter (the RFC allows ignoring it; we fail
+    // closed).
+    let delegated_credential = certp.end_entity_delegated_credential().cloned();
+    if client_delegated_credential_schemes(config).is_none()
+        && (delegated_credential.is_some() || certp.delegated_credential_on_non_end_entity())
+    {
+        return Err(common.send_fatal_alert(
+            AlertDescription::UnexpectedMessage,
+            PeerMisbehaved::UnsolicitedDelegatedCredential,
+        ));
+    }
+    if certp.delegated_credential_on_non_end_entity() {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::DelegatedCredentialNotOnEndEntity,
+        ));
+    }
     // RFC 9846 §4.5.1: entry extensions must answer our CertificateRequest.
     // It asks for stapled responses and SCTs exactly when the verifier
-    // evaluates revocation, and never for delegated credentials (RFC 9345
-    // client credentials are not supported), nor for `transparency_info`
-    // (RFC 9162 §6.1 defines no CT for client certificates).
+    // evaluates revocation. RFC 9162 §6.1 defines no CT 2.0 for client
+    // certificates.
     let evidence_requested = client_revocation_enabled(config);
     if certp.entries.iter().any(|e| {
-        e.delegated_credential.is_some()
-            || e.transparency_info.is_some()
+        e.transparency_info.is_some()
             || (!evidence_requested && (e.status.is_some() || e.sct_list.is_some()))
     }) {
         return Err(common.send_fatal_alert(
@@ -144,19 +167,24 @@ pub(super) fn check_client_certificate(
         return Ok(None);
     }
 
-    crate::server::common::verify_client_cert(common, config, client_cert, &evidence).map(Some)
+    let mut client_cert =
+        crate::server::common::verify_client_cert(common, config, client_cert, &evidence)?;
+    client_cert.delegated_credential = delegated_credential;
+    Ok(Some(client_cert))
 }
 
 /// Verifies a client CertificateVerify over `transcript` (RFC 9846 §4.5)
-/// with a scheme from our CertificateRequest.
+/// with a scheme from our CertificateRequest. When the client presented a
+/// delegated credential, that is validated first (RFC 9345 §4.1.3) and its
+/// key must have signed; it is returned with its expiry.
 pub(super) fn check_client_certificate_verify(
     common: &mut CommonState,
     config: &ServerConfig,
     transcript: &HandshakeHash,
-    client_cert: &crate::msgs::handshake::CertificateChain<'static>,
+    client_cert: &ClientCertAwaitingProof,
     offered_sigschemes: &[SignatureScheme],
     sig: &DigitallySignedStruct,
-) -> Result<HandshakeSignatureValid, Error> {
+) -> Result<(HandshakeSignatureValid, Option<ValidatedCredential>), Error> {
     if !offered_sigschemes.contains(&sig.scheme) {
         return Err(common.send_fatal_alert(
             AlertDescription::IllegalParameter,
@@ -165,16 +193,42 @@ pub(super) fn check_client_certificate_verify(
     }
     let handshake_hash = transcript.current_hash();
     let msg = crate::client::tls13::construct_client_verify_message(&handshake_hash);
-    let end_entity = client_cert.0.first().ok_or_else(|| {
+    let end_entity = client_cert.chain.0.first().ok_or_else(|| {
         common.send_fatal_alert(
             AlertDescription::DecodeError,
             Error::NoCertificatesPresented,
         )
     })?;
-    config
+    let Some(dc) = &client_cert.delegated_credential else {
+        let verified = config
+            .verifier
+            .verify_tls13_signature(&msg, end_entity, sig)
+            .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(common, err))?;
+        return Ok((verified, None));
+    };
+
+    // RFC 9345 §4.1.3: an invalid credential is illegal_parameter.
+    let offered_dc_schemes = client_delegated_credential_schemes(config).unwrap_or_default();
+    let presented = delegated_credential::Presented {
+        side: Side::Client,
+        end_entity,
+        offered_dc_schemes: &offered_dc_schemes,
+        offered_sig_schemes: offered_sigschemes,
+        cert_verify_scheme: sig.scheme,
+        now: config.current_time()?,
+    };
+    let expiry = delegated_credential::validate(dc, &presented, |message, dss| {
+        config
+            .verifier
+            .verify_tls13_signature(message, end_entity, dss)
+    })
+    .map_err(|err| common.send_fatal_alert(AlertDescription::IllegalParameter, err))?;
+    // Then the credential's key verifies CertificateVerify.
+    let verified = config
         .verifier
-        .verify_tls13_signature(&msg, end_entity, sig)
-        .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(common, err))
+        .verify_tls13_signature_with_delegated_key(&msg, &dc.credential.public_key, sig)
+        .map_err(|err| crate::client::tls13::send_cert_verify_error_alert(common, err))?;
+    Ok((verified, Some((dc.clone(), expiry))))
 }
 
 /// The TLS 1.3 signature schemes our CertificateRequest lists.
@@ -185,6 +239,44 @@ pub(super) fn client_auth_sigschemes(config: &ServerConfig) -> Vec<SignatureSche
         .into_iter()
         .filter(SignatureScheme::supported_in_tls13)
         .collect()
+}
+
+/// The schemes our CertificateRequest accepts for a client's delegated
+/// credential (RFC 9345 §4.1.2), or `None` when it carries no
+/// `delegated_credential` extension: those of [`client_auth_sigschemes`]
+/// without `rsa_pss_rsae_*` (RFC 9345 §4 forbids `rsaEncryption`
+/// credential keys), while `ServerConfig::enable_delegated_credentials`
+/// is set and the verifier takes X.509 certificates.
+pub(super) fn client_delegated_credential_schemes(
+    config: &ServerConfig,
+) -> Option<Vec<SignatureScheme>> {
+    if !config.enable_delegated_credentials || config.verifier.requires_raw_public_keys() {
+        return None;
+    }
+    let schemes: Vec<SignatureScheme> = client_auth_sigschemes(config)
+        .into_iter()
+        .filter(|scheme| delegated_credential::credential_scheme_allowed(*scheme))
+        .collect();
+    (!schemes.is_empty()).then_some(schemes)
+}
+
+/// Whether a client delegated credential that expires at `expiry` no
+/// longer covers a handshake or an authentication completing now; this
+/// sends the alert of RFC 9345 §4.1.3.
+pub(super) fn check_client_credential_unexpired(
+    common: &mut CommonState,
+    config: &ServerConfig,
+    expiry: Option<UnixTime>,
+) -> Result<(), Error> {
+    if let Some(expiry) = expiry
+        && config.current_time()? >= expiry
+    {
+        return Err(common.send_fatal_alert(
+            AlertDescription::IllegalParameter,
+            PeerMisbehaved::DelegatedCredentialExpired,
+        ));
+    }
+    Ok(())
 }
 
 struct ExpectCertificateVerify {
@@ -205,14 +297,15 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
             HandshakePayload::CertificateVerify
         )?;
 
-        let _sig_verified: HandshakeSignatureValid = check_client_certificate_verify(
-            cx.common,
-            &self.config,
-            &self.transcript,
-            &self.client_cert.chain,
-            &self.offered_sigschemes,
-            sig,
-        )?;
+        let (_sig_verified, credential): (HandshakeSignatureValid, _) =
+            check_client_certificate_verify(
+                cx.common,
+                &self.config,
+                &self.transcript,
+                &self.client_cert,
+                &self.offered_sigschemes,
+                sig,
+            )?;
 
         trace!("client CertificateVerify OK");
         self.transcript.add_message(&m);
@@ -220,8 +313,13 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
         // The client holds the key: a status lookup, if the verifier needs
         // one, may start now. Its Finished is read once that completes.
         let st = *self;
-        let ClientCertAwaitingProof { chain, revocation } = st.client_cert;
+        let ClientCertAwaitingProof {
+            chain, revocation, ..
+        } = st.client_cert;
         finish_or_pause(cx, revocation, move |cx, status| {
+            let (credential, expiry) = credential.unzip();
+            cx.data.client_delegated_credential = credential;
+            cx.data.client_delegated_credential_expiry = expiry;
             cx.common.peer_certificates = Some(chain);
             cx.common.peer_revocation_status = status;
             Ok(Box::new(ExpectFinished {

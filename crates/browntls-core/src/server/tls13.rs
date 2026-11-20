@@ -86,6 +86,10 @@ impl CompleteClientHelloHandling {
     }
 
     fn attempt_tls13_ticket_decryption(&self, ticket: &[u8]) -> Option<ServerSessionValue> {
+        // RFC 8844 §5: a bound connection resumes no session.
+        if self.config.external_binding.is_some() {
+            return None;
+        }
         let plain = if self.config.ticketer.enabled() {
             self.config.ticketer.decrypt(ticket)?
         } else {
@@ -109,6 +113,13 @@ impl CompleteClientHelloHandling {
                 PeerIncompatible::KeyShareExtensionRequired,
             )
         })?;
+        // RFC 8844: checked in each ClientHello, the second one included.
+        crate::external_binding::handshake::server_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            true,
+        )?;
 
         // Empty when the client sent no signature_algorithms, which it may
         // only do when offering a PSK (`hs::process_client_hello`); checked
@@ -583,7 +594,10 @@ impl CompleteClientHelloHandling {
         // in EncryptedExtensions when the client sent ticket_request.
         let (mut send_tickets, mut expected_tickets) =
             hs::tls13_tickets_to_send(&self.config, client_hello, resumedata.is_some());
-        if client_revocation_enabled(&self.config) && !cx.data.certificate_free {
+        // RFC 8844 §5: no session of a bound connection is kept for later.
+        if (client_revocation_enabled(&self.config) && !cx.data.certificate_free)
+            || self.config.external_binding.is_some()
+        {
             send_tickets = 0;
             expected_tickets = expected_tickets.map(|_| 0);
         }

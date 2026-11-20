@@ -224,6 +224,10 @@ pub struct CommonState {
     /// this queue as plaintext for the kernel to protect
     /// ([`crate::kernel::KernelConnection`]).
     pub(crate) kernel: Option<alloc::boxed::Box<crate::kernel::KernelQueue>>,
+    /// The RFC 8844 values the peer sent, when a binding is configured
+    /// ([`crate::external_binding`]).
+    pub(crate) peer_external_binding:
+        Option<alloc::boxed::Box<crate::external_binding::PeerExternalBinding>>,
 }
 
 impl CommonState {
@@ -269,6 +273,7 @@ impl CommonState {
             external_psk: None,
             external_psk_confirmed: false,
             kernel: None,
+            peer_external_binding: None,
         }
     }
 

@@ -202,6 +202,22 @@ pub struct ClientConfig {
     /// number of tickets.
     pub tls13_ticket_request: Option<TicketRequest>,
 
+    /// External session and identity binding (RFC 8844): our
+    /// `external_id_hash` and `external_session_id` to send, and the
+    /// server's values to expect. `None` (the default) sends neither
+    /// extension. The values belong to one connection: clone the
+    /// configuration per connection. Connection creation fails with
+    /// [`Error::InconsistentExternalBinding`] if the server's session
+    /// identifier is expected without one of ours.
+    ///
+    /// With a binding the connection neither resumes a session nor keeps
+    /// one (RFC 8844 §5: nothing of one TLS connection is used in another,
+    /// even of the same signaling session), and sends no early data, even
+    /// with [`Self::enable_early_data`]: the server would read it before
+    /// its answer is checked. [`Self::external_psks`] are still offered.
+    /// See [`crate::external_binding`].
+    pub external_binding: Option<crate::external_binding::ExternalBinding>,
+
     /// The most valid TLS 1.3 tickets accepted for storage on one
     /// connection, including after kernel handoff. Later tickets are
     /// ignored; zero accepts none. Defaults to 8, and values above 255
@@ -720,6 +736,7 @@ impl ConnectionCore<ClientConnectionData> {
         if config.max_tls13_tickets_per_connection > 255 {
             return Err(Error::BadTls13TicketLimit);
         }
+        crate::external_binding::handshake::check_client_config(config.external_binding.as_ref())?;
         let mut common_state = CommonState::new(Side::Client);
         common_state.quic = quic.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;

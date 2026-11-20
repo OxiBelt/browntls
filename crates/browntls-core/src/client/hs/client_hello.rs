@@ -45,6 +45,10 @@ fn find_session(
     config: &ClientConfig,
     cx: &mut ClientContext<'_>,
 ) -> Option<Retrieved<ClientSessionValue>> {
+    // RFC 8844 §5: a bound connection uses nothing from another one.
+    if config.external_binding.is_some() {
+        return None;
+    }
     let now = config.current_time().ok()?;
     // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume.
     let quic = cx.common.is_quic();
@@ -449,6 +453,7 @@ pub(super) fn emit_client_hello_for_retry(
     #[cfg(feature = "tls12")]
     if supports_tls12
         && !config.revocation_enabled()
+        && config.external_binding.is_none()
         && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets
     {
         exts.session_ticket = Some(match &input.resuming {
@@ -551,9 +556,12 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
     // configuration allow it, but never in the second ClientHello of a
     // retry. An external PSK needs a provisioned suite, and is not used for
-    // 0-RTT when we ask for certificate authentication (RFC 8773).
+    // 0-RTT when we ask for certificate authentication (RFC 8773). Nor with
+    // an RFC 8844 binding: the server would read the data before we check
+    // its answer in EncryptedExtensions.
     if let Some(first) = offered_psks.first()
         && config.enable_early_data
+        && config.external_binding.is_none()
         && retryreq.is_none()
         && !ech_tls13_only
     {
@@ -619,6 +627,8 @@ pub(super) fn emit_client_hello_for_retry(
             new_session_count: request.new_session_count.min(ticket_limit),
             resumption_count: request.resumption_count.min(ticket_limit),
         });
+    // RFC 8844: the same values in every ClientHello.
+    crate::external_binding::handshake::client_offer(config.external_binding.as_ref(), &mut exts);
 
     let mut cipher_suites: Vec<CipherSuite> = config
         .provider

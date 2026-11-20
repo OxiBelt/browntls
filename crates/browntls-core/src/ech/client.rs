@@ -143,6 +143,7 @@ impl ClientEch {
                 exts.encrypted_client_hello = outer_ext.clone();
                 exts.server_name = Some(ServerNamePayload::SingleDnsName(public_name.clone()));
                 exts.protocols = None;
+                crate::external_binding::handshake::strip_from_outer(exts);
             }
         }
         Ok(())
@@ -171,6 +172,8 @@ impl EchOffer {
         exts.early_data = None;
         // RFC 8773: says that the inner hello offers an external PSK.
         exts.cert_with_extern_psk = None;
+        // RFC 8844: they identify the signaling session.
+        crate::external_binding::handshake::strip_from_outer(exts);
         exts.encrypted_client_hello = None;
         // §6.1.2: a PSK in the inner hello is mirrored by a GREASE one.
         exts.preshared_key = match &inner.extensions.preshared_key {

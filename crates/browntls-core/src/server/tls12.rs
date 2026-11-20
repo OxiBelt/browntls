@@ -91,6 +91,13 @@ impl CompleteClientHelloHandling {
                 PeerMisbehaved::UnexpectedCleartextExtension,
             ));
         }
+        // RFC 8844: in every handshake, full or resumed.
+        crate::external_binding::handshake::server_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            false,
+        )?;
         let client_supports_secure_renegotiation = client_hello
             .cipher_suites
             .contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
@@ -108,8 +115,11 @@ impl CompleteClientHelloHandling {
 
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
+        // RFC 8844 §5: a bound connection neither resumes nor is resumed.
+        let resumable =
+            !client_revocation_enabled(&self.config) && self.config.external_binding.is_none();
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
-        if !client_revocation_enabled(&self.config)
+        if resumable
             && let Some(ClientSessionTicket::Offer(ticket)) =
                 &client_hello.extensions.session_ticket
             && let Some(resume) = self
@@ -128,7 +138,7 @@ impl CompleteClientHelloHandling {
             );
         }
 
-        if !client_revocation_enabled(&self.config)
+        if resumable
             && !client_hello.session_id.is_empty()
             && let Some(resume) = self
                 .config
@@ -154,10 +164,9 @@ impl CompleteClientHelloHandling {
 
         // A session created without client authentication would also
         // bypass a verifier that requires fresh authentication later.
-        let storable = !client_revocation_enabled(&self.config);
-        self.send_ticket = storable && ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket = resumable && ticket_requested && self.config.ticketer.enabled();
         self.session_id =
-            if storable && !self.send_ticket && self.config.session_storage.can_cache() {
+            if resumable && !self.send_ticket && self.config.session_storage.can_cache() {
                 SessionId::random(self.config.provider.secure_random)?
             } else {
                 SessionId::empty()
@@ -305,7 +314,7 @@ impl CompleteClientHelloHandling {
         sct_list: Option<&[u8]>,
         resuming: bool,
     ) {
-        let extensions = ServerExtensions {
+        let mut extensions = ServerExtensions {
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
             // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),
@@ -340,6 +349,12 @@ impl CompleteClientHelloHandling {
             ),
             ..Default::default()
         };
+        // RFC 8844 §3.2, §4.3: answered in the TLS 1.2 ServerHello.
+        crate::external_binding::handshake::server_answer(
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            &mut extensions,
+        );
         let sh = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload(

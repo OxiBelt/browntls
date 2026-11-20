@@ -825,6 +825,72 @@ RFC 9257 guidance and what browntls enforces:
   extension comes right before `pre_shared_key`, which stays last, and is
   sized with the binders in place. A server ignores its content.
 
+### External session and identity binding (RFC 8844)
+
+`browntls_core::external_binding` implements `external_id_hash` (55) and
+`external_session_id` (56) on both sides, in TLS 1.2 and 1.3, for
+protocols that signal a session out of band (SDP `tls-id`, WebRTC identity
+assertions). The module documentation is the reference; in short:
+
+- `ClientConfig::external_binding` and `ServerConfig::external_binding`
+  (default `None`, feature off) hold an `ExternalBinding`: our hash and
+  `tls-id` to send, the peer's to expect, and `require_peer_support`. The
+  values belong to one connection, so the application clones its base
+  configuration per connection. A server choosing its configuration finds
+  the client's values on the `ClientHello` view of `Acceptor`,
+  `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`.
+- No resumption and no 0-RTT: a connection with a binding neither offers
+  nor accepts a ticket or TLS 1.2 session ID, issues no NewSessionTicket,
+  ticket or cacheable session ID, and stores nothing it receives, so a
+  later connection, bound or not, cannot resume it either. RFC 8844 §5
+  forbids using security-sensitive information from one TLS connection in
+  another, even of the same signaling session, and a resumed handshake
+  would skip the verifier in which applications pin the signaled
+  certificate fingerprint (which §3.2 and §4.3 require in addition). A
+  bound client sends no early data even with `enable_early_data`: it
+  checks the server's answer only in EncryptedExtensions, after the server
+  has read the data. External PSKs, provisioned by the application rather
+  than left by a connection, keep working (without early data).
+- Wire rules: `external_id_hash` is 0 or 32 bytes, `external_session_id`
+  20 to 255 bytes; anything else is `decode_error`, for any server, since
+  the hello decoder parses both. With a binding configured, a client
+  always sends `external_id_hash`, empty without an assertion of its own
+  (RFC 8844 §3.2), and `external_session_id` when it has a `tls-id`. The
+  server answers only what the client sent, in the TLS 1.2 ServerHello or
+  the TLS 1.3 EncryptedExtensions, `external_id_hash` likewise always
+  (empty without an assertion); either extension in a TLS 1.3 ServerHello
+  is `illegal_parameter`, an unsolicited one in a TLS 1.2 ServerHello
+  `unsupported_extension`. After a stateful HelloRetryRequest the second
+  ClientHello must repeat the first's values
+  (`PeerMisbehaved::ExternalBindingChangedOnRetry`); after a stateless one
+  (cookies) the server starts afresh, checks the second ClientHello
+  against its expectations, and the first is bound by the transcript hash
+  the cookie carries.
+- Checks: a mismatch is `illegal_parameter`; an absent extension is
+  accepted unless `require_peer_support` is set (`missing_extension` in TLS
+  1.3, `handshake_failure` in TLS 1.2). Without an expectation nothing is
+  compared, and the application checks the values reported by
+  `peer_external_id_hash` and `peer_external_session_id` itself. A client
+  that expects the server's `tls-id` without sending its own fails
+  connection creation (`Error::InconsistentExternalBinding`).
+- ECH: both values go in the ClientHelloInner only. A client checks
+  nothing after a rejection; a server checks the ClientHello it answers
+  even when it rejects an offer (it cannot tell GREASE from a stale real
+  offer), so a server that requires support refuses a stale offer's outer
+  hello with `missing_extension` instead of sending retry configurations.
+- Security: the extensions bind the connection to the signaling session
+  but do not by themselves authenticate the signaling peer. Without
+  identity assertions, `external_session_id` prevents the session splicing
+  (unknown key-share) attack of RFC 8844 §4, if the signaling channel
+  delivers the `tls-id` values with integrity. Session concatenation (§5)
+  within one connection is prevented by identity systems (WebRTC or SIP
+  identity, that is `external_id_hash` with assertions the application
+  verifies), but two back-to-back connections through an attacker remain
+  possible; defending against concatenation also requires that peers
+  cannot claim other entities' certificate fingerprints (§6). With
+  identity assertions, TLS peer identities cannot be misrepresented even
+  by an attacker that modifies signaling (§6).
+
 ### Connection APIs
 
 Both APIs drive the same handshake state machines through

@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 
 use client_auth::{ExpectCertificate, ExpectCertificateVerify};
 
-use super::common::{ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled};
+use super::common::{
+    ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled, transparency_info_for,
+};
 use super::hs::{self, NextStateOrError, ServerContext};
 use super::server_conn::{ServerConfig, ServerConnectionData};
 use crate::cached_info::ServerHelloCachedInfo;
@@ -185,6 +187,14 @@ impl CompleteClientHelloHandling {
             .extensions
             .sct_request
             .and_then(|()| server_key.get_sct_list());
+        let evidence = (
+            sct_list,
+            transparency_info_for(
+                server_key.certified_key(),
+                client_hello,
+                self.cert_types.server,
+            ),
+        );
 
         // RFC 7924 §4.1, §4.2: the Certificate and CertificateRequest, each
         // in full or replaced by the fingerprint the client cached.
@@ -204,7 +214,7 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             ocsp.is_some(),
-            sct_list,
+            evidence,
             false,
             cached.extension(),
         );
@@ -285,7 +295,7 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             false,
-            None,
+            (None, None),
             true,
             None,
         );
@@ -332,7 +342,8 @@ impl CompleteClientHelloHandling {
         client_hello: &ClientHelloPayload,
         secure_renegotiation: bool,
         staple_ocsp: bool,
-        sct_list: Option<&[u8]>,
+        // The SCT list (RFC 6962) and `TransItemList` (RFC 9162) to send.
+        (sct_list, transparency_info): (Option<&[u8]>, Option<&[u8]>),
         resuming: bool,
         cached_info: Option<ServerHelloCachedInfo>,
     ) {
@@ -352,6 +363,7 @@ impl CompleteClientHelloHandling {
             session_ticket_ack: self.send_ticket.then_some(()),
             status_request_ack: staple_ocsp.then_some(()),
             sct_list: sct_list.map(|list| Payload::new(list.to_vec())),
+            transparency_info: transparency_info.map(|list| Payload::new(list.to_vec())),
             client_certificate_type: self.cert_types.client,
             server_certificate_type: self.cert_types.server,
             alpn: cx

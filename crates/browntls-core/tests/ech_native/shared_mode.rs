@@ -184,6 +184,48 @@ fn rejection_is_authenticated_with_the_public_name() {
     );
 }
 
+/// A Certificate Transparency 2.0 policy also covers the public name's
+/// certificate that authenticates a rejection: without CT evidence for it
+/// the client fails closed instead of returning the retry configurations,
+/// which that certificate would otherwise vouch for.
+#[test]
+fn rejection_under_a_transparency_policy_needs_the_evidence() {
+    use browntls_core::revocation::RevocationDigests;
+    use browntls_core::transparency::{CtV2LogConfig, CtV2Requirements};
+    use rcgen::PublicKeyData as _;
+
+    init_logging();
+    let certs = Certs::new();
+    let current = Arc::new(EchServerConfig::new(vec![server_key(2)]).unwrap());
+    let stale = EchServerConfig::new(vec![server_key(1)]).unwrap();
+    let log_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let log = CtV2LogConfig::new([0x2b, 0x65, 0x50, 1], log_key.subject_public_key_info());
+    let verifier = WebPkiServerVerifier::builder_with_provider(certs.roots(), provider())
+        .with_certificate_transparency(CtV2Requirements::new(
+            RevocationDigests::native(),
+            vec![log],
+        ))
+        .build()
+        .unwrap();
+    let mut client = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_webpki_verifier(verifier)
+        .with_no_client_auth();
+    client.ech_mode = enable(stale.ech_config_list());
+    let (mut client, mut server) = connect(client, server_config(&certs, Some(&current), None));
+    let (client_res, _) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        client_res,
+        Err(Error::InvalidCertificate(
+            browntls_core::CertificateError::InsufficientTransparency {
+                counted_scts: 0,
+                distinct_logs: 0,
+            }
+        ))
+    );
+}
+
 #[test]
 fn rejected_client_sends_no_certificate() {
     init_logging();

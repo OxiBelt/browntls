@@ -18,6 +18,7 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
 use crate::log::{debug, trace, warning};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
+use crate::msgs::enums::ExtensionType;
 use crate::msgs::handshake::{
     CertificateRequestPayloadTls13, HandshakeMessagePayload, HandshakePayload, PresharedKeyBinder,
     ServerExtensions, ServerHelloPayload,
@@ -550,6 +551,10 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 suite: self.suite,
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
+                offered_transparency_info: self
+                    .hello
+                    .sent_extensions
+                    .contains(&ExtensionType::TransparencyInfo),
                 offered_sigschemes: self.hello.offered_sigschemes,
             })),
         }

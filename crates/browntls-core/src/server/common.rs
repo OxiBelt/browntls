@@ -5,8 +5,9 @@ use browntls_pki::CertificateDer;
 use super::server_conn::ServerConfig;
 use crate::common_state::CommonState;
 use crate::delegated_credential::DelegatedCredentialKey;
+use crate::enums::CertificateType;
 use crate::error::Error;
-use crate::msgs::handshake::CertificateChain;
+use crate::msgs::handshake::{CertificateChain, ClientHelloPayload};
 use crate::revocation::{PeerEvidence, RevocationCheck};
 use crate::sign::{CertifiedKey, SigningKey};
 use crate::sync::Arc;
@@ -50,6 +51,23 @@ impl<'a> ActiveCertifiedKey<'a> {
     pub(super) fn get_delegated_credentials(&self) -> &'a [Arc<DelegatedCredentialKey>] {
         self.certified_key.delegated_credentials()
     }
+}
+
+/// The end entity's `TransItemList` to send in `transparency_info` (RFC
+/// 9162 §6.5): only to a client that offered the extension, only with an
+/// X.509 certificate, and only if one is configured. The callers send it
+/// on full handshakes only (§6.5: it is "omitted" when resuming).
+pub(super) fn transparency_info_for<'a>(
+    key: &'a CertifiedKey,
+    client_hello: &ClientHelloPayload,
+    server_cert_type: Option<CertificateType>,
+) -> Option<&'a [u8]> {
+    if client_hello.extensions.transparency_info.is_none()
+        || server_cert_type == Some(CertificateType::RawPublicKey)
+    {
+        return None;
+    }
+    key.transparency_info()
 }
 
 /// Whether the client certificate verifier evaluates revocation afresh for

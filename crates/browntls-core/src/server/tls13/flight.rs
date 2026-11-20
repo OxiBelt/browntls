@@ -19,7 +19,7 @@ use crate::msgs::handshake::{
     HelloRetryRequestExtensions, KeyShareEntry, ServerExtensions, ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
-use crate::server::common::ActiveCertifiedKey;
+use crate::server::common::{ActiveCertifiedKey, transparency_info_for};
 use crate::server::hs::{self, ServerContext};
 use crate::server::server_conn::ServerConfig;
 use crate::sign::CertifiedKey;
@@ -343,12 +343,17 @@ fn certificate_body<'a>(
     certified_key: &'a CertifiedKey,
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
+    server_cert_type: Option<CertificateType>,
 ) -> CertificatePayloadTls13<'a> {
     let mut cert_body = CertificatePayloadTls13::from_certified_key(
         certified_key,
         client_hello.extensions.certificate_status_request.is_some(),
         client_hello.extensions.sct_request.is_some(),
     );
+    // RFC 9162 §6.5: the TransItemList goes on the end entity's entry.
+    if let Some(list) = transparency_info_for(certified_key, client_hello, server_cert_type) {
+        cert_body.set_transparency_info(list);
+    }
     // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
     if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
         first.delegated_credential = Some(dc.credential().clone());
@@ -365,8 +370,9 @@ pub(super) fn emit_certificate_tls13(
     certified_key: &CertifiedKey,
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
+    server_cert_type: Option<CertificateType>,
 ) {
-    let cert_body = certificate_body(certified_key, client_hello, delegated);
+    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type);
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression

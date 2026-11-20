@@ -11,6 +11,7 @@ use crate::msgs::base::PayloadU16;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::handshake::DistinguishedName;
 use crate::revocation::{PeerEvidence, RevocationCheck, leaf_evidence};
+use crate::transparency::TransparencyStatus;
 
 /// A handshake signature was verified. Only verifiers can construct this.
 #[derive(Debug)]
@@ -88,6 +89,57 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
             now,
         )?;
         Ok(RevocationCheck::Complete(None))
+    }
+
+    /// [`Self::verify_server_cert_with_evidence`], also returning what the
+    /// verifier established about the certificate's Certificate
+    /// Transparency 2.0 evidence (RFC 9162), which the connection reports
+    /// ([`UnbufferedClientConnection::peer_transparency_status`]).
+    ///
+    /// A client calls this method for the server certificate of a full
+    /// TLS 1.2 or TLS 1.3 handshake, on buffered, unbuffered and QUIC
+    /// connections. A resumed handshake authenticates no certificate, and
+    /// an RFC 9261 exported authenticator is verified with
+    /// [`Self::verify_server_cert`] instead. The default calls
+    /// [`Self::verify_server_cert_with_evidence`] and reports nothing, so a
+    /// verifier that enforces Certificate Transparency there still does;
+    /// it overrides this method only to report a status.
+    ///
+    /// [`UnbufferedClientConnection::peer_transparency_status`]: crate::client::UnbufferedClientConnection::peer_transparency_status
+    fn verify_server_cert_with_transparency(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+    ) -> Result<(RevocationCheck, Option<TransparencyStatus>), Error> {
+        let check = self.verify_server_cert_with_evidence(
+            end_entity,
+            intermediates,
+            server_name,
+            evidence,
+            now,
+        )?;
+        Ok((check, None))
+    }
+
+    /// Whether the client should offer the `transparency_info` extension
+    /// (RFC 9162 §6.5), so that the server delivers Certificate
+    /// Transparency 2.0 items in the handshake, passed to this verifier as
+    /// [`CertificateEvidence::transparency_info`](crate::revocation::CertificateEvidence::transparency_info).
+    /// RFC 9162 §8.1.6 forbids evaluating compliance when the extension
+    /// was not offered. Ignored by a client whose verifier
+    /// [requires raw public keys](Self::requires_raw_public_keys).
+    ///
+    /// A verifier that wraps another must forward this method, and
+    /// [`Self::verify_server_cert_with_transparency`] to report a status.
+    /// Without it the extension is not offered while the wrapped verifier
+    /// still applies its policy, to the certificate and the stapled OCSP
+    /// response alone: contrary to §8.1.6, but failing closed rather than
+    /// open.
+    fn requests_transparency_info(&self) -> bool {
+        false
     }
 
     /// Whether certificate authentication requires fresh revocation evaluation.

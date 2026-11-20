@@ -41,6 +41,22 @@ impl ClientConnection {
         self.inner.core.data.tls13_tickets_received
     }
 
+    /// The `extension_data` of the server's `transparency_info` extension
+    /// (RFC 9162 §6.5) from a full handshake: a `TransItemList`, or empty
+    /// or an empty list, which §6.5 allows. It is well formed but **not
+    /// verified**; see [`Self::peer_transparency_status`].
+    pub fn peer_transparency_info(&self) -> Option<&[u8]> {
+        self.inner.core.data.transparency.info.as_deref()
+    }
+
+    /// What the certificate verifier established about the server
+    /// certificate's Certificate Transparency 2.0 evidence, once the
+    /// certificate is verified; `None` when the verifier reports nothing,
+    /// and after resumption. See [`crate::transparency`].
+    pub fn peer_transparency_status(&self) -> Option<crate::transparency::TransparencyStatus> {
+        self.inner.core.data.transparency.status
+    }
+
     /// The delegated credential (RFC 9345) the server authenticated with,
     /// once its CertificateVerify has been verified with the credential's
     /// key; `None` when the server signed with its certificate key.

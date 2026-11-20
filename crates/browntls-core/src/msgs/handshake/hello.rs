@@ -41,6 +41,8 @@ pub(crate) struct ClientExtensions {
     pub(crate) protocols: Option<Vec<ProtocolName>>,
     pub(crate) certificate_status_request: Option<CertificateStatusRequest>,
     pub(crate) sct_request: Option<()>,
+    /// RFC 9162 §6.5: an empty `transparency_info` extension.
+    pub(crate) transparency_info: Option<()>,
     pub(crate) extended_master_secret: Option<()>,
     /// RFC 7366: an empty `encrypt_then_mac` extension.
     pub(crate) encrypt_then_mac: Option<()>,
@@ -127,6 +129,10 @@ impl ClientExtensions {
             ExtensionType::StatusRequest,
         );
         add(self.sct_request.is_some(), ExtensionType::SCT);
+        add(
+            self.transparency_info.is_some(),
+            ExtensionType::TransparencyInfo,
+        );
         add(
             self.extended_master_secret.is_some(),
             ExtensionType::ExtendedMasterSecret,
@@ -250,6 +256,9 @@ impl Codec<'_> for ClientExtensions {
         }
         if self.sct_request.is_some() {
             encode_extension(ExtensionType::SCT, out, |_| {});
+        }
+        if self.transparency_info.is_some() {
+            encode_extension(ExtensionType::TransparencyInfo, out, |_| {});
         }
         if self.extended_master_secret.is_some() {
             encode_extension(ExtensionType::ExtendedMasterSecret, out, |_| {});
@@ -388,6 +397,9 @@ impl Codec<'_> for ClientExtensions {
                     out.certificate_status_request = Some(CertificateStatusRequest::read(body)?);
                 }
                 ExtensionType::SCT => out.sct_request = Some(()),
+                // RFC 9162 §6.5: the body must be empty, which
+                // `read_extensions` enforces (decode_error otherwise).
+                ExtensionType::TransparencyInfo => out.transparency_info = Some(()),
                 ExtensionType::ExtendedMasterSecret => out.extended_master_secret = Some(()),
                 ExtensionType::EncryptThenMac => out.encrypt_then_mac = Some(()),
                 ExtensionType::SessionTicket => {

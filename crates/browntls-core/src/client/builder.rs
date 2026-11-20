@@ -145,6 +145,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
             enable_delegated_credentials: false,
+            request_transparency_info: false,
             external_psks: Vec::new(),
             cert_with_extern_psk: false,
             require_cert_with_extern_psk: false,

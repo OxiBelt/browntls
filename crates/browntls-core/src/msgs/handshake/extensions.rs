@@ -333,6 +333,9 @@ pub(crate) struct ServerExtensions {
     pub(crate) session_ticket_ack: Option<()>,
     pub(crate) status_request_ack: Option<()>,
     pub(crate) sct_list: Option<Payload<'static>>,
+    /// RFC 9162 §6.5, TLS 1.2 ServerHello: a `TransItemList`, an empty
+    /// list or nothing, checked when parsed.
+    pub(crate) transparency_info: Option<Payload<'static>>,
     pub(crate) renegotiation_info: Option<PayloadU8>,
     pub(crate) key_share: Option<KeyShareEntry>,
     pub(crate) pre_shared_key: Option<u16>,
@@ -399,6 +402,10 @@ impl ServerExtensions {
             ExtensionType::StatusRequest,
         );
         add(self.sct_list.is_some(), ExtensionType::SCT);
+        add(
+            self.transparency_info.is_some(),
+            ExtensionType::TransparencyInfo,
+        );
         add(
             self.renegotiation_info.is_some(),
             ExtensionType::RenegotiationInfo,
@@ -485,6 +492,9 @@ impl Codec<'_> for ServerExtensions {
         if let Some(sct) = &self.sct_list {
             encode_extension(ExtensionType::SCT, out, |b| sct.encode(b));
         }
+        if let Some(list) = &self.transparency_info {
+            encode_extension(ExtensionType::TransparencyInfo, out, |b| list.encode(b));
+        }
         if let Some(ri) = &self.renegotiation_info {
             encode_extension(ExtensionType::RenegotiationInfo, out, |b| ri.encode(b));
         }
@@ -560,6 +570,11 @@ impl Codec<'_> for ServerExtensions {
                 ExtensionType::SessionTicket => out.session_ticket_ack = Some(()),
                 ExtensionType::StatusRequest => out.status_request_ack = Some(()),
                 ExtensionType::SCT => out.sct_list = Some(Payload::read(body).into_owned()),
+                ExtensionType::TransparencyInfo => {
+                    let list = body.rest();
+                    super::CertificatePayloadTls13::validate_transparency_info(list)?;
+                    out.transparency_info = Some(Payload::new(list.to_vec()));
+                }
                 ExtensionType::RenegotiationInfo => {
                     out.renegotiation_info = Some(PayloadU8::read(body)?);
                 }

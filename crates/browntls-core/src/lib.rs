@@ -109,6 +109,7 @@ pub mod ticketer;
 #[cfg(feature = "tls12")]
 mod tls12;
 mod tls13;
+pub mod transparency;
 pub mod unbuffered;
 mod vecbuf;
 mod verify;
@@ -156,6 +157,7 @@ pub mod client {
     #[cfg(feature = "tls12")]
     mod tls12;
     pub(crate) mod tls13;
+    mod transparency;
 
     pub use builder::WantsClientCert;
     pub use client_conn::{

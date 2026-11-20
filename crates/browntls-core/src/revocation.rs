@@ -85,6 +85,12 @@ pub struct CertificateEvidence<'a> {
     pub ocsp: Option<&'a [u8]>,
     /// TLS-encoded SCT list, if the peer supplied one.
     pub scts: Option<&'a [u8]>,
+    /// The `extension_data` of the `transparency_info` extension (RFC 9162
+    /// §6.5) that delivered this certificate's Certificate Transparency
+    /// 2.0 items, if the peer sent one: a `TransItemList`, or empty or an
+    /// empty list (`00 00`), which §6.5 allows. Only a server's end-entity
+    /// entry carries it. The list is well formed but not verified.
+    pub transparency_info: Option<&'a [u8]>,
 }
 
 /// Stapled evidence in Certificate message order, starting with the leaf.

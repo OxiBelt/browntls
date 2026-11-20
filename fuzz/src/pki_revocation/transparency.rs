@@ -25,14 +25,14 @@ use rcgen::{
 
 use super::fixtures::{NOW, time};
 
-const LOG_ID: &[u8] = &[0x2b, 0x65, 0x50, 0x01];
+pub(super) const LOG_ID: &[u8] = &[0x2b, 0x65, 0x50, 0x01];
 const ED_LOG_ID: &[u8] = &[0x2b, 0x65, 0x50, 0x02];
-const SCT_TIME: u64 = (NOW - 7200) * 1000;
+pub(super) const SCT_TIME: u64 = (NOW - 7200) * 1000;
 const TREE_SIZE: usize = 5;
 const OLD_SIZE: usize = 2;
 const LEAF_INDEX: usize = 3;
 
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub(super) fn sha256(data: &[u8]) -> [u8; 32] {
     (RevocationDigests::native().sha256)(data)
 }
 
@@ -156,7 +156,7 @@ impl Fixture {
     }
 }
 
-fn tbs(cert: &[u8]) -> Vec<u8> {
+pub(super) fn tbs(cert: &[u8]) -> Vec<u8> {
     let der = browntls_pki::CertificateDer::from(cert);
     Cert::try_from(&der)
         .unwrap()
@@ -174,7 +174,7 @@ fn der_octet_string(value: &[u8]) -> Vec<u8> {
     [&[0x04][..], &len, value].concat()
 }
 
-fn entry_item(precert: bool, issuer_key_hash: &[u8; 32], tbs: &[u8]) -> Vec<u8> {
+pub(super) fn entry_item(precert: bool, issuer_key_hash: &[u8; 32], tbs: &[u8]) -> Vec<u8> {
     let entry = TimestampedCertificateEntryDataV2 {
         timestamp_ms: SCT_TIME,
         issuer_key_hash,
@@ -189,7 +189,7 @@ fn entry_item(precert: bool, issuer_key_hash: &[u8; 32], tbs: &[u8]) -> Vec<u8> 
     item.encode().unwrap()
 }
 
-fn sct_item(precert: bool, log_id: &[u8], signature: &[u8]) -> Vec<u8> {
+pub(super) fn sct_item(precert: bool, log_id: &[u8], signature: &[u8]) -> Vec<u8> {
     let sct = SignedCertificateTimestampDataV2 {
         log_id: LogId::new(log_id).unwrap(),
         timestamp_ms: SCT_TIME,

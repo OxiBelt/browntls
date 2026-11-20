@@ -281,7 +281,7 @@ pub(crate) fn read_ack(body: &[u8]) -> Option<impl Iterator<Item = RecordNumber>
     {
         return None;
     }
-    Some(list.chunks_exact(RECORD_NUMBER_LEN).map(|chunk| {
+    Some(list.as_chunks::<RECORD_NUMBER_LEN>().0.iter().map(|chunk| {
         let (epoch, seq) = chunk.split_at(8);
         let word = |bytes: &[u8]| {
             let mut out = [0u8; 8];

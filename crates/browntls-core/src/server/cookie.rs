@@ -14,18 +14,27 @@
 //! version, was issued no more than [`COOKIE_LIFETIME_SECS`] ago, and parses
 //! exactly. Anything else is `illegal_parameter`.
 //!
+//! A DTLS 1.3 cookie has a label of its own, so that it never opens on a
+//! TLS connection nor a TLS cookie on a DTLS one, and also holds the
+//! client's transport address, which it must come back from (RFC 9147
+//! §5.1).
+//!
 //! [`ServerConfig::hello_retry_cookies`]: super::ServerConfig::hello_retry_cookies
 
 use alloc::vec::Vec;
 
 use super::server_conn::ProducesTickets;
 use crate::enums::CipherSuite;
+use crate::msgs::base::PayloadU16;
 use crate::msgs::codec::{Codec, Reader};
 use crate::msgs::enums::NamedGroup;
 use crate::msgs::handshake::SessionId;
 
 /// Separates cookie plaintexts from those of any other sealed token.
 const COOKIE_LABEL: &[u8; 16] = b"browntls hrr ck1";
+
+/// The label of a DTLS 1.3 cookie.
+const DTLS_COOKIE_LABEL: &[u8; 16] = b"browntls dtls ck";
 
 /// How long a cookie is accepted after it was issued, in seconds.
 pub(super) const COOKIE_LIFETIME_SECS: u64 = 60;
@@ -44,12 +53,28 @@ pub(super) struct RetryCookie {
     pub(super) session_id: SessionId,
     /// The first ClientHello's server name, empty when it sent none.
     pub(super) server_name: Vec<u8>,
+    /// DTLS 1.3 only: what else the cookie is bound to.
+    pub(super) dtls: Option<DtlsRetry>,
+}
+
+/// What a DTLS 1.3 cookie also carries.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct DtlsRetry {
+    /// The client's transport address (RFC 9147 §5.1), opaque.
+    pub(super) peer_address: Vec<u8>,
+    /// Whether the HelloRetryRequest named `group` in its key_share
+    /// extension. It does not when it only asked for the cookie, the first
+    /// ClientHello's key share being acceptable.
+    pub(super) group_named: bool,
 }
 
 impl RetryCookie {
     fn encode(&self) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(128);
-        out.extend_from_slice(COOKIE_LABEL);
+        out.extend_from_slice(match self.dtls {
+            Some(_) => DTLS_COOKIE_LABEL,
+            None => COOKIE_LABEL,
+        });
         self.issued_at.encode(&mut out);
         self.suite.encode(&mut out);
         self.group.encode(&mut out);
@@ -58,12 +83,22 @@ impl RetryCookie {
         self.session_id.encode(&mut out);
         out.push(u8::try_from(self.server_name.len()).ok()?);
         out.extend_from_slice(&self.server_name);
+        if let Some(dtls) = &self.dtls {
+            u16::try_from(dtls.peer_address.len()).ok()?;
+            PayloadU16::encode_slice(&dtls.peer_address, &mut out);
+            out.push(u8::from(dtls.group_named));
+        }
         Some(out)
     }
 
-    fn decode(plain: &[u8]) -> Option<Self> {
+    /// Decodes a TLS cookie, or a DTLS one when `dtls`.
+    fn decode(plain: &[u8], dtls: bool) -> Option<Self> {
         let mut r = Reader::init(plain);
-        if r.take(COOKIE_LABEL.len())? != COOKIE_LABEL {
+        let label = match dtls {
+            true => DTLS_COOKIE_LABEL,
+            false => COOKIE_LABEL,
+        };
+        if r.take(label.len())? != label {
             return None;
         }
         let issued_at = u64::read(&mut r).ok()?;
@@ -74,6 +109,17 @@ impl RetryCookie {
         let session_id = SessionId::read(&mut r).ok()?;
         let name_len = usize::from(u8::read(&mut r).ok()?);
         let server_name = r.take(name_len)?.to_vec();
+        let dtls = match dtls {
+            true => Some(DtlsRetry {
+                peer_address: PayloadU16::read(&mut r).ok()?.0,
+                group_named: match u8::read(&mut r).ok()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                },
+            }),
+            false => None,
+        };
         if r.any_left() {
             return None;
         }
@@ -84,6 +130,7 @@ impl RetryCookie {
             client_hello_hash,
             session_id,
             server_name,
+            dtls,
         })
     }
 
@@ -94,10 +141,22 @@ impl RetryCookie {
         (!sealed.is_empty() && sealed.len() <= usize::from(u16::MAX)).then_some(sealed)
     }
 
-    /// Opens a cookie received at `now` (seconds since the Unix epoch);
-    /// `None` unless it is authentic, well formed and fresh.
-    pub(super) fn open(sealer: &dyn ProducesTickets, cookie: &[u8], now: u64) -> Option<Self> {
-        let cookie = Self::decode(&sealer.decrypt(cookie)?)?;
+    /// Opens a cookie received at `now` (seconds since the Unix epoch) on
+    /// a TLS connection, or on a DTLS one from `dtls_peer_address`; `None`
+    /// unless it is authentic, well formed, fresh, of that protocol and,
+    /// for DTLS, issued to that address.
+    pub(super) fn open(
+        sealer: &dyn ProducesTickets,
+        cookie: &[u8],
+        now: u64,
+        dtls_peer_address: Option<&[u8]>,
+    ) -> Option<Self> {
+        let cookie = Self::decode(&sealer.decrypt(cookie)?, dtls_peer_address.is_some())?;
+        if let (Some(dtls), Some(address)) = (&cookie.dtls, dtls_peer_address)
+            && dtls.peer_address != address
+        {
+            return None;
+        }
         // Accept small clock differences between servers sharing a key in
         // either direction, never more than the lifetime.
         (now.abs_diff(cookie.issued_at) <= COOKIE_LIFETIME_SECS).then_some(cookie)
@@ -147,6 +206,18 @@ mod tests {
             client_hello_hash: alloc::vec![7; 32],
             session_id: SessionId::read_bytes(&[3, 1, 2, 3]).unwrap(),
             server_name: b"example.com".to_vec(),
+            dtls: None,
+        }
+    }
+
+    fn dtls_sample(group_named: bool) -> RetryCookie {
+        RetryCookie {
+            session_id: SessionId::empty(),
+            dtls: Some(DtlsRetry {
+                peer_address: b"192.0.2.1:4433".to_vec(),
+                group_named,
+            }),
+            ..sample()
         }
     }
 
@@ -154,30 +225,76 @@ mod tests {
     fn round_trip_and_freshness() {
         let sealer: Box<dyn ProducesTickets> = Box::new(Toy(0x5a));
         let sealed = sample().seal(&*sealer).unwrap();
-        assert_eq!(RetryCookie::open(&*sealer, &sealed, 1_000), Some(sample()));
-        assert_eq!(RetryCookie::open(&*sealer, &sealed, 1_060), Some(sample()));
-        assert_eq!(RetryCookie::open(&*sealer, &sealed, 1_061), None);
-        assert_eq!(RetryCookie::open(&*sealer, &sealed, 939), None);
+        let open = |now| RetryCookie::open(&*sealer, &sealed, now, None);
+        assert_eq!(open(1_000), Some(sample()));
+        assert_eq!(open(1_060), Some(sample()));
+        assert_eq!(open(1_061), None);
+        assert_eq!(open(939), None);
         // Another key does not open it.
-        assert_eq!(RetryCookie::open(&Toy(0x33), &sealed, 1_000), None);
+        assert_eq!(RetryCookie::open(&Toy(0x33), &sealed, 1_000, None), None);
     }
 
     #[test]
     fn malformed_plaintexts_are_refused() {
         let sealer = Toy(1);
-        let plain = sample().encode().unwrap();
-        for cut in 0..plain.len() {
-            let sealed = sealer.encrypt(&plain[..cut]).unwrap();
-            assert_eq!(RetryCookie::open(&sealer, &sealed, 1_000), None, "{cut}");
+        for (cookie, address) in [
+            (sample(), None),
+            (dtls_sample(true), Some(&b"192.0.2.1:4433"[..])),
+        ] {
+            let plain = cookie.encode().unwrap();
+            let open = |plain: &[u8]| {
+                let sealed = sealer.encrypt(plain).unwrap();
+                RetryCookie::open(&sealer, &sealed, 1_000, address)
+            };
+            assert_eq!(open(&plain), Some(cookie));
+            for cut in 0..plain.len() {
+                assert_eq!(open(&plain[..cut]), None, "{cut}");
+            }
+            let mut longer = plain.clone();
+            longer.push(0);
+            assert_eq!(open(&longer), None);
+            let mut relabelled = plain.clone();
+            relabelled[0] ^= 1;
+            assert_eq!(open(&relabelled), None);
+            if address.is_some() {
+                // `group_named` is 0 or 1.
+                let mut flag = plain;
+                if let Some(last) = flag.last_mut() {
+                    *last = 2;
+                }
+                assert_eq!(open(&flag), None);
+            }
         }
-        let mut longer = plain.clone();
-        longer.push(0);
-        let sealed = sealer.encrypt(&longer).unwrap();
-        assert_eq!(RetryCookie::open(&sealer, &sealed, 1_000), None);
-        let mut relabelled = plain;
-        relabelled[0] ^= 1;
-        let sealed = sealer.encrypt(&relabelled).unwrap();
-        assert_eq!(RetryCookie::open(&sealer, &sealed, 1_000), None);
+    }
+
+    /// RFC 9147 §5.1: a DTLS cookie verifies only from the address it was
+    /// issued to, and never as a TLS cookie; a TLS cookie never verifies on
+    /// DTLS.
+    #[test]
+    fn dtls_cookie_is_bound_to_address_and_protocol() {
+        let sealer = Toy(0x42);
+        let address = &b"192.0.2.1:4433"[..];
+        for group_named in [false, true] {
+            let sealed = dtls_sample(group_named).seal(&sealer).unwrap();
+            assert_eq!(
+                RetryCookie::open(&sealer, &sealed, 1_000, Some(address)),
+                Some(dtls_sample(group_named))
+            );
+            for other in [&b"192.0.2.1:4434"[..], b"192.0.2.2:4433", b""] {
+                assert_eq!(
+                    RetryCookie::open(&sealer, &sealed, 1_000, Some(other)),
+                    None
+                );
+            }
+            assert_eq!(RetryCookie::open(&sealer, &sealed, 1_000, None), None);
+            assert_eq!(
+                RetryCookie::open(&sealer, &sealed, 1_061, Some(address)),
+                None
+            );
+        }
+        let tls = sample().seal(&sealer).unwrap();
+        assert_eq!(RetryCookie::open(&sealer, &tls, 1_000, Some(address)), None);
+        assert_eq!(RetryCookie::open(&sealer, &tls, 1_000, Some(b"")), None);
     }
 
     /// Cookie and ticket plaintexts cannot be mistaken for each other, even
@@ -191,8 +308,11 @@ mod tests {
         use crate::msgs::persist::ServerSessionValue;
 
         assert!(COOKIE_LABEL[0] > 1);
-        let cookie = sample().encode().unwrap();
-        assert!(ServerSessionValue::read_bytes(&cookie).is_err());
+        assert!(DTLS_COOKIE_LABEL[0] > 1);
+        for cookie in [sample(), dtls_sample(true)] {
+            let cookie = cookie.encode().unwrap();
+            assert!(ServerSessionValue::read_bytes(&cookie).is_err());
+        }
 
         let name = DnsName::try_from("example.com").unwrap();
         for sni in [None, Some(&name)] {
@@ -209,7 +329,8 @@ mod tests {
             )
             .get_encoding();
             assert!(ticket[0] <= 1);
-            assert_eq!(RetryCookie::decode(&ticket), None);
+            assert_eq!(RetryCookie::decode(&ticket, false), None);
+            assert_eq!(RetryCookie::decode(&ticket, true), None);
         }
     }
 }

@@ -85,6 +85,13 @@ impl SupportedCipherSuite {
         self.tls13().is_some_and(|suite| suite.quic.is_some())
     }
 
+    /// Whether this suite can be used with DTLS 1.3: a TLS 1.3 suite whose
+    /// QUIC algorithm also encrypts DTLS record numbers (RFC 9147 §4.2.3).
+    /// That leaves out CCM_8, which DTLS 1.3 must not use (§4.5.3).
+    pub(crate) fn usable_for_dtls(&self) -> bool {
+        self.usable_for_quic()
+    }
+
     /// The protocol version this suite belongs to.
     pub fn version(&self) -> &'static SupportedProtocolVersion {
         match self {

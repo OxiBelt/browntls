@@ -350,6 +350,7 @@ impl CompleteClientHelloHandling {
                     cipher_suite: self.suite.common.suite,
                     compression_method: Compression::Null,
                     extensions,
+                    dtls: false,
                 }),
             )),
         };

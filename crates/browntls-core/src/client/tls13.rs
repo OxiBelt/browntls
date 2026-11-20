@@ -100,9 +100,10 @@ pub(super) fn derive_early_traffic_secret(
 /// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446
 /// appendix D.4).
 ///
-/// Never on QUIC, which has no such record (RFC 9001 §8.4).
+/// Never on QUIC, which has no such record (RFC 9001 §8.4), nor on DTLS
+/// (RFC 9147 §5).
 pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {
-    if *sent || common.is_quic() {
+    if *sent || common.is_quic() || common.is_dtls() {
         return;
     }
     let m = Message {

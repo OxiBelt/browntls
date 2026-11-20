@@ -1,5 +1,7 @@
 //! Tests of DTLS 1.3 record protection.
 
+#![cfg(any(feature = "native", feature = "rustcrypto"))]
+
 use alloc::vec;
 use alloc::vec::Vec;
 

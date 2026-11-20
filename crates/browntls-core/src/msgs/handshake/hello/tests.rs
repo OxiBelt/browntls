@@ -7,6 +7,7 @@ fn sample_client_hello() -> ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random::from([1u8; 32]),
         session_id: SessionId::from_slice(&[2u8; 32]).unwrap(),
+        legacy_cookie: None,
         cipher_suites: alloc::vec![
             CipherSuite::TLS13_AES_128_GCM_SHA256,
             CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV
@@ -164,6 +165,7 @@ fn client_hello_without_extensions_block() {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random::from([0u8; 32]),
         session_id: SessionId::empty(),
+        legacy_cookie: None,
         cipher_suites: alloc::vec![CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256],
         compression_methods: alloc::vec![Compression::Null],
         extensions: ClientExtensions::default(),
@@ -190,6 +192,7 @@ fn server_hello_and_hrr() {
             key_share: Some(KeyShareEntry::new(NamedGroup::X25519, &[1; 32])),
             ..Default::default()
         },
+        dtls: false,
     };
     let msg = HandshakeMessagePayload(HandshakePayload::ServerHello(sh.clone()));
     let enc = msg.get_encoding();
@@ -211,6 +214,7 @@ fn server_hello_and_hrr() {
             encrypted_client_hello: Some([7; 8]),
             unknown: Vec::new(),
         },
+        dtls: false,
     };
     let msg = HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(hrr.clone()));
     let enc = msg.get_encoding();

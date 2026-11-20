@@ -49,6 +49,16 @@ fn bound_ticket_lifetime_by_delegated_credential(
     configured_lifetime.min(u32::try_from(remaining).unwrap_or(u32::MAX))
 }
 
+/// The version a ticket issued on this connection records: TLS 1.3, or
+/// DTLS 1.3 so that the ticket only resumes over DTLS (the binder and the
+/// key schedule take another label prefix there, RFC 9147 §5.9).
+pub(super) fn ticket_version(common: &crate::common_state::CommonState) -> ProtocolVersion {
+    match common.is_dtls() {
+        true => ProtocolVersion::DTLSv1_3,
+        false => ProtocolVersion::TLSv1_3,
+    }
+}
+
 /// Issues one NewSessionTicket.
 pub(super) fn emit_ticket(
     transcript: &HandshakeHash,
@@ -81,7 +91,7 @@ pub(super) fn emit_ticket(
     }
     let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
-        ProtocolVersion::TLSv1_3,
+        ticket_version(cx.common),
         suite.common.suite,
         &secret,
         cx.common.peer_certificates.clone(),

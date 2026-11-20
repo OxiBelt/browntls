@@ -324,7 +324,11 @@ impl CommonState {
 
     /// The negotiated protocol version, once agreed.
     pub fn protocol_version(&self) -> Option<ProtocolVersion> {
-        self.negotiated_version
+        match self.negotiated_version {
+            // The state machines run DTLS 1.3 as TLS 1.3.
+            Some(ProtocolVersion::TLSv1_3) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_3),
+            version => version,
+        }
     }
 
     /// How the handshake completed, once it has.

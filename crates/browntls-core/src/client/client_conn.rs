@@ -675,7 +675,7 @@ impl ConnectionCore<ClientConnectionData> {
         name: ServerName<'static>,
         alpn_protocols: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
-        Self::for_client_with(config, name, alpn_protocols, None)
+        Self::for_client_with(config, name, alpn_protocols, None, None)
     }
 
     /// A QUIC client (RFC 9001): TLS 1.3 only, with a QUIC-capable suite.
@@ -708,7 +708,39 @@ impl ConnectionCore<ClientConnectionData> {
                 "Encrypted Client Hello is not supported over QUIC".into(),
             ));
         }
-        Self::for_client_with(config, name, alpn_protocols, Some(quic))
+        Self::for_client_with(config, name, alpn_protocols, Some(quic), None)
+    }
+
+    /// A DTLS 1.3 client (RFC 9147): TLS 1.3 only, with a DTLS-capable
+    /// suite, and without Encrypted Client Hello. The first ClientHello is
+    /// queued with `dtls` here.
+    pub(crate) fn for_dtls_client(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        dtls: crate::dtls::Dtls,
+    ) -> Result<Self, Error> {
+        if !config.supports_version(ProtocolVersion::TLSv1_3) {
+            return Err(Error::General(
+                "TLS 1.3 support is required for DTLS 1.3".into(),
+            ));
+        }
+        if !config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.usable_for_dtls())
+        {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with DTLS 1.3".into(),
+            ));
+        }
+        if config.ech_mode.is_some() {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over DTLS".into(),
+            ));
+        }
+        let alpn_protocols = config.alpn_protocols.clone();
+        Self::for_client_with(config, name, alpn_protocols, None, Some(dtls))
     }
 
     fn for_client_with(
@@ -716,12 +748,14 @@ impl ConnectionCore<ClientConnectionData> {
         name: ServerName<'static>,
         alpn_protocols: Vec<Vec<u8>>,
         quic: Option<crate::quic::Quic>,
+        dtls: Option<crate::dtls::Dtls>,
     ) -> Result<Self, Error> {
         if config.max_tls13_tickets_per_connection > 255 {
             return Err(Error::BadTls13TicketLimit);
         }
         let mut common_state = CommonState::new(Side::Client);
         common_state.quic = quic.map(alloc::boxed::Box::new);
+        common_state.dtls = dtls.map(alloc::boxed::Box::new);
         common_state.set_max_fragment_size(config.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
         common_state.enable_secret_extraction = config.enable_secret_extraction;

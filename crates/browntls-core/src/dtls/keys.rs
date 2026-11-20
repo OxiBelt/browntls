@@ -232,5 +232,5 @@ pub(crate) fn reconstruct_seq(expected: u64, low: u64, bits: u32) -> u64 {
     }
 }
 
-#[cfg(all(test, any(feature = "native", feature = "rustcrypto")))]
+#[cfg(test)]
 mod tests;

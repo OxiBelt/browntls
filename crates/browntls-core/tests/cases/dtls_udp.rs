@@ -302,3 +302,29 @@ fn a_forged_close_notify_reports_nothing() {
     }
     assert_eq!(server.handshakes(), 1, "the handshake goes on");
 }
+
+#[test]
+fn a_stream_of_junk_does_not_hold_off_the_read_timeout() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut server = server(&chain);
+    server.set_read_timeout(Some(Duration::from_millis(200)));
+    let addr = server.socket().local_addr().unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let junk = {
+        let stop = stop.clone();
+        thread::spawn(move || {
+            let socket = client_socket(addr);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = socket.send(&[0x16; 40]);
+                thread::sleep(Duration::from_micros(200));
+            }
+        })
+    };
+    let start = std::time::Instant::now();
+    let err = server.next_event().unwrap_err();
+    let waited = start.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    junk.join().unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
+}

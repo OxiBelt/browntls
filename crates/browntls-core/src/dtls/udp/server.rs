@@ -10,7 +10,9 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
-use super::{MAX_DATAGRAM, address_bytes, flush, io_error, is_transient, wait_until};
+use super::{
+    LAST_LOOKS, MAX_DATAGRAM, address_bytes, flush, io_error, is_transient, timed_out, wait_until,
+};
 use crate::dtls::{Accepted, Acceptor, ServerConnection};
 use crate::error::Error;
 use crate::log::debug;
@@ -142,8 +144,8 @@ impl UdpServer {
     }
 
     /// Sets how long [`Self::next_event`] waits for an event; `None` (the
-    /// default) waits forever. Even a zero timeout takes a datagram that
-    /// has already arrived.
+    /// default) waits forever. Even a zero timeout reads the datagrams that
+    /// have already arrived.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }
@@ -154,6 +156,7 @@ impl UdpServer {
         let deadline = self
             .read_timeout
             .map(|timeout| self.now().saturating_add(timeout));
+        let mut late = 0;
         loop {
             for peer in core::mem::take(&mut self.touched) {
                 self.flush_peer(peer);
@@ -169,12 +172,20 @@ impl UdpServer {
             self.socket
                 .set_read_timeout(wait_until(now, [timer, deadline]))?;
             match self.socket.recv_from(&mut self.buf) {
-                Ok((len, peer)) => self.handle_datagram(peer, len),
-                Err(err) if is_transient(&err) => {
+                Ok((len, peer)) => {
+                    self.handle_datagram(peer, len);
                     if expired {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
+                        // A stream of datagrams must not keep the read
+                        // timeout from passing.
+                        late += 1;
+                        if late >= LAST_LOOKS {
+                            self.run_timers();
+                            return self.events.pop_front().ok_or_else(timed_out);
+                        }
                     }
                 }
+                Err(err) if is_transient(&err) && expired => return Err(timed_out()),
+                Err(err) if is_transient(&err) => {}
                 Err(err) => return Err(err),
             }
         }

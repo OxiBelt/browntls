@@ -27,6 +27,10 @@ const MAX_DATAGRAM: usize = 65535;
 /// The shortest wait on a socket: a read timeout of zero means "forever".
 const MIN_WAIT: Duration = Duration::from_millis(1);
 
+/// How many datagrams that have already arrived are still read once the
+/// read timeout has passed.
+const LAST_LOOKS: usize = 64;
+
 /// A DTLS 1.3 client over a UDP socket connected to its server.
 ///
 /// Its calls block: [`Self::connect`] until the handshake completes,
@@ -92,6 +96,7 @@ impl UdpClient {
     }
 
     fn handshake_until(&mut self, deadline: Option<Duration>) -> io::Result<()> {
+        let mut late = 0;
         while self.conn.is_handshaking() {
             if self.conn.peer_has_closed() {
                 return Err(io::Error::new(
@@ -105,7 +110,14 @@ impl UdpClient {
                     "live OCSP checks are not supported by UdpClient",
                 ));
             }
-            self.wait(deadline)?;
+            let expired = self.expired(deadline);
+            let read = self.wait(deadline)?;
+            if expired {
+                late += 1;
+                if (!read || late >= LAST_LOOKS) && self.conn.is_handshaking() {
+                    return Err(timed_out());
+                }
+            }
         }
         self.flush()
     }
@@ -137,6 +149,7 @@ impl UdpClient {
     pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let deadline = self.deadline();
         self.handshake_until(deadline)?;
+        let mut late = 0;
         loop {
             if let Some(data) = self.received.front() {
                 let Some(dest) = buf.get_mut(..data.len()) else {
@@ -153,7 +166,17 @@ impl UdpClient {
             if self.conn.peer_has_closed() {
                 return Ok(0);
             }
-            self.wait(deadline)?;
+            let expired = self.expired(deadline);
+            let read = self.wait(deadline)?;
+            if expired {
+                late += 1;
+                if (!read || late >= LAST_LOOKS)
+                    && self.received.is_empty()
+                    && !self.conn.peer_has_closed()
+                {
+                    return Err(timed_out());
+                }
+            }
         }
     }
 
@@ -166,7 +189,7 @@ impl UdpClient {
 
     /// Sets how long [`Self::recv`] and the handshake wait for the server;
     /// `None` (the default) waits as long as the connection does. Even a
-    /// zero timeout takes a datagram that has already arrived.
+    /// zero timeout reads the datagrams that have already arrived.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         self.read_timeout = timeout;
     }
@@ -202,6 +225,11 @@ impl UdpClient {
         self.start.elapsed()
     }
 
+    /// Whether `deadline` has passed: the next wait is the last look.
+    fn expired(&self, deadline: Option<Duration>) -> bool {
+        deadline.is_some_and(|deadline| deadline <= self.now())
+    }
+
     fn deadline(&self) -> Option<Duration> {
         self.read_timeout
             .map(|timeout| self.now().saturating_add(timeout))
@@ -218,28 +246,26 @@ impl UdpClient {
         })
     }
 
-    /// Sends what is queued, then waits for one datagram, or for the next
-    /// timer, and processes it.
-    fn wait(&mut self, deadline: Option<Duration>) -> io::Result<()> {
+    /// Sends what is queued, acts on a timer that is due, then waits for
+    /// one datagram, or for the next timer or `deadline`, and processes it.
+    /// Returns whether a datagram was read.
+    fn wait(&mut self, deadline: Option<Duration>) -> io::Result<bool> {
         self.flush()?;
         let now = self.now();
         if let Some(timer) = self.conn.next_timeout()
             && timer <= now
         {
-            return self.conn.handle_timeout(now).map_err(io_error);
+            self.conn.handle_timeout(now).map_err(io_error)?;
+            self.flush()?;
         }
-        // Once the deadline passed, one last look at the socket.
-        let expired = deadline.is_some_and(|deadline| deadline <= now);
+        // Past the deadline this waits briefly: the caller's last look.
         let wait = wait_until(now, [self.conn.next_timeout(), deadline]);
         self.socket.set_read_timeout(wait)?;
         let len = match self.socket.recv(&mut self.buf) {
             Ok(len) => len,
-            Err(err) if is_transient(&err) && expired => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout"));
-            }
             // ICMP errors are not authenticated: an unreachable port
             // during the handshake is worth another retransmission.
-            Err(err) if is_transient(&err) => return Ok(()),
+            Err(err) if is_transient(&err) => return Ok(false),
             Err(err) => return Err(err),
         };
         let now = self.now();
@@ -255,7 +281,7 @@ impl UdpClient {
         for range in received.app_data() {
             self.received.push_back(datagram[range.clone()].to_vec());
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -308,6 +334,10 @@ fn is_transient(err: &io::Error) -> bool {
             | io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionReset
     )
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "DTLS read timeout")
 }
 
 fn io_error(err: Error) -> io::Error {

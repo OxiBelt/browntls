@@ -45,7 +45,9 @@ use crate::msgs::persist::ServerSessionValue;
 use crate::psk::{ExternalPskCandidate, MAX_PSK_IDENTITIES_CONSIDERED, PskSecret};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake};
+use crate::tls13::key_schedule::{
+    BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake, Protocol,
+};
 
 pub(super) struct CompleteClientHelloHandling {
     pub(super) config: Arc<ServerConfig>,
@@ -64,6 +66,7 @@ impl CompleteClientHelloHandling {
     /// plus the ClientHello without its binders, in constant time.
     fn check_binder(
         &self,
+        protocol: Protocol,
         suite: &'static Tls13CipherSuite,
         client_hello: &Message<'_>,
         psk: &[u8],
@@ -80,7 +83,7 @@ impl CompleteClientHelloHandling {
             _ => return false,
         };
         let handshake_hash = self.transcript.hash_with(binder_plaintext);
-        let key_schedule = KeyScheduleEarly::new(suite, psk);
+        let key_schedule = KeyScheduleEarly::new(suite, psk, protocol);
         let real_binder = key_schedule.psk_binder(label, handshake_hash.as_ref());
         constant_time_eq(real_binder.as_ref(), binder)
     }
@@ -270,6 +273,7 @@ impl CompleteClientHelloHandling {
                             continue;
                         };
                         if !self.check_binder(
+                            Protocol::of(cx.common),
                             self.suite,
                             chm,
                             secret.as_ref(),
@@ -351,6 +355,7 @@ impl CompleteClientHelloHandling {
                         continue;
                     }
                     if !self.check_binder(
+                        Protocol::of(cx.common),
                         self.suite,
                         chm,
                         &resume.master_secret.0,
@@ -476,7 +481,7 @@ impl CompleteClientHelloHandling {
         };
         let key_schedule_pre = match psk_secret {
             Some(psk) => {
-                let early = KeyScheduleEarly::new(self.suite, psk);
+                let early = KeyScheduleEarly::new(self.suite, psk, Protocol::of(cx.common));
                 // Start reading under the early traffic key: it carries any
                 // 0-RTT data, and is replaced below when we do not accept it.
                 early.client_early_traffic_secret(
@@ -496,7 +501,7 @@ impl CompleteClientHelloHandling {
                 }
                 early.into_pre_handshake()
             }
-            None => KeySchedulePreHandshake::new(self.suite),
+            None => KeySchedulePreHandshake::new(self.suite, Protocol::of(cx.common)),
         };
         let key_schedule = key_schedule_pre.into_handshake_with_shared_secret(&kx.secret);
 

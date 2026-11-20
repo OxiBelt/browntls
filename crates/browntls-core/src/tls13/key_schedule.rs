@@ -110,24 +110,55 @@ pub(crate) fn derive_imported_psk(
     out
 }
 
+/// The protocol a key schedule serves. It decides the label prefix of
+/// every `HKDF-Expand-Label` (RFC 9846 §7.1, RFC 9147 §5.9), which keeps
+/// the keys of TLS 1.3 and DTLS 1.3 apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Protocol {
+    /// TLS 1.3, and QUIC (RFC 9001 §5).
+    Tls13,
+    /// DTLS 1.3.
+    Dtls13,
+}
+
+impl Protocol {
+    /// The protocol of the connection `common` belongs to.
+    pub(crate) fn of(common: &CommonState) -> Self {
+        match common.is_dtls() {
+            true => Self::Dtls13,
+            false => Self::Tls13,
+        }
+    }
+
+    fn label_prefix(self) -> &'static [u8] {
+        match self {
+            Self::Tls13 => TLS13_LABEL_PREFIX,
+            Self::Dtls13 => crate::dtls::LABEL_PREFIX,
+        }
+    }
+}
+
 /// The running `HKDF-Extract` chain plus the suite it belongs to.
 struct KeySchedule {
     current: Box<dyn HkdfExpander>,
     suite: &'static Tls13CipherSuite,
+    prefix: &'static [u8],
 }
 
 impl KeySchedule {
-    fn new(suite: &'static Tls13CipherSuite, secret: &[u8]) -> Self {
+    fn new(suite: &'static Tls13CipherSuite, secret: &[u8], protocol: Protocol) -> Self {
         Self {
             current: suite.hkdf_provider.extract_from_secret(None, secret),
             suite,
+            prefix: protocol.label_prefix(),
         }
     }
 
-    fn new_with_empty_secret(suite: &'static Tls13CipherSuite) -> Self {
+    fn new_with_empty_secret(suite: &'static Tls13CipherSuite, protocol: Protocol) -> Self {
         Self {
             current: suite.hkdf_provider.extract_from_zero_ikm(None),
             suite,
+            prefix: protocol.label_prefix(),
         }
     }
 
@@ -137,7 +168,7 @@ impl KeySchedule {
 
     /// `Derive-Secret(current, kind, hs_hash)`.
     fn derive(&self, kind: SecretKind, hs_hash: &[u8]) -> OkmBlock {
-        hkdf_expand_label_block(&*self.current, kind.to_bytes(), hs_hash)
+        hkdf_expand_label_block_with_prefix(&*self.current, self.prefix, kind.to_bytes(), hs_hash)
     }
 
     /// `Derive-Secret(current, "derived", Transcript-Hash(""))`.
@@ -188,14 +219,20 @@ impl KeySchedule {
     /// hs_hash)`.
     fn sign_finish(&self, base_key: &OkmBlock, hs_hash: &[u8]) -> hmac::Tag {
         let expander = self.suite.hkdf_provider.expander_for_okm(base_key);
-        let finished_key = hkdf_expand_label_block(&*expander, b"finished", &[]);
+        let finished_key =
+            hkdf_expand_label_block_with_prefix(&*expander, self.prefix, b"finished", &[]);
         self.suite.hkdf_provider.hmac_sign(&finished_key, hs_hash)
     }
 
     /// Installs a record encrypter; QUIC connections have no record layer
-    /// and take their secrets from the stage that derives them.
+    /// and take their secrets from the stage that derives them. On a DTLS
+    /// connection the secret starts the next sending epoch.
     fn set_encrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
         if common.is_quic() {
+            return;
+        }
+        if let Some(dtls) = &mut common.dtls {
+            dtls.set_write_secret(self.suite, secret);
             return;
         }
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
@@ -208,6 +245,10 @@ impl KeySchedule {
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {
         if common.is_quic() {
+            return;
+        }
+        if let Some(dtls) = &mut common.dtls {
+            dtls.set_read_secret(self.suite, secret);
             return;
         }
         common
@@ -225,9 +266,12 @@ impl KeySchedule {
     /// (RFC 8446 §7.2).
     fn next_traffic_secret(&self, secret: &OkmBlock) -> OkmBlock {
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
-        hkdf_expand_label_block(&*expander, b"traffic upd", &[])
+        hkdf_expand_label_block_with_prefix(&*expander, self.prefix, b"traffic upd", &[])
     }
 }
+
+/// The label prefix of TLS 1.3 (RFC 9846 §7.1).
+pub(crate) const TLS13_LABEL_PREFIX: &[u8] = b"tls13 ";
 
 /// `HKDF-Expand-Label(secret, label, context, L)` into `output`.
 ///
@@ -239,16 +283,27 @@ pub(crate) fn hkdf_expand_label(
     context: &[u8],
     output: &mut [u8],
 ) {
-    const LABEL_PREFIX: &[u8] = b"tls13 ";
+    hkdf_expand_label_with_prefix(expander, TLS13_LABEL_PREFIX, label, context, output);
+}
+
+/// [`hkdf_expand_label`] with the label prefix of the protocol in use:
+/// [`TLS13_LABEL_PREFIX`], or `"dtls13"` for DTLS 1.3 (RFC 9147 §5.9).
+pub(crate) fn hkdf_expand_label_with_prefix(
+    expander: &dyn HkdfExpander,
+    prefix: &[u8],
+    label: &[u8],
+    context: &[u8],
+    output: &mut [u8],
+) {
     // Output lengths are bounded by callers; labels and contexts are at
     // most 255 bytes.
     let output_len = (output.len() as u16).to_be_bytes();
-    let label_len = [(LABEL_PREFIX.len() + label.len()) as u8];
+    let label_len = [(prefix.len() + label.len()) as u8];
     let context_len = [context.len() as u8];
     let info: [&[u8]; 6] = [
         &output_len,
         &label_len,
-        LABEL_PREFIX,
+        prefix,
         label,
         &context_len,
         context,
@@ -263,14 +318,24 @@ pub(crate) fn hkdf_expand_label_block(
     label: &[u8],
     context: &[u8],
 ) -> OkmBlock {
-    const LABEL_PREFIX: &[u8] = b"tls13 ";
+    hkdf_expand_label_block_with_prefix(expander, TLS13_LABEL_PREFIX, label, context)
+}
+
+/// [`hkdf_expand_label_block`] with the label prefix of the protocol in
+/// use (see [`hkdf_expand_label_with_prefix`]).
+pub(crate) fn hkdf_expand_label_block_with_prefix(
+    expander: &dyn HkdfExpander,
+    prefix: &[u8],
+    label: &[u8],
+    context: &[u8],
+) -> OkmBlock {
     let output_len = (expander.hash_len() as u16).to_be_bytes();
-    let label_len = [(LABEL_PREFIX.len() + label.len()) as u8];
+    let label_len = [(prefix.len() + label.len()) as u8];
     let context_len = [context.len() as u8];
     let info: [&[u8]; 6] = [
         &output_len,
         &label_len,
-        LABEL_PREFIX,
+        prefix,
         label,
         &context_len,
         context,
@@ -299,9 +364,9 @@ pub(crate) struct KeyScheduleEarly {
 }
 
 impl KeyScheduleEarly {
-    pub(crate) fn new(suite: &'static Tls13CipherSuite, secret: &[u8]) -> Self {
+    pub(crate) fn new(suite: &'static Tls13CipherSuite, secret: &[u8], protocol: Protocol) -> Self {
         Self {
-            ks: KeySchedule::new(suite, secret),
+            ks: KeySchedule::new(suite, secret, protocol),
         }
     }
 
@@ -342,6 +407,7 @@ impl KeyScheduleEarly {
     ) -> EarlyExporter {
         EarlyExporter {
             suite: self.ks.suite,
+            prefix: self.ks.prefix,
             secret: self.ks.derive_logged_secret(
                 SecretKind::EarlyExporterMasterSecret,
                 hs_hash,
@@ -371,9 +437,9 @@ pub(crate) struct KeySchedulePreHandshake {
 }
 
 impl KeySchedulePreHandshake {
-    pub(crate) fn new(suite: &'static Tls13CipherSuite) -> Self {
+    pub(crate) fn new(suite: &'static Tls13CipherSuite, protocol: Protocol) -> Self {
         Self {
-            ks: KeySchedule::new_with_empty_secret(suite),
+            ks: KeySchedule::new_with_empty_secret(suite, protocol),
         }
     }
 
@@ -478,6 +544,11 @@ impl KeyScheduleHandshake {
         common: &mut CommonState,
     ) {
         if common.is_quic() {
+            return;
+        }
+        if let Some(dtls) = &mut common.dtls {
+            // No 0-RTT over DTLS: there is nothing to skip.
+            dtls.set_read_secret(self.ks.suite, &self.client_handshake_traffic_secret);
             return;
         }
         let decrypter = self
@@ -590,6 +661,7 @@ impl KeyScheduleTrafficWithClientFinishedPending {
 /// (the exporter or the early exporter master secret).
 fn export_from_secret(
     suite: &'static Tls13CipherSuite,
+    prefix: &[u8],
     secret: &OkmBlock,
     out: &mut [u8],
     label: &[u8],
@@ -599,16 +671,18 @@ fn export_from_secret(
     if out.len() > 255 * hash.output_len() {
         return Err(Error::general("exporter output too long"));
     }
-    // HkdfLabel.label is `"tls13 " + label`, at most 255 bytes.
-    if label.len() > 255 - 6 {
+    // HkdfLabel.label is the six-byte prefix (`"tls13 "` or `"dtls13"`)
+    // followed by `label`, at most 255 bytes.
+    if label.len() > 255 - prefix.len() {
         return Err(Error::general("exporter label too long"));
     }
     let empty_hash = hash.hash(&[]);
     let expander = suite.hkdf_provider.expander_for_okm(secret);
-    let derived = hkdf_expand_label_block(&*expander, label, empty_hash.as_ref());
+    let derived =
+        hkdf_expand_label_block_with_prefix(&*expander, prefix, label, empty_hash.as_ref());
     let context_hash = hash.hash(context.unwrap_or(&[]));
     let expander = suite.hkdf_provider.expander_for_okm(&derived);
-    hkdf_expand_label(&*expander, b"exporter", context_hash.as_ref(), out);
+    hkdf_expand_label_with_prefix(&*expander, prefix, b"exporter", context_hash.as_ref(), out);
     Ok(())
 }
 
@@ -618,6 +692,7 @@ fn export_from_secret(
 #[derive(Clone)]
 pub(crate) struct EarlyExporter {
     suite: &'static Tls13CipherSuite,
+    prefix: &'static [u8],
     secret: OkmBlock,
 }
 
@@ -628,7 +703,7 @@ impl EarlyExporter {
         label: &[u8],
         context: Option<&[u8]>,
     ) -> Result<(), Error> {
-        export_from_secret(self.suite, &self.secret, out, label, context)
+        export_from_secret(self.suite, self.prefix, &self.secret, out, label, context)
     }
 }
 
@@ -712,7 +787,7 @@ impl KeyScheduleTraffic {
         let rms = self.ks.derive(SecretKind::ResumptionMasterSecret, hs_hash);
         let expander = self.ks.suite.hkdf_provider.expander_for_okm(&rms);
         let mut out = alloc::vec![0u8; self.ks.hash_len()];
-        hkdf_expand_label(&*expander, b"resumption", nonce, &mut out);
+        hkdf_expand_label_with_prefix(&*expander, self.ks.prefix, b"resumption", nonce, &mut out);
         out
     }
 
@@ -725,6 +800,7 @@ impl KeyScheduleTraffic {
     ) -> Result<(), Error> {
         export_from_secret(
             self.ks.suite,
+            self.ks.prefix,
             &self.current_exporter_secret,
             out,
             label,
@@ -812,7 +888,7 @@ mod tests {
              cc f2 4c 0e 60 91 18 6d 34 f8 12 08 9f f5 be 2e f7 df",
         );
         let recorder = Recorder::default();
-        let exporter = KeyScheduleEarly::new(suite, &psk).early_exporter(
+        let exporter = KeyScheduleEarly::new(suite, &psk, Protocol::Tls13).early_exporter(
             &client_hello_hash,
             &recorder,
             &[0; 32],

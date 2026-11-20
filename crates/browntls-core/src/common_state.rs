@@ -208,6 +208,10 @@ pub struct CommonState {
     /// Present on QUIC connections (RFC 9001): handshake messages and alerts
     /// go to the QUIC implementation instead of the record layer.
     pub(crate) quic: Option<alloc::boxed::Box<crate::quic::Quic>>,
+    /// Present on DTLS connections (RFC 9147): handshake messages, alerts
+    /// and application data go to the DTLS record layer and its flights
+    /// instead of the TLS record layer.
+    pub(crate) dtls: Option<alloc::boxed::Box<crate::dtls::Dtls>>,
     /// Driven by the unbuffered API: received application data stays in the
     /// caller's buffer instead of being copied into `received_plaintext`.
     pub(crate) unbuffered: bool,
@@ -264,6 +268,7 @@ impl CommonState {
             encrypt_failed: false,
             fips: false,
             quic: None,
+            dtls: None,
             unbuffered: false,
             app_data_in_place: false,
             external_psk: None,
@@ -483,13 +488,33 @@ impl CommonState {
         self.quic.is_some()
     }
 
+    /// Whether this is a DTLS connection (RFC 9147).
+    pub(crate) fn is_dtls(&self) -> bool {
+        self.dtls.is_some()
+    }
+
     /// Queues `m` for sending, encrypting it when `must_encrypt`.
     ///
     /// On a QUIC connection nothing goes to the record layer: handshake
     /// messages are queued for CRYPTO frames at the current encryption level
     /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
     /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
+    ///
+    /// On a DTLS connection handshake messages join the flight being
+    /// prepared and alerts are sent once, both under the current sending
+    /// epoch whatever `must_encrypt` says. There is no ChangeCipherSpec in
+    /// DTLS 1.3 (RFC 9147 §5), and application data does not come this way.
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        if let Some(dtls) = &mut self.dtls {
+            match m.payload {
+                MessagePayload::Handshake { encoded, .. } => {
+                    dtls.queue_handshake(encoded.bytes());
+                }
+                MessagePayload::Alert(alert) => dtls.queue_alert(alert.level, alert.description),
+                _ => {}
+            }
+            return;
+        }
         if let Some(quic) = &mut self.quic {
             match m.payload {
                 MessagePayload::Handshake { encoded, .. } => {
@@ -519,6 +544,13 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
+        if let Some(dtls) = &mut self.dtls {
+            // Only handshake messages (KeyUpdate) come this way.
+            if m.typ == ContentType::Handshake {
+                dtls.queue_handshake(m.payload.bytes());
+            }
+            return;
+        }
         if self.send_to_kernel(&m) {
             return;
         }

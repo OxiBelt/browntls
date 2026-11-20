@@ -37,7 +37,7 @@ use crate::msgs::persist::Retrieved;
 use crate::psk::{OfferedPsk, PskSecret};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly};
+use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly, Protocol};
 
 /// Looks up and validates a session to offer for `server_name`.
 fn find_session(
@@ -673,7 +673,12 @@ pub(super) fn emit_client_hello_for_retry(
     }
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 
-    tls13::fill_in_psk_binders(&offered_psks, &transcript_buffer, &mut hmp);
+    tls13::fill_in_psk_binders(
+        Protocol::of(cx.common),
+        &offered_psks,
+        &transcript_buffer,
+        &mut hmp,
+    );
 
     let ch = Message {
         // RFC 8446 §5.1: the first ClientHello's record may use the lowest
@@ -723,7 +728,8 @@ pub(super) fn emit_client_hello_for_retry(
     if let Some(first) = offered_psks.first()
         && cx.data.early_data.is_enabled()
     {
-        let schedule = KeyScheduleEarly::new(first.suite, first.secret.as_ref());
+        let schedule =
+            KeyScheduleEarly::new(first.suite, first.secret.as_ref(), Protocol::of(cx.common));
         tls13::derive_early_traffic_secret(
             &*config.key_log,
             cx,

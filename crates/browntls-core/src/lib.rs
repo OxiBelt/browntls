@@ -80,6 +80,7 @@ mod conn;
 pub mod crypto;
 mod ct;
 pub mod delegated_credential;
+mod dtls;
 pub mod ech;
 mod enums;
 mod error;

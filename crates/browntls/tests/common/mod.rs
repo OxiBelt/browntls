@@ -27,7 +27,8 @@ pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(browntls::crypto::native::default_provider())
 }
 
-/// A CA and a `localhost` server certificate it issued (ECDSA P-256).
+/// A CA, a `localhost` server certificate and a `client.example` client
+/// certificate it issued (ECDSA P-256).
 pub struct Pki {
     ca: CertificateDer<'static>,
     server_chain: Vec<CertificateDer<'static>>,
@@ -39,6 +40,17 @@ pub struct Pki {
 
 impl Pki {
     pub fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Like [`Self::new`], with the `DelegationUsage` extension (RFC 9345
+    /// §4.2) on the client certificate, so that it can sign delegated
+    /// credentials.
+    pub fn with_delegation() -> Self {
+        Self::build(true)
+    }
+
+    fn build(delegation: bool) -> Self {
         let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -67,6 +79,15 @@ impl Pki {
         client_params
             .distinguished_name
             .push(DnType::CommonName, "client.example");
+        if delegation {
+            // DelegationUsage: OID 1.3.6.1.4.1.44363.44, `NULL` value.
+            client_params
+                .custom_extensions
+                .push(rcgen::CustomExtension::from_oid_content(
+                    &[1, 3, 6, 1, 4, 1, 44363, 44],
+                    vec![0x05, 0x00],
+                ));
+        }
         let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
 
         let ca = CertificateDer::from(ca_cert.der().to_vec());
@@ -79,7 +100,13 @@ impl Pki {
         }
     }
 
-    fn roots(&self) -> RootCertStore {
+    /// The client certificate's private key.
+    pub fn client_key(&self) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.client_key.clone()))
+    }
+
+    /// The trusted CA.
+    pub fn roots(&self) -> RootCertStore {
         let mut roots = RootCertStore::empty();
         roots.add(self.ca.clone()).unwrap();
         roots
@@ -137,12 +164,11 @@ impl Pki {
 
     /// Like [`Self::client_config`], presenting the client certificate.
     pub fn client_config_with_cert(&self) -> ClientConfig {
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.client_key.clone()));
         ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(self.roots())
-            .with_client_auth_cert(self.client_chain.clone(), key)
+            .with_client_auth_cert(self.client_chain.clone(), self.client_key())
             .unwrap()
     }
 }

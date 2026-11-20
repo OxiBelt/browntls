@@ -2204,7 +2204,8 @@ be built with a struct literal; `CertifiedKey::new` remains.
   handshake, replaced (or cleared) by each successful post-handshake
   authentication (a declined one leaves it, like `peer_certificates`);
   `None` on a resumed connection. Never with raw public keys
-  or TLS 1.2.
+  or TLS 1.2. `browntls-tokio` streams reach the accessors through
+  `get_ref`.
 - Resumption: the client and server save the absolute expiry of the delegated
   credential that authenticated the original full handshake. A ticket is not
   offered or accepted, including for 0-RTT, when the current time is at or

@@ -819,6 +819,17 @@ where
     Poll::Ready(Ok(()))
 }
 
+/// A write of nothing for a stream in `st`: no I/O, and the error a write
+/// would meet at once after `shutdown`. The stream checks a kept handshake
+/// failure first.
+pub(crate) fn empty_write(st: &StreamState) -> io::Result<usize> {
+    if st.state.writeable() {
+        Ok(0)
+    } else {
+        Err(write_after_shutdown())
+    }
+}
+
 /// `AsyncWrite::poll_write` for a stream in `st`.
 pub(crate) fn poll_write<IO, C, SD>(
     io: &mut IO,

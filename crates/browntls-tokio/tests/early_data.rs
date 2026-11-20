@@ -299,6 +299,18 @@ async fn a_failed_early_phase_fails_every_later_operation() {
             .unwrap()
             .unwrap_err();
         assert!(tls_error(&err).is_some(), "{err:?}");
+        // A write of nothing too, plain or vectored.
+        let err = timeout(LIMIT, client.write(&[]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
+        let empty = [std::io::IoSlice::new(b"")];
+        let err = timeout(LIMIT, client.write_vectored(&empty))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
         let err = timeout(LIMIT, client.flush()).await.unwrap().unwrap_err();
         assert!(tls_error(&err).is_some(), "{err:?}");
     }

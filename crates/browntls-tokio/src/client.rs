@@ -397,6 +397,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         )
     }
 
+    /// A write of nothing: moves nothing, and fails as a write would after
+    /// a handshake failure kept by the early phase or after `shutdown`.
+    fn empty_write(&self) -> io::Result<usize> {
+        if let Some(early) = &self.early {
+            early.check()?;
+        }
+        common::empty_write(&self.st)
+    }
+
     /// The early-data part of a write: `Ready(Ok(n))` with `n > 0` when
     /// early data took the bytes, `Ready(Ok(0))` when the write should go
     /// the ordinary way.
@@ -485,7 +494,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         if buf.is_empty() {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(this.empty_write());
         }
         coop::budgeted(cx, |cx| {
             match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
@@ -503,7 +512,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         if bufs.iter().all(|buf| buf.is_empty()) {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(this.empty_write());
         }
         coop::budgeted(cx, |cx| match ready!(this.poll_write_early(cx, bufs))? {
             0 => {

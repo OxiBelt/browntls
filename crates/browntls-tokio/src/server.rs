@@ -496,6 +496,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         self.st.track(cx, poll)
     }
 
+    /// A write of nothing: moves nothing, and fails as a write would after
+    /// a handshake failure kept by the early phase or after `shutdown`.
+    fn empty_write(&self) -> io::Result<usize> {
+        if let Some(early) = &self.early {
+            early.check()?;
+        }
+        common::empty_write(&self.st)
+    }
+
     /// The early-phase part of a write: `Ready(Ok(()))` once the connection
     /// may take the bytes. With 0.5-RTT data that is at once; otherwise the
     /// handshake completes first, as the connection would only hold them.
@@ -550,10 +559,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.st.begin_poll();
+        if buf.is_empty() {
+            return Poll::Ready(this.empty_write());
+        }
         coop::budgeted(cx, |cx| {
-            if !buf.is_empty() {
-                ready!(this.poll_write_early(cx))?;
-            }
+            ready!(this.poll_write_early(cx))?;
             this.write_with_early_reader(cx, |this, cx| {
                 common::poll_write(&mut this.io, &mut this.session, &mut this.st, cx, buf)
             })
@@ -567,10 +577,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.st.begin_poll();
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Poll::Ready(this.empty_write());
+        }
         coop::budgeted(cx, |cx| {
-            if !bufs.iter().all(|buf| buf.is_empty()) {
-                ready!(this.poll_write_early(cx))?;
-            }
+            ready!(this.poll_write_early(cx))?;
             this.write_with_early_reader(cx, |this, cx| {
                 common::poll_write_vectored(&mut this.io, &mut this.session, &mut this.st, cx, bufs)
             })

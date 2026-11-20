@@ -311,6 +311,19 @@ pub struct ClientConfig {
     /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
     /// once the handshake completes.
     pub require_external_psk: bool,
+
+    /// Whether to offer a TLS 1.2 server certificate URLs in place of the
+    /// client certificate chain (RFC 6066 §5, `client_certificate_url`). Off
+    /// by default.
+    ///
+    /// The extension is sent only when TLS 1.2 is offered and the client
+    /// certificate resolver has certificates; a CertificateURL message only
+    /// when the server acknowledged it, asked for a certificate, and the
+    /// resolved key carries URLs
+    /// ([`CertifiedKey::set_certificate_url`](crate::sign::CertifiedKey::set_certificate_url)).
+    /// The server, not this library, fetches them. See
+    /// [`crate::certificate_url`].
+    pub enable_client_certificate_url: bool,
 }
 
 impl ClientConfig {

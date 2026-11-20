@@ -451,6 +451,16 @@ pub(super) fn emit_client_hello_for_retry(
         exts.delegated_credential = Some(tls13::delegated_credential_schemes(config));
     }
 
+    // RFC 6066 §5: offer certificate URLs (TLS 1.2 only, so never on QUIC
+    // or in an ECH inner hello, which offer TLS 1.3 alone).
+    #[cfg(feature = "tls12")]
+    if supports_tls12
+        && config.enable_client_certificate_url
+        && config.client_auth_cert_resolver.has_certs()
+    {
+        exts.client_certificate_url = Some(());
+    }
+
     #[cfg(feature = "tls12")]
     if supports_tls12
         && !config.revocation_enabled()

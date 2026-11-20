@@ -9,7 +9,7 @@ use super::{
     ContentType, Error, ExpectCcs, ExpectNewTicket, ExpectServerDone, HandshakeMessagePayload,
     HandshakePayload, HandshakeSignatureValid, HandshakeType, KxState, Message, MessagePayload,
     NextStateOrError, PeerMisbehaved, ProtocolVersion, ServerCertVerified, Side, State,
-    emit_certificate, emit_certverify, emit_client_kx, emit_finished, mac_order, tls13,
+    emit_certverify, emit_client_kx, emit_finished, mac_order, tls13,
 };
 use crate::msgs::codec::Codec;
 use crate::revocation::finish_or_pause;
@@ -93,16 +93,14 @@ impl ExpectServerDone {
         let cert_verified = ServerCertVerified::assertion();
         cx.common.peer_certificates = Some(st.server_cert.cert_chain);
 
-        // 3. Client certificate, if requested.
-        if let Some(client_auth) = &st.client_auth {
-            match client_auth {
-                ClientAuthDetails::Empty { .. } => {
-                    emit_certificate(&mut st.transcript, None, cx.common)
-                }
-                ClientAuthDetails::Verify { certkey, .. } => {
-                    emit_certificate(&mut st.transcript, Some(certkey), cx.common)
-                }
-            }
+        // 3. Client certificate (or the URLs of RFC 6066 §5), if requested.
+        if let Some(client_auth) = st.client_auth.take() {
+            st.client_auth = Some(super::certificate_url::emit_client_certificate(
+                &mut st.transcript,
+                client_auth,
+                st.hello.certificate_url_accepted,
+                cx.common,
+            ));
         }
 
         // 4. Our key exchange, and the master secret.

@@ -264,6 +264,17 @@ pub struct ServerConfig {
     /// [`CommonState::external_psk_identity`](crate::CommonState::external_psk_identity)
     /// once the handshake completes.
     pub require_external_psk: bool,
+
+    /// Whether, and under which rules, a TLS 1.2 client may send URLs of its
+    /// certificate chain instead of the chain (RFC 6066 §5,
+    /// `client_certificate_url`). `None` (the default) never acknowledges
+    /// the extension.
+    ///
+    /// The library never fetches a URL: the handshake pauses and the
+    /// application authorizes and performs each fetch (server-side request
+    /// forgery, RFC 6066 §11.3). See [`crate::certificate_url`]. Zero limits
+    /// or no valid scheme make connection creation fail.
+    pub client_certificate_url: Option<crate::certificate_url::ClientCertificateUrlPolicy>,
 }
 
 impl ServerConfig {
@@ -365,6 +376,7 @@ impl ServerConfig {
         self.check_ech_role()?;
         common.set_max_fragment_size(self.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
+        crate::certificate_url::check_policy(self.client_certificate_url.as_ref())?;
         common.enable_secret_extraction = self.enable_secret_extraction;
         common.fips = self.fips();
         Ok(())

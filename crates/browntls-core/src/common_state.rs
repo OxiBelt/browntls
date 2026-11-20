@@ -136,6 +136,7 @@ pub struct IoState {
     plaintext_bytes_to_read: usize,
     peer_has_closed: bool,
     revocation_pending: bool,
+    client_certificate_url_pending: bool,
 }
 
 impl IoState {
@@ -159,6 +160,12 @@ impl IoState {
     pub fn revocation_pending(&self) -> bool {
         self.revocation_pending
     }
+
+    /// Whether progress requires resolving a pending client certificate
+    /// URL query (RFC 6066 §5, servers only).
+    pub fn client_certificate_url_pending(&self) -> bool {
+        self.client_certificate_url_pending
+    }
 }
 
 /// Connection state that is independent of the handshake position.
@@ -174,6 +181,9 @@ pub struct CommonState {
     pub(crate) pending_revocation: Option<alloc::boxed::Box<crate::revocation::PendingRevocation>>,
     pub(crate) peer_revocation_status: Option<crate::revocation::RevocationStatus>,
     pub(crate) revocation_auth_outstanding: bool,
+    /// The client certificate URL query a TLS 1.2 server waits on.
+    pub(crate) pending_certificate_url:
+        Option<alloc::boxed::Box<crate::certificate_url::PendingCertificateUrl>>,
     message_fragmenter: MessageFragmenter,
     pub(crate) received_plaintext: ChunkVecBuffer,
     pub(crate) sendable_plaintext: ChunkVecBuffer,
@@ -246,6 +256,7 @@ impl CommonState {
             pending_revocation: None,
             peer_revocation_status: None,
             revocation_auth_outstanding: false,
+            pending_certificate_url: None,
             message_fragmenter: MessageFragmenter::default(),
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
             sendable_plaintext: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
@@ -390,6 +401,7 @@ impl CommonState {
     pub fn wants_read(&self) -> bool {
         self.received_plaintext.is_empty()
             && self.pending_revocation.is_none()
+            && self.pending_certificate_url.is_none()
             && !self.has_received_close_notify
             && (self.may_send_application_data || self.sendable_tls.is_empty())
             && !self.control_backlog_full()
@@ -479,6 +491,7 @@ impl CommonState {
             plaintext_bytes_to_read: self.received_plaintext.len(),
             peer_has_closed: self.has_received_close_notify,
             revocation_pending: self.pending_revocation.is_some(),
+            client_certificate_url_pending: self.pending_certificate_url.is_some(),
         }
     }
 
@@ -953,6 +966,8 @@ fn is_always_fatal(desc: AlertDescription) -> bool {
             | AlertDescription::InternalError
             | AlertDescription::InappropriateFallback
             | AlertDescription::UnsupportedExtension
+            // RFC 6066 §5: "This alert is always fatal."
+            | AlertDescription::BadCertificateHashValue
     )
 }
 

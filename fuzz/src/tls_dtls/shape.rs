@@ -12,7 +12,7 @@ const TYPES: [u8; 6] = [22, 22, 21, 26, 23, 20];
 const HANDSHAKE_TYPES: [u8; 10] = [1, 2, 4, 6, 8, 11, 13, 15, 20, 24];
 
 /// A datagram of one to four records, or raw bytes.
-pub(super) fn datagram(input: &mut Input) -> Vec<u8> {
+pub(crate) fn datagram(input: &mut Input) -> Vec<u8> {
     let mut out = Vec::new();
     let records = 1 + input.choose(4);
     for _ in 0..records {
@@ -180,7 +180,7 @@ fn fragments(input: &mut Input) -> Vec<u8> {
 
 /// Seed bytes for [`datagram`]: a plaintext ClientHello fragment, an ACK,
 /// an alert, and a unified record for the flag combination `flags`.
-pub(super) fn seed(flags: u8) -> Vec<u8> {
+pub(crate) fn seed(flags: u8) -> Vec<u8> {
     let mut seed = vec![3]; // four records
     // 1: plaintext handshake, DTLS 1.2 version, epoch 0, fragments
     seed.extend_from_slice(&[1, 0, 4, 0]);

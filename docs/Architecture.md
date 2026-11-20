@@ -2199,8 +2199,9 @@ be built with a struct literal; `CertifiedKey::new` remains.
   `client_delegated_credential` on `ServerConnection`,
   `UnbufferedServerConnection` and the server's `KernelConnection` returns
   the credential of the client's current identity: that of the full
-  handshake, replaced (or cleared) by each completed post-handshake
-  authentication; `None` on a resumed connection. Never with raw public keys
+  handshake, replaced (or cleared) by each successful post-handshake
+  authentication (a declined one leaves it, like `peer_certificates`);
+  `None` on a resumed connection. Never with raw public keys
   or TLS 1.2.
 - Resumption: the client and server save the absolute expiry of the delegated
   credential that authenticated the original full handshake. A ticket is not
@@ -2219,16 +2220,18 @@ be built with a struct literal; `CertifiedKey::new` remains.
   Finished.
 - Persistence: the private client session value carries the deadline without
   changing `ClientSessionStore`. The server session encoding has a mandatory
-  tagged deadline field. Because the old encoding cannot distinguish sessions
-  authenticated with a delegated credential, an upgrade deliberately rejects
-  every pre-change server session value (TLS 1.3 and TLS 1.2); old and new
-  members of a mixed-version fleet therefore cold-miss each other's cached
-  sessions and tickets rather than resuming ambiguous authentication state.
-  The tag is a bit mask (1: the server credential's deadline follows, 2: the
-  client credential's). Values written before client credentials existed
-  (tag 0 or 1) still decode; a server from before rejects a value that
-  carries a client deadline, so it never resumes a session whose client
-  authentication it cannot bound.
+  tagged deadline field. Because the encoding from before server credentials
+  cannot distinguish sessions authenticated with a delegated credential, the
+  change that added the field deliberately rejects every server session value
+  written before it (TLS 1.3 and TLS 1.2); old and new members of a
+  mixed-version fleet therefore cold-miss each other's cached sessions and
+  tickets rather than resuming ambiguous authentication state. Client
+  credentials later made the tag a bit mask (1: the server credential's
+  deadline follows, 2: the client credential's). Values with that field
+  written before client credentials (tag 0 or 1) still decode; a server
+  from before client credentials rejects a value that carries a client
+  deadline, so it never resumes a session whose client authentication it
+  cannot bound.
 - Alerts (§4.1.1 to §4.1.3), the same on both sides: an invalid credential
   is `illegal_parameter`; one the receiver did not ask for is
   `unexpected_message`; one on an entry other than the end entity's is

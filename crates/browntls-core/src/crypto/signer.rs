@@ -226,6 +226,12 @@ impl CertifiedKey {
     /// Adds a client's delegated credential for the end entity (one issued
     /// for [`Side::Client`]), with its private `key` (RFC 9345 §4.1.2). See
     /// [`DelegatedCredentialKey::new_for`] for the checks.
+    ///
+    /// A client tries its credentials before [`Self::key`], so `key` may be
+    /// one that cannot sign (kept offline). A
+    /// [`ResolvesClientCert`](crate::client::ResolvesClientCert) that only
+    /// returns certified keys whose `key` signs one of the offered schemes
+    /// never lets such a credential answer.
     pub fn with_client_delegated_credential(
         self,
         credential: DelegatedCredential,

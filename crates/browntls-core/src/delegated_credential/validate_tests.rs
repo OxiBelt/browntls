@@ -286,7 +286,7 @@ fn a_credential_is_only_usable_by_its_side() {
     // that list governs CertificateVerify (RFC 9846 §4.5.2).
     let all = [P256, SignatureScheme::ED25519];
     assert!(client.usable(Side::Client, &ee, &[P256], &all, now));
-    assert!(!client.usable(Side::Client, &ee, &all, &[P256], now));
+    assert!(!client.usable(Side::Client, &ee, &[P256], &[SignatureScheme::ED25519], now));
 
     // The signature covers the side: a client's credential validates as
     // one presented by a client only.

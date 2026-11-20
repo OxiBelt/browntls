@@ -1148,7 +1148,10 @@ RFC 9257 guidance and what browntls enforces:
   and an unknown signature scheme is passed on with the others to
   `ResolvesClientCert::resolve` and `SigningKey::choose_scheme`. The
   built-in keys choose only schemes they implement; a custom key must not
-  choose a scheme it does not know.
+  choose a scheme it does not know. The option needs no API of its own
+  above the protocol crate: the acceptors of `browntls-tokio` (buffered and
+  unbuffered) take the configuration as it is, and the facade re-exports it
+  as `browntls::ServerConfig::enable_grease`.
 - `padding` (RFC 7685), client: by default
   (`ClientHelloPadding::AvoidProblematicLengths`) a ClientHello handshake
   message of 256 to 511 bytes is padded to 512 bytes, or 513 to 515 bytes

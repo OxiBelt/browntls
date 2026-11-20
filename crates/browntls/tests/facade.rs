@@ -58,6 +58,54 @@ fn handshake_and_data_through_the_root() {
     });
 }
 
+/// `ServerConfig::enable_grease` (RFC 8701 §4.1) is reachable through the
+/// root: with it on, the server's CertificateRequest and NewSessionTicket
+/// messages carry GREASE values, and a client still authenticates with a
+/// certificate and resumes from the tickets.
+#[test]
+fn server_grease_with_client_authentication_through_the_root() {
+    let pki = Pki::new();
+    let mut server_config = pki.server_config_with_client_auth();
+    server_config.enable_grease = true;
+    let server_config = Arc::new(server_config);
+    let client_config = Arc::new(pki.client_config_with_cert());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    for expected in [HandshakeKind::Full, HandshakeKind::Resumed] {
+        let conn = ClientConnection::new(client_config.clone(), localhost()).unwrap();
+        let tcp = TcpStream::connect(addr).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (tcp, _) = listener.accept().unwrap();
+                let conn = ServerConnection::new(server_config.clone()).unwrap();
+                let mut tls = StreamOwned::new(conn, tcp);
+                let mut request = [0u8; 5];
+                tls.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hello");
+                let certs = tls.conn.peer_certificates().unwrap().to_vec();
+                tls.write_all(b"world").unwrap();
+                tls.conn.send_close_notify();
+                tls.flush().unwrap();
+                certs
+            });
+
+            let mut tls = StreamOwned::new(conn, tcp);
+            tls.write_all(b"hello").unwrap();
+            // Reading to the end takes in the tickets.
+            let mut reply = Vec::new();
+            tls.read_to_end(&mut reply).unwrap();
+            assert_eq!(reply, b"world");
+            assert_eq!(tls.conn.handshake_kind(), Some(expected));
+            assert_eq!(
+                tls.conn.protocol_version(),
+                Some(browntls::ProtocolVersion::TLSv1_3)
+            );
+            assert_eq!(server.join().unwrap()[0], pki.client_chain[0]);
+        });
+    }
+}
+
 /// `native`: the built-in provider, which the configurations above were
 /// built with.
 #[test]

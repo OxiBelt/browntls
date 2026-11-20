@@ -18,8 +18,8 @@
 //!
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
-//!         --record-size-limit N|none, --async
-//! CLIENT: --grease, --ticket-request NEW,RESUMPTION, --padding N
+//!         --record-size-limit N|none, --grease, --async
+//! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
 //!         --ech-trial-decryption, --ech-public-name-check
 //! ECH-CLIENT: --ech-config-list FILE, --ech-grease, --ech-random-config-id,
@@ -27,12 +27,14 @@
 //! ```
 //!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
-//! extension); `--grease` sends RFC 8701 GREASE values; `--ticket-request`
-//! sends the RFC 9149 extension; `--padding` pads the ClientHello to at
-//! least N bytes (RFC 7685). `--async` runs the client's or server's
-//! connections through `browntls-tokio` on a single-threaded Tokio runtime
-//! instead of the blocking `StreamOwned` (same exchange and output, with
-//! `"io":"async"`; a client then does not retry after an ECH rejection).
+//! extension); `--grease` sends RFC 8701 GREASE values (a client in its
+//! ClientHello, a server in its TLS 1.3 CertificateRequest and
+//! NewSessionTicket messages); `--ticket-request` sends the RFC 9149
+//! extension; `--padding` pads the ClientHello to at least N bytes (RFC
+//! 7685). `--async` runs the client's or server's connections through
+//! `browntls-tokio` on a single-threaded Tokio runtime instead of the
+//! blocking `StreamOwned` (same exchange and output, with `"io":"async"`; a
+//! client then does not retry after an ECH rejection).
 //!
 //! Encrypted Client Hello (RFC 9849): `ech-keygen` writes an X25519 key for
 //! every native HPKE suite with that KEM to `DIR/ech-config` (one
@@ -518,6 +520,7 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
     if let Some(limit) = o.record_size_limit {
         config.record_size_limit = limit;
     }
+    config.enable_grease = o.grease;
     config.ech = ech;
     config.ech_backend = o.ech_backend;
     Ok(Arc::new(config))

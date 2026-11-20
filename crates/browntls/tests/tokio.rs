@@ -42,6 +42,38 @@ async fn handshake_and_data_through_the_tokio_module() {
     tokio::join!(server, client);
 }
 
+/// An acceptor whose configuration turns on `enable_grease` (RFC 8701
+/// §4.1) authenticates a client certificate through `browntls::tokio`.
+#[tokio::test]
+async fn server_grease_with_client_authentication_through_the_tokio_module() {
+    let pki = Pki::new();
+    let mut server_config = pki.server_config_with_client_auth();
+    server_config.enable_grease = true;
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let connector = TlsConnector::from(Arc::new(pki.client_config_with_cert()));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let server = async {
+        let mut tls = acceptor.accept(server_io).await.unwrap();
+        let certs = tls.get_ref().1.peer_certificates().unwrap();
+        assert_eq!(certs[0], pki.client_chain[0]);
+        let mut request = [0u8; 5];
+        tls.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello");
+        tls.write_all(b"world").await.unwrap();
+        tls.shutdown().await.unwrap();
+    };
+    let client = async {
+        let mut tls = connector.connect(localhost(), client_io).await.unwrap();
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut reply = Vec::new();
+        tls.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(reply, b"world");
+    };
+    tokio::join!(server, client);
+}
+
 /// The module's own re-export of the protocol crate names the same items
 /// as this crate's root: a configuration built through one path is the
 /// type the other path expects.

@@ -309,6 +309,72 @@ outstanding revocation-aware authentication block kernel handoff. See
 [browntls-tokio](../crates/browntls-tokio/README.md) for application
 integration.
 
+### Certificate Transparency 2.0 (RFC 9162)
+
+`browntls_pki::transparency` holds the TLS-independent part of CT 2.0, beside
+the RFC 6962 code in `browntls_pki::sct`. Like the rest of `browntls-pki` it
+needs only `alloc` and contains no cryptography: SHA-256 and signature
+verification are passed in. No TLS connection uses it yet; the TLS extension
+(`transparency_info`, type 52) is not negotiated by `browntls-core`.
+
+It serves three callers:
+
+- A TLS client creates a `CtV2Verifier` from a `CtV2Policy` (trusted logs,
+  optionally trusted tree heads, budgets), the end-entity certificate and the
+  issuer's SPKI. It hands over the `TransItemList` of each delivery
+  mechanism: `verify_embedded` (certificate extension 1.3.101.75),
+  `verify_ocsp_response` (the list `SingleResponse::transparency_info` and
+  `VerifiedOcspStatus::transparency_info` return) and
+  `verify_tls_extension`. Each call returns a `CtV2Report` of counters;
+  `verified` lists the SCTs whose signatures verified with their source and,
+  when found, their inclusion evidence. An OCSP response whose single
+  response repeats the Transparency Information extension, or holds one
+  that is not an `OCTET STRING`, does not parse (as for the RFC 6962 SCT
+  list), so it is not usable revocation evidence either.
+- A server or submitter parses and encodes lists and items (`TransItemList`,
+  `TransItem`) and checks `has_sct` before sending a list (§6.4).
+- An auditor verifies tree heads, inclusion proofs and consistency proofs
+  standalone through `CtV2Log` and the `merkle` module.
+
+An SCT is accepted when its log is configured, its timestamp lies in the log's
+window and no later than the verification time (plus a configurable tolerance),
+its extensions are ordered (§4.8) and the log's signature over the `TransItem`
+of the reconstructed entry verifies. The entry binds the timestamp, the issuer
+key hash and the certificate; for a precertificate the TBSCertificate is rebuilt
+without the 1.3.101.75 extension and the RFC 6962 SCT list extension (§8.1.2).
+Signatures are ECDSA P-256 with SHA-256 or Ed25519, derived from the log's key.
+
+Inclusion evidence is recorded for a verified SCT when an inclusion proof of the
+same log verifies its leaf against a tree head of the proof's tree size with a
+timestamp not older than the SCT. The tree head comes from the application
+(`trusted_tree_heads`) or from any delivered list, and its signature is verified
+only when a proof needs it. The proof, the tree head and the SCT may arrive
+through different mechanisms. The tree size is bound only by the signed tree
+head: a path of the same shape verifies for other sizes, so evidence is never
+recorded without a verified or trusted head. Consistency proofs in lists are
+counted as ignored by the verifier; checking them needs two tree heads the
+auditor holds.
+
+Merkle verification follows the algorithms of §2.1.3.2 and §2.1.4.2 step by
+step. Paths longer than 64 (inclusion) or 65 (consistency) nodes are
+rejected before any hashing. The verifier bounds the list length, item count,
+extension and signature lengths, signature verifications and hash
+operations per instance (`CtV2Options`); exceeding a budget is an error, not
+a silent truncation.
+
+§6.3 defines `TransItemList` as non-empty while §6.5 lets a server send an
+empty list in the TLS extension. `verify_tls_extension` accepts an empty
+extension body or an empty list; the strict parser, the certificate
+extension and the OCSP extension reject an empty list.
+
+Not covered: the HTTP API of §5, log operation, monitoring, the final STH
+log parameter (§4.1) and the TLS extension itself. No public CT 2.0 log
+ecosystem and no second implementation were available, and RFC 9162 has no
+test vectors for its hashes or items. The tests check the code against
+independent encoders and a reference Merkle tree written from the RFC text
+in `crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
+self-consistency against the RFC text only, not interoperability.
+
 ## Crypto provider mount point
 
 `browntls_core::crypto` defines the provider interface, modelled on rustls 0.23

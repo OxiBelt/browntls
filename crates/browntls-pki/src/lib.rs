@@ -51,6 +51,7 @@ pub mod sct;
 pub mod server_name;
 mod signed_data;
 pub mod time;
+pub mod transparency;
 pub mod types;
 mod verify;
 

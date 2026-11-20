@@ -381,11 +381,18 @@ impl Dtls {
                 Ok(Incoming::Handled)
             }
             // A peer that cannot complete the handshake may say so before
-            // it has keys. Only fatal alerts count: an unprotected warning
-            // (close_notify, user_canceled), which anyone can forge, would
-            // otherwise end a handshake that then never fails.
+            // it has keys. Only fatal error alerts count: an unprotected
+            // warning, close_notify or user_canceled (at any level), which
+            // anyone can forge, would otherwise end a handshake that then
+            // never fails.
             ContentType::Alert if !self.peer_authenticated => Ok(match body {
-                [level, description] if AlertLevel::from(*level) == AlertLevel::Fatal => {
+                [level, description]
+                    if AlertLevel::from(*level) == AlertLevel::Fatal
+                        && !matches!(
+                            AlertDescription::from(*description),
+                            AlertDescription::CloseNotify | AlertDescription::UserCanceled
+                        ) =>
+                {
                     Incoming::Alert(AlertLevel::Fatal, AlertDescription::from(*description))
                 }
                 _ => Incoming::Handled,

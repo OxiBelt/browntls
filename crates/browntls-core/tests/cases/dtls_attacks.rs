@@ -254,10 +254,13 @@ fn a_forged_client_hello_before_the_first_answer_leaves_numbers_to_spare() {
 fn a_forged_close_notify_does_not_end_a_handshake() {
     let (mut pair, ..) = Pair::default_pair();
     let mut sim = Sim::perfect();
-    // close_notify, a warning, ahead of everything else on both sides.
+    // close_notify and user_canceled, as warnings and as fatal alerts,
+    // ahead of everything else on both sides.
     for endpoint in [&mut *pair.client as &mut dyn Endpoint, &mut *pair.server] {
-        let mut alert = plaintext_record(21, 0, &[1, 0]);
-        endpoint.read(&mut alert, sim.now).unwrap();
+        for alert in [[1, 0], [2, 0], [1, 90], [2, 90]] {
+            let mut alert = plaintext_record(21, 0, &alert);
+            endpoint.read(&mut alert, sim.now).unwrap();
+        }
     }
     pair.handshake(&mut sim).unwrap();
     assert!(!pair.client.peer_has_closed());

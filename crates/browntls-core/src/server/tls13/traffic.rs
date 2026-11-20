@@ -6,14 +6,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::client_auth::{
-    check_client_certificate, check_client_certificate_verify, client_auth_sigschemes,
+    ClientAuthOffer, check_client_certificate, check_client_certificate_verify,
+    check_client_credential_unexpired,
 };
 use super::flight::certificate_request_message;
 use super::ticket::emit_ticket;
 use crate::common_state::{CommonState, Side};
 use crate::conn::State;
 use crate::ct::constant_time_eq;
-use crate::enums::{AlertDescription, ContentType, HandshakeType, SignatureScheme};
+use crate::enums::{AlertDescription, ContentType, HandshakeType};
 use crate::error::{Error, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace};
@@ -22,7 +23,9 @@ use crate::msgs::handshake::CertificateChain;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{Message, MessagePayload};
 use crate::revocation::{RevocationCheck, RevocationStatus};
-use crate::server::common::{ClientCertAwaitingProof, client_revocation_enabled};
+use crate::server::common::{
+    ClientCertAwaitingProof, ValidatedCredential, client_revocation_enabled,
+};
 use crate::server::hs::{NextStateOrError, ServerContext};
 use crate::server::server_conn::{PostHandshakeAuthStatus, ServerConfig, ServerConnectionData};
 use crate::suites::PartiallyExtractedSecrets;
@@ -55,6 +58,13 @@ impl State<ServerConnectionData> for ExpectFinished {
                 .common
                 .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
         }
+        // A client credential that expired while the handshake, or the
+        // resumption of a session it authenticated, was under way.
+        check_client_credential_unexpired(
+            cx.common,
+            &st.config,
+            cx.data.client_delegated_credential_expiry,
+        )?;
         let fin = FinishedMessageVerified::assertion();
         // The client has proven it holds the external PSK, if one is in use;
         // tickets issued below record it.
@@ -115,7 +125,7 @@ struct PendingClientAuth {
     /// The transcript through the client Finished, then this request and
     /// the answer so far.
     transcript: HandshakeHash,
-    offered_sigschemes: Vec<SignatureScheme>,
+    offer: ClientAuthOffer,
     stage: ClientAuthStage,
 }
 
@@ -126,10 +136,17 @@ enum ClientAuthStage {
     /// The proof verified and `CommonState::pending_revocation` holds the
     /// status lookup; no message is read until it resolves
     /// ([`PostHandshakeAuth::resume_revocation`]).
-    Revocation(CertificateChain<'static>),
-    /// The chain and its revocation status, or `None` when the client
+    Revocation(ProvenClient),
+    /// The identity and its revocation status, or `None` when the client
     /// declined. Neither is reported before the Finished verifies.
-    Finished(Option<(CertificateChain<'static>, Option<RevocationStatus>)>),
+    Finished(Option<(ProvenClient, Option<RevocationStatus>)>),
+}
+
+/// A client certificate chain whose key the client proved to hold, with
+/// the delegated credential (RFC 9345 §4.1.2) it did so with, if any.
+struct ProvenClient {
+    chain: CertificateChain<'static>,
+    credential: Option<ValidatedCredential>,
 }
 
 /// The length of a post-handshake `certificate_request_context`: an 8-byte
@@ -160,7 +177,7 @@ impl PostHandshakeAuth {
             self.config.provider.secure_random,
             POST_HANDSHAKE_CONTEXT_RANDOM_LEN,
         )?);
-        let m = certificate_request_message(&self.config, context.clone())?;
+        let (m, offer) = certificate_request_message(&self.config, context.clone())?;
         let mut transcript = self.transcript.fork();
         transcript.add_message(&m);
         trace!("Sending post-handshake CertificateRequest {:?}", m);
@@ -172,7 +189,7 @@ impl PostHandshakeAuth {
         self.pending = Some(PendingClientAuth {
             context,
             transcript,
-            offered_sigschemes: client_auth_sigschemes(&self.config),
+            offer,
             stage: ClientAuthStage::Certificate,
         });
         Ok(())
@@ -191,7 +208,9 @@ impl PostHandshakeAuth {
         let no_continuation = || Error::general("no revocation continuation");
         let pending = self.pending.as_mut().ok_or_else(no_continuation)?;
         pending.stage = match core::mem::replace(&mut pending.stage, ClientAuthStage::Certificate) {
-            ClientAuthStage::Revocation(chain) => ClientAuthStage::Finished(Some((chain, status))),
+            ClientAuthStage::Revocation(client) => {
+                ClientAuthStage::Finished(Some((client, status)))
+            }
             _ => return Err(no_continuation()),
         };
         Ok(())
@@ -220,7 +239,13 @@ impl PostHandshakeAuth {
         pending.stage = match (pending.stage, payload) {
             (ClientAuthStage::Certificate, HandshakePayload::CertificateTls13(certp)) => {
                 pending.transcript.add_message(m);
-                match check_client_certificate(cx.common, &self.config, certp, &pending.context)? {
+                match check_client_certificate(
+                    cx.common,
+                    &self.config,
+                    certp,
+                    &pending.context,
+                    &pending.offer,
+                )? {
                     Some(cert) => ClientAuthStage::CertificateVerify(cert),
                     None => ClientAuthStage::Finished(None),
                 }
@@ -235,7 +260,13 @@ impl PostHandshakeAuth {
                     compressed,
                 )?;
                 pending.transcript.add_message(m);
-                match check_client_certificate(cx.common, &self.config, &certp, &pending.context)? {
+                match check_client_certificate(
+                    cx.common,
+                    &self.config,
+                    &certp,
+                    &pending.context,
+                    &pending.offer,
+                )? {
                     Some(cert) => ClientAuthStage::CertificateVerify(cert),
                     None => ClientAuthStage::Finished(None),
                 }
@@ -244,25 +275,29 @@ impl PostHandshakeAuth {
                 ClientAuthStage::CertificateVerify(cert),
                 HandshakePayload::CertificateVerify(sig),
             ) => {
-                check_client_certificate_verify(
+                let (_, credential) = check_client_certificate_verify(
                     cx.common,
                     &self.config,
                     &pending.transcript,
-                    &cert.chain,
-                    &pending.offered_sigschemes,
+                    &cert,
+                    &pending.offer,
                     sig,
                 )?;
                 pending.transcript.add_message(m);
+                let client = ProvenClient {
+                    chain: cert.chain,
+                    credential,
+                };
                 // The client holds the key: a status lookup, if the
                 // verifier needs one, may start now. The traffic state
                 // stays; the Finished is read once the lookup resolves.
                 match cert.revocation {
                     RevocationCheck::Complete(status) => {
-                        ClientAuthStage::Finished(Some((cert.chain, status)))
+                        ClientAuthStage::Finished(Some((client, status)))
                     }
                     RevocationCheck::Pending(lookup) => {
                         cx.common.pending_revocation = Some(lookup);
-                        ClientAuthStage::Revocation(cert.chain)
+                        ClientAuthStage::Revocation(client)
                     }
                 }
             }
@@ -276,11 +311,21 @@ impl PostHandshakeAuth {
                         .common
                         .send_fatal_alert(AlertDescription::DecryptError, Error::DecryptError));
                 }
+                // A credential that expired while the answer, or a status
+                // lookup for it, was under way.
+                let expiry = identity
+                    .as_ref()
+                    .and_then(|(client, _)| client.credential.as_ref())
+                    .map(|(_, expiry)| *expiry);
+                check_client_credential_unexpired(cx.common, &self.config, expiry)?;
                 cx.common.revocation_auth_outstanding = false;
                 cx.data.post_handshake_auth = Some(match identity {
-                    Some((chain, status)) => {
+                    Some((client, status)) => {
                         debug!("post-handshake client authentication succeeded");
-                        cx.common.peer_certificates = Some(chain);
+                        let (credential, expiry) = client.credential.unzip();
+                        cx.data.client_delegated_credential = credential;
+                        cx.data.client_delegated_credential_expiry = expiry;
+                        cx.common.peer_certificates = Some(client.chain);
                         cx.common.peer_revocation_status = status;
                         PostHandshakeAuthStatus::Authenticated
                     }

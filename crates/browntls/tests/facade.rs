@@ -58,6 +58,54 @@ fn handshake_and_data_through_the_root() {
     });
 }
 
+/// `ServerConfig::enable_grease` (RFC 8701 §4.1) is reachable through the
+/// root: with it on, the server's CertificateRequest and NewSessionTicket
+/// messages carry GREASE values, and a client still authenticates with a
+/// certificate and resumes from the tickets.
+#[test]
+fn server_grease_with_client_authentication_through_the_root() {
+    let pki = Pki::new();
+    let mut server_config = pki.server_config_with_client_auth();
+    server_config.enable_grease = true;
+    let server_config = Arc::new(server_config);
+    let client_config = Arc::new(pki.client_config_with_cert());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    for expected in [HandshakeKind::Full, HandshakeKind::Resumed] {
+        let conn = ClientConnection::new(client_config.clone(), localhost()).unwrap();
+        let tcp = TcpStream::connect(addr).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (tcp, _) = listener.accept().unwrap();
+                let conn = ServerConnection::new(server_config.clone()).unwrap();
+                let mut tls = StreamOwned::new(conn, tcp);
+                let mut request = [0u8; 5];
+                tls.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hello");
+                let certs = tls.conn.peer_certificates().unwrap().to_vec();
+                tls.write_all(b"world").unwrap();
+                tls.conn.send_close_notify();
+                tls.flush().unwrap();
+                certs
+            });
+
+            let mut tls = StreamOwned::new(conn, tcp);
+            tls.write_all(b"hello").unwrap();
+            // Reading to the end takes in the tickets.
+            let mut reply = Vec::new();
+            tls.read_to_end(&mut reply).unwrap();
+            assert_eq!(reply, b"world");
+            assert_eq!(tls.conn.handshake_kind(), Some(expected));
+            assert_eq!(
+                tls.conn.protocol_version(),
+                Some(browntls::ProtocolVersion::TLSv1_3)
+            );
+            assert_eq!(server.join().unwrap()[0], pki.client_chain[0]);
+        });
+    }
+}
+
 /// `native`: the built-in provider, which the configurations above were
 /// built with.
 #[test]
@@ -89,6 +137,35 @@ fn tls12_is_nameable() {
     assert!(browntls::ALL_VERSIONS.contains(&&browntls::version::TLS12));
 }
 
+/// Client certificate URLs (RFC 6066 §5) are configured through the root:
+/// the PkiPath helpers, the client's URLs and the server's policy.
+#[test]
+fn certificate_url_is_nameable() {
+    use browntls::certificate_url::{
+        CertificateUrl, ClientCertificateUrlPolicy, UrlAndHash, decode_pki_path, encode_pki_path,
+    };
+
+    let chain = [browntls::pki_types::CertificateDer::from(vec![0x30, 0x00])];
+    let path = encode_pki_path(&chain).unwrap();
+    assert_eq!(path, [0x30, 0x02, 0x30, 0x00]);
+    assert_eq!(decode_pki_path(&path).unwrap(), chain);
+    let entry = UrlAndHash::for_object(
+        "http://certs.example/p",
+        &path,
+        browntls::crypto::native::sha1,
+    )
+    .unwrap();
+    let urls = CertificateUrl::pkipath(entry).unwrap();
+
+    let mut client = Pki::new().client_config();
+    client.enable_client_certificate_url = true;
+    let mut server = Pki::new().server_config();
+    server.client_certificate_url = Some(ClientCertificateUrlPolicy::new(
+        browntls::crypto::native::sha1,
+    ));
+    assert_eq!(urls.entries().len(), 1);
+}
+
 #[cfg(not(feature = "tls12"))]
 #[test]
 fn tls12_is_absent() {
@@ -108,4 +185,63 @@ fn certificate_compressors_follow_the_features() {
     assert_eq!(enabled.contains(&Alg::Zlib), cfg!(feature = "zlib"));
     assert_eq!(enabled.contains(&Alg::Brotli), cfg!(feature = "brotli"));
     assert_eq!(enabled.contains(&Alg::Zstd), cfg!(feature = "zstd"));
+}
+
+/// Certificate Transparency 2.0 (RFC 9162): the TLS side at the root, the
+/// PKI side under `pki_types`.
+#[test]
+fn transparency_is_nameable() {
+    let requirements = browntls::transparency::CtV2Requirements::new(
+        browntls::revocation::RevocationDigests::native(),
+        Vec::new(),
+    );
+    assert_eq!(requirements.min_verified_scts, 1);
+    // §6.3: a `TransItemList` is not empty.
+    assert!(browntls::pki_types::transparency::TransItemList::parse(&[0, 0]).is_err());
+    let mut config = Pki::new().client_config();
+    config.request_transparency_info = true;
+}
+
+/// `trusted_ca_keys` (RFC 6066 §6), named through `browntls` only: a TLS 1.2
+/// server whose resolver follows the client's list acknowledges it.
+#[cfg(feature = "tls12")]
+#[test]
+fn trusted_ca_keys_through_the_root() {
+    use browntls::server::{ResolvesServerCert, ResolvesServerCertUsingTrustedCaKeys};
+    use browntls::{ServerConfig, TrustedAuthority};
+
+    let pki = Pki::new();
+    let sha1 = browntls::crypto::native::sha1;
+    let mut resolver = ResolvesServerCertUsingTrustedCaKeys::new(Arc::new(
+        browntls::sign::SingleCertAndKey::from(pki.certified_key()),
+    ));
+    resolver
+        .add_for_root(pki.ca(), sha1, pki.certified_key())
+        .unwrap();
+    let resolver: Arc<dyn ResolvesServerCert> = Arc::new(resolver);
+    let server_config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&browntls::version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    let mut client_config = pki.client_config();
+    client_config.trusted_ca_keys = Some(vec![TrustedAuthority::x509_name(pki.ca()).unwrap()]);
+
+    let mut client = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+    while client.is_handshaking() || server.is_handshaking() {
+        let mut buf = Vec::new();
+        client.write_tls(&mut buf).unwrap();
+        server.read_tls(&mut &buf[..]).unwrap();
+        server.process_new_packets().unwrap();
+        buf.clear();
+        server.write_tls(&mut buf).unwrap();
+        client.read_tls(&mut &buf[..]).unwrap();
+        client.process_new_packets().unwrap();
+    }
+    assert!(client.trusted_ca_keys_acknowledged());
+    assert_eq!(
+        client.protocol_version(),
+        Some(browntls::ProtocolVersion::TLSv1_2)
+    );
 }

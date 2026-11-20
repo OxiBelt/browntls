@@ -9,6 +9,7 @@ use super::{
     ClientHello, EarlyDataState, PostHandshakeAuthStatus, ServerConfig, ServerConnectionData,
 };
 use crate::conn::ConnectionCore;
+use crate::delegated_credential::DelegatedCredential;
 use crate::error::Error;
 use crate::sync::Arc;
 use crate::vecbuf::ChunkVecBuffer;
@@ -106,6 +107,16 @@ impl ServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// The delegated credential (RFC 9345 §4.1.2) the client authenticated
+    /// with, once its CertificateVerify has been verified with the
+    /// credential's key (and, after the handshake, once the Finished of
+    /// that answer has verified); `None` when the client signed with its
+    /// certificate key, sent no certificate, or the session was resumed.
+    /// It belongs to the certificate `peer_certificates` returns.
+    pub fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.inner.core.data.client_delegated_credential.as_ref()
     }
 
     /// What was decided about Encrypted Client Hello. With

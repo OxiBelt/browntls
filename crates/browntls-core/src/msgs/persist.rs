@@ -411,6 +411,10 @@ pub(crate) struct ServerSessionValue {
     /// The absolute expiry of the server delegated credential that
     /// authenticated the original TLS 1.3 full handshake.
     pub(crate) delegated_credential_expiry: Option<UnixTime>,
+    /// The absolute expiry of the client delegated credential (RFC 9345
+    /// §4.1.2) that authenticated `client_cert_chain` in the original
+    /// TLS 1.3 full handshake.
+    pub(crate) client_delegated_credential_expiry: Option<UnixTime>,
     /// The original handshake authenticated with only an external PSK.
     pub(crate) certificate_free: bool,
 }
@@ -442,6 +446,7 @@ impl ServerSessionValue {
             freshness: None,
             external_psk: None,
             delegated_credential_expiry: None,
+            client_delegated_credential_expiry: None,
             certificate_free: false,
         }
     }
@@ -506,6 +511,10 @@ impl fmt::Debug for ServerSessionValue {
                 "delegated_credential_expiry",
                 &self.delegated_credential_expiry,
             )
+            .field(
+                "client_delegated_credential_expiry",
+                &self.client_delegated_credential_expiry,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -554,12 +563,16 @@ impl Codec<'_> for ServerSessionValue {
                 PayloadU8::new(binding.key_tag.clone()).encode(bytes);
             }
         }
-        match self.delegated_credential_expiry {
-            None => 0u8.encode(bytes),
-            Some(expiry) => {
-                1u8.encode(bytes);
-                expiry.as_secs().encode(bytes);
-            }
+        // A bit per delegated credential deadline: 1 for the server's, 2
+        // for the client's; the deadlines follow in that order.
+        let deadlines = [
+            self.delegated_credential_expiry,
+            self.client_delegated_credential_expiry,
+        ];
+        let tag = u8::from(deadlines[0].is_some()) | (u8::from(deadlines[1].is_some()) << 1);
+        tag.encode(bytes);
+        for expiry in deadlines.into_iter().flatten() {
+            expiry.as_secs().encode(bytes);
         }
         if self.certificate_free {
             1u8.encode(bytes);
@@ -622,19 +635,30 @@ impl Codec<'_> for ServerSessionValue {
             }
             _ => return Err(InvalidMessage::IllegalEmptyValue),
         };
-        let delegated_credential_expiry = match u8::read(r)? {
-            0 => None,
-            1 => Some(UnixTime::since_unix_epoch(core::time::Duration::from_secs(
-                u64::read(r)?,
-            ))),
-            _ => return Err(InvalidMessage::IllegalEmptyValue),
+        let deadlines = u8::read(r)?;
+        if deadlines > 3 {
+            return Err(InvalidMessage::IllegalEmptyValue);
+        }
+        let mut deadline = |bit: u8| -> Result<Option<UnixTime>, InvalidMessage> {
+            if deadlines & bit == 0 {
+                return Ok(None);
+            }
+            Ok(Some(UnixTime::since_unix_epoch(
+                core::time::Duration::from_secs(u64::read(r)?),
+            )))
         };
+        let delegated_credential_expiry = deadline(1)?;
+        let client_delegated_credential_expiry = deadline(2)?;
         // A DTLS 1.3 session is a TLS 1.3 one issued over DTLS.
         let tls13 = matches!(
             version,
             ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
         );
-        if delegated_credential_expiry.is_some() && !tls13 {
+        // Delegated credentials are TLS 1.3 only, and a client's
+        // authenticates a certificate chain.
+        if (deadlines != 0 && !tls13)
+            || (client_delegated_credential_expiry.is_some() && client_cert_chain.is_none())
+        {
             return Err(InvalidMessage::IllegalEmptyValue);
         }
         let certificate_free = if r.any_left() {
@@ -666,6 +690,7 @@ impl Codec<'_> for ServerSessionValue {
             freshness: None,
             external_psk,
             delegated_credential_expiry,
+            client_delegated_credential_expiry,
             certificate_free,
         })
     }

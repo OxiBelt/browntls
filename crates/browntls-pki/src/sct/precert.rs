@@ -1,6 +1,6 @@
 //! Reconstruction of the `TBSCertificate` a log signed for a precertificate
-//! (RFC 6962 §3.2) from the final certificate, and the `digitally-signed`
-//! input of an SCT.
+//! (RFC 6962 §3.2, RFC 9162 §8.1.2) from the final certificate, and the
+//! `digitally-signed` input of a version 1 SCT.
 
 use alloc::vec::Vec;
 
@@ -21,15 +21,58 @@ pub(super) struct PrecertTbs<'a> {
 }
 
 /// Rebuilds the `TBSCertificate` of `cert` without its embedded SCT list
-/// extension. Every other octet is copied as encoded; only the lengths of
-/// the enclosing `Extensions`, `[3]` and `TBSCertificate` elements are
-/// re-encoded (minimally, as DER). When the SCT list was the only extension
-/// the `extensions` field is omitted, as RFC 5280 requires of an empty list.
+/// extension: [`tbs_without_extensions`] for that one extension.
 ///
 /// A certificate without the extension yields its `TBSCertificate` unchanged.
 pub(super) fn tbs_without_sct_list<'a>(cert: &Cert<'a>) -> Result<PrecertTbs<'a>, SctError> {
-    let malformed = |_| SctError::MalformedCertificate;
+    let rebuilt = tbs_without_extensions(cert, [EMBEDDED_SCT_LIST_OID]).map_err(|e| match e {
+        RebuildError::Malformed => SctError::MalformedCertificate,
+        RebuildError::Duplicate => SctError::DuplicateSctExtension,
+    })?;
+    let [sct_list_extension] = rebuilt.removed;
+    Ok(PrecertTbs {
+        tbs: rebuilt.tbs,
+        sct_list_extension,
+    })
+}
+
+/// Why a `TBSCertificate` could not be rebuilt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RebuildError {
+    /// The certificate's encoding could not be re-read or re-encoded.
+    Malformed,
+    /// One of the extensions to remove occurs more than once.
+    Duplicate,
+}
+
+/// A `TBSCertificate` rebuilt without some extensions.
+pub(crate) struct RebuiltTbs<'a, const N: usize> {
+    /// The complete `TBSCertificate` (tag and length included).
+    pub(crate) tbs: Vec<u8>,
+    /// For each removed identifier, the `extnValue` contents of its
+    /// extension, if the certificate had it.
+    pub(crate) removed: [Option<&'a [u8]>; N],
+}
+
+/// Rebuilds the `TBSCertificate` of `cert` without the extensions whose
+/// `extnID` contents are listed in `oids`. Every other octet is copied as
+/// encoded; only the lengths of the enclosing `Extensions`, `[3]` and
+/// `TBSCertificate` elements are re-encoded (minimally, as DER). When no
+/// extension remains the `extensions` field is omitted, as RFC 5280 requires
+/// of an empty list.
+///
+/// A certificate with none of the extensions yields its `TBSCertificate`
+/// unchanged.
+pub(crate) fn tbs_without_extensions<'a, const N: usize>(
+    cert: &Cert<'a>,
+    oids: [&[u8]; N],
+) -> Result<RebuiltTbs<'a, N>, RebuildError> {
+    let malformed = |_| RebuildError::Malformed;
     let tbs = der::read_all(cert.signed.data, |r| r.expect(tag::SEQUENCE)).map_err(malformed)?;
+    let unchanged = || RebuiltTbs {
+        tbs: cert.signed.data.to_vec(),
+        removed: [None; N],
+    };
 
     // Locate the extensions field, which certificate parsing has checked to
     // be the last element of the TBSCertificate.
@@ -44,25 +87,19 @@ pub(super) fn tbs_without_sct_list<'a>(cert: &Cert<'a>) -> Result<PrecertTbs<'a>
         }
         prefix_len = prefix_len.saturating_add(field.raw.len());
     }
-    let unchanged = || PrecertTbs {
-        tbs: cert.signed.data.to_vec(),
-        sct_list_extension: None,
-    };
     let Some(wrapped) = wrapped else {
         return Ok(unchanged());
     };
     if !fields.at_end() {
-        return Err(SctError::MalformedCertificate);
+        return Err(RebuildError::Malformed);
     }
-    let prefix = tbs
-        .get(..prefix_len)
-        .ok_or(SctError::MalformedCertificate)?;
+    let prefix = tbs.get(..prefix_len).ok_or(RebuildError::Malformed)?;
     let extensions = der::read_all(wrapped, |r| r.expect(tag::SEQUENCE)).map_err(malformed)?;
 
-    // Find the single SCT list extension and the octets around it.
+    // Keep every other extension, in order, and note the removed ones.
+    let mut removed = [None; N];
+    let mut kept = Vec::with_capacity(extensions.len());
     let mut reader = Reader::new(extensions);
-    let mut offset = 0usize;
-    let mut found: Option<(usize, usize, &'a [u8])> = None;
     while !reader.at_end() {
         let raw = reader.expect_tlv(tag::SEQUENCE).map_err(malformed)?;
         let (id, value) = der::read_all(raw.value, |ext| {
@@ -71,43 +108,36 @@ pub(super) fn tbs_without_sct_list<'a>(cert: &Cert<'a>) -> Result<PrecertTbs<'a>
             Ok((id, ext.expect(tag::OCTET_STRING)?))
         })
         .map_err(malformed)?;
-        let end = offset.saturating_add(raw.raw.len());
-        if id == EMBEDDED_SCT_LIST_OID {
-            if found.is_some() {
-                return Err(SctError::DuplicateSctExtension);
+        match oids.iter().position(|oid| *oid == id) {
+            Some(index) => {
+                let slot = removed.get_mut(index).ok_or(RebuildError::Malformed)?;
+                if slot.is_some() {
+                    return Err(RebuildError::Duplicate);
+                }
+                *slot = Some(value);
             }
-            found = Some((offset, end, value));
+            None => kept.extend_from_slice(raw.raw),
         }
-        offset = end;
     }
-    let Some((start, end, value)) = found else {
+    if removed.iter().all(Option::is_none) {
         return Ok(unchanged());
-    };
-    let before = extensions
-        .get(..start)
-        .ok_or(SctError::MalformedCertificate)?;
-    let after = extensions
-        .get(end..)
-        .ok_or(SctError::MalformedCertificate)?;
+    }
 
-    let remaining = before.len().saturating_add(after.len());
+    let remaining = kept.len();
     let mut field = Vec::new();
     if remaining != 0 {
         let sequence_len = header_len(remaining).saturating_add(remaining);
-        push_header(&mut field, EXTENSIONS_TAG, sequence_len)?;
-        push_header(&mut field, tag::SEQUENCE, remaining)?;
-        field.extend_from_slice(before);
-        field.extend_from_slice(after);
+        push_header(&mut field, EXTENSIONS_TAG, sequence_len)
+            .map_err(|_| RebuildError::Malformed)?;
+        push_header(&mut field, tag::SEQUENCE, remaining).map_err(|_| RebuildError::Malformed)?;
+        field.extend_from_slice(&kept);
     }
     let contents_len = prefix.len().saturating_add(field.len());
     let mut out = Vec::with_capacity(contents_len.saturating_add(4));
-    push_header(&mut out, tag::SEQUENCE, contents_len)?;
+    push_header(&mut out, tag::SEQUENCE, contents_len).map_err(|_| RebuildError::Malformed)?;
     out.extend_from_slice(prefix);
     out.extend_from_slice(&field);
-    Ok(PrecertTbs {
-        tbs: out,
-        sct_list_extension: Some(value),
-    })
+    Ok(RebuiltTbs { tbs: out, removed })
 }
 
 /// The number of octets of a DER tag and length for `len` content octets
@@ -351,6 +381,58 @@ mod tests {
             assert_eq!(rebuilt.tbs, cert.signed.data);
             assert_eq!(rebuilt.sct_list_extension, None);
         }
+    }
+
+    /// RFC 9162 §8.1.2 removes the Transparency Information extension and
+    /// the version 1 SCT list, in whichever order they appear.
+    #[test]
+    fn removes_both_transparency_extensions() {
+        const TRANSPARENCY_INFO: &[u8] = &[0x2b, 0x65, 0x4b];
+        let v1 = extension(EMBEDDED_SCT_LIST_OID, &tlv(tag::OCTET_STRING, &[0x11; 9]));
+        let v2 = extension(TRANSPARENCY_INFO, &tlv(tag::OCTET_STRING, &[0x22; 7]));
+        let other = extension(OTHER_OID, &[0x05, 0x00]);
+        let layouts = [
+            (vec![v1.clone(), v2.clone()], None),
+            (vec![v2.clone(), v1.clone()], None),
+            (
+                vec![v2.clone(), other.clone(), v1.clone()],
+                Some(vec![other.clone()]),
+            ),
+            (
+                vec![other.clone(), v1.clone(), v2.clone()],
+                Some(vec![other.clone()]),
+            ),
+        ];
+        for key_len in [1, 100, 200] {
+            for (with, without) in &layouts {
+                let with = certificate(key_len, Some(with.as_slice()));
+                let without = certificate(key_len, without.as_deref());
+                let with = Cert::from_der(&with).unwrap();
+                let without = Cert::from_der(&without).unwrap();
+                let rebuilt =
+                    tbs_without_extensions(&with, [TRANSPARENCY_INFO, EMBEDDED_SCT_LIST_OID])
+                        .unwrap();
+                assert_eq!(rebuilt.tbs, without.signed.data);
+                assert_eq!(
+                    rebuilt.removed,
+                    [
+                        Some(&tlv(tag::OCTET_STRING, &[0x22; 7])[..]),
+                        Some(&tlv(tag::OCTET_STRING, &[0x11; 9])[..])
+                    ]
+                );
+            }
+        }
+        // Only one of them.
+        let der = certificate(32, Some(&[other.clone(), v2.clone()][..]));
+        let cert = Cert::from_der(&der).unwrap();
+        let rebuilt = tbs_without_extensions(&cert, [TRANSPARENCY_INFO, EMBEDDED_SCT_LIST_OID]);
+        assert!(rebuilt.unwrap().removed[1].is_none());
+        let der = certificate(32, Some(&[v2.clone(), v2][..]));
+        let cert = Cert::from_der(&der).unwrap();
+        assert!(matches!(
+            tbs_without_extensions(&cert, [TRANSPARENCY_INFO, EMBEDDED_SCT_LIST_OID]),
+            Err(RebuildError::Duplicate)
+        ));
     }
 
     #[test]

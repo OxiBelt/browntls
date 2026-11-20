@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::hash_hs::HandshakeHash;
 use crate::log::{trace, warning};
 use crate::msgs::codec::Codec;
+use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     HandshakeMessagePayload, HandshakePayload, NewSessionTicketPayloadTls13,
 };
@@ -77,15 +78,27 @@ pub(super) fn emit_ticket(
     let rng = config.provider.secure_random;
     let nonce = crate::rand::random_vec(rng, 32)?;
     let age_add = crate::rand::random_u32(rng)?;
+    // RFC 8701 §4.1: GREASE extensions, fresh for every ticket. Drawn with
+    // the other random values, before the session is stored: nothing that
+    // can fail follows the store.
+    let grease = config
+        .enable_grease
+        .then(|| ServerGreaseValues::random(rng))
+        .transpose()?;
     let secret = key_schedule
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
     let now = config.current_time()?;
-    let lifetime = bound_ticket_lifetime_by_delegated_credential(
-        configured_lifetime,
-        now,
+    // The session must not outlive a delegated credential that
+    // authenticated either side (RFC 9345).
+    let lifetime = [
         cx.data.delegated_credential_expiry,
-    );
+        cx.data.client_delegated_credential_expiry,
+    ]
+    .into_iter()
+    .fold(configured_lifetime, |lifetime, expiry| {
+        bound_ticket_lifetime_by_delegated_credential(lifetime, now, expiry)
+    });
     if lifetime == 0 {
         return Ok(());
     }
@@ -105,6 +118,7 @@ pub(super) fn emit_ticket(
             .external_psk_binding(&config.provider.cipher_suites, &secret)?,
     );
     value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+    value.client_delegated_credential_expiry = cx.data.client_delegated_credential_expiry;
     value.certificate_free = cx.data.certificate_free;
     let plain = value.get_encoding();
 
@@ -132,6 +146,10 @@ pub(super) fn emit_ticket(
         } else {
             payload.exts.max_early_data_size = Some(config.max_early_data_size);
         }
+    }
+    if let Some(grease) = grease {
+        payload.exts.grease_first = Some(grease.first_extension);
+        payload.exts.grease_last = Some(grease.last_extension);
     }
     let m = Message {
         version: ProtocolVersion::TLSv1_3,

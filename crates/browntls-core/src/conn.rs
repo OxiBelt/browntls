@@ -2,6 +2,7 @@
 //! the buffered I/O API around it.
 
 mod buffered;
+mod certificate_url;
 #[cfg(all(test, feature = "std", feature = "native"))]
 mod control_backlog_tests;
 
@@ -43,6 +44,16 @@ pub(crate) trait State<Data>: Send + Sync {
         _status: Option<RevocationStatus>,
     ) -> Result<Box<dyn State<Data>>, Error> {
         Err(Error::general("no revocation continuation"))
+    }
+
+    /// Continues a TLS 1.2 server handshake with the client certificate
+    /// chain fetched for a CertificateURL message (RFC 6066 §5).
+    fn resume_client_certificate_url(
+        self: Box<Self>,
+        _cx: &mut Context<'_, Data>,
+        _chain: crate::msgs::handshake::CertificateChain<'static>,
+    ) -> Result<Box<dyn State<Data>>, Error> {
+        Err(Error::general("no client certificate URL continuation"))
     }
 
     /// RFC 5705 / RFC 8446 §7.5 keying material export.
@@ -178,6 +189,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         loop {
             if self.common_state.has_received_close_notify
                 || self.common_state.pending_revocation.is_some()
+                || self.common_state.pending_certificate_url.is_some()
             {
                 // RFC 8446 §6.1: everything after close_notify is ignored.
                 break;
@@ -192,7 +204,9 @@ impl<Data: SideData> ConnectionCore<Data> {
 
         self.state = Ok(state);
 
-        if self.common_state.pending_revocation.is_none() {
+        if self.common_state.pending_revocation.is_none()
+            && self.common_state.pending_certificate_url.is_none()
+        {
             self.maybe_send_key_update()?;
         }
 
@@ -378,9 +392,10 @@ impl<Data: SideData> ConnectionCore<Data> {
                 let epoch = self.read_epoch();
                 let bytes = &self.deframer.joiner.buffered()[..len];
                 let parse_version = self.common_state.negotiated_version.unwrap_or(version);
-                let result = match HandshakeMessagePayload::read_version(
-                    &mut CodecReader::init(bytes),
+                let result = match crate::cached_info::read_handshake(
+                    bytes,
                     parse_version,
+                    self.common_state.cached_info.expect_hash_form,
                 ) {
                     Ok(parsed) => {
                         let msg = Message {
@@ -485,6 +500,7 @@ impl<Data: SideData> ConnectionCore<Data> {
     /// forget any session the failed connection was using.
     pub(crate) fn fail(&mut self, err: Error) -> Error {
         self.common_state.pending_revocation = None;
+        self.common_state.pending_certificate_url = None;
         self.data
             .on_fatal_error(self.common_state.negotiated_version);
         self.state = Err(err.clone());

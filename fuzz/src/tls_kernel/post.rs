@@ -95,6 +95,8 @@ impl KernelSide for ClientConnectionData {
 impl KernelSide for ServerConnectionData {
     fn extras(off: &mut Offloaded<Self>, flag: u8) {
         let _ = off.conn.post_handshake_auth_status();
+        // No server here asks for delegated credentials.
+        assert!(off.conn.client_delegated_credential().is_none());
         if flag & 1 != 0 {
             let before_failed = off.failed;
             if let Err(err) = off.conn.request_client_auth() {

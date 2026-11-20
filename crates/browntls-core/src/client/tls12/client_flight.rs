@@ -9,7 +9,7 @@ use super::{
     ContentType, Error, ExpectCcs, ExpectNewTicket, ExpectServerDone, HandshakeMessagePayload,
     HandshakePayload, HandshakeSignatureValid, HandshakeType, KxState, Message, MessagePayload,
     NextStateOrError, PeerMisbehaved, ProtocolVersion, ServerCertVerified, Side, State,
-    emit_certificate, emit_certverify, emit_client_kx, emit_finished, mac_order, tls13,
+    emit_certverify, emit_client_kx, emit_finished, mac_order, tls13,
 };
 use crate::msgs::codec::Codec;
 use crate::revocation::finish_or_pause;
@@ -41,10 +41,10 @@ impl State<ClientConnectionData> for ExpectServerDone {
                 )
             })?;
         let now = st.config.current_time()?;
-        let check = st
+        let (check, transparency_status) = st
             .config
             .verifier()
-            .verify_server_cert_with_evidence(
+            .verify_server_cert_with_transparency(
                 end_entity,
                 intermediates,
                 &st.server_name,
@@ -76,6 +76,8 @@ impl State<ClientConnectionData> for ExpectServerDone {
 
         finish_or_pause(cx, check, move |cx, status| {
             cx.common.peer_revocation_status = status;
+            cx.data.transparency.info = st.server_cert.transparency_info.take();
+            cx.data.transparency.status = transparency_status;
             st.finish_client_flight(cx, sig_verified)
         })
     }
@@ -91,16 +93,14 @@ impl ExpectServerDone {
         let cert_verified = ServerCertVerified::assertion();
         cx.common.peer_certificates = Some(st.server_cert.cert_chain);
 
-        // 3. Client certificate, if requested.
-        if let Some(client_auth) = &st.client_auth {
-            match client_auth {
-                ClientAuthDetails::Empty { .. } => {
-                    emit_certificate(&mut st.transcript, None, cx.common)
-                }
-                ClientAuthDetails::Verify { certkey, .. } => {
-                    emit_certificate(&mut st.transcript, Some(certkey), cx.common)
-                }
-            }
+        // 3. Client certificate (or the URLs of RFC 6066 §5), if requested.
+        if let Some(client_auth) = st.client_auth.take() {
+            st.client_auth = Some(super::certificate_url::emit_client_certificate(
+                &mut st.transcript,
+                client_auth,
+                st.hello.certificate_url_accepted,
+                cx.common,
+            ));
         }
 
         // 4. Our key exchange, and the master secret.
@@ -167,6 +167,7 @@ impl ExpectServerDone {
             resuming: false,
             cert_verified,
             sig_verified,
+            cached_info: st.hello.cached_info.take(),
         };
         Ok(if st.must_issue_new_ticket {
             Box::new(ExpectNewTicket { next })

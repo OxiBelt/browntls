@@ -12,11 +12,19 @@
 //! * TLS 1.3 handshakes with a delegated credential whose validity, the
 //!   peers' clocks and an optional tampering are fuzz-chosen, so that the
 //!   expiry and seven-day boundaries of RFC 9345 §4.1.3 are crossed;
+//! * the same for a client that authenticates with a credential (§4.1.2),
+//!   in the handshake or after it, to a buffered or unbuffered server that
+//!   asks for one or not, with fuzz-chosen schemes, a credential issued for
+//!   the wrong side or attached as a server's, and resumption;
+//! * [`validate`] on its own, with fuzz-chosen certificates, sides, offered
+//!   schemes and clock;
 //! * RFC 9261 exported authenticators between a connected client and server
 //!   (TLS 1.3 or TLS 1.2, each end buffered or unbuffered): requests with
 //!   fuzzed contexts and extensions, answers with fuzz-chosen certificates
 //!   or declined, spontaneous server authenticators, tampered and replayed
-//!   authenticators, and fuzzed request and authenticator bytes.
+//!   authenticators, and fuzzed request and authenticator bytes;
+//! * RFC 6066 §5 client certificate URLs (`certificate_url`): see
+//!   its module for what it reaches and checks.
 //!
 //! Checked properties: decoding matches an independent parser of RFC 9345
 //! §4 and re-encodes byte for byte; issuance succeeds exactly when the
@@ -24,10 +32,15 @@
 //! `signed_message` (which matches an independent construction) while any
 //! tampering makes verification fail; generated keys match their
 //! credential; a peer accepts a credential exactly when it is within its
-//! validity window and untampered; an authenticator validates once, for the
-//! request it answers, with the expected chain (or none when declined);
-//! any altered, replayed or fuzzed authenticator is rejected; no exchange
-//! queues TLS records on either connection.
+//! validity window and untampered; a server reports a client's credential
+//! only when it asked for one and the credential passes an independent
+//! validation, and a credential that passes it, presented when the
+//! client's own clock and the request allow, is accepted; `validate`
+//! returns the expiry exactly when the independent validation passes, and
+//! fails otherwise with an RFC 9345 §4.1.3 refusal; an authenticator
+//! validates once, for the request it answers, with the expected chain (or
+//! none when declined); any altered, replayed or fuzzed authenticator is
+//! rejected; no exchange queues TLS records on either connection.
 //!
 //! Input: up to 32 operations, each an operation byte followed by its
 //! arguments (see [`run`]).
@@ -35,6 +48,7 @@
 //! [`generate`]: browntls_core::crypto::native::delegated_credential::generate
 //! [`DelegatedCredentialKey`]: browntls_core::delegated_credential::DelegatedCredentialKey
 //! [`valid_time_until`]: browntls_core::delegated_credential::valid_time_until
+//! [`validate`]: browntls_core::delegated_credential::validate
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -46,13 +60,18 @@ use browntls_core::pki_types::{
 };
 use browntls_core::sign::{CertifiedKey, SigningKey};
 use browntls_core::time_provider::TimeProvider;
-use browntls_core::{DigitallySignedStruct, RootCertStore, Side, SignatureScheme};
+use browntls_core::{
+    DigitallySignedStruct, Error, PeerMisbehaved, RootCertStore, Side, SignatureScheme,
+};
 
-use self::credential::{decode, encode, issue, native_generate, validity};
+use self::client_auth::client_auth;
+use self::credential::{decode, encode, issue, native_generate, validate, validity};
 use self::exported::{Ea, exported};
 use self::handshake::handshake;
 use crate::input::Input;
 
+mod certificate_url;
+mod client_auth;
 mod credential;
 mod exported;
 mod handshake;
@@ -127,6 +146,11 @@ struct Fixture {
     /// A P-256 `localhost` certificate without `DelegationUsage`.
     plain: CertificateDer<'static>,
     plain_key: Arc<dyn SigningKey>,
+    /// A P-256 client certificate that permits delegation, with the same
+    /// validity.
+    client_delegation: CertificateDer<'static>,
+    client_delegation_pkcs8: Vec<u8>,
+    client_delegation_key: Arc<dyn SigningKey>,
     not_before: u64,
     not_after: u64,
     /// Credential keys: ECDSA P-256 and Ed25519.
@@ -188,17 +212,31 @@ fn fixture() -> &'static Fixture {
         let start = rcgen::date_time_ymd(2026, 1, 1);
         let end = rcgen::date_time_ymd(2027, 1, 1);
         let server = rcgen::ExtendedKeyUsagePurpose::ServerAuth;
+        // DelegationUsage (RFC 9345 §4.2), with a NULL value.
+        let delegation_usage = || {
+            rcgen::CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 4, 1, 44363, 44],
+                vec![0x05, 0x00],
+            )
+        };
         let delegation_key = rcgen::KeyPair::generate().expect("key");
         let delegation = leaf(&issuer, &delegation_key, "localhost", server.clone(), |p| {
             p.not_before = start;
             p.not_after = end;
-            // DelegationUsage (RFC 9345 §4.2), with a NULL value.
-            p.custom_extensions
-                .push(rcgen::CustomExtension::from_oid_content(
-                    &[1, 3, 6, 1, 4, 1, 44363, 44],
-                    vec![0x05, 0x00],
-                ));
+            p.custom_extensions.push(delegation_usage());
         });
+        let client_delegation_key = rcgen::KeyPair::generate().expect("key");
+        let client_delegation = leaf(
+            &issuer,
+            &client_delegation_key,
+            "client.example",
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            |p| {
+                p.not_before = start;
+                p.not_after = end;
+                p.custom_extensions.push(delegation_usage());
+            },
+        );
         let plain_key = rcgen::KeyPair::generate().expect("key");
         let plain = leaf(&issuer, &plain_key, "localhost", server.clone(), |p| {
             p.not_before = start;
@@ -250,6 +288,9 @@ fn fixture() -> &'static Fixture {
             delegation,
             plain_key: load(&plain_key.serialize_der()),
             plain,
+            client_delegation_pkcs8: client_delegation_key.serialize_der(),
+            client_delegation_key: load(&client_delegation_key.serialize_der()),
+            client_delegation,
             not_before: start.unix_timestamp() as u64,
             not_after: end.unix_timestamp() as u64,
             dc_keys,
@@ -356,6 +397,68 @@ fn signature_verifies(
     .is_ok()
 }
 
+/// What a peer offered and saw, for [`expected_validation`].
+struct Offer<'a> {
+    /// The side that presents the credential.
+    side: Side,
+    end_entity: &'a CertificateDer<'a>,
+    dc_schemes: &'a [SignatureScheme],
+    sig_schemes: &'a [SignatureScheme],
+    cert_verify_scheme: SignatureScheme,
+    now: u64,
+}
+
+/// The expiry a peer must find when it validates `dc` (RFC 9345 §4.1.1,
+/// §4.1.3), or `None` when it must refuse it: worked out from the fixture
+/// and the wire form alone. Its signature is checked over the harness's
+/// own construction of the signed bytes.
+fn expected_validation(dc: &DelegatedCredential, offer: &Offer<'_>) -> Option<u64> {
+    let fixture = fixture();
+    // Only the two delegation certificates permit delegation; both are
+    // valid from `not_before` to `not_after`.
+    let end_entity = offer.end_entity.as_ref();
+    if end_entity != fixture.delegation.as_ref() && end_entity != fixture.client_delegation.as_ref()
+    {
+        return None;
+    }
+    let scheme = dc.credential.dc_cert_verify_algorithm;
+    let expiry = fixture.not_before + u64::from(dc.credential.valid_time);
+    let message = expected_signed_message(offer.side, end_entity, &dc.credential, dc.algorithm);
+    let dss = DigitallySignedStruct::new(dc.algorithm, dc.signature.clone());
+    let signed = verify_tls13_signature(
+        &message,
+        offer.end_entity,
+        &dss,
+        &fixture.provider.signature_verification_algorithms,
+    )
+    .is_ok();
+    let valid = credential_scheme_ok(scheme)
+        && offer.dc_schemes.contains(&scheme)
+        && offer.sig_schemes.contains(&dc.algorithm)
+        && offer.now < expiry
+        && expiry <= offer.now.saturating_add(MAX_VALIDITY.as_secs())
+        && expiry <= fixture.not_after
+        && offer.cert_verify_scheme == scheme
+        && signed;
+    valid.then_some(expiry)
+}
+
+/// Whether `error` is one of the refusals RFC 9345 §4.1.3 answers with
+/// `illegal_parameter`.
+fn credential_refused(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::PeerMisbehaved(
+            PeerMisbehaved::DelegatedCredentialBadSignature
+                | PeerMisbehaved::DelegatedCredentialExpired
+                | PeerMisbehaved::DelegatedCredentialSchemeMismatch
+                | PeerMisbehaved::DelegatedCredentialValidityTooLong
+                | PeerMisbehaved::DelegatedCredentialWithUnofferedScheme
+                | PeerMisbehaved::DelegatedCredentialWithoutDelegationUsage
+        )
+    )
+}
+
 // --------------------------------------------------------- fuzzed choices
 
 /// Which certificate an operation uses.
@@ -432,11 +535,12 @@ struct State {
     generations: usize,
     authenticators: usize,
     ea: Option<Ea>,
+    certificate_url_handshakes: usize,
 }
 
 /// The `tls_auth` fuzz target.
 ///
-/// Operations (first byte modulo 7):
+/// Operations (first byte modulo 10):
 ///
 /// 0. decode: a 16-bit-prefixed `DelegatedCredential`;
 /// 1. encode: valid time, schemes, key and signature fields;
@@ -449,7 +553,14 @@ struct State {
 /// 5. handshake with a credential: clock offset, server clock skew, valid
 ///    time, credential key, tampering;
 /// 6. exported authenticators: version and connection APIs (first use),
-///    then one exchange.
+///    then one exchange;
+/// 7. client certificate URLs: a sub-operation and its arguments
+///    (`certificate_url::certificate_url`);
+/// 8. client authentication with a credential: mode flags, clock offset,
+///    server clock skew, valid time, credential key, variant, schemes;
+/// 9. validation: issuing certificate and side, presented certificate and
+///    side, clock, valid time, credential key, tampering, offered schemes
+///    and CertificateVerify scheme for `validate`.
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);
@@ -458,7 +569,7 @@ pub fn run(data: &[u8]) {
         if input.is_empty() {
             break;
         }
-        match input.choose(7) {
+        match input.choose(10) {
             0 => decode(&mut input),
             1 => encode(&mut input),
             2 => issue(&mut input),
@@ -475,12 +586,22 @@ pub fn run(data: &[u8]) {
                     handshake(&mut input);
                 }
             }
-            _ => {
+            6 => {
                 if state.authenticators < MAX_AUTHENTICATORS {
                     state.authenticators += 1;
                     exported(&mut input, &mut state);
                 }
             }
+            7 => {
+                certificate_url::certificate_url(&mut input, &mut state.certificate_url_handshakes)
+            }
+            8 => {
+                if state.handshakes < MAX_HANDSHAKES {
+                    state.handshakes += 1;
+                    client_auth(&mut input);
+                }
+            }
+            _ => validate(&mut input),
         }
     }
 }

@@ -69,10 +69,14 @@ allows it, with browntls as server against the peer's client:
 - a TLS 1.2 CBC peer without Encrypt-then-MAC: browntls must refuse it by
   default (and fail for that reason), and must complete the handshake when
   `allow_mac_then_encrypt` is set;
-- the optional extensions in TLS 1.3 (also with resumption) and TLS 1.2: a
-  `record_size_limit` of 512 (RFC 8449) on the browntls side, which a peer
-  implementing it (GnuTLS) must respect, and, as a browntls client, GREASE
-  values (RFC 8701), `ticket_request` (RFC 9149) and a ClientHello padded to
+- the optional extensions in TLS 1.3 (also with resumption and with client
+  authentication) and TLS 1.2: a `record_size_limit` of 512 (RFC 8449) on
+  the browntls side, which a peer implementing it (GnuTLS) must respect;
+  GREASE values (RFC 8701) on the browntls side, in the ClientHello of a
+  client and in the TLS 1.3 NewSessionTicket and CertificateRequest messages
+  of a server (`tls13-optional-extensions-client-auth` has the peer client
+  answer a GREASE CertificateRequest with its certificate); and, as a
+  browntls client, `ticket_request` (RFC 9149) and a ClientHello padded to
   1024 bytes (RFC 7685);
 - the asynchronous streams of `browntls-tokio`, reached as `browntls::tokio`
   (`browntls-e2e --async`, a single-threaded Tokio runtime, confirmed by

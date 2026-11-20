@@ -61,6 +61,16 @@ impl Pki {
     /// Like [`Self::new`], with a client certificate for `client_names`
     /// (many of them make a large certificate).
     pub fn with_client_names(client_names: Vec<String>) -> Self {
+        Self::build(client_names, false)
+    }
+
+    /// Like [`Self::new`], with the `DelegationUsage` extension on both end
+    /// entities, so that each can sign delegated credentials (RFC 9345).
+    pub fn with_delegation() -> Self {
+        Self::build(vec!["client.example".to_string()], true)
+    }
+
+    fn build(client_names: Vec<String>, delegation: bool) -> Self {
         let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -79,6 +89,11 @@ impl Pki {
         ee_params
             .distinguished_name
             .push(DnType::CommonName, "localhost");
+        if delegation {
+            ee_params
+                .custom_extensions
+                .push(delegation_usage_extension());
+        }
         let ee_cert = ee_params.signed_by(&ee_key, &issuer).unwrap();
 
         let client_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
@@ -89,6 +104,11 @@ impl Pki {
         client_params
             .distinguished_name
             .push(DnType::CommonName, "client.example");
+        if delegation {
+            client_params
+                .custom_extensions
+                .push(delegation_usage_extension());
+        }
         let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
 
         let ca = CertificateDer::from(ca_cert.der().to_vec());
@@ -172,6 +192,12 @@ impl Pki {
     pub fn connector(&self, version: &'static SupportedProtocolVersion) -> TlsConnector {
         TlsConnector::from(Arc::new(self.client_config(version)))
     }
+}
+
+/// The `DelegationUsage` extension (RFC 9345 §4.2): OID
+/// 1.3.6.1.4.1.44363.44 with a `NULL` value, non-critical.
+pub fn delegation_usage_extension() -> rcgen::CustomExtension {
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 44363, 44], vec![0x05, 0x00])
 }
 
 pub fn localhost() -> ServerName<'static> {

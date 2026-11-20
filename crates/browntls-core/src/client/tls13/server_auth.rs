@@ -12,8 +12,8 @@ use super::super::common::{ClientAuthDetails, ClientCertificateExtensions, Serve
 use super::super::hs::{ClientContext, NextStateOrError};
 use super::finished::ExpectFinished;
 use super::{
-    certificate_request_sigschemes, construct_server_verify_message, delegated_credential_schemes,
-    send_cert_path_error_alert, send_cert_verify_error_alert,
+    certificate_request_sigschemes, construct_server_verify_message, delegated_credential_request,
+    delegated_credential_schemes, send_cert_path_error_alert, send_cert_verify_error_alert,
 };
 use crate::common_state::{ConnectionRandoms, Side};
 use crate::conn::State;
@@ -38,6 +38,8 @@ pub(super) struct ExpectCertificateOrCertReq {
     pub(super) transcript: HandshakeHash,
     pub(super) key_schedule: KeyScheduleHandshake,
     pub(super) offered_sigschemes: Vec<crate::enums::SignatureScheme>,
+    /// Whether the ClientHello carried `transparency_info` (RFC 9162 §6.5).
+    pub(super) offered_transparency_info: bool,
 }
 
 impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
@@ -61,6 +63,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 client_cert_extensions: ClientCertificateExtensions::default(),
                 client_cert_compression: Vec::new(),
                 offered_sigschemes: self.offered_sigschemes,
+                offered_transparency_info: self.offered_transparency_info,
             })
             .handle(cx, m),
             MessagePayload::Handshake {
@@ -74,6 +77,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 offered_sigschemes: self.offered_sigschemes,
+                offered_transparency_info: self.offered_transparency_info,
             })
             .handle(cx, m),
             payload => Err(crate::check::inappropriate_handshake_message(
@@ -96,6 +100,7 @@ struct ExpectCertificateRequest {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
+    offered_transparency_info: bool,
 }
 
 impl State<ClientConnectionData> for ExpectCertificateRequest {
@@ -137,6 +142,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
                 None,
                 &compat_sigschemes,
                 Some(certreq.context.0.clone()),
+                delegated_credential_request(&self.config, certreq),
             )
         };
 
@@ -151,6 +157,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             client_cert_extensions: (&certreq.extensions).into(),
             client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
+            offered_transparency_info: self.offered_transparency_info,
         }))
     }
 }
@@ -168,6 +175,7 @@ struct ExpectCertificate {
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
+    offered_transparency_info: bool,
 }
 
 impl State<ClientConnectionData> for ExpectCertificate {
@@ -242,9 +250,17 @@ impl State<ClientConnectionData> for ExpectCertificate {
             ));
         }
 
+        // RFC 9162 §6.5: only on the end entity's entry, if offered.
+        let transparency_info = super::super::transparency::tls13_end_entity_list(
+            cx.common,
+            self.offered_transparency_info,
+            &cert_chain,
+        )?;
+
         let server_cert = ServerCertDetails {
             ocsp: cert_chain.ocsp_responses(),
             scts: cert_chain.sct_lists(),
+            transparency_info,
             cert_chain: cert_chain.into_certificate_chain().into_owned(),
         };
 
@@ -310,10 +326,10 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
         }
 
         let now = self.config.current_time()?;
-        let check = self
+        let (check, transparency_status) = self
             .config
             .verifier()
-            .verify_server_cert_with_evidence(
+            .verify_server_cert_with_transparency(
                 end_entity,
                 intermediates,
                 &self.server_name,
@@ -380,6 +396,8 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             cx.data.delegated_credential_expiry = delegated_credential_expiry;
             cx.common.peer_certificates = Some(self.server_cert.cert_chain);
             cx.common.peer_revocation_status = status;
+            cx.data.transparency.info = self.server_cert.transparency_info;
+            cx.data.transparency.status = transparency_status;
             Ok(Box::new(ExpectFinished {
                 config: self.config,
                 server_name: self.server_name,

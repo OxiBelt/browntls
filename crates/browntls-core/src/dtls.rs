@@ -30,6 +30,7 @@ mod flight;
 mod keys;
 mod reassembly;
 mod replay;
+mod send;
 mod state;
 #[cfg(feature = "std")]
 mod udp;

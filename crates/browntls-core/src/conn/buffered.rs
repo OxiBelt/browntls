@@ -183,8 +183,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// post-handshake authentication responses, alerts) wait to be written,
     /// so that a peer cannot force unbounded buffering in either direction.
     /// [`CommonState::wants_read`](crate::CommonState::wants_read) is false in
-    /// both cases. When an OCSP response is pending, returns `WouldBlock`
-    /// until it is resolved.
+    /// both cases. When an OCSP response or a client certificate URL answer
+    /// is pending, returns `WouldBlock` until it is resolved.
     pub fn read_tls(&mut self, rd: &mut dyn std::io::Read) -> Result<usize, std::io::Error> {
         if self.core.common_state.received_plaintext.is_full() {
             return Err(std::io::Error::other(
@@ -196,6 +196,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
                 "certificate revocation response is pending",
+            ));
+        }
+        if common.pending_client_certificate_url().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "client certificate URL answer is pending",
             ));
         }
         if common.may_send_application_data && common.control_backlog_full() {
@@ -289,6 +295,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "certificate revocation response is pending",
+                ));
+            }
+            if self.pending_client_certificate_url().is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "client certificate URL answer is pending",
                 ));
             }
 

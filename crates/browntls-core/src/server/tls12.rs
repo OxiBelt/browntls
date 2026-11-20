@@ -1,6 +1,7 @@
 //! The TLS 1.2 server handshake (RFC 5246 §7.3, RFC 8422, RFC 7627, RFC 5077,
 //! RFC 5746).
 
+mod certificate_url;
 mod client_auth;
 
 use alloc::boxed::Box;
@@ -9,9 +10,13 @@ use alloc::vec::Vec;
 
 use client_auth::{ExpectCertificate, ExpectCertificateVerify};
 
-use super::common::{ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled};
+use super::common::{
+    ActiveCertifiedKey, ClientCertAwaitingProof, client_revocation_enabled, transparency_info_for,
+};
 use super::hs::{self, NextStateOrError, ServerContext};
 use super::server_conn::{ServerConfig, ServerConnectionData};
+use crate::cached_info::ServerHelloCachedInfo;
+use crate::cached_info::server::ServerCachedInfo;
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, Side};
 use crate::conn::State;
 use crate::crypto::cipher::Tls12MacOrder;
@@ -62,6 +67,9 @@ pub(super) struct CompleteClientHelloHandling {
     pub(super) randoms: ConnectionRandoms,
     pub(super) send_ticket: bool,
     pub(super) cert_types: hs::NegotiatedCertTypes,
+    /// Whether the certificate resolver said it chose with the client's
+    /// `trusted_ca_keys` (RFC 6066 §6).
+    pub(super) trusted_ca_keys_ack: bool,
 }
 
 impl CompleteClientHelloHandling {
@@ -91,6 +99,13 @@ impl CompleteClientHelloHandling {
                 PeerMisbehaved::UnexpectedCleartextExtension,
             ));
         }
+        // RFC 8844: in every handshake, full or resumed.
+        crate::external_binding::handshake::server_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            false,
+        )?;
         let client_supports_secure_renegotiation = client_hello
             .cipher_suites
             .contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
@@ -108,8 +123,11 @@ impl CompleteClientHelloHandling {
 
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
+        // RFC 8844 §5: a bound connection neither resumes nor is resumed.
+        let resumable =
+            !client_revocation_enabled(&self.config) && self.config.external_binding.is_none();
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
-        if !client_revocation_enabled(&self.config)
+        if resumable
             && let Some(ClientSessionTicket::Offer(ticket)) =
                 &client_hello.extensions.session_ticket
             && let Some(resume) = self
@@ -128,7 +146,7 @@ impl CompleteClientHelloHandling {
             );
         }
 
-        if !client_revocation_enabled(&self.config)
+        if resumable
             && !client_hello.session_id.is_empty()
             && let Some(resume) = self
                 .config
@@ -154,10 +172,9 @@ impl CompleteClientHelloHandling {
 
         // A session created without client authentication would also
         // bypass a verifier that requires fresh authentication later.
-        let storable = !client_revocation_enabled(&self.config);
-        self.send_ticket = storable && ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket = resumable && ticket_requested && self.config.ticketer.enabled();
         self.session_id =
-            if storable && !self.send_ticket && self.config.session_storage.can_cache() {
+            if resumable && !self.send_ticket && self.config.session_storage.can_cache() {
                 SessionId::random(self.config.provider.secure_random)?
             } else {
                 SessionId::empty()
@@ -174,16 +191,38 @@ impl CompleteClientHelloHandling {
             .extensions
             .sct_request
             .and_then(|()| server_key.get_sct_list());
+        let evidence = (
+            sct_list,
+            transparency_info_for(
+                server_key.certified_key(),
+                client_hello,
+                self.cert_types.server,
+            ),
+        );
+
+        // RFC 7924 §4.1, §4.2: the Certificate and CertificateRequest, each
+        // in full or replaced by the fingerprint the client cached.
+        let cached = ServerCachedInfo::new(
+            &self.config.cached_info,
+            &self.config.provider,
+            client_hello.extensions.cached_info.as_ref(),
+            certificate_message(server_key.get_cert()),
+            certificate_request(&self.config)?.map(|request| {
+                HandshakeMessagePayload(HandshakePayload::CertificateRequest(request))
+            }),
+        );
+        cx.common.cached_info.replaced = cached.replaced();
 
         self.emit_server_hello(
             cx,
             client_hello,
             client_supports_secure_renegotiation,
             ocsp.is_some(),
-            sct_list,
+            evidence,
             false,
+            cached.extension(),
         );
-        emit_certificate(&mut self.transcript, cx.common, server_key.get_cert());
+        emit_handshake(&mut self.transcript, cx.common, cached.certificate);
         if let Some(ocsp) = ocsp {
             emit_cert_status(&mut self.transcript, cx.common, ocsp);
         }
@@ -195,12 +234,18 @@ impl CompleteClientHelloHandling {
             server_key.get_key(),
             &self.randoms,
         )?;
-        let doing_client_auth =
-            emit_certificate_req(&mut self.transcript, cx.common, &self.config)?;
+        let doing_client_auth = cached.certificate_request.is_some();
+        if let Some(request) = cached.certificate_request {
+            trace!("Sending CertificateRequest {:?}", request);
+            emit_handshake(&mut self.transcript, cx.common, request);
+        }
         emit_server_hello_done(&mut self.transcript, cx.common);
 
         if doing_client_auth {
+            let certificate_url =
+                certificate_url::acknowledged(&self.config, client_hello, &self.cert_types);
             Ok(Box::new(ExpectCertificate {
+                certificate_url,
                 config: self.config,
                 transcript: self.transcript,
                 randoms: self.randoms,
@@ -257,8 +302,9 @@ impl CompleteClientHelloHandling {
             client_hello,
             client_supports_secure_renegotiation,
             false,
-            None,
+            (None, None),
             true,
+            None,
         );
 
         let secrets = ConnectionSecrets::new_resume(
@@ -296,16 +342,19 @@ impl CompleteClientHelloHandling {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_server_hello(
         &mut self,
         cx: &mut ServerContext<'_>,
         client_hello: &ClientHelloPayload,
         secure_renegotiation: bool,
         staple_ocsp: bool,
-        sct_list: Option<&[u8]>,
+        // The SCT list (RFC 6962) and `TransItemList` (RFC 9162) to send.
+        (sct_list, transparency_info): (Option<&[u8]>, Option<&[u8]>),
         resuming: bool,
+        cached_info: Option<ServerHelloCachedInfo>,
     ) {
-        let extensions = ServerExtensions {
+        let mut extensions = ServerExtensions {
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
             // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),
@@ -321,8 +370,13 @@ impl CompleteClientHelloHandling {
             session_ticket_ack: self.send_ticket.then_some(()),
             status_request_ack: staple_ocsp.then_some(()),
             sct_list: sct_list.map(|list| Payload::new(list.to_vec())),
+            transparency_info: transparency_info.map(|list| Payload::new(list.to_vec())),
             client_certificate_type: self.cert_types.client,
             server_certificate_type: self.cert_types.server,
+            // RFC 6066 §5: never on resumption, which sends no certificate.
+            client_certificate_url: (!resuming
+                && certificate_url::acknowledged(&self.config, client_hello, &self.cert_types))
+            .then_some(()),
             alpn: cx
                 .common
                 .alpn_protocol
@@ -332,14 +386,28 @@ impl CompleteClientHelloHandling {
             server_name_ack: (!resuming)
                 .then(|| client_hello.sni().map(|_| ()))
                 .flatten(),
+            // RFC 6066 §6: an empty trusted_ca_keys when the client's list
+            // guided the chain we send; a resumed session sends no chain.
+            trusted_ca_keys_ack: (!resuming
+                && self.trusted_ca_keys_ack
+                && client_hello.extensions.trusted_ca_keys.is_some())
+            .then_some(()),
             // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
             record_size_limit: hs::record_size_limit_ack(
                 &self.config,
                 client_hello,
                 ProtocolVersion::TLSv1_2,
             ),
+            // RFC 7924 §4: the types replaced by their fingerprint.
+            cached_info,
             ..Default::default()
         };
+        // RFC 8844 §3.2, §4.3: answered in the TLS 1.2 ServerHello.
+        crate::external_binding::handshake::server_answer(
+            self.config.external_binding.as_ref(),
+            &client_hello.extensions,
+            &mut extensions,
+        );
         let sh = Message {
             version: ProtocolVersion::TLSv1_2,
             payload: MessagePayload::handshake(HandshakeMessagePayload(
@@ -360,22 +428,28 @@ impl CompleteClientHelloHandling {
     }
 }
 
-fn emit_certificate(
-    transcript: &mut HandshakeHash,
-    common: &mut CommonState,
+/// The Certificate message for `certs`.
+fn certificate_message(
     certs: &[browntls_pki::CertificateDer<'static>],
-) {
+) -> HandshakeMessagePayload<'static> {
     let chain = CertificateChain(
         certs
             .iter()
-            .map(|c| browntls_pki::CertificateDer::from_slice(c.as_ref()))
+            .map(|c| browntls_pki::CertificateDer::from_slice(c.as_ref()).into_owned())
             .collect(),
     );
+    HandshakeMessagePayload(HandshakePayload::Certificate(chain))
+}
+
+/// Sends `payload` unprotected and adds it, as sent, to the transcript.
+fn emit_handshake(
+    transcript: &mut HandshakeHash,
+    common: &mut CommonState,
+    payload: HandshakeMessagePayload<'_>,
+) {
     let m = Message {
         version: ProtocolVersion::TLSv1_2,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::Certificate(
-            chain,
-        ))),
+        payload: MessagePayload::handshake(payload),
     };
     transcript.add_message(&m);
     common.send_msg(m, false);
@@ -431,14 +505,11 @@ fn emit_server_kx(
     Ok(kx)
 }
 
-/// Sends a CertificateRequest if the configuration wants client authentication.
-fn emit_certificate_req(
-    transcript: &mut HandshakeHash,
-    common: &mut CommonState,
-    config: &ServerConfig,
-) -> Result<bool, Error> {
+/// The CertificateRequest, if the configuration wants client
+/// authentication.
+fn certificate_request(config: &ServerConfig) -> Result<Option<CertificateRequestPayload>, Error> {
     if !config.verifier.offer_client_auth() {
-        return Ok(false);
+        return Ok(None);
     }
     let sigschemes = config.verifier.supported_verify_schemes();
     if sigschemes.is_empty() {
@@ -454,16 +525,7 @@ fn emit_certificate_req(
         sigschemes,
         canames: config.verifier.root_hint_subjects().to_vec(),
     };
-    let m = Message {
-        version: ProtocolVersion::TLSv1_2,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::CertificateRequest(cr),
-        )),
-    };
-    trace!("Sending CertificateRequest {:?}", m);
-    transcript.add_message(&m);
-    common.send_msg(m, false);
-    Ok(true)
+    Ok(Some(cr))
 }
 
 fn emit_server_hello_done(transcript: &mut HandshakeHash, common: &mut CommonState) {

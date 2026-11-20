@@ -41,7 +41,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use browntls_core::{CipherSuite, HandshakeKind, ProtocolVersion, dtls};
+use browntls_core::{CipherSuite, Error, HandshakeKind, PeerMisbehaved, ProtocolVersion, dtls};
 
 use crate::input::Input;
 
@@ -52,7 +52,7 @@ pub(crate) mod shape;
 #[cfg(test)]
 mod tests;
 
-use self::net::{Net, settled};
+use self::net::{Failure, Net, settled};
 pub use self::seeds::seeds;
 use self::setup::{Choice, Configs, localhost};
 
@@ -91,6 +91,9 @@ struct Pair {
     established: bool,
     client_closed: bool,
     server_closed: bool,
+    /// KeyUpdates the client may have requested since the server last
+    /// received data: the server fails the connection after eight.
+    client_requests: u8,
 }
 
 /// The configurations of the current handshakes and their network.
@@ -139,7 +142,7 @@ pub fn run(data: &[u8]) {
         match (op, session.as_mut()) {
             (0, _) => session = handshake(&mut input),
             (1, Some(s)) => connect(s, &mut input),
-            (7, _) => fresh(&mut input, session.as_ref().map(|s| &s.configs)),
+            (7, _) => fresh(&mut input, session.as_mut()),
             (_, Some(s)) => match s.pair.as_mut() {
                 Some(pair) if pair.established => match op {
                     2 => application_data(pair, &mut s.net, &mut input),
@@ -278,6 +281,7 @@ fn connect<'a>(session: &mut Session<'a>, input: &mut Input<'a>) {
         established: false,
         client_closed: false,
         server_closed: false,
+        client_requests: 0,
     };
     match result {
         Ok(()) => {
@@ -452,6 +456,9 @@ fn application_data(pair: &mut Pair, net: &mut Net, input: &mut Input) {
     for _ in 0..copies {
         received.extend(read(pair, net, to_server, &out).expect("established read"));
     }
+    if to_server && received.iter().any(|r| !r.is_empty()) {
+        pair.client_requests = 0;
+    }
     let expected: &[&[u8]] = match fate {
         0 | 2 if !payload.is_empty() => &[payload],
         _ => &[],
@@ -498,6 +505,7 @@ fn key_update<'a>(pair: &mut Pair, net: &mut Net<'a>, input: &mut Input<'a>) {
         pair.client
             .refresh_traffic_keys()
             .expect("client key update");
+        pair.client_requests = pair.client_requests.saturating_add(1);
     }
     if side == 1 || side == 2 {
         pair.server
@@ -507,6 +515,7 @@ fn key_update<'a>(pair: &mut Pair, net: &mut Net<'a>, input: &mut Input<'a>) {
     if side == 3 {
         // A second request while the first awaits its ACK just waits.
         let _ = pair.client.refresh_traffic_keys();
+        pair.client_requests = pair.client_requests.saturating_add(1);
     }
     settle(pair, net, fates, clock);
 }
@@ -517,8 +526,14 @@ fn settle<'a>(pair: &mut Pair, net: &mut Net<'a>, fates: &'a [u8], clock: &'a [u
     net.script(fates, clock, &[]);
     let result = net.run(&mut pair.client, &mut pair.server, settled);
     if let Err(failure) = result {
+        let too_many_requests = matches!(
+            failure,
+            Failure::Server(Error::PeerMisbehaved(
+                PeerMisbehaved::TooManyKeyUpdateRequests
+            ))
+        );
         assert!(
-            !net.lossless(),
+            !net.lossless() || (too_many_requests && pair.client_requests > 8),
             "established connections failed: {failure:?}"
         );
         net.wind_down(&mut pair.client, &mut pair.server);
@@ -667,10 +682,10 @@ fn default_configs() -> &'static Configs {
 
 /// Target (client, server, server without cookies, acceptor), a clock
 /// byte, an 8-bit-prefixed address, then one to three shaped datagrams.
-fn fresh(input: &mut Input, configs: Option<&Configs>) {
-    let configs = match configs {
-        Some(c) if c.compatible && c.cookies => c,
-        _ => default_configs(),
+fn fresh(input: &mut Input, session: Option<&mut Session>) {
+    let (configs, tickets) = match session {
+        Some(s) if s.configs.compatible && s.configs.cookies => (&s.configs, Some(&mut s.tickets)),
+        _ => (default_configs(), None),
     };
     let target = input.choose(4);
     let now = START + Duration::from_millis(u64::from(input.byte()) * 100);
@@ -683,6 +698,10 @@ fn fresh(input: &mut Input, configs: Option<&Configs>) {
         0 => {
             let mut client =
                 dtls::ClientConnection::new(client_config, localhost()).expect("client");
+            // It took a ticket of the session's client, if it held one.
+            if let Some(tickets) = tickets {
+                *tickets = tickets.saturating_sub(1);
+            }
             feed(&mut client, datagrams, now);
         }
         1 | 2 => {

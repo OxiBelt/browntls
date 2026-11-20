@@ -114,17 +114,19 @@ pub fn verify_server_cert_signed_by_trust_anchor(
         browntls_pki::KeyUsage::server_auth(),
         None,
     )
+    .map(|_| ())
 }
 
-pub(crate) fn verify_cert_for_usage(
-    cert: &ParsedCertificate<'_>,
-    roots: &[TrustAnchor<'_>],
-    intermediates: &[CertificateDer<'_>],
+/// Validates `cert`'s path for `usage`; returns the path that validated.
+pub(crate) fn verify_cert_for_usage<'p>(
+    cert: &'p ParsedCertificate<'p>,
+    roots: &'p [TrustAnchor<'_>],
+    intermediates: &'p [CertificateDer<'p>],
     now: UnixTime,
     supported_algs: &[&dyn SignatureVerificationAlgorithm],
     usage: browntls_pki::KeyUsage,
     revocation: Option<browntls_pki::RevocationOptions<'_>>,
-) -> Result<(), Error> {
+) -> Result<browntls_pki::VerifiedPath<'p>, Error> {
     cert.0
         .verify_for_usage(
             supported_algs,
@@ -135,7 +137,6 @@ pub(crate) fn verify_cert_for_usage(
             revocation,
             None,
         )
-        .map(|_| ())
         .map_err(pki_error)
 }
 

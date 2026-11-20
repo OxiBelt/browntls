@@ -120,3 +120,35 @@ fn clones_keep_evidence() {
     assert_eq!(clone.ocsp_for(1), Some(&[9][..]));
     assert_eq!(clone.sct_list(), key.sct_list());
 }
+
+/// A `TransItemList` holding `item`.
+fn trans_item_list(item: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(item.len()).unwrap();
+    [&(len + 2).to_be_bytes()[..], &len.to_be_bytes(), item].concat()
+}
+
+#[test]
+fn transparency_info_needs_an_sct() {
+    let mut key = certified_key(1);
+    assert_eq!(key.transparency_info(), None);
+    // An `x509_sct_v2` of log 1.3.101.80.1, no extensions, a one-octet
+    // signature.
+    let mut sct = vec![1, 2, 4, 0x2b, 0x65, 0x50, 1];
+    sct.extend(7u64.to_be_bytes());
+    sct.extend([0, 0, 0, 1, 0x55]);
+    let list = trans_item_list(&sct);
+    key.set_transparency_info(Some(list.clone())).unwrap();
+    assert_eq!(key.transparency_info(), Some(&list[..]));
+
+    // RFC 9162 §6.4: a list without an SCT (here an item of an unknown
+    // type), an empty list and garbage are refused and change nothing.
+    let unknown = trans_item_list(&[0xf0, 0, 1]);
+    for bad in [&unknown[..], &[0, 0], &[], &[0xaa, 0xbb, 0xcc]] {
+        assert!(key.set_transparency_info(Some(bad.to_vec())).is_err());
+        assert_eq!(key.transparency_info(), Some(&list[..]));
+    }
+
+    assert_eq!(key.clone().transparency_info(), Some(&list[..]));
+    key.set_transparency_info(None).unwrap();
+    assert_eq!(key.transparency_info(), None);
+}

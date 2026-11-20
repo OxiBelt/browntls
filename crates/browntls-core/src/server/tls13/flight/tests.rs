@@ -67,7 +67,7 @@ fn sent_evidence(
     status_request: bool,
     sct_request: bool,
 ) -> (PerEntry, PerEntry) {
-    let body = certificate_body(key, &client_hello(status_request, sct_request), None);
+    let body = certificate_body(key, &client_hello(status_request, sct_request), None, None);
     let encoded = body.get_encoding();
     let parsed = CertificatePayloadTls13::read_bytes(&encoded).unwrap();
     assert_eq!(parsed, body);
@@ -89,7 +89,7 @@ fn nothing_is_sent_unasked() {
     assert_eq!(scts, [None, None, None]);
     // Exactly the bare chain.
     assert_eq!(
-        certificate_body(&key, &client_hello(false, false), None).get_encoding(),
+        certificate_body(&key, &client_hello(false, false), None, None).get_encoding(),
         CertificatePayloadTls13::new(key.cert.iter(), None).get_encoding()
     );
 }
@@ -132,4 +132,86 @@ fn end_entity_response_set_through_the_field_is_stapled() {
     key.ocsp = Some(vec![0x20, 0x21]);
     let (ocsp, _) = sent_evidence(&key, true, false);
     assert_eq!(ocsp[0], Some(vec![0x20, 0x21]));
+}
+
+#[test]
+fn transparency_info_only_when_offered_and_for_x509() {
+    // One `x509_sct_v2` of log 1.3.101.80.1 (RFC 9162 §4.8).
+    let mut sct = vec![1, 2, 4, 0x2b, 0x65, 0x50, 1];
+    sct.extend(7u64.to_be_bytes());
+    sct.extend([0, 0, 0, 1, 0x55]);
+    let len = u16::try_from(sct.len()).unwrap();
+    let list = [&(len + 2).to_be_bytes()[..], &len.to_be_bytes(), &sct].concat();
+    let mut key = certified_key();
+    key.set_transparency_info(Some(list.clone())).unwrap();
+
+    let mut offered = client_hello(false, false);
+    offered.extensions.transparency_info = Some(());
+    let body = certificate_body(&key, &offered, None, None);
+    let encoded = body.get_encoding();
+    let parsed = CertificatePayloadTls13::read_bytes(&encoded).unwrap();
+    assert_eq!(parsed.end_entity_transparency_info(), Some(&list[..]));
+    assert!(
+        parsed.entries[1..]
+            .iter()
+            .all(|e| e.transparency_info.is_none())
+    );
+
+    // Not offered, or a raw public key negotiated: nothing.
+    let body = certificate_body(&key, &client_hello(false, false), None, None);
+    assert!(!body.has_transparency_info());
+    let rpk = Some(CertificateType::RawPublicKey);
+    assert!(!certificate_body(&key, &offered, None, rpk).has_transparency_info());
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn greased_request_encodes_only_the_eligible_delegated_schemes() {
+    let provider = Arc::new(crate::crypto::native::default_provider());
+    let ca = rcgen::generate_simple_self_signed(vec!["client.example".into()]).unwrap();
+    let mut roots = crate::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ca.cert.der().to_vec()))
+        .unwrap();
+    let verifier = crate::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .unwrap();
+    let mut config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(Arc::new(crate::server::handy::NoServerCert));
+    config.enable_grease = true;
+    config.enable_delegated_credentials = true;
+
+    let (message, offer) = certificate_request_message(&config, vec![]).unwrap();
+    let MessagePayload::Handshake {
+        parsed: HandshakeMessagePayload(HandshakePayload::CertificateRequestTls13(request)),
+        ..
+    } = message.payload
+    else {
+        panic!("expected CertificateRequest");
+    };
+    let encoded = request.get_encoding();
+    let received = CertificateRequestPayloadTls13::read_bytes(&encoded).unwrap();
+    let schemes = received.extensions.signature_algorithms.unwrap();
+    assert!(crate::msgs::grease::is_grease_u16(schemes[0].into()));
+    assert_eq!(schemes[1..], offer.signature_schemes);
+    assert!(schemes.contains(&SignatureScheme::RSA_PSS_SHA256));
+    let eligible: Vec<_> = schemes[1..]
+        .iter()
+        .copied()
+        .filter(|scheme| {
+            !matches!(
+                scheme,
+                SignatureScheme::RSA_PSS_SHA256
+                    | SignatureScheme::RSA_PSS_SHA384
+                    | SignatureScheme::RSA_PSS_SHA512
+            )
+        })
+        .collect();
+    assert_eq!(received.extensions.delegated_credential, Some(eligible));
 }

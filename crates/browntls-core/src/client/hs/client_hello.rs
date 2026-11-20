@@ -30,8 +30,8 @@ use crate::msgs::handshake::ClientSessionTicket;
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientHelloPayload, ClientTicketRequest,
     HandshakeMessagePayload, HandshakePayload, HelloRetryRequest, KeyShareEntry,
-    PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName, Random,
-    ServerNamePayload, SessionId,
+    MAX_HANDSHAKE_SIZE, PresharedKeyBinder, PresharedKeyIdentity, PresharedKeyOffer, ProtocolName,
+    Random, ServerNamePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::{Retrieved, Tls13ClientSessionValue};
@@ -46,6 +46,10 @@ fn find_session(
     config: &ClientConfig,
     cx: &mut ClientContext<'_>,
 ) -> Option<Retrieved<ClientSessionValue>> {
+    // RFC 8844 §5: a bound connection uses nothing from another one.
+    if config.external_binding.is_some() {
+        return None;
+    }
     let now = config.current_time().ok()?;
     // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume;
     // so does DTLS 1.3, with its own tickets.
@@ -446,6 +450,7 @@ pub(super) fn emit_client_hello_for_retry(
         }),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
         sct_request: config.revocation_enabled().then_some(()),
+        transparency_info: config.offers_transparency_info().then_some(()),
         extended_master_secret: supports_tls12.then_some(()),
         encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),
@@ -492,9 +497,20 @@ pub(super) fn emit_client_hello_for_retry(
         exts.delegated_credential = Some(tls13::delegated_credential_schemes(config));
     }
 
+    // RFC 6066 §5: offer certificate URLs (TLS 1.2 only, so never on QUIC
+    // or in an ECH inner hello, which offer TLS 1.3 alone).
+    #[cfg(feature = "tls12")]
+    if supports_tls12
+        && config.enable_client_certificate_url
+        && config.client_auth_cert_resolver.has_certs()
+    {
+        exts.client_certificate_url = Some(());
+    }
+
     #[cfg(feature = "tls12")]
     if supports_tls12
         && !config.revocation_enabled()
+        && config.external_binding.is_none()
         && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets
     {
         exts.session_ticket = Some(match &input.resuming {
@@ -597,9 +613,12 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
     // configuration allow it, but never in the second ClientHello of a
     // retry. An external PSK needs a provisioned suite, and is not used for
-    // 0-RTT when we ask for certificate authentication (RFC 8773).
+    // 0-RTT when we ask for certificate authentication (RFC 8773). Nor with
+    // an RFC 8844 binding: the server would read the data before we check
+    // its answer in EncryptedExtensions.
     if let Some(first) = offered_psks.first()
         && config.enable_early_data
+        && config.external_binding.is_none()
         && retryreq.is_none()
         && !ech_tls13_only
         && !dtls
@@ -658,6 +677,9 @@ pub(super) fn emit_client_hello_for_retry(
         .record_size_limit
         .filter(|_| !quic && !dtls)
         .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    // RFC 6066 §6: a TLS 1.2 extension only; `supports_tls12` is false
+    // over QUIC and with an ECH offer (RFC 9849 §6.1).
+    exts.trusted_ca_keys = config.trusted_ca_keys.clone().filter(|_| supports_tls12);
     // RFC 9149: a TLS 1.3 extension only.
     let ticket_limit = u8::try_from(config.max_tls13_tickets_per_connection).unwrap_or(u8::MAX);
     exts.ticket_request = config
@@ -667,6 +689,8 @@ pub(super) fn emit_client_hello_for_retry(
             new_session_count: request.new_session_count.min(ticket_limit),
             resumption_count: request.resumption_count.min(ticket_limit),
         });
+    // RFC 8844: the same values in every ClientHello.
+    crate::external_binding::handshake::client_offer(config.external_binding.as_ref(), &mut exts);
 
     let mut cipher_suites: Vec<CipherSuite> = config
         .provider
@@ -684,6 +708,20 @@ pub(super) fn emit_client_hello_for_retry(
     // renegotiate); a TLS 1.3-only hello has nothing to signal.
     if supports_tls12 || !ech_tls13_only {
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    }
+
+    // RFC 7924: fingerprints of cached TLS 1.2 messages. The second
+    // ClientHello after a HelloRetryRequest repeats the first one's offer.
+    #[cfg(feature = "tls12")]
+    {
+        if retryreq.is_none() {
+            input.hello.cached_info = crate::cached_info::client::ClientCachedInfo::offer(
+                config,
+                &input.server_name,
+                supports_tls12,
+            );
+        }
+        exts.cached_info = input.hello.cached_info.as_ref().and_then(|c| c.extension());
     }
 
     // What the server's choices are checked against: never a GREASE value.
@@ -744,6 +782,16 @@ pub(super) fn emit_client_hello_for_retry(
         chp.extensions.key_shares = Some(Vec::new());
         key_share = None;
         cx.common.kx_state = KxState::Start;
+    }
+    // A ClientHello must fit in a handshake message, and its extension
+    // block in a two-byte length; a large `trusted_ca_keys` list or ALPN
+    // offer could break either, which would send a malformed message. With
+    // an ECH offer this checks the inner ClientHello; the outer one is
+    // built from it later.
+    if chp.get_encoding().len() > MAX_HANDSHAKE_SIZE as usize {
+        return Err(Error::general(
+            "the ClientHello is longer than a handshake message may be",
+        ));
     }
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 

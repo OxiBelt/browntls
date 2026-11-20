@@ -215,6 +215,12 @@ pub struct VerifiedOcspStatus<'a> {
     /// response (RFC 6962 section 3.3) in its TLS encoding, if present.
     /// The timestamps themselves are not verified.
     pub sct_list: Option<&'a [u8]>,
+    /// The `TransItemList` of the RFC 9162 Transparency Information
+    /// extension of the matching single response (RFC 9162 section 7.1.1),
+    /// if present, for
+    /// [`CtV2Verifier::verify_ocsp_response`](crate::transparency::CtV2Verifier::verify_ocsp_response).
+    /// The items themselves are not verified.
+    pub transparency_info: Option<&'a [u8]>,
     /// Whether the response echoed [`OcspPolicy::expected_nonce`].
     pub nonce_matched: bool,
 }
@@ -301,6 +307,7 @@ impl<'a> OcspResponse<'a> {
             signer,
             cert_id_hash: single.cert_id.hash.unwrap_or(CertIdHash::Sha1),
             sct_list: single.sct_list,
+            transparency_info: single.transparency_info,
             nonce_matched,
         })
     }

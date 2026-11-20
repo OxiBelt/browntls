@@ -1,6 +1,7 @@
 //! The TLS 1.2 client handshake after the ServerHello (RFC 5246 §7.3,
 //! RFC 8422, RFC 7627, RFC 5077, RFC 5746).
 
+mod certificate_url;
 mod client_flight;
 
 use alloc::boxed::Box;
@@ -12,6 +13,7 @@ use super::client_conn::ClientConnectionData;
 use super::common::{ClientAuthDetails, ClientHelloDetails, ServerCertDetails};
 use super::hs::{ClientContext, NextStateOrError};
 use super::{ClientConfig, hs, tls13};
+use crate::cached_info::client::{self as cached_info, ClientCachedInfo};
 use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState, Side};
 use crate::conn::State;
 use crate::crypto::cipher::Tls12MacOrder;
@@ -146,6 +148,19 @@ impl CompleteServerHelloHandling {
             server_hello.extensions.record_size_limit,
             false,
         )?;
+        crate::external_binding::handshake::client_check(
+            cx.common,
+            self.config.external_binding.as_ref(),
+            &server_hello.extensions,
+            false,
+            false,
+        )?;
+        // RFC 7924 §4: which messages the server replaces by fingerprints.
+        cached_info::process_server_hello(
+            cx.common,
+            self.hello.cached_info.as_mut(),
+            server_hello.extensions.cached_info.as_ref(),
+        )?;
 
         if self.config.require_ems && !self.using_ems {
             return Err(cx.common.send_fatal_alert(
@@ -160,6 +175,7 @@ impl CompleteServerHelloHandling {
             if !server_hello.session_id.is_empty() && resuming.session_id == server_hello.session_id
             {
                 debug!("Server agreed to resume");
+                super::transparency::refuse_on_resumption(cx.common, &server_hello.extensions)?;
                 if resuming.suite() != suite {
                     return Err(cx.common.send_fatal_alert(
                         AlertDescription::HandshakeFailure,
@@ -202,6 +218,7 @@ impl CompleteServerHelloHandling {
                     resuming: true,
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
+                    cached_info: None,
                 };
                 // RFC 5077 §3.3: a new ticket, if any, precedes
                 // ChangeCipherSpec.
@@ -221,12 +238,22 @@ impl CompleteServerHelloHandling {
         if cx.common.handshake_kind.is_none() {
             cx.common.handshake_kind = Some(HandshakeKind::Full);
         }
+        cached_info::expect_hash_forms(cx.common, self.hello.cached_info.as_ref());
+        // RFC 6066 §6: the server says our trusted_ca_keys guided its
+        // choice of chain (unsolicited, it was refused above). Only a full
+        // handshake sends a chain, so a resumed one never records it.
+        cx.data.trusted_ca_keys_acknowledged =
+            server_hello.extensions.trusted_ca_keys_ack.is_some();
 
         if let Some(list) = &server_hello.extensions.sct_list {
             crate::msgs::handshake::CertificatePayloadTls13::validate_sct_list(list.bytes())
                 .map_err(|e| cx.common.send_fatal_alert(AlertDescription::DecodeError, e))?;
         }
 
+        // RFC 6066 §5; an acknowledgement we did not ask for was refused
+        // above as unsolicited.
+        self.hello.certificate_url_accepted =
+            server_hello.extensions.client_certificate_url.is_some();
         Ok(Box::new(ExpectCertificate {
             config: self.config,
             session_id: server_hello.session_id,
@@ -240,6 +267,11 @@ impl CompleteServerHelloHandling {
             sct_list: server_hello
                 .extensions
                 .sct_list
+                .as_ref()
+                .map(|list| list.bytes().to_vec()),
+            transparency_info: server_hello
+                .extensions
+                .transparency_info
                 .as_ref()
                 .map(|list| list.bytes().to_vec()),
             must_issue_new_ticket,
@@ -259,25 +291,24 @@ struct ExpectCertificate {
     suite: &'static Tls12CipherSuite,
     may_send_cert_status: bool,
     sct_list: Option<Vec<u8>>,
+    transparency_info: Option<Vec<u8>>,
     must_issue_new_ticket: bool,
     hello: ClientHelloDetails,
 }
 
 impl State<ClientConnectionData> for ExpectCertificate {
-    fn handle(
-        mut self: Box<Self>,
-        _cx: &mut ClientContext<'_>,
-        m: Message<'_>,
-    ) -> NextStateOrError {
+    fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 7924 §4.1: the chain may be restored from the cached_info
+        // store; the transcript has the message as sent.
         let server_cert_chain =
-            require_handshake_msg!(m, HandshakeType::Certificate, HandshakePayload::Certificate)?;
+            cached_info::take_certificate(cx.common, self.hello.cached_info.as_mut(), &m)?;
         self.transcript.add_message(&m);
-        let server_cert_chain = server_cert_chain.clone().into_owned();
 
         let server_cert = ServerCertDetails {
             cert_chain: server_cert_chain,
             ocsp: Vec::new(),
             scts: self.sct_list.into_iter().map(Some).collect(),
+            transparency_info: self.transparency_info,
         };
 
         if self.may_send_cert_status {
@@ -503,41 +534,58 @@ struct ExpectServerDoneOrCertReq {
     hello: ClientHelloDetails,
 }
 
+impl ExpectServerDoneOrCertReq {
+    fn certificate_request(
+        mut self: Box<Self>,
+        m: &Message<'_>,
+        certreq: &crate::msgs::handshake::CertificateRequestPayload,
+    ) -> NextStateOrError {
+        self.transcript.add_message(m);
+        debug!("Got CertificateRequest {:?}", certreq);
+
+        // RFC 5246 §7.4.4: the schemes must be non-empty (checked by the
+        // codec).
+        let client_auth = ClientAuthDetails::resolve(
+            &*self.config.client_auth_cert_resolver,
+            Some(&certreq.canames),
+            Some(&certreq.certtypes),
+            &certreq.sigschemes,
+            None,
+            None,
+        );
+        Ok(Box::new(ExpectServerDone {
+            config: self.config,
+            session_id: self.session_id,
+            server_name: self.server_name,
+            randoms: self.randoms,
+            using_ems: self.using_ems,
+            using_etm: self.using_etm,
+            transcript: self.transcript,
+            suite: self.suite,
+            server_cert: self.server_cert,
+            server_kx: self.server_kx,
+            client_auth: Some(client_auth),
+            must_issue_new_ticket: self.must_issue_new_ticket,
+            hello: self.hello,
+        }))
+    }
+}
+
 impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
     fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        // RFC 7924 §4.2: a CertificateRequest replaced by its fingerprint.
+        if let Some(certreq) = cached_info::restored_certificate_request(
+            cx.common,
+            self.hello.cached_info.as_mut(),
+            &m,
+        )? {
+            return self.certificate_request(&m, &certreq);
+        }
         match &m.payload {
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::CertificateRequest(certreq)),
                 ..
-            } => {
-                self.transcript.add_message(&m);
-                debug!("Got CertificateRequest {:?}", certreq);
-
-                // RFC 5246 §7.4.4: the schemes must be non-empty (checked by
-                // the codec).
-                let client_auth = ClientAuthDetails::resolve(
-                    &*self.config.client_auth_cert_resolver,
-                    Some(&certreq.canames),
-                    Some(&certreq.certtypes),
-                    &certreq.sigschemes,
-                    None,
-                );
-                Ok(Box::new(ExpectServerDone {
-                    config: self.config,
-                    session_id: self.session_id,
-                    server_name: self.server_name,
-                    randoms: self.randoms,
-                    using_ems: self.using_ems,
-                    using_etm: self.using_etm,
-                    transcript: self.transcript,
-                    suite: self.suite,
-                    server_cert: self.server_cert,
-                    server_kx: self.server_kx,
-                    client_auth: Some(client_auth),
-                    must_issue_new_ticket: self.must_issue_new_ticket,
-                    hello: self.hello,
-                }))
-            }
+            } => self.certificate_request(&m, certreq),
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHelloDone),
                 ..
@@ -700,6 +748,7 @@ struct ExpectCcs {
     resuming: bool,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
+    cached_info: Option<ClientCachedInfo>,
 }
 
 impl State<ClientConnectionData> for ExpectCcs {
@@ -727,6 +776,7 @@ impl State<ClientConnectionData> for ExpectCcs {
             resuming: self.resuming,
             cert_verified: self.cert_verified,
             sig_verified: self.sig_verified,
+            cached_info: self.cached_info,
         }))
     }
 }
@@ -743,11 +793,13 @@ struct ExpectFinished {
     resuming: bool,
     cert_verified: ServerCertVerified,
     sig_verified: HandshakeSignatureValid,
+    cached_info: Option<ClientCachedInfo>,
 }
 
 impl ExpectFinished {
     fn save_session(&mut self, cx: &mut ClientContext<'_>) {
-        if self.config.revocation_enabled() {
+        // RFC 8844 §5: nothing of a bound connection is used in another.
+        if self.config.revocation_enabled() || self.config.external_binding.is_some() {
             return;
         }
         let (ticket, lifetime) = self.ticket.take().unwrap_or_default();
@@ -799,6 +851,11 @@ impl State<ClientConnectionData> for ExpectFinished {
             emit_finished(&st.secrets, &mut st.transcript, cx.common);
         }
 
+        // RFC 7924 §7: messages received in full are cached only now that
+        // the handshake has completed.
+        if let Some(cached) = st.cached_info.take() {
+            cached.handshake_completed(&st.config, &st.server_name);
+        }
         st.save_session(cx);
         if let Some(group) = cx.common.negotiated_key_exchange_group() {
             st.config

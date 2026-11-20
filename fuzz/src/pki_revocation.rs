@@ -10,6 +10,8 @@ mod drivers;
 mod evidence;
 mod fixtures;
 mod handshake;
+mod transparency;
+mod transparency_tls;
 
 const MAX_EVIDENCE_LEN: usize = 64 * 1024;
 
@@ -24,6 +26,8 @@ pub fn run(data: &[u8]) {
         4 => clubcard::run(bytes),
         5 => drivers::run(fixtures::Fixture::get(), bytes),
         6 => asynchronous::run(fixtures::Fixture::get(), bytes),
+        7 => transparency::run(bytes),
+        8 => transparency_tls::run(bytes),
         _ => match kind % 4 {
             0 => clubcard::filter(bytes),
             1 => evidence::ocsp(fixtures::Fixture::get(), bytes),
@@ -40,7 +44,7 @@ pub fn run(data: &[u8]) {
 }
 
 pub fn seeds() -> Vec<Vec<u8>> {
-    vec![
+    let mut seeds = vec![
         [&[0], clubcard::FULL_V3].concat(),
         [&[0], clubcard::FULL_V4].concat(),
         vec![1],
@@ -64,7 +68,18 @@ pub fn seeds() -> Vec<Vec<u8>> {
         vec![6, 3],
         vec![6, 4],
         vec![6, 5],
-    ]
+    ];
+    seeds.extend(
+        transparency::seeds()
+            .into_iter()
+            .map(|seed| [&[7][..], &seed].concat()),
+    );
+    seeds.extend(
+        transparency_tls::seeds()
+            .into_iter()
+            .map(|seed| [&[8][..], &seed].concat()),
+    );
+    seeds
 }
 
 #[cfg(test)]

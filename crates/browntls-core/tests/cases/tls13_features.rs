@@ -111,3 +111,4 @@ fn feed<A: browntls_core::SideData>(
 
 include!("tls13_features/post_handshake_auth.rs");
 include!("tls13_features/cookies_and_exporters.rs");
+include!("tls13_features/server_grease.rs");

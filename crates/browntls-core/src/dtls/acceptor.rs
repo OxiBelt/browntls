@@ -24,7 +24,7 @@ use crate::sync::Arc;
 ///
 /// The cookie is checked before anything is kept, also for a second
 /// ClientHello split over several datagrams: its first fragment, which
-/// starts with the cookie, must arrive first. Clients that complete no
+/// must hold the cookie, must arrive first. Clients that complete no
 /// handshake still cost a connection each: bound how many a server keeps,
 /// and drop those that make no progress.
 pub struct Acceptor {
@@ -122,10 +122,10 @@ fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8])> {
     (header.typ == u8::from(HandshakeType::ClientHello)).then_some((header, fragment))
 }
 
-/// The cookie of a ClientHello from its first fragment: browntls clients,
-/// as RFC 9147 §5.1 suggests, send the `cookie` extension first so that it
-/// arrives in that fragment. `None` for any other fragment, or when the
-/// first extension is not a cookie.
+/// The cookie of a ClientHello from its first fragment, wherever it is
+/// among the extensions that fragment holds: a split ClientHello must
+/// carry it in its first fragment, which is why browntls clients, as RFC
+/// 9147 §5.1 suggests, send it first. `None` for any other fragment.
 fn cookie_of<'a>(header: &HandshakeHeader, fragment: &'a [u8]) -> Option<&'a [u8]> {
     if header.fragment_offset != 0 {
         return None;
@@ -140,21 +140,77 @@ fn cookie_of<'a>(header: &HandshakeHeader, fragment: &'a [u8]) -> Option<&'a [u8
         let len = len.iter().fold(0usize, |acc, b| acc << 8 | usize::from(*b));
         r.take(len)?;
     }
-    // extensions<8..2^16-1>, then the first extension's type and length
-    let _extensions_len = r.take(2)?;
-    let typ = r.take(2)?;
-    if typ != u16::from(ExtensionType::Cookie).to_be_bytes() {
-        return None;
+    // extensions<8..2^16-1>, as far as this fragment holds them
+    r.take(2)?;
+    let cookie_type = u16::from(ExtensionType::Cookie).to_be_bytes();
+    loop {
+        let typ = r.take(2)?;
+        let len = r.take(2)?;
+        let body = r.take(usize::from(u16::from_be_bytes([len[0], len[1]])))?;
+        if typ != cookie_type {
+            continue;
+        }
+        // struct { opaque cookie<1..2^16-1>; } Cookie;
+        let (len, cookie) = body.split_first_chunk::<2>()?;
+        return (usize::from(u16::from_be_bytes(*len)) == cookie.len() && !cookie.is_empty())
+            .then_some(cookie);
     }
-    let ext_len = r.take(2)?;
-    let ext = r.take(usize::from(u16::from_be_bytes([ext_len[0], ext_len[1]])))?;
-    // struct { opaque cookie<1..2^16-1>; } Cookie;
-    let (len, cookie) = ext.split_first_chunk::<2>()?;
-    (usize::from(u16::from_be_bytes(*len)) == cookie.len() && !cookie.is_empty()).then_some(cookie)
 }
 
 impl fmt::Debug for Acceptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("dtls::Acceptor").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A first ClientHello fragment with `extensions`, each a type and a
+    /// body.
+    fn fragment(extensions: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut out = alloc::vec![0xfe, 0xfd];
+        out.extend_from_slice(&[7; 32]);
+        // session id, legacy_cookie, one suite, one compression method
+        out.extend_from_slice(&[0, 0, 0, 2, 0x13, 0x01, 1, 0]);
+        let mut ext = Vec::new();
+        for (typ, body) in extensions {
+            ext.extend_from_slice(&typ.to_be_bytes());
+            ext.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
+            ext.extend_from_slice(body);
+        }
+        out.extend_from_slice(&u16::try_from(ext.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(&ext);
+        out
+    }
+
+    fn header(fragment_offset: u32) -> HandshakeHeader {
+        HandshakeHeader {
+            typ: 1,
+            length: 1000,
+            message_seq: 1,
+            fragment_offset,
+            fragment_length: 100,
+        }
+    }
+
+    #[test]
+    fn finds_the_cookie_wherever_the_first_fragment_holds_it() {
+        let cookie: &[u8] = &[0, 3, 9, 8, 7];
+        let first = fragment(&[(44, cookie), (43, &[2, 0xfe, 0xfc])]);
+        assert_eq!(cookie_of(&header(0), &first), Some(&[9, 8, 7][..]));
+        let later = fragment(&[(43, &[2, 0xfe, 0xfc]), (10, &[0, 2, 0, 29]), (44, cookie)]);
+        assert_eq!(cookie_of(&header(0), &later), Some(&[9, 8, 7][..]));
+        // Cut off before the cookie, or not the first fragment.
+        assert_eq!(cookie_of(&header(0), &later[..later.len() - 2]), None);
+        assert_eq!(cookie_of(&header(10), &first), None);
+        // No cookie, or a malformed one.
+        assert_eq!(
+            cookie_of(&header(0), &fragment(&[(43, &[2, 0xfe, 0xfc])])),
+            None
+        );
+        assert_eq!(cookie_of(&header(0), &fragment(&[(44, &[0, 4, 1])])), None);
+        assert_eq!(cookie_of(&header(0), &fragment(&[(44, &[0, 0])])), None);
     }
 }

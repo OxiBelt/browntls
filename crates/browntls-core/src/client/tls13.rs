@@ -617,6 +617,21 @@ pub(super) fn delegated_credential_schemes(
         .collect()
 }
 
+/// The schemes of `certreq`'s `delegated_credential` extension and the
+/// current time, when a delegated credential may answer it (RFC 9345
+/// §4.1.2). Never with raw public keys (RFC 7250), which have no
+/// certificate to delegate from, nor without a clock.
+fn delegated_credential_request<'a>(
+    config: &ClientConfig,
+    certreq: &'a CertificateRequestPayloadTls13,
+) -> Option<(&'a [crate::enums::SignatureScheme], browntls_pki::UnixTime)> {
+    let dc_schemes = certreq.extensions.delegated_credential.as_deref()?;
+    if config.client_auth_cert_resolver.only_raw_public_keys() {
+        return None;
+    }
+    Some((dc_schemes, config.current_time().ok()?))
+}
+
 /// Sends the alert for a certificate chain that failed validation.
 ///
 /// A signature inside the chain that does not verify, or that uses an

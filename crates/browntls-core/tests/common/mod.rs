@@ -189,6 +189,54 @@ pub fn delegation_server_chain(key_type: KeyType) -> Chain {
     )
 }
 
+/// Like [`client_chain`], with the `DelegationUsage` extension on the end
+/// entity (whose key usage is `digitalSignature`), so it can sign delegated
+/// credentials for a client (RFC 9345 §4.1.2).
+pub fn delegation_client_chain(key_type: KeyType) -> Chain {
+    let ca_key = key_type.generate_key();
+    let ee_key = key_type.generate_key();
+    let ee_pkcs8 = ee_key.serialize_der();
+    issue_chain_with(
+        key_type,
+        ca_key,
+        &ee_key,
+        ee_pkcs8,
+        &["client.example"],
+        ExtendedKeyUsagePurpose::ClientAuth,
+        |params| params.custom_extensions.push(delegation_usage_extension()),
+    )
+}
+
+/// A chain whose end entity can sign delegated credentials, as
+/// [`delegation_server_chain`] (or, with `client`,
+/// [`delegation_client_chain`]), but expiring at `not_after`.
+pub fn delegation_chain_expiring(key_type: KeyType, client: bool, not_after: UnixTime) -> Chain {
+    let ca_key = key_type.generate_key();
+    let ee_key = key_type.generate_key();
+    let ee_pkcs8 = ee_key.serialize_der();
+    let (names, purpose): (&[&str], _) = if client {
+        (&["client.example"], ExtendedKeyUsagePurpose::ClientAuth)
+    } else {
+        (
+            &["localhost", "testserver.example"],
+            ExtendedKeyUsagePurpose::ServerAuth,
+        )
+    };
+    issue_chain_with(
+        key_type,
+        ca_key,
+        &ee_key,
+        ee_pkcs8,
+        names,
+        purpose,
+        |params| {
+            params.custom_extensions.push(delegation_usage_extension());
+            params.not_after = rcgen::date_time_ymd(1970, 1, 1)
+                + std::time::Duration::from_secs(not_after.as_secs());
+        },
+    )
+}
+
 /// [`issue_chain`], letting `customize` adjust the end entity's parameters.
 pub fn issue_chain_with<K: rcgen::SigningKey>(
     key_type: KeyType,
@@ -439,6 +487,17 @@ impl ClientCertVerifier for PinnedClientVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algs.supported_schemes()
     }
+
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        browntls_core::crypto::verify_tls13_signature_with_raw_key(
+            message, public_key, dss, &self.algs,
+        )
+    }
 }
 
 /// Serves `chain`'s key as an RFC 7250 raw public key (server or client side).
@@ -577,7 +636,8 @@ impl ServerCertVerifier for SchemeRecordingServerVerifier {
 #[derive(Debug)]
 pub struct SchemeRecordingClientVerifier {
     pub inner: Arc<dyn ClientCertVerifier>,
-    pub offer: Vec<SignatureScheme>,
+    offer: Vec<SignatureScheme>,
+    first_offer: Mutex<Option<Vec<SignatureScheme>>>,
     pub seen: Mutex<Vec<SignatureScheme>>,
 }
 
@@ -586,8 +646,14 @@ impl SchemeRecordingClientVerifier {
         Arc::new(Self {
             inner,
             offer: offer.to_vec(),
+            first_offer: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Overrides the list only for the next inquiry.
+    pub fn set_first_offer(&self, offer: Vec<SignatureScheme>) {
+        *self.first_offer.lock().unwrap() = Some(offer);
     }
 
     /// The schemes of the signatures checked so far.
@@ -636,11 +702,26 @@ impl ClientCertVerifier for SchemeRecordingClientVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.offer.clone()
+        self.first_offer
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.offer.clone())
     }
 
     fn requires_raw_public_keys(&self) -> bool {
         self.inner.requires_raw_public_keys()
+    }
+
+    fn verify_tls13_signature_with_delegated_key(
+        &self,
+        message: &[u8],
+        public_key: &SubjectPublicKeyInfoDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.seen.lock().unwrap().push(dss.scheme);
+        self.inner
+            .verify_tls13_signature_with_delegated_key(message, public_key, dss)
     }
 }
 

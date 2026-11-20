@@ -3,7 +3,11 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use browntls_pki::UnixTime;
+
 use super::ResolvesClientCert;
+use crate::common_state::Side;
+use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::log::{debug, trace};
 use crate::msgs::enums::{ClientCertificateType, ExtensionType};
@@ -60,18 +64,34 @@ pub(super) enum ClientAuthDetails {
         certkey: Arc<CertifiedKey>,
         signer: Box<dyn Signer>,
         auth_context_tls13: Option<Vec<u8>>,
+        /// The delegated credential (RFC 9345 §4.1.2) to send on the end
+        /// entity's TLS 1.3 CertificateEntry; `signer` then signs with its
+        /// key.
+        delegated: Option<Arc<DelegatedCredentialKey>>,
     },
 }
 
 impl ClientAuthDetails {
     /// `certtypes` is the TLS 1.2 CertificateRequest's `certificate_types`
     /// (RFC 5246 §7.4.4); a certificate of another type is not sent.
+    ///
+    /// `delegated` is the list of a TLS 1.3 CertificateRequest's
+    /// `delegated_credential` extension and the current time, when the
+    /// request lets a delegated credential answer it (RFC 9345 §4.1.2).
+    /// The first of the certificate's client credentials the request
+    /// accepts is then sent and its key signs CertificateVerify: its
+    /// `dc_cert_verify_algorithm` must be in that list and in
+    /// `sigschemes`, the scheme of its signature in `sigschemes`, and it
+    /// must be unexpired with at most seven days left, within the
+    /// certificate's validity (§4.1.3). Otherwise the certificate key
+    /// signs, if it can.
     pub(super) fn resolve(
         resolver: &dyn ResolvesClientCert,
         canames: Option<&[DistinguishedName]>,
         certtypes: Option<&[ClientCertificateType]>,
         sigschemes: &[SignatureScheme],
         auth_context_tls13: Option<Vec<u8>>,
+        delegated: Option<(&[SignatureScheme], UnixTime)>,
     ) -> Self {
         let acceptable_issuers: Vec<&[u8]> = canames
             .unwrap_or_default()
@@ -106,12 +126,31 @@ impl ClientAuthDetails {
                 debug!("Client certificate type not among the server's certificate_types");
                 return Self::Empty { auth_context_tls13 };
             }
+            // The credential's scheme was checked to be one its key signs
+            // with when it was attached.
+            if let Some((dc_schemes, now)) = delegated
+                && let Some(dc) = certkey
+                    .choose_delegated_credential(Side::Client, dc_schemes, sigschemes, now)
+                    .cloned()
+                && let Some(signer) = dc
+                    .key()
+                    .choose_scheme(&[dc.credential().credential.dc_cert_verify_algorithm])
+            {
+                debug!("Attempting client auth with a delegated credential");
+                return Self::Verify {
+                    certkey,
+                    signer,
+                    auth_context_tls13,
+                    delegated: Some(dc),
+                };
+            }
             if let Some(signer) = certkey.key.choose_scheme(sigschemes) {
                 debug!("Attempting client auth");
                 return Self::Verify {
                     certkey,
                     signer,
                     auth_context_tls13,
+                    delegated: None,
                 };
             }
             debug!("Client certificate key cannot sign with any offered scheme");

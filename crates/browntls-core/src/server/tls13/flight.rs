@@ -3,8 +3,8 @@
 
 use alloc::vec::Vec;
 
-use super::client_auth::client_auth_sigschemes;
-use crate::common_state::{CommonState, ConnectionRandoms};
+use super::client_auth::ClientAuthOffer;
+use crate::common_state::{CommonState, ConnectionRandoms, Side};
 use crate::delegated_credential::DelegatedCredentialKey;
 use crate::enums::{AlertDescription, CertificateType, ProtocolVersion, SignatureScheme};
 use crate::error::{Error, PeerIncompatible};
@@ -256,33 +256,34 @@ pub(super) fn emit_certificate_req_tls13(
     transcript: &mut HandshakeHash,
     common: &mut CommonState,
     config: &ServerConfig,
-) -> Result<bool, Error> {
+) -> Result<Option<ClientAuthOffer>, Error> {
     if !config.verifier.offer_client_auth() {
-        return Ok(false);
+        return Ok(None);
     }
-    let m = certificate_request_message(config, Vec::new())?;
+    let (m, offer) = certificate_request_message(config, Vec::new())?;
     trace!("Sending CertificateRequest {:?}", m);
     transcript.add_message(&m);
     common.send_msg(m, true);
-    Ok(true)
+    Ok(Some(offer))
 }
 
 /// A CertificateRequest with `context` (empty during the handshake, RFC
 /// 9846 §4.4.2) listing the verifier's TLS 1.3 schemes and authorities,
 /// and GREASE values (RFC 8701 §4.1) when the configuration enables them.
+/// Also returns the schemes the server may accept in the answer.
 pub(super) fn certificate_request_message(
     config: &ServerConfig,
     context: Vec<u8>,
-) -> Result<Message<'static>, Error> {
-    let mut schemes = client_auth_sigschemes(config);
+) -> Result<(Message<'static>, ClientAuthOffer), Error> {
+    let offer = ClientAuthOffer::from_config(config);
+    let mut schemes = offer.signature_schemes.clone();
     if schemes.is_empty() {
         return Err(Error::general(
             "client certificate verifier supports no TLS 1.3 signature schemes",
         ));
     }
-    // The GREASE scheme is only in the message: a CertificateVerify is
-    // checked against `client_auth_sigschemes`, which never holds one, so
-    // a client that signs with it is refused like any scheme not offered.
+    // GREASE is only in the message. CertificateVerify uses the real
+    // signature schemes recorded in the offer.
     let grease = config
         .enable_grease
         .then(|| ServerGreaseValues::random(config.provider.secure_random))
@@ -303,6 +304,9 @@ pub(super) fn certificate_request_message(
                 &config.cert_decompressors,
                 config.cert_decompression_limit,
             ),
+            // RFC 9345 §4.1.2: the schemes accepted for a client's
+            // delegated credential, when those are enabled.
+            delegated_credential: offer.delegated_schemes.clone(),
             status_request: evidence,
             sct_request: evidence,
             grease_first: grease.map(|g| g.first_extension),
@@ -310,12 +314,13 @@ pub(super) fn certificate_request_message(
             ..Default::default()
         },
     };
-    Ok(Message {
+    let message = Message {
         version: ProtocolVersion::TLSv1_3,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::CertificateRequestTls13(cr),
         )),
-    })
+    };
+    Ok((message, offer))
 }
 
 /// The first delegated credential (RFC 9345) of `server_key` that the
@@ -331,18 +336,14 @@ pub(super) fn choose_delegated_credential<'a>(
     cert_types: hs::NegotiatedCertTypes,
 ) -> Option<&'a DelegatedCredentialKey> {
     let offered = client_hello.extensions.delegated_credential.as_ref()?;
-    let end_entity = server_key.get_cert().first()?;
-    if server_key.get_delegated_credentials().is_empty()
-        || cert_types.server == Some(CertificateType::RawPublicKey)
-    {
+    if cert_types.server == Some(CertificateType::RawPublicKey) {
         return None;
     }
     let now = config.current_time().ok()?;
     server_key
-        .get_delegated_credentials()
-        .iter()
+        .certified_key()
+        .choose_delegated_credential(Side::Server, offered, sigschemes, now)
         .map(|dc| &**dc)
-        .find(|dc| dc.usable(end_entity, offered, sigschemes, now))
 }
 
 /// The server's Certificate message for `certified_key`, with what

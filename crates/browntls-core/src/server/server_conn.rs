@@ -25,6 +25,7 @@ use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
+use crate::delegated_credential::DelegatedCredential;
 use crate::enums::{CipherSuite, ProtocolVersion};
 use crate::error::Error;
 use crate::key_log::KeyLog;
@@ -137,6 +138,20 @@ pub struct ServerConfig {
     /// trusts the client. RFC 8740 forbids post-handshake authentication
     /// over HTTP/2; the library leaves that decision to the application.
     pub request_client_auth_after_handshake: bool,
+
+    /// Whether to accept a TLS 1.3 client authenticating with a delegated
+    /// credential (RFC 9345 §4.1.2). Off by default. With it on, every
+    /// CertificateRequest, in the handshake and after it, carries a
+    /// `delegated_credential` extension listing the client certificate
+    /// verifier's TLS 1.3 schemes other than `rsa_pss_rsae_*`.
+    ///
+    /// The client's certificate chain is verified as usual; then the
+    /// credential is validated and CertificateVerify is checked with its
+    /// key, through
+    /// [`ClientCertVerifier::verify_tls13_signature_with_delegated_key`].
+    /// Never with raw public keys (RFC 7250). See
+    /// [`ServerConnection::client_delegated_credential`].
+    pub enable_delegated_credentials: bool,
 
     /// Seals the cookie sent in TLS 1.3 HelloRetryRequests (RFC 9846
     /// §4.3.2), which makes the retry stateless; `None` (the default) sends
@@ -541,6 +556,13 @@ pub struct ServerConnectionData {
     /// The absolute expiry of the server delegated credential that
     /// authenticated this TLS 1.3 connection or its resumed ancestor.
     pub(super) delegated_credential_expiry: Option<UnixTime>,
+    /// The delegated credential (RFC 9345 §4.1.2) the client's current
+    /// identity was authenticated with on this connection.
+    pub(super) client_delegated_credential: Option<DelegatedCredential>,
+    /// The absolute expiry of the delegated credential that authenticated
+    /// the client's current identity, on this TLS 1.3 connection or its
+    /// resumed ancestor.
+    pub(super) client_delegated_credential_expiry: Option<UnixTime>,
     /// The original handshake authenticated with an external PSK alone.
     pub(super) certificate_free: bool,
     /// The session cache entry this TLS 1.2 connection resumed or created,
@@ -606,6 +628,13 @@ impl crate::kernel::KernelConnection<ServerConnectionData> {
     /// or after the handover, or `None` if none was requested.
     pub fn post_handshake_auth_status(&self) -> Option<PostHandshakeAuthStatus> {
         self.core.data.post_handshake_auth
+    }
+
+    /// The delegated credential (RFC 9345 §4.1.2) the client authenticated
+    /// with, before or after the handover; see
+    /// [`ServerConnection::client_delegated_credential`].
+    pub fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.core.data.client_delegated_credential.as_ref()
     }
 }
 
@@ -770,6 +799,12 @@ impl UnbufferedServerConnection {
     /// Whether the connection only uses FIPS-validated components.
     pub fn fips(&self) -> bool {
         self.inner.core.common_state.fips()
+    }
+
+    /// The delegated credential (RFC 9345 §4.1.2) the client authenticated
+    /// with; see [`ServerConnection::client_delegated_credential`].
+    pub fn client_delegated_credential(&self) -> Option<&DelegatedCredential> {
+        self.inner.core.data.client_delegated_credential.as_ref()
     }
 
     /// What was decided about Encrypted Client Hello. With

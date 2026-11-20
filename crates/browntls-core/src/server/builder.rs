@@ -113,6 +113,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_with_extern_psk: false,
             require_external_psk: false,
             client_certificate_url: None,
+            enable_delegated_credentials: false,
             record_size_limit: Some(crate::common_state::max_record_size_limit(true)),
             external_binding: None,
             enable_grease: false,

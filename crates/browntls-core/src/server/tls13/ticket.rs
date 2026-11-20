@@ -79,11 +79,16 @@ pub(super) fn emit_ticket(
         .resumption_master_secret_and_derive_ticket_psk(transcript.current_hash().as_ref(), &nonce);
 
     let now = config.current_time()?;
-    let lifetime = bound_ticket_lifetime_by_delegated_credential(
-        configured_lifetime,
-        now,
+    // The session must not outlive a delegated credential that
+    // authenticated either side (RFC 9345).
+    let lifetime = [
         cx.data.delegated_credential_expiry,
-    );
+        cx.data.client_delegated_credential_expiry,
+    ]
+    .into_iter()
+    .fold(configured_lifetime, |lifetime, expiry| {
+        bound_ticket_lifetime_by_delegated_credential(lifetime, now, expiry)
+    });
     if lifetime == 0 {
         return Ok(());
     }
@@ -103,6 +108,7 @@ pub(super) fn emit_ticket(
             .external_psk_binding(&config.provider.cipher_suites, &secret)?,
     );
     value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+    value.client_delegated_credential_expiry = cx.data.client_delegated_credential_expiry;
     value.certificate_free = cx.data.certificate_free;
     let plain = value.get_encoding();
 

@@ -17,8 +17,15 @@
 //!   DC key pair (`crypto::native::delegated_credential`).
 //! - A server attaches it to its certificate with
 //!   [`CertifiedKey::with_delegated_credential`](crate::sign::CertifiedKey::with_delegated_credential);
-//!   it is used when the client offered a compatible scheme.
-//! - A client opts in with `ClientConfig::enable_delegated_credentials`.
+//!   it is used when the client offered a compatible scheme. A client
+//!   accepts one with `ClientConfig::enable_delegated_credentials`.
+//! - A client attaches one issued for [`Side::Client`] with
+//!   [`CertifiedKey::with_client_delegated_credential`](crate::sign::CertifiedKey::with_client_delegated_credential);
+//!   it is used when the server's CertificateRequest lists a compatible
+//!   scheme (§4.1.2). A server asks for and accepts one with
+//!   `ServerConfig::enable_delegated_credentials`.
+//! - [`validate`] is the check both sides run on a received credential,
+//!   for callers that handle credentials outside a handshake.
 //!
 //! No other TLS implementation browntls is tested against (rustls, OpenSSL,
 //! GnuTLS) supports RFC 9345, so only browntls-to-browntls handshakes are
@@ -52,8 +59,10 @@ const CLIENT_CONTEXT: &[u8] = b"TLS, client delegated credentials";
 /// Whether `scheme` may be a credential's `dc_cert_verify_algorithm`: a
 /// TLS 1.3 scheme whose key is not an `rsaEncryption` key. RFC 9345 §4
 /// forbids `rsaEncryption` credential keys, so the `rsa_pss_rsae_*` schemes
-/// are excluded (`rsa_pss_pss_*` keys are allowed).
-pub(crate) fn credential_scheme_allowed(scheme: SignatureScheme) -> bool {
+/// are excluded (`rsa_pss_pss_*` keys are allowed). The handshakes offer
+/// only such schemes in `delegated_credential`, and [`validate`] accepts no
+/// other.
+pub fn credential_scheme_allowed(scheme: SignatureScheme) -> bool {
     scheme.supported_in_tls13()
         && !matches!(
             scheme,
@@ -295,25 +304,45 @@ fn check_delegation_certificate(end_entity: &CertificateDer<'_>) -> Result<(), E
 
 /// A delegated credential and its private key, attached to a
 /// [`CertifiedKey`](crate::sign::CertifiedKey) with
-/// [`with_delegated_credential`](crate::sign::CertifiedKey::with_delegated_credential).
+/// [`with_delegated_credential`](crate::sign::CertifiedKey::with_delegated_credential)
+/// (a server's) or
+/// [`with_client_delegated_credential`](crate::sign::CertifiedKey::with_client_delegated_credential)
+/// (a client's).
 #[derive(Clone, Debug)]
 pub struct DelegatedCredentialKey {
+    side: Side,
     credential: DelegatedCredential,
     key: Arc<dyn SigningKey>,
     end_entity: CertificateDer<'static>,
     expiry: UnixTime,
+    /// The delegation certificate's `notAfter`.
+    not_after: UnixTime,
 }
 
 impl DelegatedCredentialKey {
-    /// Pairs `credential` with its private `key` for `end_entity`.
+    /// Pairs a server's `credential` (issued for [`Side::Server`]) with its
+    /// private `key` for `end_entity`; see [`Self::new_for`].
+    pub fn new(
+        end_entity: &CertificateDer<'_>,
+        credential: DelegatedCredential,
+        key: Arc<dyn SigningKey>,
+    ) -> Result<Self, Error> {
+        Self::new_for(Side::Server, end_entity, credential, key)
+    }
+
+    /// Pairs `credential` with its private `key` for `end_entity`. `side`
+    /// is the side that authenticates with it, as given to
+    /// [`DelegatedCredential::issue`]: the credential's signature covers
+    /// it, so a credential is only ever presented by that side.
     ///
     /// Checks that the certificate permits delegation, that the key can
     /// sign with the credential's scheme (a TLS 1.3 scheme other than
     /// `rsa_pss_rsae_*`, RFC 9345 §4) and, when the
     /// key exposes its public half, that it matches the credential. The
     /// credential's signature is the issuer's responsibility and is not
-    /// checked here; peers check it.
-    pub fn new(
+    /// checked here (so neither is `side`); peers check it.
+    pub fn new_for(
+        side: Side,
         end_entity: &CertificateDer<'_>,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
@@ -331,13 +360,21 @@ impl DelegatedCredentialKey {
         {
             return Err(InconsistentKeys::KeyMismatch.into());
         }
-        let expiry = credential.expiry(end_entity)?;
+        let cert = EndEntityCert::try_from(end_entity).map_err(crate::webpki::pki_error)?;
+        let expiry = expiry_from(cert.not_before(), credential.credential.valid_time);
         Ok(Self {
+            side,
             credential,
             key,
             end_entity: end_entity.clone().into_owned(),
             expiry,
+            not_after: cert.not_after(),
         })
+    }
+
+    /// The side that authenticates with the credential.
+    pub fn side(&self) -> Side {
+        self.side
     }
 
     /// The credential.
@@ -355,50 +392,69 @@ impl DelegatedCredentialKey {
         self.expiry
     }
 
-    /// Whether this credential can authenticate `end_entity` at `now` to a
-    /// peer that offered `dc_schemes` in its `delegated_credential`
-    /// extension and `sig_schemes` in `signature_algorithms` (RFC 9345
-    /// §4.1.1, §4.1.3). Credentials the peer would reject as expired or
-    /// valid for too long are not used.
+    /// Whether this credential lets `side` authenticate `end_entity` at
+    /// `now` to a peer that offered `dc_schemes` in its
+    /// `delegated_credential` extension and `sig_schemes` in
+    /// `signature_algorithms` (RFC 9345 §4.1.1, §4.1.2, §4.1.3).
+    /// Credentials the peer would reject as expired, valid for too long or
+    /// valid beyond the certificate are not used, nor is one whose own
+    /// scheme is missing from `signature_algorithms`, which is where a
+    /// peer looks up the CertificateVerify scheme (RFC 9846 §4.5.2).
     pub(crate) fn usable(
         &self,
+        side: Side,
         end_entity: &CertificateDer<'_>,
         dc_schemes: &[SignatureScheme],
         sig_schemes: &[SignatureScheme],
         now: UnixTime,
     ) -> bool {
         let scheme = self.credential.credential.dc_cert_verify_algorithm;
-        self.end_entity.as_ref() == end_entity.as_ref()
+        self.side == side
+            && self.end_entity.as_ref() == end_entity.as_ref()
             && dc_schemes.contains(&scheme)
+            && sig_schemes.contains(&scheme)
             && sig_schemes.contains(&self.credential.algorithm)
             && now.as_secs() < self.expiry.as_secs()
             && self.expiry.as_secs() <= now.as_secs().saturating_add(MAX_VALIDITY.as_secs())
+            && self.expiry.as_secs() <= self.not_after.as_secs()
     }
 }
 
-/// What a peer offered and presented, for [`validate`].
-pub(crate) struct Presented<'a> {
-    /// The side that authenticates with the credential.
-    pub(crate) side: Side,
-    pub(crate) end_entity: &'a CertificateDer<'a>,
-    /// Our `delegated_credential` extension's schemes.
-    pub(crate) offered_dc_schemes: &'a [SignatureScheme],
-    /// Our `signature_algorithms`.
-    pub(crate) offered_sig_schemes: &'a [SignatureScheme],
-    /// The peer's CertificateVerify scheme.
-    pub(crate) cert_verify_scheme: SignatureScheme,
-    pub(crate) now: UnixTime,
+/// What we offered and the peer presented, for [`validate`].
+#[derive(Clone, Copy, Debug)]
+pub struct Presented<'a> {
+    /// The side that authenticates with the credential (the peer).
+    pub side: Side,
+    /// The peer's end-entity certificate, whose chain has been verified.
+    pub end_entity: &'a CertificateDer<'a>,
+    /// The schemes of our `delegated_credential` extension (in the
+    /// ClientHello, or in the CertificateRequest for a client's
+    /// credential).
+    pub offered_dc_schemes: &'a [SignatureScheme],
+    /// Our `signature_algorithms`, from the same message.
+    pub offered_sig_schemes: &'a [SignatureScheme],
+    /// The scheme of the peer's CertificateVerify.
+    pub cert_verify_scheme: SignatureScheme,
+    /// The current time.
+    pub now: UnixTime,
 }
 
-/// Validates a received delegated credential (RFC 9345 §4.1.1, §4.1.3)
-/// after the certificate chain itself has been verified. `verify_signature`
-/// checks the credential's signature with the end-entity certificate's key
-/// (through the configured certificate verifier). Returns the validated
-/// absolute expiry for resumption state.
+/// Validates a received delegated credential (RFC 9345 §4.1.1, §4.1.2,
+/// §4.1.3) after the certificate chain itself has been verified.
+/// `verify_signature` checks the credential's signature (its second
+/// argument, over its first) with the end-entity certificate's key; the
+/// handshakes pass the configured certificate verifier's
+/// `verify_tls13_signature`. Returns the validated absolute expiry, which
+/// the handshakes keep for resumption state.
+///
+/// The handshakes run this themselves; it is public for callers that
+/// handle credentials at a lower level. The CertificateVerify signature
+/// itself is not checked here: verify it with the credential's
+/// `public_key` afterwards.
 ///
 /// Every failure is a `PeerMisbehaved` error that RFC 9345 §4.1.3 answers
 /// with `illegal_parameter`.
-pub(crate) fn validate(
+pub fn validate(
     dc: &DelegatedCredential,
     presented: &Presented<'_>,
     verify_signature: impl FnOnce(
@@ -456,336 +512,8 @@ pub(crate) fn validate(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample() -> DelegatedCredential {
-        DelegatedCredential {
-            credential: Credential {
-                valid_time: 0x0102_0304,
-                dc_cert_verify_algorithm: SignatureScheme::ECDSA_NISTP256_SHA256,
-                public_key: SubjectPublicKeyInfoDer::from(alloc::vec![0x30, 0x01, 0x00]),
-            },
-            algorithm: SignatureScheme::ED25519,
-            signature: alloc::vec![9, 8, 7],
-        }
-    }
-
-    #[test]
-    fn wire_format() {
-        let dc = sample();
-        let bytes = dc.to_bytes();
-        assert_eq!(
-            bytes,
-            [
-                1, 2, 3, 4, // valid_time
-                0x04, 0x03, // ecdsa_secp256r1_sha256
-                0, 0, 3, 0x30, 0x01, 0x00, // ASN1_subjectPublicKeyInfo
-                0x08, 0x07, // ed25519
-                0, 3, 9, 8, 7, // signature
-            ]
-        );
-        assert_eq!(DelegatedCredential::from_bytes(&bytes).unwrap(), dc);
-    }
-
-    #[test]
-    fn rejects_malformed() {
-        let bytes = sample().to_bytes();
-        // Truncated anywhere.
-        for len in 0..bytes.len() {
-            assert!(
-                DelegatedCredential::from_bytes(&bytes[..len]).is_err(),
-                "{len}"
-            );
-        }
-        // Trailing data.
-        let mut long = bytes.clone();
-        long.push(0);
-        assert!(DelegatedCredential::from_bytes(&long).is_err());
-        // Empty public key and empty signature.
-        let empty_spki = [1, 2, 3, 4, 4, 3, 0, 0, 0, 8, 7, 0, 1, 1];
-        assert_eq!(
-            DelegatedCredential::from_bytes(&empty_spki),
-            Err(InvalidMessage::IllegalEmptyValue)
-        );
-        let empty_sig = [1, 2, 3, 4, 4, 3, 0, 0, 1, 0, 8, 7, 0, 0];
-        assert_eq!(
-            DelegatedCredential::from_bytes(&empty_sig),
-            Err(InvalidMessage::IllegalEmptyValue)
-        );
-        // A public key above the local bound.
-        let huge = [1, 2, 3, 4, 4, 3, 0, 0x40, 1];
-        assert_eq!(
-            DelegatedCredential::from_bytes(&huge),
-            Err(InvalidMessage::MessageTooLarge)
-        );
-    }
-
-    #[test]
-    fn signed_message_layout() {
-        let dc = sample();
-        let cert = CertificateDer::from_slice(&[0xaa, 0xbb]);
-        let msg =
-            DelegatedCredential::signed_message(Side::Server, &cert, &dc.credential, dc.algorithm);
-        assert!(msg[..64].iter().all(|b| *b == 0x20));
-        let rest = &msg[64..];
-        assert!(rest.starts_with(b"TLS, server delegated credentials\0\xaa\xbb"));
-        let tail = &rest[SERVER_CONTEXT.len() + 3..];
-        assert_eq!(&tail[..tail.len() - 2], dc.credential.get_encoding());
-        assert_eq!(&tail[tail.len() - 2..], [0x08, 0x07]);
-        let client =
-            DelegatedCredential::signed_message(Side::Client, &cert, &dc.credential, dc.algorithm);
-        assert!(client[64..].starts_with(CLIENT_CONTEXT));
-    }
-
-    #[test]
-    fn expiry_arithmetic() {
-        let nb = UnixTime::since_unix_epoch(Duration::from_secs(1000));
-        assert_eq!(expiry_from(nb, 5).as_secs(), 1005);
-        assert_eq!(
-            expiry_from(UnixTime::since_unix_epoch(Duration::from_secs(u64::MAX)), 5).as_secs(),
-            u64::MAX
-        );
-    }
-}
+mod tests;
 
 #[cfg(test)]
 #[cfg(feature = "native")]
-mod validate_tests {
-    use alloc::vec;
-
-    use super::*;
-    use crate::crypto::native::sign::any_supported_type;
-
-    const DC_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 44363, 44];
-
-    /// An Ed25519 end-entity certificate (self-signed), with or without the
-    /// `DelegationUsage` extension and the `digitalSignature` key usage.
-    fn cert(
-        delegation: bool,
-        digital_signature: bool,
-    ) -> (CertificateDer<'static>, Arc<dyn SigningKey>) {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
-        // Within `valid_time`'s 32-bit reach of the default notBefore (1975).
-        params.not_after = rcgen::date_time_ymd(2040, 1, 1);
-        if delegation {
-            params
-                .custom_extensions
-                .push(rcgen::CustomExtension::from_oid_content(
-                    DC_OID,
-                    vec![0x05, 0x00],
-                ));
-        }
-        if digital_signature {
-            params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-        }
-        let cert = params.self_signed(&key).unwrap();
-        let signing = any_supported_type(&browntls_pki::PrivateKeyDer::Pkcs8(
-            browntls_pki::PrivatePkcs8KeyDer::from(key.serialize_der()),
-        ))
-        .unwrap();
-        (CertificateDer::from(cert.der().to_vec()), signing)
-    }
-
-    fn credential(
-        end_entity: &CertificateDer<'_>,
-        key: &dyn SigningKey,
-        expiry: u64,
-    ) -> DelegatedCredential {
-        let not_before = EndEntityCert::try_from(end_entity)
-            .unwrap()
-            .not_before()
-            .as_secs();
-        let dc_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cred = Credential {
-            valid_time: u32::try_from(expiry - not_before).unwrap(),
-            dc_cert_verify_algorithm: SignatureScheme::ECDSA_NISTP256_SHA256,
-            public_key: SubjectPublicKeyInfoDer::from(
-                rcgen::PublicKeyData::subject_public_key_info(&dc_key),
-            ),
-        };
-        // Signed directly: `issue` refuses certificates without delegation.
-        let algorithm = SignatureScheme::ED25519;
-        let signer = key.choose_scheme(&[algorithm]).unwrap();
-        let signature = signer
-            .sign(&DelegatedCredential::signed_message(
-                Side::Server,
-                end_entity,
-                &cred,
-                algorithm,
-            ))
-            .unwrap();
-        DelegatedCredential {
-            credential: cred,
-            algorithm,
-            signature,
-        }
-    }
-
-    fn check(
-        dc: &DelegatedCredential,
-        end_entity: &CertificateDer<'_>,
-        dc_schemes: &[SignatureScheme],
-        cv_scheme: SignatureScheme,
-        now: u64,
-    ) -> Result<UnixTime, Error> {
-        let presented = Presented {
-            side: Side::Server,
-            end_entity,
-            offered_dc_schemes: dc_schemes,
-            offered_sig_schemes: &[
-                SignatureScheme::ED25519,
-                SignatureScheme::ECDSA_NISTP256_SHA256,
-            ],
-            cert_verify_scheme: cv_scheme,
-            now: UnixTime::since_unix_epoch(Duration::from_secs(now)),
-        };
-        let spki = EndEntityCert::try_from(end_entity)
-            .unwrap()
-            .subject_public_key_info()
-            .into_owned();
-        validate(dc, &presented, |msg, dss| {
-            crate::webpki::verify_tls13_signature_with_raw_key(
-                msg,
-                &spki,
-                dss,
-                &crate::crypto::native::SUPPORTED_SIG_ALGS,
-            )
-        })
-    }
-
-    #[test]
-    fn checks_in_rfc_order() {
-        const P256: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
-        let now = UnixTime::now().as_secs();
-        let (ee, key) = cert(true, true);
-        let dc = credential(&ee, &*key, now + 3600);
-        assert_eq!(
-            check(&dc, &ee, &[P256], P256, now).unwrap().as_secs(),
-            now + 3600
-        );
-
-        let err = |e: PeerMisbehaved| Err(Error::PeerMisbehaved(e));
-        // §4.1.1: the credential's scheme must be one we offered.
-        assert_eq!(
-            check(&dc, &ee, &[SignatureScheme::ED25519], P256, now).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialWithUnofferedScheme)
-        );
-        // §4.1.3 1: expired.
-        assert_eq!(
-            check(&dc, &ee, &[P256], P256, now + 3600).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialExpired)
-        );
-        // 2: more than seven days left.
-        assert_eq!(
-            check(&dc, &ee, &[P256], P256, now - MAX_VALIDITY.as_secs()).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialValidityTooLong)
-        );
-        // 3: CertificateVerify with another scheme.
-        assert_eq!(
-            check(&dc, &ee, &[P256], SignatureScheme::ED25519, now).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialSchemeMismatch)
-        );
-        // 4: the certificate must permit delegation.
-        for (delegation, ku) in [(false, true), (true, false)] {
-            let (ee, key) = cert(delegation, ku);
-            let dc = credential(&ee, &*key, now + 3600);
-            assert_eq!(
-                check(&dc, &ee, &[P256], P256, now).map(|_| ()),
-                err(PeerMisbehaved::DelegatedCredentialWithoutDelegationUsage)
-            );
-        }
-        // 5: signed by the certificate key, over this certificate and
-        // credential.
-        let (other, _) = cert(true, true);
-        let mut forged = credential(&other, &*key, now + 3600);
-        forged.credential.valid_time = dc.credential.valid_time;
-        assert_eq!(
-            check(&forged, &ee, &[P256], P256, now).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialBadSignature)
-        );
-        let mut client = dc.clone();
-        client.signature = key
-            .choose_scheme(&[SignatureScheme::ED25519])
-            .unwrap()
-            .sign(&DelegatedCredential::signed_message(
-                Side::Client,
-                &ee,
-                &dc.credential,
-                dc.algorithm,
-            ))
-            .unwrap();
-        assert_eq!(
-            check(&client, &ee, &[P256], P256, now).map(|_| ()),
-            err(PeerMisbehaved::DelegatedCredentialBadSignature)
-        );
-    }
-
-    #[test]
-    fn no_rsa_encryption_keys() {
-        const RSAE: [SignatureScheme; 3] = [
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-        ];
-        for scheme in RSAE {
-            assert!(!credential_scheme_allowed(scheme), "{scheme:?}");
-        }
-        for scheme in [
-            SignatureScheme::RSA_PSS_PSS_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ED25519,
-        ] {
-            assert!(credential_scheme_allowed(scheme), "{scheme:?}");
-        }
-
-        let now = UnixTime::now().as_secs();
-        let (ee, key) = cert(true, true);
-        let mut dc = credential(&ee, &*key, now + 3600);
-        // Rejected by a validator even when it offered the scheme
-        // (illegal_parameter, like every validation failure).
-        dc.credential.dc_cert_verify_algorithm = SignatureScheme::RSA_PSS_SHA256;
-        assert_eq!(
-            check(&dc, &ee, &RSAE, SignatureScheme::RSA_PSS_SHA256, now).map(|_| ()),
-            Err(Error::PeerMisbehaved(
-                PeerMisbehaved::DelegatedCredentialWithUnofferedScheme
-            ))
-        );
-        // Neither issued nor attached.
-        let refused = |r: Result<(), Error>| matches!(r, Err(Error::General(msg)) if msg.contains("rsaEncryption"));
-        assert!(refused(
-            DelegatedCredential::issue(
-                Side::Server,
-                &ee,
-                &*key,
-                &[SignatureScheme::ED25519],
-                dc.credential.clone(),
-            )
-            .map(|_| ())
-        ));
-        assert!(refused(
-            DelegatedCredentialKey::new(&ee, dc, key).map(|_| ())
-        ));
-    }
-
-    #[test]
-    fn not_beyond_the_certificate() {
-        let (ee, key) = cert(true, true);
-        let not_after = EndEntityCert::try_from(&ee).unwrap().not_after().as_secs();
-        let dc = credential(&ee, &*key, not_after + 60);
-        assert_eq!(
-            check(
-                &dc,
-                &ee,
-                &[SignatureScheme::ECDSA_NISTP256_SHA256],
-                SignatureScheme::ECDSA_NISTP256_SHA256,
-                not_after - 3600,
-            )
-            .map(|_| ()),
-            Err(Error::PeerMisbehaved(
-                PeerMisbehaved::DelegatedCredentialValidityTooLong
-            ))
-        );
-    }
-}
+mod validate_tests;

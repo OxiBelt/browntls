@@ -107,7 +107,12 @@ fn a_split_second_client_hello_is_kept_once_its_cookie_arrives() {
     // Nor does the first one from another address.
     assert!(matches!(
         acceptor
-            .accept(&mut second[0].clone(), b"198.51.100.7:9", &mut Vec::new(), now)
+            .accept(
+                &mut second[0].clone(),
+                b"198.51.100.7:9",
+                &mut Vec::new(),
+                now
+            )
             .unwrap(),
         dtls::Accepted::Ignored
     ));
@@ -133,9 +138,7 @@ fn a_forged_client_hello_cannot_use_up_the_servers_record_numbers() {
     let now = Duration::from_secs(1000);
     let mut pair = pair_after_second_client_hello(now);
     let forged = handshake_fragment((1 << 48) - 1, 1, 7, 0, &[]);
-    pair.server
-        .read_datagram(&mut forged.clone(), now)
-        .unwrap();
+    pair.server.read_datagram(&mut forged.clone(), now).unwrap();
     // The flight is lost a few times: every retransmission needs fresh
     // record numbers.
     let mut sim = Sim::new(
@@ -143,9 +146,7 @@ fn a_forged_client_hello_cannot_use_up_the_servers_record_numbers() {
         Link::new(|n, _| if n < 6 { Fate::Drop } else { Fate::Deliver }),
     );
     sim.now = now;
-    pair.server
-        .read_datagram(&mut forged.clone(), now)
-        .unwrap();
+    pair.server.read_datagram(&mut forged.clone(), now).unwrap();
     pair.handshake(&mut sim).unwrap();
     pair.exchange(&mut sim, "after forgery");
 }
@@ -172,7 +173,10 @@ fn forged_repetitions_do_not_amplify() {
             .unwrap();
         sent += lose(&mut *pair.server, now);
     }
-    assert!(sent <= flight, "{sent} bytes sent for a {flight}-byte flight");
+    assert!(
+        sent <= flight,
+        "{sent} bytes sent for a {flight}-byte flight"
+    );
 
     // A repetition one timeout later is answered.
     let later = now + Duration::from_secs(1);
@@ -188,9 +192,7 @@ fn forged_hello_fragments_cannot_fill_the_reassembly_buffer() {
     let mut sim = Sim::perfect();
     for (seq, len) in [(14, 0xffff), (15, 0xffff), (1, 0xffff)] {
         let mut forged = handshake_fragment(seq.into(), 2, seq, len, &[0; 1000]);
-        pair.client
-            .read_datagram(&mut forged, sim.now)
-            .unwrap();
+        pair.client.read_datagram(&mut forged, sim.now).unwrap();
     }
     pair.handshake(&mut sim).unwrap();
     assert_dtls13(&pair);
@@ -204,10 +206,7 @@ fn a_received_fatal_alert_stops_retransmissions() {
     assert!(pair.client.next_timeout().is_some());
     // handshake_failure
     let mut alert = plaintext_record(21, 0, &[2, 40]);
-    assert!(pair
-        .client
-        .read_datagram(&mut alert, now)
-        .is_err());
+    assert!(pair.client.read_datagram(&mut alert, now).is_err());
     assert_eq!(pair.client.next_timeout(), None);
     assert_eq!(lose(&mut *pair.client, now + Duration::from_secs(5)), 0);
 }
@@ -238,9 +237,30 @@ fn a_forged_client_hello_before_the_first_answer_leaves_numbers_to_spare() {
     // needs fresh record numbers.
     let mut sim = Sim::new(
         Link::perfect(),
-        Link::new(|n, _| if n % 2 == 0 && n < 8 { Fate::Drop } else { Fate::Deliver }),
+        Link::new(|n, _| {
+            if n % 2 == 0 && n < 8 {
+                Fate::Drop
+            } else {
+                Fate::Deliver
+            }
+        }),
     );
     sim.now = now;
     pair.handshake(&mut sim).unwrap();
     pair.exchange(&mut sim, "after forgery");
+}
+
+#[test]
+fn a_forged_close_notify_does_not_end_a_handshake() {
+    let (mut pair, ..) = Pair::default_pair();
+    let mut sim = Sim::perfect();
+    // close_notify, a warning, ahead of everything else on both sides.
+    for endpoint in [&mut *pair.client as &mut dyn Endpoint, &mut *pair.server] {
+        let mut alert = plaintext_record(21, 0, &[1, 0]);
+        endpoint.read(&mut alert, sim.now).unwrap();
+    }
+    pair.handshake(&mut sim).unwrap();
+    assert!(!pair.client.peer_has_closed());
+    assert!(!pair.server.peer_has_closed());
+    pair.exchange(&mut sim, "after forged close_notify");
 }

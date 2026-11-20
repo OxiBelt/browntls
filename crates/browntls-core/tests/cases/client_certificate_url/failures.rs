@@ -1,4 +1,5 @@
-// Client certificate URL failures, included by `cases/client_certificate_url.rs`.
+// Client certificate URL failures, included by
+// `cases/client_certificate_url.rs`.
 
 /// Runs a handshake from a client without a chain that sends `urls`.
 fn failing_run(
@@ -93,7 +94,9 @@ fn oversized_objects_are_unobtainable() {
     let total = s.web[EE_URL].len() + s.web[CA_URL].len();
     let mut small = ClientCertificateUrlPolicy::new(prov::sha1);
     small.max_fetched_len = total - 1;
-    let outcome = failing_run(&s, s.individual(), true, Some(small.clone()), |q| s.fetch(q));
+    let outcome = failing_run(&s, s.individual(), true, Some(small.clone()), |q| {
+        s.fetch(q)
+    });
     assert_failed(
         &outcome,
         CertificateUrlError::FetchedTooLarge.into(),
@@ -204,7 +207,12 @@ fn the_pause_holds_until_the_right_answer() {
     assert!(!server.wants_read() && !server.wants_write());
     let err = server.read_tls(&mut &[22u8, 3, 3, 0, 0][..]).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-    assert!(server.process_new_packets().unwrap().client_certificate_url_pending());
+    assert!(
+        server
+            .process_new_packets()
+            .unwrap()
+            .client_certificate_url_pending()
+    );
 
     let fetched = s.fetch(server.pending_client_certificate_url().unwrap());
     assert!(
@@ -260,6 +268,9 @@ fn the_client_survives_a_warning_certificate_unobtainable() {
         }
         result.unwrap();
         let outcome = run(&mut client, &mut server, |q| s.fetch(q));
-        assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+        assert!(
+            outcome.server.is_ok() && outcome.client.is_ok(),
+            "{outcome:?}"
+        );
     }
 }

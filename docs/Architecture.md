@@ -628,8 +628,9 @@ interoperability matrix implements the extension (OpenSSL, GnuTLS and Go
 ignore it), so it is tested between browntls peers only, on both
 providers, with the Tokio streams and through the `browntls` facade.
 
-`client_certificate_url`: not negotiated. A client never sends it, and a
-server never acknowledges it, so no CertificateURL message is accepted.
+`client_certificate_url`: negotiated in TLS 1.2 when both sides enable
+it; see [client certificate URLs](#client-certificate-urls-rfc-6066-5)
+below.
 
 `truncated_hmac`: deliberately not implemented, and not planned.
 RFC 9325 §4.6 says implementations MUST NOT use it: its use with the CBC
@@ -638,6 +639,82 @@ AEAD suites. A client never sends the extension and so refuses
 a ServerHello that carries it (`unsupported_extension`); a server never
 acknowledges it, which RFC 6066 §7 allows, and the connection then uses the
 full HMAC.
+
+#### Client certificate URLs (RFC 6066 §5)
+
+A constrained TLS 1.2 client may name its certificate chain with URLs and
+SHA-1 hashes in a CertificateURL message instead of sending it
+(`browntls_core::certificate_url`). Both sides are off by default.
+
+Client: `ClientConfig::enable_client_certificate_url` offers the empty
+extension when TLS 1.2 is among the offered versions and the client
+certificate resolver has certificates (so never on QUIC or in an ECH
+inner hello, which offer TLS 1.3 only). The URLs belong to the
+`CertifiedKey` (`set_certificate_url`), built with `UrlAndHash` and
+`CertificateUrl` (`individual_certs`, end entity first, or `pkipath`;
+`encode_pki_path` writes the DER `PkiPath ::= SEQUENCE OF Certificate`,
+issuer first). The key may hold no certificate at all. A CertificateURL
+message replaces the Certificate only when a TLS 1.2 server acknowledged
+the extension and sent a CertificateRequest; anywhere else, TLS 1.3
+included, a key without a chain sends an empty Certificate and no
+CertificateVerify. A warning-level `certificate_unobtainable` is logged and
+the handshake goes on (RFC 6066 §5); a fatal one ends it with
+`Error::AlertReceived`.
+
+Server: `ServerConfig::client_certificate_url` takes a
+`ClientCertificateUrlPolicy` (`None` by default) with the caller's SHA-1
+function, the allowed URI schemes (only `http` by default, compared
+without regard to case), at most 8 URLs, 2048 bytes per URL and 64 KiB
+for all fetched objects; zero limits or no valid scheme make connection
+creation fail. The server acknowledges the extension only on a full TLS 1.2
+handshake (not a resumption), with a policy set, a client certificate
+verifier that sends a CertificateRequest, and an X.509 client certificate
+(not an RFC 7250 raw public key). It then takes a CertificateURL message
+in place of the Certificate, into the transcript as received. Without the
+acknowledgement the message is `unexpected_message`, and in TLS 1.3 its
+type stays unknown. An unknown chain type, an empty list or URL and
+trailing bytes are `decode_error`; a padding byte other than 0x01 and a
+`pkipath` list of other than one URL are `illegal_parameter`.
+
+The library never opens a connection to a URL. A client-chosen URL that a
+server fetches is a server-side request forgery vector (RFC 6066 §11.3), so
+the application, or its fetcher, performs and authorizes every fetch.
+Before anything reaches it, URLs beyond the policy's count or length, not
+printable ASCII, without a scheme or with one not allowed, without a `//`
+authority or with an empty one, with userinfo, a fragment or a backslash
+end the handshake with `certificate_unobtainable`. Otherwise the
+connection pauses, like the live OCSP pause and independently of it, with
+a `ClientCertificateUrlQuery`
+(`CommonState::pending_client_certificate_url`,
+`IoState::client_certificate_url_pending`,
+`ConnectionState::PendingClientCertificateUrl` on the unbuffered API). No
+input is processed while it is outstanding: ClientKeyExchange,
+CertificateVerify, ChangeCipherSpec and Finished stay buffered, and
+`read_tls` returns `WouldBlock`. `resolve_client_certificate_url` answers
+it with `ClientCertificateUrlResponse::Fetched` (one object per URL) or
+`Unobtainable`; a wrong id is an error that changes nothing, and buffered
+input is processed as after `resolve_peer_revocation`.
+
+An unobtainable chain, a wrong number of objects or more bytes than the
+limit is `certificate_unobtainable`, always, also when client
+authentication is optional. RFC 6066 §5 lets a server that does not
+require the certificate continue, but the client still sends a
+CertificateVerify that cannot be checked without its key, and this crate
+does not go on with an unverified one: a deliberate narrowing. An object
+whose SHA-1 differs from the client's is `bad_certificate_hash_value`
+(always fatal, also when received as a warning); a malformed `PkiPath`
+(not one DER SEQUENCE of 1 to 16 SEQUENCEs with definite, minimal
+lengths and nothing after it) is `bad_certificate`. The chain, in TLS
+order, then goes through the very path a Certificate message takes: the
+client certificate verifier, the revocation hook, then ClientKeyExchange.
+Nothing about the client is reported as authenticated before its
+CertificateVerify verified.
+
+No peer of the end-to-end matrix implements the extension (OpenSSL,
+GnuTLS and Go do not), so the evidence is self-interoperation on both
+providers (`crates/browntls-core/tests/client_certificate_url*.rs`,
+buffered and unbuffered), the Tokio fetcher tests, and codec and PkiPath
+vectors checked with `openssl asn1parse` and Python `hashlib`.
 
 ### TLS 1.3 protocol rules (RFC 9846)
 
@@ -1659,6 +1736,18 @@ nothing per record and copy plaintext at most once:
   transport until a record gives plaintext or the transport waits, so over
   a transport that never waits and does not count, the peer decides how
   long one poll runs. Both are open.
+
+A TLS 1.2 server connection paused for a client certificate URL query
+(RFC 6066 §5) is answered by the acceptor's
+`client_certificate_url_fetcher`, an application closure that takes the
+query and returns the objects (`browntls_tokio::certificate_url`, no Cargo
+feature): `TlsAcceptor`, `LazyConfigAcceptor`, `StartHandshake` and the
+unbuffered counterparts take one, and every place that answers
+certificate status queries (handshakes, early-data paths, reads, the
+unbuffered driver) answers this query first. Without a fetcher it is
+answered `Unobtainable` at once. The fetch runs in the poll that met it
+and is dropped with the handshake future. The fetcher authorizes every
+destination; the module documentation lists what it must check.
 
 ### Kernel TLS offload (`browntls_core::kernel`)
 

@@ -249,7 +249,10 @@ fn individual_certs_from_a_client_without_a_chain() {
     assert!(server.is_handshaking());
 
     let outcome = run(&mut client, &mut server, |q| s.fetch(q));
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert_eq!(
         server.peer_certificates().unwrap(),
         s.client.cert_chain().as_slice()
@@ -265,7 +268,10 @@ fn pkipath_from_a_client_without_a_chain() {
         s.server(&TLS12, true, policy()),
     );
     let outcome = run(&mut client, &mut server, |q| s.fetch(q));
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert_eq!(outcome.queries.len(), 1);
     assert_eq!(outcome.queries[0].chain_type(), CertChainType::PkiPath);
     assert_eq!(outcome.queries[0].entries()[0].url(), PATH_URL);
@@ -286,13 +292,18 @@ fn pkipath_hash_vector() {
         CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x02]),
     ];
     let der = encode_pki_path(&chain).unwrap();
-    assert_eq!(der, [0x30, 0x0a, 0x30, 0x03, 0x02, 0x01, 0x02, 0x30, 0x03, 0x02, 0x01, 0x01]);
+    assert_eq!(
+        der,
+        [
+            0x30, 0x0a, 0x30, 0x03, 0x02, 0x01, 0x02, 0x30, 0x03, 0x02, 0x01, 0x01
+        ]
+    );
     let entry = UrlAndHash::for_object("http://a/p", &der, prov::sha1).unwrap();
     assert_eq!(
         entry.sha1_hash(),
         &[
-            0xf2, 0x40, 0x1d, 0x4f, 0x98, 0xcf, 0xba, 0x18, 0xc9, 0xc6, 0x44, 0x45, 0x8d, 0xf2, 0x39,
-            0xa0, 0xfa, 0x17, 0x07, 0x43
+            0xf2, 0x40, 0x1d, 0x4f, 0x98, 0xcf, 0xba, 0x18, 0xc9, 0xc6, 0x44, 0x45, 0x8d, 0xf2,
+            0x39, 0xa0, 0xfa, 0x17, 0x07, 0x43
         ]
     );
 }
@@ -307,7 +318,10 @@ fn pkipath_object_is_the_reversed_chain() {
     let contents = [ca, ee].concat();
     assert_eq!(der[0], 0x30);
     assert!(der.ends_with(&contents));
-    assert_eq!(der.len() - contents.len(), if contents.len() < 256 { 3 } else { 4 });
+    assert_eq!(
+        der.len() - contents.len(),
+        if contents.len() < 256 { 3 } else { 4 }
+    );
 }
 
 #[test]
@@ -324,7 +338,10 @@ fn a_server_without_a_policy_gets_the_ordinary_certificate() {
     give(&mut client, &flight);
     client.process_new_packets().unwrap();
     let outcome = run(&mut client, &mut server, |_| unreachable!());
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert_eq!(
         server.peer_certificates().unwrap(),
         s.client.cert_chain().as_slice()
@@ -343,7 +360,10 @@ fn a_key_without_a_chain_sends_no_certificate_to_other_servers() {
             s.server(versions, false, None),
         );
         let outcome = run(&mut client, &mut server, |_| unreachable!());
-        assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+        assert!(
+            outcome.server.is_ok() && outcome.client.is_ok(),
+            "{outcome:?}"
+        );
         assert!(server.peer_certificates().is_none());
 
         let (mut client, mut server) = connect(
@@ -369,7 +389,10 @@ fn a_disabled_client_sends_neither_extension_nor_urls() {
     give(&mut client, &flight);
     client.process_new_packets().unwrap();
     let outcome = run(&mut client, &mut server, |_| unreachable!());
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert!(outcome.queries.is_empty());
 }
 
@@ -390,7 +413,10 @@ fn tls13_never_uses_certificate_urls() {
         s.server(&BOTH, true, policy()),
     );
     let outcome = run(&mut client, &mut server, |_| unreachable!());
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert_eq!(
         server.protocol_version(),
         Some(browntls_core::ProtocolVersion::TLSv1_3)
@@ -425,7 +451,10 @@ fn resumption_does_not_acknowledge() {
     let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
     let mut server = ServerConnection::new(server_config.clone()).unwrap();
     let outcome = run(&mut client, &mut server, |q| s.fetch(q));
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
 
     let mut client = ClientConnection::new(client_config, server_name()).unwrap();
     let mut server = ServerConnection::new(server_config).unwrap();
@@ -435,7 +464,10 @@ fn resumption_does_not_acknowledge() {
     give(&mut client, &flight);
     client.process_new_packets().unwrap();
     let outcome = run(&mut client, &mut server, |_| unreachable!());
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
     assert_eq!(server.handshake_kind(), Some(HandshakeKind::Resumed));
     assert_eq!(
         server.peer_certificates().unwrap(),
@@ -469,7 +501,10 @@ fn raw_public_keys_are_not_named_by_url() {
     give(&mut client, &flight);
     client.process_new_packets().unwrap();
     let outcome = run(&mut client, &mut server, |_| unreachable!());
-    assert!(outcome.server.is_ok() && outcome.client.is_ok(), "{outcome:?}");
+    assert!(
+        outcome.server.is_ok() && outcome.client.is_ok(),
+        "{outcome:?}"
+    );
 }
 
 /// Invalid policies fail connection creation, like other invalid
@@ -495,7 +530,10 @@ fn invalid_policies_are_refused() {
     }
     let p = ClientCertificateUrlPolicy::new(prov::sha1);
     assert_eq!(p.allowed_schemes, ["http"]);
-    assert_eq!((p.max_urls, p.max_url_len, p.max_fetched_len), (8, 2048, 65536));
+    assert_eq!(
+        (p.max_urls, p.max_url_len, p.max_fetched_len),
+        (8, 2048, 65536)
+    );
 }
 
 include!("client_certificate_url/failures.rs");

@@ -44,11 +44,12 @@
 //! Nothing about the client counts as authenticated before its
 //! CertificateVerify verified.
 //!
-//! A chain that cannot be obtained is always fatal (`certificate_unobtainable`),
-//! also when client authentication is optional. RFC 6066 §5 lets a server
-//! that does not require the certificate continue, but the client still sends
-//! a CertificateVerify that cannot be checked without its key, and this crate
-//! does not go on with an unverified one: a deliberate narrowing.
+//! A chain that cannot be obtained is always fatal
+//! (`certificate_unobtainable`), also when client authentication is optional.
+//! RFC 6066 §5 lets a server that does not require the certificate continue,
+//! but the client still sends a CertificateVerify that cannot be checked
+//! without its key, and this crate does not go on with an unverified one: a
+//! deliberate narrowing.
 //!
 //! SHA-1 only names the objects here; the certificates are verified as
 //! usual. The caller supplies the SHA-1 function

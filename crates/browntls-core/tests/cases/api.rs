@@ -67,7 +67,8 @@ fn acceptor_reads_the_client_hello_before_a_config_is_chosen() {
 fn acceptor_rejects_garbage_with_an_alert() {
     init_logging();
     let mut acceptor = Acceptor::default();
-    // a well-formed handshake message (ServerHelloDone) that is not a ClientHello
+    // a well-formed handshake message (ServerHelloDone) that is not a
+    // ClientHello
     acceptor
         .read_tls(&mut &[0x16u8, 3, 1, 0, 4, 0x0e, 0, 0, 0][..])
         .unwrap();
@@ -353,7 +354,8 @@ fn max_fragment_size_bounds_every_record() {
             client.write_tls(&mut wire).unwrap();
         }
         // As in rustls, `max_fragment_size` bounds header + plaintext fragment;
-        // TLS 1.3 record protection then adds a content-type byte and a 16-byte tag.
+        // TLS 1.3 record protection then adds a content-type byte and a 16-byte
+        // tag.
         const AEAD_OVERHEAD: usize = 17;
         let sizes = record_sizes(&wire);
         if let Some(max) = client_max {

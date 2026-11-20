@@ -2,10 +2,10 @@
 //!
 //! The tables in `tables/` are generated source: computing them at compile
 //! time costs about a minute of constant evaluation per build, so they are
-//! committed instead and this module keeps them honest. `tables_match_generator`
-//! recomputes every entry from the base point with the run-time group law and
-//! fails on any difference; `regenerate_tables` (ignored, run manually) rewrites
-//! the files:
+//! committed instead and this module keeps them honest.
+//! `tables_match_generator` recomputes every entry from the base point with the
+//! run-time group law and fails on any difference; `regenerate_tables`
+//! (ignored, run manually) rewrites the files:
 //!
 //! ```text
 //! cargo test -p browntls-crypto --lib nist::table::tests::regenerate_tables -- --ignored
@@ -106,8 +106,10 @@ pub(crate) mod generate {
             s,
             "//! Precomputed base-point multiples for {curve_name} (generated; do not edit).\n\
              //!\n\
-             //! Regenerate with the ignored test `nist::table::tests::regenerate_tables`;\n\
-             //! `nist::table::tests::tables_match_generator` verifies every entry.\n\
+             //! Regenerate with the ignored test \
+             `nist::table::tests::regenerate_tables`;\n\
+             //! `nist::table::tests::tables_match_generator` verifies every \
+             entry.\n\
              #![allow(clippy::unreadable_literal)]\n\n\
              use super::super::curve::Affine;\n\n\
              /// `[j][m - 1] = m * 2^({} j) * G`.\n\

@@ -81,7 +81,8 @@ pub(crate) trait Arith<const N: usize> {
     type Soft: Curve<N>;
     /// The accelerated backend (the portable one on targets without it).
     type Fast: Curve<N>;
-    /// Whether the curve's acceleration policy currently selects [`Self::Fast`].
+    /// Whether the curve's acceleration policy currently selects
+    /// [`Self::Fast`].
     fn fast() -> bool;
 }
 

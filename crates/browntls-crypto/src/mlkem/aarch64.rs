@@ -79,7 +79,8 @@ static TABLES: Tables = Tables {
 #[target_feature(enable = "neon")]
 fn ld(s: &[i16]) -> int16x8_t {
     let s = &s[..8];
-    // SAFETY: `s` holds 8 `i16`s; `ld1` has no alignment requirement beyond `i16`.
+    // SAFETY: `s` holds 8 `i16`s; `ld1` has no alignment requirement beyond
+    // `i16`.
     unsafe { vld1q_s16(s.as_ptr()) }
 }
 
@@ -87,7 +88,8 @@ fn ld(s: &[i16]) -> int16x8_t {
 #[target_feature(enable = "neon")]
 fn st(s: &mut [i16], v: int16x8_t) {
     let s = &mut s[..8];
-    // SAFETY: `s` holds 8 `i16`s; `st1` has no alignment requirement beyond `i16`.
+    // SAFETY: `s` holds 8 `i16`s; `st1` has no alignment requirement beyond
+    // `i16`.
     unsafe { vst1q_s16(s.as_mut_ptr(), v) }
 }
 

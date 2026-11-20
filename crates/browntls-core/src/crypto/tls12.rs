@@ -60,9 +60,11 @@ impl Prf for PrfUsingHmac<'_> {
     }
 }
 
-/// `P_hash(secret, label || seed)` (RFC 5246 §5) with `hmac_key` keyed by the secret.
+/// `P_hash(secret, label || seed)` (RFC 5246 §5) with `hmac_key` keyed by the
+/// secret.
 pub(crate) fn prf(out: &mut [u8], hmac_key: &dyn hmac::Key, label: &[u8], seed: &[u8]) {
-    // A(0) = seed; A(i) = HMAC(secret, A(i-1)); P = HMAC(secret, A(1) || seed) || ...
+    // A(0) = seed; A(i) = HMAC(secret, A(i-1));
+    // P = HMAC(secret, A(1) || seed) || ...
     let mut a = hmac_key.sign(&[label, seed]);
     for chunk in out.chunks_mut(hmac_key.tag_len()) {
         let p = hmac_key.sign(&[a.as_ref(), label, seed]);

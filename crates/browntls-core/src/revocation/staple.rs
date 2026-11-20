@@ -146,8 +146,9 @@ impl ServerStapleResolver {
 
     /// Builds an OCSP query for the current usable leaf.
     ///
-    /// The application must authorize the endpoint before resolving or dialing it.
-    /// It may select a configured responder when the certificate lists no URL.
+    /// The application must authorize the endpoint before resolving or dialing
+    /// it. It may select a configured responder when the certificate lists no
+    /// URL.
     pub fn refresh_query(&self) -> Result<Option<StapleQuery>, Error> {
         let now = self.now()?;
         let credential = {

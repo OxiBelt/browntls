@@ -64,7 +64,8 @@ fn xor_store(ks: uint32x4_t, c: &mut [u8; 16]) {
     unsafe { vst1q_u8(c.as_mut_ptr(), x) };
 }
 
-/// Four blocks of keystream; `out[4 * j + g]` holds words `4g..4g+4` of block `j`.
+/// Four blocks of keystream; `out[4 * j + g]` holds words `4g..4g+4` of block
+/// `j`.
 #[target_feature(enable = "neon")]
 #[inline]
 fn core4(key: &[u32; 8], counter: u32, nonce: &[u32; 3]) -> [uint32x4_t; 16] {

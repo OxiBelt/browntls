@@ -5,8 +5,8 @@
 //! that the certificates browntls sends are well-formed. browntls pins the
 //! rustls peer's certificate instead of validating its path.
 //!
-//! This target runs the cases in `cases/interop.rs` with the RustCrypto provider;
-//! `interop_native.rs` runs them with the native provider.
+//! This target runs the cases in `cases/interop.rs` with the RustCrypto
+//! provider; `interop_native.rs` runs them with the native provider.
 
 #![cfg(feature = "rustcrypto")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

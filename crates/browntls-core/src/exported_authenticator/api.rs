@@ -108,8 +108,8 @@ macro_rules! client_methods {
             }
 
             /// Answers the server's authenticator `request` (a TLS 1.3
-            /// `CertificateRequest`) with `certified_key` (RFC 9261 §5), or with
-            /// an empty authenticator declining it when `certified_key` is
+            /// `CertificateRequest`) with `certified_key` (RFC 9261 §5), or
+            /// with an empty authenticator declining it when `certified_key` is
             /// `None` or cannot sign with any scheme the request allows.
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
@@ -262,10 +262,11 @@ macro_rules! server_methods {
 
             /// Answers the client's authenticator `request` (a
             /// `ClientCertificateRequest`) with `certified_key`, or, with
-            /// `request` `None`, authenticates spontaneously with a fresh random
-            /// context and a scheme from the client's `signature_algorithms`
-            /// (RFC 9261 §5). Declines with an empty authenticator when
-            /// answering a request without a usable `certified_key`.
+            /// `request` `None`, authenticates spontaneously with a fresh
+            /// random context and a scheme from the client's
+            /// `signature_algorithms` (RFC 9261 §5). Declines with an empty
+            /// authenticator when answering a request without a usable
+            /// `certified_key`.
             ///
             /// Fails with [`Error::HandshakeNotComplete`] until the handshake
             /// has completed (also when the handshake itself failed), with

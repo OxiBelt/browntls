@@ -57,7 +57,8 @@ impl<'a> EndEntityCert<'a> {
     ///
     /// # Errors
     ///
-    /// Returns the most specific [`Error`] found when no acceptable path exists.
+    /// Returns the most specific [`Error`] found when no acceptable path
+    /// exists.
     #[allow(clippy::too_many_arguments)]
     pub fn verify_for_usage<'p>(
         &'p self,

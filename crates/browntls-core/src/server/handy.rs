@@ -172,7 +172,8 @@ mod sni_resolver {
             Self::default()
         }
 
-        /// Serves `ck` for `name`, after checking the certificate is valid for it.
+        /// Serves `ck` for `name`, after checking the certificate is valid for
+        /// it.
         pub fn add(&mut self, name: &str, ck: CertifiedKey) -> Result<(), Error> {
             let server_name = ServerName::try_from(name)
                 .map_err(|_| Error::General("Bad DNS name".to_string()))?;

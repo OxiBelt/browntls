@@ -30,9 +30,10 @@
 //! permits; the portable implementation uses neither kind and is the
 //! fallback. Hash compressions and stream-cipher calls select per call, while
 //! keyed objects (AES and AES-GCM keys, ML-KEM keys, RSA private keys)
-//! select once when constructed or loaded, so set policies before creating keys or connections. The
-//! hardware checks that guard `unsafe` backend code are independent of the
-//! policy, and `--cfg browntls_force_soft` removes every accelerated backend.
+//! select once when constructed or loaded, so set policies before creating keys
+//! or connections. The hardware checks that guard `unsafe` backend code are
+//! independent of the policy, and `--cfg browntls_force_soft` removes every
+//! accelerated backend.
 //!
 //! The policy's choice is static. [`load`] can additionally move a share of
 //! a family's work to another permitted backend while the selected one runs

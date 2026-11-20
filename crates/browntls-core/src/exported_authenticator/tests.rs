@@ -47,10 +47,10 @@ fn context_lists_are_capped_separately() {
 
 /// Exported authenticators between unbuffered connections, the only kind
 /// there is without `std`. This module is built with every configuration
-/// the unit tests are, so `cargo test -p browntls-core --lib --no-default-features
-/// --features alloc,rustcrypto,tls12` shows that the API compiles and works
-/// with the library built without `std`. It uses `alloc` and `core` only
-/// (the certificates come from `rcgen`).
+/// the unit tests are, so `cargo test -p browntls-core --lib
+/// --no-default-features --features alloc,rustcrypto,tls12` shows that the API
+/// compiles and works with the library built without `std`. It uses `alloc`
+/// and `core` only (the certificates come from `rcgen`).
 #[cfg(any(feature = "rustcrypto", feature = "native"))]
 mod unbuffered {
     use alloc::vec;

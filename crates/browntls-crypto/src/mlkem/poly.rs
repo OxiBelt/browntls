@@ -23,7 +23,8 @@ pub(crate) const Q: i16 = 3329;
 pub(crate) const QINV: i16 = -3327;
 /// Barrett constant `round(2^26 / q)`.
 pub(crate) const BARRETT_V: i16 = 20159;
-/// `2^32 mod q`: multiplying by this in Montgomery form converts to Montgomery form.
+/// `2^32 mod q`: multiplying by this in Montgomery form converts to Montgomery
+/// form.
 pub(crate) const MONT_R2: i16 = 1353;
 /// `2^32 / 128 mod q`: final scaling of the inverse NTT (undoes the `R^-1` of
 /// base multiplication and divides by 128).
@@ -372,7 +373,8 @@ pub(crate) fn decode12_raw(bytes: &[u8; 384], p: &mut Poly) {
     }
 }
 
-/// ByteDecode_12 (reducing modulo `q`, constant time): coefficients in `[0, q)`.
+/// ByteDecode_12 (reducing modulo `q`, constant time): coefficients in
+/// `[0, q)`.
 pub(crate) fn decode12(bytes: &[u8; 384], p: &mut Poly) {
     decode12_raw(bytes, p);
     for c in p.0.iter_mut() {

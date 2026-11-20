@@ -30,7 +30,8 @@ pub trait Hkdf: Send + Sync {
         ))
     }
 
-    /// An expander whose PRK is `okm` (used when a derived secret is itself a PRK).
+    /// An expander whose PRK is `okm` (used when a derived secret is itself a
+    /// PRK).
     fn expander_for_okm(&self, okm: &OkmBlock) -> Box<dyn HkdfExpander>;
 
     /// `HMAC(key, message)` with this HKDF's hash.
@@ -63,7 +64,8 @@ where
     T: From<[u8; N]>,
 {
     let mut output = [0u8; N];
-    // Every array size used in this crate is below 255 * 32, so this cannot fail.
+    // Every array size used in this crate is below 255 * 32, so this cannot
+    // fail.
     let _ = expander.expand_slice(info, &mut output);
     T::from(output)
 }
@@ -197,7 +199,8 @@ impl HkdfExpander for HkdfExpanderUsingHmac {
     }
 }
 
-/// Collects `info` parts into one vector (test helper and provider convenience).
+/// Collects `info` parts into one vector (test helper and provider
+/// convenience).
 #[allow(dead_code)]
 pub(crate) fn concat_info(info: &[&[u8]]) -> Vec<u8> {
     info.concat()

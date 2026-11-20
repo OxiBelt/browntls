@@ -151,8 +151,9 @@ impl fmt::Debug for CrlDistributionPoint<'_> {
     }
 }
 
-/// Reads the contents of `distributionPoint [0]`, which (`DistributionPointName`
-/// being a `CHOICE`) hold one explicitly tagged choice.
+/// Reads the contents of `distributionPoint [0]`, which
+/// (`DistributionPointName` being a `CHOICE`) hold one explicitly tagged
+/// choice.
 fn read_name(contents: &[u8]) -> Result<NameForm<'_>, Error> {
     der::read_all(contents, |r| {
         let tlv = r.tlv()?;

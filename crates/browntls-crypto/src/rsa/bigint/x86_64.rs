@@ -145,7 +145,8 @@ fn mont_mul4(t: &mut [u64], a: &[u64], b: &[u64], m: &[u64], m0inv: u64) {
             "add rcx, 4",
             "cmp rcx, qword ptr [rsp + 16]",
             "jb 3b",
-            // Top: tp[len - 1] = tp[len] + both pending halves, tp[len] = carry.
+            // Top: tp[len - 1] = tp[len] + both pending halves,
+            // tp[len] = carry.
             "xor eax, eax",
             "add r14, r15",
             "adc rax, 0",

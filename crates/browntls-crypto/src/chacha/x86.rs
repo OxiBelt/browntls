@@ -152,7 +152,8 @@ mod zmm {
     }
 }
 
-/// Four blocks of keystream; `out[4 * j + g]` holds words `4g..4g+4` of block `j`.
+/// Four blocks of keystream; `out[4 * j + g]` holds words `4g..4g+4` of block
+/// `j`.
 #[target_feature(enable = "avx2")]
 fn core4(key: &[u32; 8], counter: u32, nonce: &[u32; 3]) -> [__m128i; 16] {
     use xmm::{add, r7, r8, r12, r16, xor};
@@ -179,7 +180,8 @@ fn core4(key: &[u32; 8], counter: u32, nonce: &[u32; 3]) -> [__m128i; 16] {
     out
 }
 
-/// Eight blocks of keystream; `out[2 * j + h]` holds words `8h..8h+8` of block `j`.
+/// Eight blocks of keystream; `out[2 * j + h]` holds words `8h..8h+8` of block
+/// `j`.
 #[target_feature(enable = "avx2")]
 fn core8(key: &[u32; 8], counter: u32, nonce: &[u32; 3]) -> [__m256i; 16] {
     use ymm::{add, r7, r8, r12, r16, xor};

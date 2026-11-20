@@ -91,8 +91,8 @@ fn mul(out: &mut Fe4, a: &Fe4, b: &Fe4) {
             "adcx r9, rax",
             "adox r10, r8",
             "adcx r10, r8",
-            // z0..z2 in memory, z3 = r11, z4 = r12, z5 = r13, z6 = r9, z7 = r10.
-            // Fold: z_lo + 38 * z_hi.
+            // z0..z2 in memory, z3 = r11, z4 = r12, z5 = r13, z6 = r9,
+            // z7 = r10. Fold: z_lo + 38 * z_hi.
             "mov edx, 38",
             "mulx rax, r12, r12",
             "mulx r15, r13, r13",

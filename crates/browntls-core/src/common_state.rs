@@ -26,7 +26,8 @@ use crate::vecbuf::ChunkVecBuffer;
 /// the application must read it.
 pub(crate) const DEFAULT_RECEIVED_PLAINTEXT_LIMIT: usize = 16 * 1024;
 
-/// The default limit on buffered outgoing data (TLS bytes plus unsent plaintext).
+/// The default limit on buffered outgoing data (TLS bytes plus unsent
+/// plaintext).
 pub(crate) const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// RFC 8449 §4: the smallest record size limit an endpoint may announce;
@@ -153,7 +154,8 @@ impl IoState {
         self.peer_has_closed
     }
 
-    /// Whether progress requires resolving a pending certificate status request.
+    /// Whether progress requires resolving a pending certificate status
+    /// request.
     pub fn revocation_pending(&self) -> bool {
         self.revocation_pending
     }

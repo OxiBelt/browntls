@@ -125,7 +125,8 @@ pub(crate) trait Curve<const N: usize>: Copy + 'static {
     /// Fixed-base comb table, flattened rows of `2^(w-1)` entries: entry
     /// `m - 1` of row `j` is `m * 2^(w s j) * G` (see `scalar_mul::mul_comb`).
     const BASE_TABLE: &'static [Affine<N>];
-    /// Odd multiples `(2i + 1) * G` for `i` in `0..16` (verification wNAF table).
+    /// Odd multiples `(2i + 1) * G` for `i` in `0..16` (verification wNAF
+    /// table).
     const G_ODD: &'static [Affine<N>; 16];
 
     /// Montgomery multiplication in the field (backend-specific).
@@ -149,7 +150,8 @@ pub(crate) trait Curve<const N: usize>: Copy + 'static {
         mont::sub_mod(a, b, &Self::P)
     }
 
-    /// Constant-time field inversion in the Montgomery domain (`0` maps to `0`).
+    /// Constant-time field inversion in the Montgomery domain (`0` maps to
+    /// `0`).
     #[inline]
     fn invert(a: &Fe<N>) -> Fe<N> {
         fe_invert_fermat::<Self, N>(a)

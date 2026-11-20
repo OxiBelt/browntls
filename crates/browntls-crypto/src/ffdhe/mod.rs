@@ -205,7 +205,8 @@ impl Group {
     }
 
     /// The exponent length `m` used here: [`Self::min_exponent_bits`]
-    /// rounded up to a multiple of 64 (see the [module documentation](crate::ffdhe)).
+    /// rounded up to a multiple of 64 (see the
+    /// [module documentation](crate::ffdhe)).
     #[must_use]
     pub const fn exponent_bits(self) -> usize {
         self.min_exponent_bits().div_ceil(64) * 64

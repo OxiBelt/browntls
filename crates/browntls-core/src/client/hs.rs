@@ -666,7 +666,8 @@ impl ExpectServerHelloOrHelloRetryRequest {
         }
         transcript_buffer.add_message(&m);
 
-        // RFC 8446 §4.2.10: early data is not possible after a HelloRetryRequest.
+        // RFC 8446 §4.2.10: early data is not possible after a
+        // HelloRetryRequest.
         if cx.data.early_data.is_enabled() {
             cx.data.early_data.rejected();
         }

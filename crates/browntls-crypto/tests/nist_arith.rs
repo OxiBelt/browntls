@@ -94,7 +94,8 @@ macro_rules! curve_arith {
     ($m:ident, $curve:ident, $rc:ident, $fl:literal, $alg:ident, p = $p:literal, n = $n:literal) => {
         mod $m {
             use super::*;
-            // `Field` supplies `square`, `double` and `invert` on the P-256 scalar only.
+            // `Field` supplies `square`, `double` and `invert` on the P-256
+            // scalar only.
             #[allow(unused_imports)]
             use ::$rc::elliptic_curve::ff::{Field as _, PrimeField as _};
             use browntls_crypto::nist::$curve as ours;
@@ -337,7 +338,8 @@ macro_rules! curve_arith {
                             None => assert_eq!(x, BigUint::from(0u8)),
                         },
                         _ => {
-                            // A root of the square is the value or its negation.
+                            // A root of the square is the value or its
+                            // negation.
                             let r = a.square().sqrt().unwrap();
                             assert!(r == a || r == -a, "step {step}: sqrt");
                             a = r;

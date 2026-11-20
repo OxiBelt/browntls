@@ -51,7 +51,8 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
     fn can_cache(&self) -> bool;
 }
 
-/// Encrypts session state into tickets the client holds (RFC 5077, RFC 8446 §4.6.1).
+/// Encrypts session state into tickets the client holds (RFC 5077,
+/// RFC 8446 §4.6.1).
 pub trait ProducesTickets: fmt::Debug + Send + Sync {
     /// Whether tickets are issued at all.
     fn enabled(&self) -> bool;
@@ -156,7 +157,8 @@ pub struct ServerConfig {
     /// Prefer the server's suite order over the client's.
     pub ignore_client_order: bool,
 
-    /// The maximum record size including header; `None` means the protocol maximum.
+    /// The maximum record size including header; `None` means the protocol
+    /// maximum.
     pub max_fragment_size: Option<usize>,
 
     /// Where session state is cached.
@@ -227,7 +229,8 @@ pub struct ServerConfig {
     /// holds its key.
     pub hello_retry_cookies: Option<Arc<dyn ProducesTickets>>,
 
-    /// Whether TLS 1.2 clients must support the extended master secret (RFC 7627).
+    /// Whether TLS 1.2 clients must support the extended master secret
+    /// (RFC 7627).
     pub require_ems: bool,
 
     /// Whether a TLS 1.2 CBC cipher suite may be selected for a client that
@@ -762,7 +765,8 @@ impl UnbufferedServerConnection {
         Ok(Self::from_core(ConnectionCore::for_server(config)?))
     }
 
-    /// The server name the client indicated, once its ClientHello was processed.
+    /// The server name the client indicated, once its ClientHello was
+    /// processed.
     pub fn server_name(&self) -> Option<&str> {
         self.inner.core.data.sni.as_ref().map(|n| n.as_ref())
     }
@@ -843,12 +847,14 @@ impl UnbufferedServerConnection {
         self.inner.core.data.post_handshake_auth
     }
 
-    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    /// See
+    /// [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()
     }
 
-    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
+    /// See
+    /// [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
     pub fn dangerous_into_kernel_connection(
         self,
     ) -> Result<

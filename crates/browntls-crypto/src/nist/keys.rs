@@ -78,7 +78,8 @@ pub(crate) fn scalar_to_bytes<const N: usize>(d: &SecretScalar<N>, out: &mut [u8
 }
 
 /// Generates a uniformly random scalar in `[1, n - 1]` by rejection sampling
-/// (FIPS 186-5, A.2.2). The number of iterations leaks nothing about the result.
+/// (FIPS 186-5, A.2.2). The number of iterations leaks nothing about the
+/// result.
 pub(crate) fn generate<C: Curve<N>, const N: usize>(
     rng: &dyn SecureRandom,
 ) -> Result<SecretScalar<N>, Error> {
@@ -125,7 +126,8 @@ pub(crate) fn ecdh<C: Curve<N>, const N: usize>(
     zeroize_u64(&mut p.x);
     zeroize_u64(&mut p.y);
     zeroize_u64(&mut p.z);
-    // A valid peer point has prime order, so the product cannot be the identity.
+    // A valid peer point has prime order, so the product cannot be the
+    // identity.
     let mut a = result.ok_or(Error::KeyAgreementFailed)?;
     let mut x = fe_to_canonical::<C, N>(&a.x);
     mont::to_be_bytes(&x, out);
@@ -232,7 +234,8 @@ pub(crate) fn decode_spki<C: Curve<N>, const N: usize>(der: &[u8]) -> Result<Aff
     })
 }
 
-/// Writes a `SubjectPublicKeyInfo` with the uncompressed point; returns the length.
+/// Writes a `SubjectPublicKeyInfo` with the uncompressed point; returns the
+/// length.
 pub(crate) fn encode_spki<C: Curve<N>, const N: usize>(
     a: &Affine<N>,
     out: &mut [u8],

@@ -47,9 +47,11 @@ macro_rules! curve_module {
         pub const SIGNATURE_FIXED_LEN: usize = 2 * $field_len;
         /// Maximum length of a DER-encoded signature.
         pub const SIGNATURE_DER_MAX_LEN: usize = ecdsa::der_max_len($field_len);
-        /// Maximum length of a `SubjectPublicKeyInfo` written by [`PublicKey::to_spki_der`].
+        /// Maximum length of a `SubjectPublicKeyInfo` written by
+        /// [`PublicKey::to_spki_der`].
         pub const SPKI_MAX_LEN: usize = 32 + UNCOMPRESSED_LEN;
-        /// Maximum length of an RFC 5915 `ECPrivateKey` written by [`SecretKey::to_sec1_der`].
+        /// Maximum length of an RFC 5915 `ECPrivateKey` written by
+        /// [`SecretKey::to_sec1_der`].
         pub const SEC1_PRIVATE_MAX_LEN: usize = 24 + FIELD_LEN + UNCOMPRESSED_LEN;
         /// DER contents of the curve's `namedCurve` OBJECT IDENTIFIER.
         pub const OID: &[u8] = <$soft as Curve<$n>>::OID;
@@ -120,8 +122,8 @@ macro_rules! curve_module {
                 Self::from_scalar(d, public)
             }
 
-            /// Parses a PKCS#8 `PrivateKeyInfo` / `OneAsymmetricKey` carrying an
-            /// `id-ecPublicKey` key on this curve.
+            /// Parses a PKCS#8 `PrivateKeyInfo` / `OneAsymmetricKey` carrying
+            /// an `id-ecPublicKey` key on this curve.
             ///
             /// # Errors
             ///
@@ -139,8 +141,8 @@ macro_rules! curve_module {
                 out
             }
 
-            /// Writes an RFC 5915 `ECPrivateKey` (with curve OID and public key)
-            /// into `out` and returns its length.
+            /// Writes an RFC 5915 `ECPrivateKey` (with curve OID and public
+            /// key) into `out` and returns its length.
             ///
             /// # Errors
             ///
@@ -160,8 +162,8 @@ macro_rules! curve_module {
             ///
             /// # Errors
             ///
-            /// Returns [`Error::KeyAgreementFailed`] if the product is the identity,
-            /// which cannot happen for a validated `peer`.
+            /// Returns [`Error::KeyAgreementFailed`] if the product is the
+            /// identity, which cannot happen for a validated `peer`.
             pub fn diffie_hellman(&self, peer: &PublicKey) -> Result<[u8; FIELD_LEN], Error> {
                 let mut out = [0u8; FIELD_LEN];
                 let route = load::route_call::<Backend>(&LOAD[LOAD_ECDH], 1);
@@ -187,7 +189,8 @@ macro_rules! curve_module {
             /// # Errors
             ///
             /// Returns [`Error::InvalidEncoding`] for malformed input and
-            /// [`Error::InvalidKey`] for coordinates `>= p` or points off the curve.
+            /// [`Error::InvalidKey`] for coordinates `>= p` or points off the
+            /// curve.
             pub fn from_sec1_bytes(bytes: &[u8]) -> Result<Self, Error> {
                 Ok(Self {
                     point: keys::decode_point::<$soft, $n>(bytes)?,
@@ -214,11 +217,13 @@ macro_rules! curve_module {
                 out
             }
 
-            /// Writes a `SubjectPublicKeyInfo` into `out` and returns its length.
+            /// Writes a `SubjectPublicKeyInfo` into `out` and returns its
+            /// length.
             ///
             /// # Errors
             ///
-            /// Returns [`Error::InvalidLength`] if `out` is shorter than [`SPKI_MAX_LEN`].
+            /// Returns [`Error::InvalidLength`] if `out` is shorter than
+            /// [`SPKI_MAX_LEN`].
             pub fn to_spki_der(&self, out: &mut [u8]) -> Result<usize, Error> {
                 keys::encode_spki::<$soft, $n>(&self.point, out)
             }
@@ -290,8 +295,8 @@ macro_rules! curve_module {
                 self.sign_prehashed(hash, digest.as_ref(), None)
             }
 
-            /// Signs a precomputed `digest` of `hash` (its length must match the
-            /// hash's output length); `rng`, if given, hedges the nonce.
+            /// Signs a precomputed `digest` of `hash` (its length must match
+            /// the hash's output length); `rng`, if given, hedges the nonce.
             ///
             /// # Errors
             ///
@@ -426,14 +431,14 @@ macro_rules! curve_module {
             Ok(())
         }
 
-        /// Verifies a DER signature over `msg` hashed with `hash`. Any supported
-        /// hash is accepted (X.509 allows, for example, P-256 with SHA-384).
-        /// Variable time: all inputs are public.
+        /// Verifies a DER signature over `msg` hashed with `hash`. Any
+        /// supported hash is accepted (X.509 allows, for example, P-256 with
+        /// SHA-384). Variable time: all inputs are public.
         ///
         /// # Errors
         ///
-        /// Returns [`Error::InvalidSignature`] for any malformed or non-verifying
-        /// signature.
+        /// Returns [`Error::InvalidSignature`] for any malformed or
+        /// non-verifying signature.
         pub fn verify(
             public: &PublicKey,
             hash: HashAlgorithm,
@@ -444,7 +449,8 @@ macro_rules! curve_module {
             verify_prehashed(public, digest.as_ref(), sig_der)
         }
 
-        /// Verifies a fixed-size `r || s` signature over `msg` hashed with `hash`.
+        /// Verifies a fixed-size `r || s` signature over `msg` hashed with
+        /// `hash`.
         ///
         /// # Errors
         ///

@@ -130,7 +130,8 @@ macro_rules! nist_group {
 
         impl ActiveKeyExchange for $kx {
             fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
-                // RFC 8446 §4.2.8.2: only the uncompressed point format is used.
+                // RFC 8446 §4.2.8.2: only the uncompressed point format is
+                // used.
                 if peer_pub_key.len() != 2 * $field_len + 1 || peer_pub_key[0] != 0x04 {
                     return Err(PeerMisbehaved::InvalidKeyShare.into());
                 }

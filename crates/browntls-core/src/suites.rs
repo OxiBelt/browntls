@@ -152,7 +152,8 @@ impl fmt::Debug for SupportedCipherSuite {
     }
 }
 
-/// Traffic secrets extracted from a connection, with their next sequence numbers.
+/// Traffic secrets extracted from a connection, with their next sequence
+/// numbers.
 ///
 /// The values are what Linux kernel TLS (`TLS_TX`, `TLS_RX`) takes: the
 /// sequence number is `rec_seq`, and for AES-GCM and AES-CCM the IV's first

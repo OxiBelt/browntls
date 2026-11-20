@@ -1,4 +1,5 @@
-//! TLS 1.2 cipher suites and connection secrets (RFC 5246 §6.3, §8.1; RFC 7627).
+//! TLS 1.2 cipher suites and connection secrets (RFC 5246 §6.3, §8.1;
+//! RFC 7627).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -35,7 +36,8 @@ pub struct Tls12CipherSuite {
 }
 
 impl Tls12CipherSuite {
-    /// Intersects the peer's offered schemes with this suite's, keeping our order.
+    /// Intersects the peer's offered schemes with this suite's, keeping our
+    /// order.
     pub fn resolve_sig_schemes(&self, offered: &[SignatureScheme]) -> Vec<SignatureScheme> {
         self.sign
             .iter()
@@ -159,7 +161,8 @@ impl ConnectionSecrets {
 
     fn make_key_block(&self, shape: &crate::crypto::cipher::KeyBlockShape) -> Vec<u8> {
         let mut out = alloc::vec![0u8; shape.total_len()];
-        // RFC 5246 §6.3: key_block = PRF(master_secret, "key expansion", server_random + client_random)
+        // RFC 5246 §6.3: key_block = PRF(master_secret, "key expansion",
+        // server_random + client_random)
         let seed = join_randoms(&self.randoms.server, &self.randoms.client);
         self.suite
             .prf_provider

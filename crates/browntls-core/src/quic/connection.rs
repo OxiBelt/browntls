@@ -74,7 +74,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.core.read_quic_handshake(plaintext)
     }
 
-    /// Supplies the result of the current OCSP query and processes buffered CRYPTO data.
+    /// Supplies the result of the current OCSP query and processes buffered
+    /// CRYPTO data.
     pub fn resolve_peer_revocation(
         &mut self,
         id: u64,
@@ -102,7 +103,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// this is `None`, the peer broke a rule RFC 9001 makes a QUIC
     /// PROTOCOL_VIOLATION (for example
     /// [`PeerMisbehaved::KeyEpochWithPendingFragment`](crate::PeerMisbehaved::KeyEpochWithPendingFragment),
-    /// [`PeerMisbehaved::InvalidMaxEarlyDataSize`](crate::PeerMisbehaved::InvalidMaxEarlyDataSize) or
+    /// [`PeerMisbehaved::InvalidMaxEarlyDataSize`](crate::PeerMisbehaved::InvalidMaxEarlyDataSize)
+    /// or
     /// [`PeerMisbehaved::NonEmptySessionIdInQuicClientHello`](crate::PeerMisbehaved::NonEmptySessionIdInQuicClientHello)).
     pub fn alert(&self) -> Option<AlertDescription> {
         self.quic().alert
@@ -241,7 +243,8 @@ impl ServerConnection {
         })
     }
 
-    /// The server name the client indicated, once its ClientHello was processed.
+    /// The server name the client indicated, once its ClientHello was
+    /// processed.
     pub fn server_name(&self) -> Option<&str> {
         self.inner.core.data.server_name()
     }
@@ -324,7 +327,8 @@ impl Connection {
         }
     }
 
-    /// Supplies the result of the current OCSP query and processes buffered CRYPTO data.
+    /// Supplies the result of the current OCSP query and processes buffered
+    /// CRYPTO data.
     pub fn resolve_peer_revocation(
         &mut self,
         id: u64,

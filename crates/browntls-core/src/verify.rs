@@ -55,7 +55,8 @@ impl ClientCertVerified {
     }
 }
 
-/// Decides whether a server's certificate and handshake signatures are acceptable.
+/// Decides whether a server's certificate and handshake signatures are
+/// acceptable.
 pub trait ServerCertVerifier: Debug + Send + Sync {
     /// Verifies the server's certificate chain against `server_name` at `now`.
     ///
@@ -69,7 +70,8 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error>;
 
-    /// Verify the server certificate using the evidence presented with its chain.
+    /// Verify the server certificate using the evidence presented with its
+    /// chain.
     fn verify_server_cert_with_evidence(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -115,7 +117,8 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// The schemes this verifier can check; offered in `signature_algorithms`.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 
-    /// Whether the server must present a raw public key instead of a certificate (RFC 7250).
+    /// Whether the server must present a raw public key instead of a
+    /// certificate (RFC 7250).
     fn requires_raw_public_keys(&self) -> bool {
         false
     }
@@ -145,7 +148,8 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     }
 }
 
-/// Decides whether a client's certificate and handshake signatures are acceptable.
+/// Decides whether a client's certificate and handshake signatures are
+/// acceptable.
 pub trait ClientCertVerifier: Debug + Send + Sync {
     /// Whether to send a CertificateRequest at all.
     fn offer_client_auth(&self) -> bool {
@@ -168,7 +172,8 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
         now: UnixTime,
     ) -> Result<ClientCertVerified, Error>;
 
-    /// Verify the client certificate using the evidence presented with its chain.
+    /// Verify the client certificate using the evidence presented with its
+    /// chain.
     fn verify_client_cert_with_evidence(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -207,7 +212,8 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     /// The schemes this verifier can check; sent in the CertificateRequest.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 
-    /// Whether the client must present a raw public key instead of a certificate (RFC 7250).
+    /// Whether the client must present a raw public key instead of a
+    /// certificate (RFC 7250).
     fn requires_raw_public_keys(&self) -> bool {
         false
     }
@@ -258,7 +264,8 @@ impl ClientCertVerifier for NoClientAuth {
     }
 }
 
-/// A signature and the scheme that produced it (RFC 8446 §4.4.3, RFC 5246 §4.7).
+/// A signature and the scheme that produced it (RFC 8446 §4.4.3,
+/// RFC 5246 §4.7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigitallySignedStruct {
     /// The scheme.

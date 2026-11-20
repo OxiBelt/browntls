@@ -31,7 +31,8 @@ struct TicketRotatorState {
 }
 
 impl TicketRotator {
-    /// Builds a rotator whose keys come from `generator` and change every `lifetime` seconds.
+    /// Builds a rotator whose keys come from `generator` and change every
+    /// `lifetime` seconds.
     pub fn new(
         lifetime: u32,
         generator: fn() -> Result<Box<dyn TicketProducer>, GetRandomFailed>,

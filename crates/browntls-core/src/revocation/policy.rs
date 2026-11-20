@@ -70,7 +70,8 @@ impl fmt::Debug for RevocationDigests {
 ///
 /// The default is strict and covers the end-entity certificate: without
 /// fresh, authenticated evidence that it is not revoked, verification fails.
-/// See the [revocation module documentation](crate::revocation) for the sources and their order.
+/// See the [revocation module documentation](crate::revocation) for the sources
+/// and their order.
 #[derive(Clone, Debug)]
 pub struct RevocationPolicy {
     pub(crate) digests: RevocationDigests,
@@ -104,7 +105,8 @@ impl RevocationPolicy {
     }
 
     /// Accepts a certificate whose status no source could establish and
-    /// reports [`RevocationStatus::Indeterminate`](super::RevocationStatus::Indeterminate).
+    /// reports
+    /// [`RevocationStatus::Indeterminate`](super::RevocationStatus::Indeterminate).
     ///
     /// A revoked certificate, an invalid stapled response and a missing
     /// Must-Staple response still fail verification.

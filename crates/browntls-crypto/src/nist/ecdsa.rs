@@ -116,7 +116,8 @@ impl<H: HashFunction> HmacDrbg<H> {
         m.finalize()
     }
 
-    /// `K = HMAC_K(V || 0x00 || seed); V = HMAC_K(V); K = HMAC_K(V || 0x01 || seed); V = HMAC_K(V)`.
+    /// `K = HMAC_K(V || 0x00 || seed); V = HMAC_K(V);`
+    /// `K = HMAC_K(V || 0x01 || seed); V = HMAC_K(V)`.
     fn update(&mut self, seed: &[&[u8]]) {
         for sep in [0x00u8, 0x01] {
             let mut m = self.keyed.clone();

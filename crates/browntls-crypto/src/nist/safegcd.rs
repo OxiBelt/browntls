@@ -12,7 +12,8 @@
 //! choice is a mask that passes through [`barrier`].
 //!
 //! Numbers are five signed limbs `v[0] + v[1] 2^62 + ... + v[4] 2^248`; limbs
-//! 0..3 are in `[0, 2^62)` in normalised form and the top limb carries the sign.
+//! 0..3 are in `[0, 2^62)` in normalised form and the top limb carries the
+//! sign.
 //!
 //! [`invert`] wipes its working state (`d`, `e`, `f`, `g`, which hold the
 //! input, its inverse and the gcd steps in signed form) before returning;

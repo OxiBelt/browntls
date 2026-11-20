@@ -162,7 +162,8 @@ impl KeySchedule {
         output
     }
 
-    /// Feeds the next input secret (`HKDF-Extract(Derive-Secret(current, "derived", ""), secret)`).
+    /// Feeds the next input secret
+    /// (`HKDF-Extract(Derive-Secret(current, "derived", ""), secret)`).
     fn input_secret(&mut self, secret: &[u8]) {
         let salt = self.derive_for_empty_hash();
         self.current = self
@@ -183,7 +184,8 @@ impl KeySchedule {
         self.input_secret(secret.secret_bytes());
     }
 
-    /// `HMAC(HKDF-Expand-Label(base_key, "finished", "", Hash.length), hs_hash)`.
+    /// `HMAC(HKDF-Expand-Label(base_key, "finished", "", Hash.length),
+    /// hs_hash)`.
     fn sign_finish(&self, base_key: &OkmBlock, hs_hash: &[u8]) -> hmac::Tag {
         let expander = self.suite.hkdf_provider.expander_for_okm(base_key);
         let finished_key = hkdf_expand_label_block(&*expander, b"finished", &[]);
@@ -219,7 +221,8 @@ impl KeySchedule {
         self.suite.aead_alg.decrypter(key, iv)
     }
 
-    /// `HKDF-Expand-Label(secret, "traffic upd", "", Hash.length)` (RFC 8446 §7.2).
+    /// `HKDF-Expand-Label(secret, "traffic upd", "", Hash.length)`
+    /// (RFC 8446 §7.2).
     fn next_traffic_secret(&self, secret: &OkmBlock) -> OkmBlock {
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         hkdf_expand_label_block(&*expander, b"traffic upd", &[])
@@ -228,8 +231,8 @@ impl KeySchedule {
 
 /// `HKDF-Expand-Label(secret, label, context, L)` into `output`.
 ///
-/// The `HkdfLabel` structure is `u16 length; opaque label<7..255> = "tls13 " + label;
-/// opaque context<0..255>`.
+/// The `HkdfLabel` structure is `u16 length;
+/// opaque label<7..255> = "tls13 " + label; opaque context<0..255>`.
 pub(crate) fn hkdf_expand_label(
     expander: &dyn HkdfExpander,
     label: &[u8],
@@ -237,7 +240,8 @@ pub(crate) fn hkdf_expand_label(
     output: &mut [u8],
 ) {
     const LABEL_PREFIX: &[u8] = b"tls13 ";
-    // Output lengths are bounded by callers; labels and contexts are at most 255 bytes.
+    // Output lengths are bounded by callers; labels and contexts are at
+    // most 255 bytes.
     let output_len = (output.len() as u16).to_be_bytes();
     let label_len = [(LABEL_PREFIX.len() + label.len()) as u8];
     let context_len = [context.len() as u8];
@@ -634,7 +638,8 @@ impl core::fmt::Debug for EarlyExporter {
     }
 }
 
-/// The steady-state schedule: application traffic, exporter and resumption secrets.
+/// The steady-state schedule: application traffic, exporter and resumption
+/// secrets.
 pub(crate) struct KeyScheduleTraffic {
     ks: KeySchedule,
     current_client_traffic_secret: OkmBlock,

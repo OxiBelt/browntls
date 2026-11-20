@@ -129,7 +129,8 @@ impl CompleteClientHelloHandling {
             ));
         }
 
-        // RFC 8446 §4.2.10: early_data may only appear in the first ClientHello.
+        // RFC 8446 §4.2.10: early_data may only appear in the first
+        // ClientHello.
         let early_data_requested = client_hello.early_data_offered();
         if self.done_retry && early_data_requested {
             return Err(cx.common.send_fatal_alert(

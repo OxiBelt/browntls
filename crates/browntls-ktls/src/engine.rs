@@ -184,7 +184,8 @@ impl<Data: SideData> Engine<Data> {
         result.map_err(|err| self.fail(err))
     }
 
-    /// See [`KtlsStream::refresh_traffic_keys`](crate::KtlsStream::refresh_traffic_keys).
+    /// See
+    /// [`KtlsStream::refresh_traffic_keys`](crate::KtlsStream::refresh_traffic_keys).
     pub(crate) fn refresh_traffic_keys(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
         self.check()?;
         let result = self.conn.refresh_traffic_keys();
@@ -203,7 +204,8 @@ impl<Data: SideData> Engine<Data> {
         }
     }
 
-    /// See [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
+    /// See
+    /// [`KtlsStream::set_rx_expect_no_pad`](crate::KtlsStream::set_rx_expect_no_pad).
     pub(crate) fn set_rx_expect_no_pad(
         &mut self,
         fd: BorrowedFd<'_>,
@@ -224,7 +226,8 @@ impl<Data: SideData> Engine<Data> {
         Ok(())
     }
 
-    /// See [`KtlsStream::rx_expect_no_pad`](crate::KtlsStream::rx_expect_no_pad).
+    /// See
+    /// [`KtlsStream::rx_expect_no_pad`](crate::KtlsStream::rx_expect_no_pad).
     pub(crate) fn rx_expect_no_pad(&self, fd: BorrowedFd<'_>) -> io::Result<bool> {
         self.tls13_only()?;
         sys::rx_expect_no_pad(fd).map_err(option_error)

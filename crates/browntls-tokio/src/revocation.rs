@@ -82,8 +82,9 @@
 //!   for it (each was dropped, or timed out by its owner).
 //! - **A bounded cache** of responses, so that a burst of connections to
 //!   one peer asks its responder once. Each connection still verifies the
-//!   response it is given. See [`cache_ttl`](RevocationFetcherBuilder::cache_ttl)
-//!   for what remembering a response costs.
+//!   response it is given. See
+//!   [`cache_ttl`](RevocationFetcherBuilder::cache_ttl) for what remembering a
+//!   response costs.
 //! - **Bounds** on the size of a response and on how many fetches run at
 //!   once; beyond them a query is answered `Unavailable`.
 //!

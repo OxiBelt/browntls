@@ -149,7 +149,8 @@ static REJ_IDX: [[u8; 8]; 256] = {
 #[target_feature(enable = "avx2")]
 fn ld(s: &[i16]) -> __m256i {
     let s = &s[..16];
-    // SAFETY: `s` holds 16 `i16`s (32 bytes); `loadu` has no alignment requirement.
+    // SAFETY: `s` holds 16 `i16`s (32 bytes); `loadu` has no alignment
+    // requirement.
     unsafe { _mm256_loadu_si256(s.as_ptr().cast()) }
 }
 
@@ -157,7 +158,8 @@ fn ld(s: &[i16]) -> __m256i {
 #[target_feature(enable = "avx2")]
 fn st(s: &mut [i16], v: __m256i) {
     let s = &mut s[..16];
-    // SAFETY: `s` holds 16 `i16`s (32 bytes); `storeu` has no alignment requirement.
+    // SAFETY: `s` holds 16 `i16`s (32 bytes); `storeu` has no alignment
+    // requirement.
     unsafe { _mm256_storeu_si256(s.as_mut_ptr().cast(), v) }
 }
 
@@ -417,7 +419,8 @@ fn idx_lo(m: u32) -> __m128i {
 #[target_feature(enable = "avx2")]
 fn store8(out: &mut [i16; N], ctr: usize, v: __m128i) {
     let s = &mut out[ctr..ctr + 8];
-    // SAFETY: `s` holds 8 `i16`s (16 bytes); `storeu` has no alignment requirement.
+    // SAFETY: `s` holds 8 `i16`s (16 bytes); `storeu` has no alignment
+    // requirement.
     unsafe { _mm_storeu_si128(s.as_mut_ptr().cast(), v) }
 }
 

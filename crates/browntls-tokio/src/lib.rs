@@ -47,8 +47,8 @@
 //! ```
 //!
 //! [`LazyConfigAcceptor`] reads the ClientHello first, so a server can
-//! choose its [`ServerConfig`](browntls_core::ServerConfig) by server name, ALPN
-//! or cipher suites before the handshake goes on.
+//! choose its [`ServerConfig`](browntls_core::ServerConfig) by server name,
+//! ALPN or cipher suites before the handshake goes on.
 //!
 //! [`TlsConnector::early_data`] lets [`TlsConnector::connect`] return
 //! before the handshake on a resumed TLS 1.3 session, so the first writes go
@@ -60,9 +60,9 @@
 //! means for a server that acts on it before the handshake completes.
 //!
 //! The [`unbuffered`] module has the same connector, acceptor and lazy
-//! acceptor over `browntls-core`'s unbuffered connection API: its streams decrypt
-//! each record in place in one receive buffer, so [`AsyncBufRead`] lends
-//! the plaintext without a copy and [`AsyncRead`] copies it once. Its
+//! acceptor over `browntls-core`'s unbuffered connection API: its streams
+//! decrypt each record in place in one receive buffer, so [`AsyncBufRead`]
+//! lends the plaintext without a copy and [`AsyncRead`] copies it once. Its
 //! streams have no `into_split` and the `coop` feature does not cover them
 //! yet. Its client sends no early data, and its acceptors have no
 //! `early_data` option: a server has the early data it accepted only as

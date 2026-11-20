@@ -3,7 +3,8 @@
 //! rejections, and handshakes between the two providers.
 //!
 //! This target runs the cases in `cases/cert_compression.rs` with the
-//! RustCrypto provider; `cert_compression_native.rs` runs them with the native provider.
+//! RustCrypto provider; `cert_compression_native.rs` runs them with the native
+//! provider.
 
 #![cfg(all(
     feature = "rustcrypto",

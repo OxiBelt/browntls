@@ -101,7 +101,8 @@ impl Scalar {
         s
     }
 
-    /// Reduces a 512-bit little-endian integer (e.g. a SHA-512 output) modulo `L`.
+    /// Reduces a 512-bit little-endian integer (e.g. a SHA-512 output) modulo
+    /// `L`.
     pub(crate) fn from_bytes_mod_order_wide(b: &[u8; 64]) -> Self {
         let w: [u64; 8] = load_words(b);
         let lo = Self([

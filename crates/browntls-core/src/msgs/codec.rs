@@ -130,7 +130,8 @@ impl Codec<'_> for u16 {
     }
 }
 
-/// A 24-bit unsigned integer, used for handshake message and certificate lengths.
+/// A 24-bit unsigned integer, used for handshake message and certificate
+/// lengths.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct u24(pub(crate) u32);
@@ -263,7 +264,8 @@ pub(crate) fn encode_list<'a, T: Codec<'a>>(size: ListLength, items: &[T], bytes
     }
 }
 
-/// Reads the length prefix and returns a sub-reader over exactly that many bytes.
+/// Reads the length prefix and returns a sub-reader over exactly that many
+/// bytes.
 pub(crate) fn read_list_prefix<'a>(
     size: ListLength,
     r: &mut Reader<'a>,

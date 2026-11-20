@@ -35,7 +35,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             // k = 2^384 - p = (r14, r15, 1).
             "mov r14, 0xffffffff00000001",
             "mov r15d, 0xffffffff",
-            // Round 0: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 0: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r8",
             "shl rdx, 32",
             "add rdx, r8",
@@ -52,7 +53,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "sbb r13, 0",
             "sbb rdx, 0",
             "mov r8, rdx",
-            // Round 1: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 1: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r9",
             "shl rdx, 32",
             "add rdx, r9",
@@ -69,7 +71,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "sbb r8, 0",
             "sbb rdx, 0",
             "mov r9, rdx",
-            // Round 2: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 2: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r10",
             "shl rdx, 32",
             "add rdx, r10",
@@ -86,7 +89,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "sbb r9, 0",
             "sbb rdx, 0",
             "mov r10, rdx",
-            // Round 3: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 3: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r11",
             "shl rdx, 32",
             "add rdx, r11",
@@ -103,7 +107,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "sbb r10, 0",
             "sbb rdx, 0",
             "mov r11, rdx",
-            // Round 4: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 4: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r12",
             "shl rdx, 32",
             "add rdx, r12",
@@ -120,7 +125,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "sbb r11, 0",
             "sbb rdx, 0",
             "mov r12, rdx",
-            // Round 5: q = w0 (2^32 + 1); window = (window - q k) / 2^64 + q 2^320.
+            // Round 5: q = w0 (2^32 + 1);
+            // window = (window - q k) / 2^64 + q 2^320.
             "mov rdx, r13",
             "shl rdx, 32",
             "add rdx, r13",
@@ -146,7 +152,8 @@ fn reduce(t: &[u64; 12]) -> Fe<6> {
             "adc r13, qword ptr [rsi + 88]",
             "mov eax, 0",
             "adc eax, 0",
-            // Subtract p = (r15, !r15, -2, -1, -1, -1); rax becomes the borrow mask.
+            // Subtract p = (r15, !r15, -2, -1, -1, -1); rax becomes the borrow
+            // mask.
             "mov rdx, r15",
             "not rdx",
             "sub r8, r15",
@@ -210,7 +217,8 @@ fn add(a: &Fe<6>, b: &Fe<6>) -> Fe<6> {
             "adc r13, qword ptr [rdi + 40]",
             "mov eax, 0",
             "adc eax, 0",
-            // Subtract p = (rcx, rsi, -2, -1, -1, -1); rax becomes the borrow mask.
+            // Subtract p = (rcx, rsi, -2, -1, -1, -1); rax becomes the borrow
+            // mask.
             "mov ecx, 0xffffffff",
             "mov rsi, rcx",
             "not rsi",

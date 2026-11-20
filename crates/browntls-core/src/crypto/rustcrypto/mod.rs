@@ -105,7 +105,8 @@ pub mod kx_group {
     };
 }
 
-/// The key exchange groups enabled by [`default_provider`], in preference order.
+/// The key exchange groups enabled by [`default_provider`], in preference
+/// order.
 pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     #[cfg(feature = "prefer-post-quantum")]
     kx::X25519MLKEM768,

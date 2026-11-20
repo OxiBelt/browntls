@@ -428,7 +428,8 @@ impl ExpectClientHello {
             .as_deref()
             .map(ActiveCertifiedKey::from_certified_key);
 
-        // RFC 7250: certificate types, for the server's and the client's credentials.
+        // RFC 7250: certificate types, for the server's and the client's
+        // credentials.
         let cert_types = NegotiatedCertTypes {
             server: negotiate_cert_type(
                 client_hello

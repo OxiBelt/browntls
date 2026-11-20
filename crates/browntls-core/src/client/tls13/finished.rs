@@ -279,7 +279,8 @@ impl State<ClientConnectionData> for ExpectFinished {
             config: st.config,
             server_name: st.server_name,
             suite: st.suite,
-            // Resumption secrets derive from the transcript through our Finished.
+            // Resumption secrets derive from the transcript through our
+            // Finished.
             final_hash: st.transcript.current_hash(),
             post_handshake_transcript,
             post_handshake_requests_since_data: 0,

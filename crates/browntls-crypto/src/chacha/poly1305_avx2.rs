@@ -118,7 +118,8 @@ fn mul32(a: __m256i, b: __m256i) -> __m256i {
     out
 }
 
-/// Dot product of five limb pairs: `sum a[i] * b[i]` (low 32 bits of each lane).
+/// Dot product of five limb pairs: `sum a[i] * b[i]` (low 32 bits of each
+/// lane).
 #[target_feature(enable = "avx2")]
 #[inline]
 fn dot(a: [__m256i; 5], b: [__m256i; 5]) -> __m256i {

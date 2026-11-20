@@ -139,7 +139,8 @@ fn parse_spki(cert: &[u8]) -> Result<&[u8], ()> {
     tbs.expect(TAG_SEQUENCE)?; // subject Name
     let (spki_value, spki) = tbs.expect(TAG_SEQUENCE)?; // subjectPublicKeyInfo
 
-    // Sanity-check the SPKI shape: AlgorithmIdentifier SEQUENCE then BIT STRING.
+    // Sanity-check the SPKI shape: AlgorithmIdentifier SEQUENCE then BIT
+    // STRING.
     let mut inner = Der { input: spki_value };
     inner.expect(TAG_SEQUENCE)?;
     let (bits, _) = inner.expect(TAG_BIT_STRING)?;

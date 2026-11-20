@@ -184,7 +184,8 @@ mod tests {
 
     #[test]
     fn mgf1_known_answer() {
-        // MGF1-SHA256 values cross-checked against an independent implementation.
+        // MGF1-SHA256 values cross-checked against an independent
+        // implementation.
         let mut out = [0u8; 3];
         mgf1_xor(HashAlgorithm::Sha256, b"foo", &mut out);
         assert_eq!(hex::encode(out), "3bdaba");

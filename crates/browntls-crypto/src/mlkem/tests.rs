@@ -210,7 +210,8 @@ fn rej_uniform_matches_portable() {
             for start in [0usize, 1, 100, 224, 225, 250, 255, 256] {
                 let mut buf = std::vec![0u8; len];
                 for (i, b) in buf.iter_mut().enumerate() {
-                    // Mix of accepted and rejected values, including runs of 0xff.
+                    // Mix of accepted and rejected values, including runs
+                    // of 0xff.
                     *b = if i % 7 == 0 { 0xff } else { rng.next() as u8 };
                 }
                 let mut a = [0i16; N];
@@ -307,7 +308,8 @@ fn encode_decode_roundtrip() {
 }
 
 /// Arithmetic-only throughput per backend
-/// (`cargo test --release -p browntls-crypto --lib mlkem::tests::arith_throughput -- --ignored --nocapture`).
+/// (`cargo test --release -p browntls-crypto --lib
+/// mlkem::tests::arith_throughput -- --ignored --nocapture`).
 #[test]
 #[ignore = "throughput measurement"]
 fn arith_throughput() {

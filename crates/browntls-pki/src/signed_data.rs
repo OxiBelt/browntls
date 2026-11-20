@@ -100,7 +100,8 @@ impl<'a> SignedData<'a> {
     /// the contents are two (an `AlgorithmIdentifier` and a `BIT STRING`).
     /// The signature is checked by the first algorithm of
     /// `supported_sig_algs` whose signature and public key
-    /// `AlgorithmIdentifier`s both match ([`AlgorithmIdentifier::matches_signature`],
+    /// `AlgorithmIdentifier`s both match
+    /// ([`AlgorithmIdentifier::matches_signature`],
     /// [`AlgorithmIdentifier::matches_public_key`]: byte for byte, or by the
     /// canonical form of `id-RSASSA-PSS` parameters), exactly as path
     /// validation verifies certificate signatures.

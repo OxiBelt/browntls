@@ -68,7 +68,8 @@ where
 
     /// Answers the certificate status (OCSP) queries of the connection
     /// with `fetcher`: the [`StartHandshake`] this future returns keeps
-    /// it. See [`TlsAcceptor::revocation_fetcher`](super::TlsAcceptor::revocation_fetcher).
+    /// it. See
+    /// [`TlsAcceptor::revocation_fetcher`](super::TlsAcceptor::revocation_fetcher).
     #[cfg(feature = "ocsp")]
     pub fn revocation_fetcher(
         mut self,

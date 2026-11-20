@@ -1,4 +1,5 @@
-//! TLS 1.2 client authentication of the server and emission of the client flight.
+//! TLS 1.2 client authentication of the server and emission of the client
+//! flight.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

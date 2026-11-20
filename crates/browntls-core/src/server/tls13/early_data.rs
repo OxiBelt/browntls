@@ -115,9 +115,9 @@ pub(super) struct ExpectAndSkipRejectedEarlyData {
 impl State<ServerConnectionData> for ExpectAndSkipRejectedEarlyData {
     fn handle(mut self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
         // RFC 8446 §4.2.10: "skipping all records with an external content
-        // type of application_data ... up to the configured max_early_data_size".
-        // Each record costs at least one byte, so the limit also bounds how
-        // many (empty) records are skipped.
+        // type of application_data ... up to the configured
+        // max_early_data_size". Each record costs at least one byte, so the
+        // limit also bounds how many (empty) records are skipped.
         if let MessagePayload::ApplicationData(skip_data) = &m.payload {
             let cost = skip_data.bytes().len().max(1);
             if cost <= self.skip_data_left {
@@ -156,7 +156,8 @@ impl State<ServerConnectionData> for ExpectEarlyData {
                 ..
             } => {
                 let mut st = *self;
-                // RFC 8446 §4.5: the client's next records use its handshake key.
+                // RFC 8446 §4.5: the client's next records use its handshake
+                // key.
                 st.key_schedule.update_decrypter(cx.common);
                 st.transcript.add_message(&m);
                 Ok(Box::new(ExpectFinished {

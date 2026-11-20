@@ -18,10 +18,11 @@
 //!
 //! # Layout
 //!
-//! * [`crypto`]: the provider mount point (cipher suites, key exchange, signing,
-//!   randomness) and the providers shipped with the crate.
-//! * [`client`] / [`server`]: configuration ([`ClientConfig`], [`ServerConfig`])
-//!   and connections ([`ClientConnection`], [`ServerConnection`]).
+//! * [`crypto`]: the provider mount point (cipher suites, key exchange,
+//!   signing, randomness) and the providers shipped with the crate.
+//! * [`client`] / [`server`]: configuration ([`ClientConfig`],
+//!   [`ServerConfig`]) and connections ([`ClientConnection`],
+//!   [`ServerConnection`]).
 //! * [`ConnectionCommon`]: the buffered connection API shared by both sides.
 //! * [`unbuffered`]: the caller-buffer-driven API
 //!   ([`client::UnbufferedClientConnection`],

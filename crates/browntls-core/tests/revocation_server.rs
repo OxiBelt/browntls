@@ -351,7 +351,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 const VERSIONS: [&SupportedProtocolVersion; 2] = [&version::TLS13, &version::TLS12];
 
-// ------------------------------------------------- initial client authentication
+// ----------------------------------------------- initial client authentication
 
 #[test]
 fn handshake_waits_for_the_status_lookup_after_the_proof() {
@@ -797,7 +797,7 @@ fn raw_public_key_sessions_are_unaffected() {
     }
 }
 
-// -------------------------------------------- post-handshake client authentication
+// ---------------------------------------- post-handshake client authentication
 
 /// A handshake without client authentication, then a post-handshake
 /// request carried up to the server having read the client's answer.

@@ -146,7 +146,8 @@ impl Side {
         Arc::new(provider)
     }
 
-    /// Pins `chain`'s end entity, checking signatures with this side's algorithms.
+    /// Pins `chain`'s end entity, checking signatures with this side's
+    /// algorithms.
     fn server_verifier(self, chain: &Chain) -> Arc<PinnedServerVerifier> {
         Arc::new(PinnedServerVerifier {
             expected: chain.end_entity.clone(),
@@ -156,7 +157,8 @@ impl Side {
         })
     }
 
-    /// Requires `chain`'s end entity, checking signatures with this side's algorithms.
+    /// Requires `chain`'s end entity, checking signatures with this side's
+    /// algorithms.
     fn client_verifier(self, chain: &Chain) -> Arc<PinnedClientVerifier> {
         Arc::new(PinnedClientVerifier {
             expected: chain.end_entity.clone(),

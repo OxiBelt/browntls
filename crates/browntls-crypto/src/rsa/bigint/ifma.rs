@@ -29,8 +29,8 @@
 //! # Timing
 //!
 //! Every multiplication runs a fixed instruction sequence for its size. In
-//! the CRT exponentiation, the 4-bit fixed window, the number of squarings and multiplications, and
-//! the full scan of the 16-entry table with masks match
+//! the CRT exponentiation, the 4-bit fixed window, the number of squarings and
+//! multiplications, and the full scan of the 16-entry table with masks match
 //! [`super::mont::Mont::exp_ct`]; all loop counts depend only on `len`.
 //! Carry normalisation uses masked vector adds driven by a carry-lookahead
 //! word computed with plain integer arithmetic. No branch or memory index
@@ -555,7 +555,8 @@ impl<const V: usize, const C: usize> Amm<V, C> {
                 let t0 = _mm_cvtsi128_si64(_mm512_castsi512_si128(acc[c][0])) as u64;
                 let y = t0.wrapping_mul(self.k0[c]) & MASK52;
                 yv[c] = _mm512_set1_epi64(y as i64);
-                // Lane 0 after adding the low half of m_0 y (exact; below 2^63).
+                // Lane 0 after adding the low half of m_0 y (exact;
+                // below 2^63).
                 carry[c] = (t0 + (m0[c].wrapping_mul(y) & MASK52)) >> 52;
                 for v in 0..V {
                     acc[c][v] = _mm512_madd52lo_epu64(acc[c][v], mv[c][v], yv[c]);

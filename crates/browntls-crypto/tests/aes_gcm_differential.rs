@@ -321,7 +321,8 @@ fn backends_report_what_they_were_built_with() {
 }
 
 /// Rough throughput per backend pair (release build recommended):
-/// `cargo test -p browntls-crypto --release --test aes_gcm_differential -- --ignored --nocapture throughput`
+/// `cargo test -p browntls-crypto --release --test aes_gcm_differential --
+/// --ignored --nocapture throughput`
 #[test]
 #[ignore = "benchmark; run manually with --ignored --nocapture"]
 fn throughput() {

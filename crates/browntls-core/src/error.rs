@@ -37,7 +37,8 @@ pub enum Error {
     /// The peer sent no certificates where one was required.
     NoCertificatesPresented,
 
-    /// The configured server name type is not supported (e.g. an IP address with SNI).
+    /// The configured server name type is not supported (e.g. an IP address
+    /// with SNI).
     UnsupportedNameType,
 
     /// A record failed to decrypt.

@@ -436,7 +436,8 @@ impl Codec<'_> for ClientExtensions {
                     out.encrypted_client_hello = Some(EchClientHello::read(body)?);
                 }
                 ExtensionType::DelegatedCredential => {
-                    // SignatureSchemeList: supported_signature_algorithm<2..2^16-2>.
+                    // SignatureSchemeList:
+                    // supported_signature_algorithm<2..2^16-2>.
                     out.delegated_credential =
                         Some(read_nonempty_vec_u16(body, "DelegatedCredentialSchemes")?);
                 }
@@ -763,7 +764,8 @@ impl<'a> HandshakeMessagePayload<'a> {
     }
 
     /// Builds the synthetic `message_hash` message used to replace the first
-    /// ClientHello in the transcript after a HelloRetryRequest (RFC 8446 §4.4.1).
+    /// ClientHello in the transcript after a HelloRetryRequest
+    /// (RFC 8446 §4.4.1).
     pub(crate) fn build_handshake_hash(hash: &[u8]) -> HandshakeMessagePayload<'static> {
         HandshakeMessagePayload(HandshakePayload::MessageHash(Payload::new(hash.to_vec())))
     }

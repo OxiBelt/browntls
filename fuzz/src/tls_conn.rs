@@ -63,8 +63,9 @@ const SERVER: usize = 1;
 #[repr(u8)]
 enum Op {
     /// `side, write chunk, damage, position (u16), read chunk (u16, 0: no
-    /// limit), limit (u16, 0: none)[, inserted bytes]`: `write_tls` from `side`, damage the bytes
-    /// in flight, then `read_tls` and `process_new_packets` on the peer.
+    /// limit), limit (u16, 0: none)[, inserted bytes]`: `write_tls` from
+    /// `side`, damage the bytes in flight, then `read_tls` and
+    /// `process_new_packets` on the peer.
     Transfer,
     /// Exchange everything until both sides are idle.
     Pump,
@@ -417,8 +418,9 @@ impl World {
     }
 
     /// Reads the buffered plaintext of `side` with `method` (0: `read`,
-    /// 1: `BufRead`, 2: `read_to_end`, 3: `into_first_chunk`): all of it, or about `size` bytes
-    /// when that is not zero. Returns the number of bytes read.
+    /// 1: `BufRead`, 2: `read_to_end`, 3: `into_first_chunk`): all of it, or
+    /// about `size` bytes when that is not zero. Returns the number of bytes
+    /// read.
     fn read_with(&mut self, side: usize, method: u8, size: usize) -> usize {
         let Some(conn) = self.conns[side].as_mut() else {
             return 0;

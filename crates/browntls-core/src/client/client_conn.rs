@@ -68,7 +68,8 @@ pub trait ClientSessionStore: fmt::Debug + Send + Sync {
 
 /// Chooses the client certificate to present.
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
-    /// Picks a certificate acceptable to the given issuers and schemes, or `None`.
+    /// Picks a certificate acceptable to the given issuers and schemes, or
+    /// `None`.
     fn resolve(
         &self,
         root_hint_subjects: &[&[u8]],
@@ -95,7 +96,8 @@ pub struct ClientConfig {
     /// How sessions are stored and resumed.
     pub resumption: Resumption,
 
-    /// The maximum record size including header; `None` means the protocol maximum.
+    /// The maximum record size including header; `None` means the protocol
+    /// maximum.
     pub max_fragment_size: Option<usize>,
 
     /// Chooses the client certificate when the server asks for one.
@@ -125,7 +127,8 @@ pub struct ClientConfig {
     /// not tie the setting to the negotiated ALPN protocol.
     pub enable_post_handshake_auth: bool,
 
-    /// Whether TLS 1.2 servers must support the extended master secret (RFC 7627).
+    /// Whether TLS 1.2 servers must support the extended master secret
+    /// (RFC 7627).
     pub require_ems: bool,
 
     /// Whether a TLS 1.2 server must acknowledge secure renegotiation
@@ -638,7 +641,8 @@ impl ClientConnectionData {
         self.early_data.left
     }
 
-    /// Charges `len` bytes (at most [`Self::early_data_left`]) of sent 0-RTT data.
+    /// Charges `len` bytes (at most [`Self::early_data_left`]) of sent 0-RTT
+    /// data.
     pub(crate) fn charge_early_data(&mut self, len: usize) {
         self.early_data.left = self.early_data.left.saturating_sub(len);
     }
@@ -779,7 +783,8 @@ impl UnbufferedClientConnection {
     /// connection has answered, with or without a certificate.
     ///
     /// The answers are queued while the request is processed and offered
-    /// through [`ConnectionState::EncodeTlsData`](crate::unbuffered::ConnectionState::EncodeTlsData)
+    /// through
+    /// [`ConnectionState::EncodeTlsData`](crate::unbuffered::ConnectionState::EncodeTlsData)
     /// like any other handshake message.
     pub fn post_handshake_auth_responses(&self) -> u32 {
         self.inner.core.data.post_handshake_auth_responses
@@ -803,12 +808,14 @@ impl UnbufferedClientConnection {
         self.inner.core.data.ech_status
     }
 
-    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
+    /// See
+    /// [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_extract_secrets`].
     pub fn dangerous_extract_secrets(self) -> Result<crate::suites::ExtractedSecrets, Error> {
         self.inner.dangerous_extract_secrets()
     }
 
-    /// See [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
+    /// See
+    /// [`crate::unbuffered::UnbufferedConnectionCommon::dangerous_into_kernel_connection`].
     pub fn dangerous_into_kernel_connection(
         self,
     ) -> Result<

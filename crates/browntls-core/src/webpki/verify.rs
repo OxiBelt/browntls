@@ -1,4 +1,5 @@
-//! Handshake signature verification and the algorithm table a provider supplies.
+//! Handshake signature verification and the algorithm table a provider
+//! supplies.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -95,8 +96,8 @@ pub fn verify_server_name(
         .map_err(pki_error)
 }
 
-/// Verifies that `cert`, with `intermediates`, chains to one of `roots` at `now`
-/// for server authentication.
+/// Verifies that `cert`, with `intermediates`, chains to one of `roots` at
+/// `now` for server authentication.
 pub fn verify_server_cert_signed_by_trust_anchor(
     cert: &ParsedCertificate<'_>,
     roots: &super::RootCertStore,
@@ -256,7 +257,8 @@ fn verify_sig_using_any_alg(
     message: &[u8],
     sig: &[u8],
 ) -> Result<HandshakeSignatureValid, Error> {
-    // Several algorithms may share one scheme (differing in key size); try each.
+    // Several algorithms may share one scheme (differing in key size); try
+    // each.
     let mut last = Error::from(crate::error::CertificateError::BadSignature);
     for alg in algs {
         match cert.0.verify_signature(*alg, message, sig) {

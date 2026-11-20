@@ -306,7 +306,8 @@ impl CompleteClientHelloHandling {
         resuming: bool,
     ) {
         let extensions = ServerExtensions {
-            // RFC 5746 §3.6: echo an empty renegotiation_info to a capable client.
+            // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
+            // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),
             extended_master_secret: self.using_ems.then_some(()),
             // RFC 7366 §2: acknowledged only for a block cipher suite.
@@ -585,7 +586,8 @@ impl State<ServerConnectionData> for ExpectClientKx {
                 .send_fatal_alert(AlertDescription::DecodeError, err)
         })?;
 
-        // RFC 7627 §4: the session hash covers the transcript through ClientKeyExchange.
+        // RFC 7627 §4: the session hash covers the transcript through
+        // ClientKeyExchange.
         let ems_seed = st.using_ems.then(|| st.transcript.current_hash());
         let secrets = ConnectionSecrets::from_key_exchange(
             st.server_kx,

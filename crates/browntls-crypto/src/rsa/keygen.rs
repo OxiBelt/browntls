@@ -367,8 +367,8 @@ mod tests {
         let mut prod = [0u64; 2];
         bigint::mul(&mut prod, &[u64::MAX - 58], &[u64::MAX - 82]);
         assert!(!miller_rabin::<HALF_LIMBS>(&prod, &rng, kernel).unwrap());
-        // A Carmichael-like composite: 2^89 - 1 = 618970019642690137449562111 is
-        // prime; 2^89 + 1 is composite (divisible by 3).
+        // A Carmichael-like composite: 2^89 - 1 = 618970019642690137449562111
+        // is prime; 2^89 + 1 is composite (divisible by 3).
         let mut c = [1u64, 1 << 25];
         c[0] = 1;
         assert!(!miller_rabin::<HALF_LIMBS>(&c, &rng, kernel).unwrap());

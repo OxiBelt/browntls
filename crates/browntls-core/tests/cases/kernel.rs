@@ -759,7 +759,8 @@ fn post_handshake_auth_through_the_kernel() {
     server.request_client_auth().unwrap();
     peer_to_kernel(&mut server, &mut off).unwrap();
     let kinds: Vec<_> = off.control_sent.iter().map(|(t, p)| (*t, p[0])).collect();
-    // Certificate (11, or 25 compressed), CertificateVerify (15), Finished (20).
+    // Certificate (11, or 25 compressed), CertificateVerify (15), Finished
+    // (20).
     assert_eq!(kinds.len(), 3, "{kinds:?}");
     assert!(kinds.iter().all(|(t, _)| *t == ContentType::Handshake));
     assert!(matches!(kinds[0].1, 11 | 25), "{kinds:?}");

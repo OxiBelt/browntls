@@ -1,7 +1,8 @@
 // Shared cases, included by `tests/exported_authenticators_unbuffered.rs`
-// (RustCrypto provider) and `tests/exported_authenticators_unbuffered_native.rs`
-// (native provider): RFC 9261 exported authenticators on unbuffered
-// connections, against buffered and unbuffered peers.
+// (RustCrypto provider) and
+// `tests/exported_authenticators_unbuffered_native.rs` (native provider):
+// RFC 9261 exported authenticators on unbuffered connections, against buffered
+// and unbuffered peers.
 
 use std::ops::DerefMut;
 use std::sync::Arc;

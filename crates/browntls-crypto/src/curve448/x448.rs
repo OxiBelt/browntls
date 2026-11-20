@@ -225,7 +225,8 @@ mod tests {
     fn base_matches_ladder() {
         let via_ladder = |k: &[u8; 56]| ladder(&clamp(k), &BASEPOINT);
         let mut cases = std::vec![[0u8; 56], [0xff; 56], [0x55; 56], [0xaa; 56]];
-        // 4L = 2^448 - 4 * 13818066809895115352007386748515426880336692474882178609894547503885:
+        // 4L = 2^448 - 4 *
+        // 13818066809895115352007386748515426880336692474882178609894547503885:
         // L little endian, shifted left by two bits.
         let l: [u8; 56] = [
             0xf3, 0x44, 0x58, 0xab, 0x92, 0xc2, 0x78, 0x23, 0x55, 0x8f, 0xc5, 0x8d, 0x72, 0xc2,

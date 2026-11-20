@@ -1,4 +1,5 @@
-//! Record protection: AEAD algorithms and the message encrypter/decrypter traits.
+//! Record protection: AEAD algorithms and the message encrypter/decrypter
+//! traits.
 
 use alloc::boxed::Box;
 use core::fmt;
@@ -239,7 +240,8 @@ pub trait MessageEncrypter: Send + Sync {
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error>;
 
-    /// The ciphertext length (excluding the record header) for a plaintext of `payload_len`.
+    /// The ciphertext length (excluding the record header) for a plaintext of
+    /// `payload_len`.
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
 
     /// Encrypts `msg` as one complete record (header included) at the front

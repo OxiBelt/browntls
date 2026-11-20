@@ -27,7 +27,8 @@ fn floor_pow2_e(k: usize) -> BigUint {
         term /= n;
     }
     // Each of the n terms was truncated by less than one unit and the
-    // remaining tail is below one unit: the exact value is in [sum, sum + n + 1).
+    // remaining tail is below one unit: the exact value is in
+    // [sum, sum + n + 1).
     let lo = &sum >> guard;
     let hi = (sum + n + 1u32) >> guard;
     assert_eq!(lo, hi, "not enough guard bits");
@@ -74,7 +75,8 @@ fn primes_match_the_rfc_construction() {
         // RFC 7919 §2: the high and low 64 bits are all ones.
         assert_eq!(&p[..8], &[0xff; 8], "{group:?}");
         assert_eq!(&p[p.len() - 8..], &[0xff; 8], "{group:?}");
-        // RFC 7919 Appendix A: p = 2^b - 2^(b-64) + ([2^(b-130) e] + X) 2^64 - 1.
+        // RFC 7919 Appendix A:
+        // p = 2^b - 2^(b-64) + ([2^(b-130) e] + X) 2^64 - 1.
         let one = BigUint::from(1u8);
         let expected =
             (&one << b) - (&one << (b - 64)) + ((floor_pow2_e(b - 130) + x) << 64) - &one;

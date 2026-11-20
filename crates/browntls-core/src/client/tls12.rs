@@ -69,7 +69,8 @@ impl CompleteServerHelloHandling {
     ) -> NextStateOrError {
         let _ = tls13_supported;
 
-        // RFC 5746 §3.4: on an initial handshake the server's renegotiation_info is empty.
+        // RFC 5746 §3.4: on an initial handshake the server's
+        // renegotiation_info is empty.
         if let Some(ri) = &server_hello.extensions.renegotiation_info
             && !ri.0.is_empty()
         {
@@ -202,7 +203,8 @@ impl CompleteServerHelloHandling {
                     cert_verified: ServerCertVerified::assertion(),
                     sig_verified: HandshakeSignatureValid::assertion(),
                 };
-                // RFC 5077 §3.3: a new ticket, if any, precedes ChangeCipherSpec.
+                // RFC 5077 §3.3: a new ticket, if any, precedes
+                // ChangeCipherSpec.
                 return Ok(if must_issue_new_ticket {
                     Box::new(ExpectNewTicket { next })
                 } else {
@@ -511,7 +513,8 @@ impl State<ClientConnectionData> for ExpectServerDoneOrCertReq {
                 self.transcript.add_message(&m);
                 debug!("Got CertificateRequest {:?}", certreq);
 
-                // RFC 5246 §7.4.4: the schemes must be non-empty (checked by the codec).
+                // RFC 5246 §7.4.4: the schemes must be non-empty (checked by
+                // the codec).
                 let client_auth = ClientAuthDetails::resolve(
                     &*self.config.client_auth_cert_resolver,
                     Some(&certreq.canames),

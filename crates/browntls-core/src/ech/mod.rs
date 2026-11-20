@@ -83,7 +83,8 @@ pub(crate) const ACCEPT_LABEL: &[u8] = b"ech accept confirmation";
 /// The label for a HelloRetryRequest's confirmation (RFC 9849 §7.2.1).
 pub(crate) const HRR_ACCEPT_LABEL: &[u8] = b"hrr ech accept confirmation";
 
-/// `HKDF-Expand-Label(HKDF-Extract(0, inner_random), label, transcript_hash, 8)`.
+/// `HKDF-Expand-Label(HKDF-Extract(0, inner_random), label,
+/// transcript_hash, 8)`.
 pub(crate) fn accept_confirmation(
     hkdf: &dyn Hkdf,
     inner_random: &[u8; 32],

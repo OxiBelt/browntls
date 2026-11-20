@@ -1,4 +1,5 @@
-//! Turning bytes from the transport into records and complete handshake messages.
+//! Turning bytes from the transport into records and complete handshake
+//! messages.
 //!
 //! [`DeframerVecBuffer`] holds raw bytes from the peer for the buffered API;
 //! [`DeframerSliceBuffer`] wraps the caller's own buffer for the unbuffered
@@ -350,7 +351,8 @@ impl MessageDeframer {
                         );
                     }
                     None => {
-                        // Dropped during trial decryption of rejected early data.
+                        // Dropped during trial decryption of rejected early
+                        // data.
                         buffer.discard(record_len);
                         continue;
                     }
@@ -378,7 +380,8 @@ impl MessageDeframer {
 
             if typ == ContentType::Handshake {
                 if payload.is_empty() {
-                    // RFC 8446 §5.1: zero-length handshake fragments are forbidden.
+                    // RFC 8446 §5.1: zero-length handshake fragments are
+                    // forbidden.
                     return Err(InvalidMessage::InvalidEmptyPayload.into());
                 }
                 let fragment = payload.to_vec();

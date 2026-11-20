@@ -176,7 +176,8 @@ fn main() {
     }
 
     if wanted("X25519") {
-        // X25519: one Diffie-Hellman derivation (as `openssl speed ecdhx25519`).
+        // X25519: one Diffie-Hellman derivation (as
+        // `openssl speed ecdhx25519`).
         let peer = x25519::x25519_base(&[9; 32]);
         ops_line(
             "X25519",

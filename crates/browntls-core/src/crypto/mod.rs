@@ -13,7 +13,8 @@
 //!
 //! With `std`, when exactly one of them is enabled it becomes the process
 //! default the first time a configuration builder needs one, unless
-//! another provider is installed first with [`CryptoProvider::install_default`].
+//! another provider is installed first with
+//! [`CryptoProvider::install_default`].
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -58,7 +59,8 @@ pub struct CryptoProvider {
     /// Key exchange groups, in preference order.
     pub kx_groups: Vec<&'static dyn SupportedKxGroup>,
 
-    /// Signature verification algorithms for certificates and handshake signatures.
+    /// Signature verification algorithms for certificates and handshake
+    /// signatures.
     pub signature_verification_algorithms: WebPkiSupportedAlgorithms,
 
     /// The random source.
@@ -183,18 +185,21 @@ pub trait SupportedKxGroup: Send + Sync + Debug {
         false
     }
 
-    /// Whether the group may be used with `version` (hybrid groups are TLS 1.3 only).
+    /// Whether the group may be used with `version` (hybrid groups are TLS 1.3
+    /// only).
     fn usable_for_version(&self, _version: ProtocolVersion) -> bool {
         true
     }
 }
 
-/// A key exchange in progress: our key pair exists, the peer's share is awaited.
+/// A key exchange in progress: our key pair exists, the peer's share is
+/// awaited.
 pub trait ActiveKeyExchange: Send + Sync {
     /// Completes the exchange with the peer's public share.
     fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error>;
 
-    /// Completes the exchange for `tls_version`; TLS 1.2 FFDHE strips leading zeros.
+    /// Completes the exchange for `tls_version`; TLS 1.2 FFDHE strips leading
+    /// zeros.
     fn complete_for_tls_version(
         self: Box<Self>,
         peer_pub_key: &[u8],

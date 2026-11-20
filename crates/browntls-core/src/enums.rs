@@ -105,7 +105,8 @@ enum_builder! {
 }
 
 enum_builder! {
-    /// The `CipherSuite` TLS protocol enum (the subset this library knows by name).
+    /// The `CipherSuite` TLS protocol enum (the subset this library knows by
+    /// name).
     #[repr(u16)]
     pub enum CipherSuite {
         TLS_NULL_WITH_NULL_NULL => 0x0000,

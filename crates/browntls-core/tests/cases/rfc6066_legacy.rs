@@ -20,6 +20,7 @@ use common::*;
 
 const ALERT_ILLEGAL_PARAMETER: u8 = 47;
 const ALERT_DECODE_ERROR: u8 = 50;
+#[cfg(feature = "tls12")]
 const ALERT_UNSUPPORTED_EXTENSION: u8 = 110;
 
 /// The three extensions, each with a well-formed ClientHello body.
@@ -35,10 +36,12 @@ fn legacy_client_extensions() -> Vec<(u16, Vec<u8>)> {
 }
 
 fn versions() -> Vec<&'static SupportedProtocolVersion> {
-    let mut all = vec![&version::TLS13];
-    #[cfg(feature = "tls12")]
-    all.push(&version::TLS12);
-    all
+    [
+        &version::TLS13,
+        #[cfg(feature = "tls12")]
+        &version::TLS12,
+    ]
+    .to_vec()
 }
 
 fn client_for(chain: &Chain, version: &'static SupportedProtocolVersion) -> ClientConfig {

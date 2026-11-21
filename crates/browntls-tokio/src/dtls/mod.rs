@@ -22,9 +22,11 @@ use std::task::Poll;
 
 pub mod client;
 mod server;
+mod session;
 
 pub use client::UdpClient;
 pub use server::{ServerEvent, UdpServer};
+pub use session::{SessionDriver, SessionLimits, UdpListener, UdpSession};
 
 /// The result of receiving one application record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

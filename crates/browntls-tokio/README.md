@@ -162,6 +162,13 @@ address. The server requires a cookie sealer. It bounds pending handshakes,
 established peers, and queued datagrams. Poll an operation to drive both
 socket I/O and retransmission timers.
 
+For individually owned peers, `dtls::UdpListener::new` returns a listener
+and a `SessionDriver`. Run the driver in a task owned by the application.
+Each accepted `UdpSession` receives whole datagrams and can send and close
+independently. `SessionLimits` bounds retained sessions and all queues.
+Sends wait for command capacity. A full receive queue drops newly arriving
+application datagrams while retaining close and error state.
+
 ## Choosing the configuration per ClientHello
 
 `LazyConfigAcceptor` reads the ClientHello before the server picks a

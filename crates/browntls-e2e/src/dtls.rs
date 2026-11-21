@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use browntls::client::{Resumption, Tls12Resumption};
 use browntls::crypto::native::ticketer::AeadTicketProducer;
-use browntls::dtls::{ServerEvent, UdpClient, UdpServer};
+use browntls::dtls::{ConnectionIdPolicy, ServerEvent, Settings, UdpClient, UdpServer};
 use browntls::server::{NoServerSessionStorage, ServerSessionMemoryCache};
 use browntls::ticketer::TicketRotator;
 use browntls::{ClientConfig, CommonState, HandshakeKind};
@@ -11,6 +11,16 @@ use browntls::{ClientConfig, CommonState, HandshakeKind};
 use super::{IO_TIMEOUT, Options, Result, ServerName, emit, negotiated, required, roots};
 
 const MESSAGE: &str = "hello from browntls";
+
+fn settings(options: &Options) -> Result<Settings> {
+    let mut settings = Settings::default().with_versions(options.dtls_versions());
+    if options.dtls_cid {
+        settings = settings.with_connection_ids(
+            ConnectionIdPolicy::new(8, true).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(settings)
+}
 
 pub(super) fn client(options: &Options) -> Result<()> {
     let count = exchange_count(options, options.connections)?;
@@ -51,10 +61,10 @@ pub(super) fn client(options: &Options) -> Result<()> {
     let name = ServerName::try_from(name.to_owned()).map_err(|error| error.to_string())?;
     // Retain the UDP endpoint and authentication objects across connections.
     for index in 0..count {
-        let conn = browntls::dtls::ClientConnection::new_with_versions(
+        let conn = browntls::dtls::ClientConnection::new_with_settings(
             config.clone(),
             name.clone(),
-            options.dtls_versions(),
+            settings(options)?,
         )
         .map_err(|error| error.to_string())?;
         let mut client = UdpClient::from_connection(
@@ -128,7 +138,7 @@ pub(super) fn server(options: &Options) -> Result<()> {
     }
     let listen = required(options.listen.as_ref(), "--listen")?;
     let socket = UdpSocket::bind(listen).map_err(|error| format!("bind {listen}: {error}"))?;
-    let mut server = UdpServer::new_with_versions(config, socket, options.dtls_versions())
+    let mut server = UdpServer::new_with_settings(config, socket, settings(options)?)
         .map_err(|error| error.to_string())?;
     server.set_read_timeout(Some(IO_TIMEOUT));
     emit(&[("event", "listening".into())]);

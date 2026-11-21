@@ -123,7 +123,21 @@ impl UdpServer {
         socket: UdpSocket,
         versions: super::super::Versions,
     ) -> io::Result<Self> {
-        let acceptor = Acceptor::new_with_versions(config, versions)
+        Self::new_with_settings(
+            config,
+            socket,
+            super::super::Settings::default().with_versions(versions),
+        )
+    }
+
+    /// Serves clients with explicit DTLS settings, including opt-in CIDs.
+    /// The address used to admit a client remains the routing key.
+    pub fn new_with_settings(
+        config: Arc<crate::ServerConfig>,
+        socket: UdpSocket,
+        settings: super::super::Settings,
+    ) -> io::Result<Self> {
+        let acceptor = Acceptor::new_with_settings(config, settings)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         socket.set_nonblocking(false)?;
         Ok(Self {

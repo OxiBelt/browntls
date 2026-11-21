@@ -581,6 +581,10 @@ impl CompleteClientHelloHandling {
         let key_schedule = key_schedule_pre.into_handshake_with_shared_secret(&kx.secret);
 
         let ech_accepted = cx.data.ech.is_accepted();
+        if let Some(dtls) = cx.common.dtls.as_deref_mut() {
+            dtls.cid
+                .select(client_hello.extensions.connection_id.as_ref(), true)?;
+        }
         emit_server_hello(
             &mut self.transcript,
             &mut self.randoms,

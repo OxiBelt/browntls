@@ -711,6 +711,8 @@ pub(super) fn emit_client_hello_for_retry(
         });
     }
 
+    exts.connection_id = cx.common.dtls.as_deref().and_then(|dtls| dtls.cid.offer());
+
     // RFC 8449: the largest record we accept. The protocol maximum is that
     // of the highest version offered; a TLS 1.2 server does not enforce a
     // larger value (RFC 8449 §4) and we clamp what we enforce.

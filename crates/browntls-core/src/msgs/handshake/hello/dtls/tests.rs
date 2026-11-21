@@ -260,6 +260,42 @@ fn dtls_less_messages_read_as_unknown() {
 }
 
 #[test]
+fn connection_id_round_trips_in_dtls_client_hello_only() {
+    for id in [vec![], vec![9; 8], vec![3; 255]] {
+        let mut hello = dtls_client_hello();
+        hello.extensions.connection_id = Some(PayloadU8::new(id.clone()));
+        let encoding =
+            HandshakeMessagePayload(HandshakePayload::ClientHello(hello.clone())).get_encoding();
+        let parsed = HandshakeMessagePayload::read_dtls(
+            &mut Reader::init(&encoding),
+            ProtocolVersion::TLSv1_3,
+        )
+        .unwrap();
+        let HandshakePayload::ClientHello(parsed) = parsed.0 else {
+            panic!("ClientHello expected")
+        };
+        assert_eq!(parsed.extensions.connection_id, Some(PayloadU8::new(id)));
+        assert!(
+            parsed
+                .extensions
+                .present_types()
+                .contains(&ExtensionType::ConnectionId)
+        );
+        hello.legacy_cookie = None;
+        let encoding = HandshakeMessagePayload(HandshakePayload::ClientHello(hello)).get_encoding();
+        let parsed = HandshakeMessagePayload::read_version(
+            &mut Reader::init(&encoding),
+            ProtocolVersion::TLSv1_3,
+        )
+        .unwrap();
+        let HandshakePayload::ClientHello(parsed) = parsed.0 else {
+            panic!("ClientHello expected")
+        };
+        assert!(parsed.extensions.connection_id.is_none());
+    }
+}
+
+#[test]
 fn other_messages_read_as_in_tls() {
     let enc = [u8::from(HandshakeType::Finished), 0, 0, 2, 1, 2];
     let msg = HandshakeMessagePayload::read_dtls(&mut Reader::init(&enc), ProtocolVersion::TLSv1_3)

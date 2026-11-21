@@ -122,7 +122,11 @@ pub(super) fn validate_server_hello(
     // RFC 9846 §4.3: a recognised extension that Table 1 does not allow in
     // a ServerHello is illegal_parameter.
     if first_disallowed(
-        server_hello.extensions.present_types(),
+        server_hello
+            .extensions
+            .present_types()
+            .into_iter()
+            .filter(|ext| !common.is_dtls() || *ext != ExtensionType::ConnectionId),
         Tls13Message::ServerHello,
     )
     .is_some()

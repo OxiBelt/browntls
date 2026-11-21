@@ -99,7 +99,10 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/browntls-e2e-image/browntls-e2e-amd64.tar"
 
       - name: Exchange DTLS datagrams with wolfSSL and OpenSSL
-        run: python3 -B tests/e2e/dtls.py --arch amd64 --suite all
+        run: |
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite all
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite openssl --resumption --skip-peer-build
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite wolfssl-cid --skip-peer-build
 
   e2e:
     name: E2E ${{ matrix.label }} vs ${{ matrix.description }}

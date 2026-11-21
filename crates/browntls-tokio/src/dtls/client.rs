@@ -14,7 +14,7 @@ use browntls_core::dtls::{
     ClientConnection, Settings, UdpPathValidation, Versions, rrc::Selection,
 };
 use browntls_core::pki_types::ServerName;
-use browntls_core::{ClientConfig, Error};
+use browntls_core::{ClientConfig, ClientServerIdentity, Error};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, Sleep, sleep_until};
@@ -87,6 +87,32 @@ impl UdpClient {
     ) -> io::Result<Self> {
         Self::from_connection(
             ClientConnection::new_with_settings(config, name, settings).map_err(io_error)?,
+            socket,
+        )
+    }
+
+    /// Creates a client using RFC 9525 service identity matching. The UDP
+    /// socket must already be connected to its server.
+    pub fn new_with_identity(
+        config: Arc<ClientConfig>,
+        identity: ClientServerIdentity,
+        socket: UdpSocket,
+    ) -> io::Result<Self> {
+        Self::new_with_identity_and_settings(config, identity, socket, Settings::default())
+    }
+
+    /// Creates a client using RFC 9525 service identity matching and
+    /// explicit CID and return-routability settings. The socket must already
+    /// be connected to its server.
+    pub fn new_with_identity_and_settings(
+        config: Arc<ClientConfig>,
+        identity: ClientServerIdentity,
+        socket: UdpSocket,
+        settings: Settings,
+    ) -> io::Result<Self> {
+        Self::from_connection(
+            ClientConnection::new_with_identity_and_settings(config, identity, settings)
+                .map_err(io_error)?,
             socket,
         )
     }

@@ -41,7 +41,16 @@ fn client_hands_its_connection_to_the_kernel() {
     let server_config = Arc::new(pki.server_config());
     let mut client_config = pki.client_config();
     client_config.enable_secret_extraction = true;
-    let conn = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    let identity = browntls::ClientServerIdentity::new(
+        browntls::pki_types::ServerName::try_from("localhost").unwrap(),
+        browntls::ServiceIdentity::new(vec![browntls::ReferenceIdentifier::Dns(
+            browntls::pki_types::DnsName::try_from("localhost")
+                .unwrap()
+                .to_owned(),
+        )])
+        .unwrap(),
+    );
+    let conn = ClientConnection::new_with_identity(Arc::new(client_config), identity).unwrap();
     // The listener's backlog takes the connection before `accept` runs.
     let tcp = TcpStream::connect(addr).unwrap();
 
@@ -64,6 +73,14 @@ fn client_hands_its_connection_to_the_kernel() {
             // An accepted handover is itself the proof of kernel TLS (the
             // probe below cannot see it from every network namespace).
             Ok(mut tls) => {
+                assert_eq!(
+                    tls.kernel_connection().matched_service_identity(),
+                    Some(&browntls::ReferenceIdentifier::Dns(
+                        browntls::pki_types::DnsName::try_from("localhost")
+                            .unwrap()
+                            .to_owned()
+                    ))
+                );
                 tls.write_all(b"hello").unwrap();
                 tls.read_to_end(&mut reply).unwrap();
             }

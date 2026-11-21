@@ -22,6 +22,8 @@ mod connection;
 pub mod input;
 mod pki;
 pub mod seeds;
+#[cfg(test)]
+mod service_identity_adapters;
 
 pub mod crypto_cipher;
 pub mod crypto_ecc;

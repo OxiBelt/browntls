@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use browntls_core::pki_types::ServerName;
-use browntls_core::{ClientConfig, ClientConnection};
+use browntls_core::{ClientConfig, ClientConnection, ClientServerIdentity};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
@@ -88,6 +88,35 @@ impl TlsConnector {
         self.connect_impl(domain, stream, None, f)
     }
 
+    /// Connects using RFC 9525 service identity matching. `identity` supplies
+    /// the routing name sent as SNI and the reference identifiers checked
+    /// against the server certificate.
+    pub fn connect_with_identity<IO>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.connect_identity_impl(identity, stream, None, |_| ())
+    }
+
+    /// Like [`connect_with_identity`](Self::connect_with_identity), adjusting
+    /// the connection before its first flight is sent.
+    pub fn connect_with_identity_and_callback<IO, F>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        self.connect_identity_impl(identity, stream, None, f)
+    }
+
     /// Overrides the configuration's ALPN protocols for one connection.
     pub fn with_alpn(&self, alpn_protocols: Vec<Vec<u8>>) -> TlsConnectorWithAlpn<'_> {
         TlsConnectorWithAlpn {
@@ -114,7 +143,47 @@ impl TlsConnector {
     {
         let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
         let alpn_offered = alpn.clone();
-        let mut session = match ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn) {
+        self.finish_connect(
+            stream,
+            ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn),
+            alpn_offered,
+            f,
+        )
+    }
+
+    fn connect_identity_impl<IO, F>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        alpn_protocols: Option<Vec<Vec<u8>>>,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
+        let alpn_offered = alpn.clone();
+        self.finish_connect(
+            stream,
+            ClientConnection::new_with_identity_and_alpn(self.inner.clone(), identity, alpn),
+            alpn_offered,
+            f,
+        )
+    }
+
+    fn finish_connect<IO, F>(
+        &self,
+        stream: IO,
+        result: Result<ClientConnection, browntls_core::Error>,
+        alpn_offered: Vec<Vec<u8>>,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        let mut session = match result {
             Ok(session) => session,
             Err(error) => {
                 return Connect(MidHandshake::Error {
@@ -172,6 +241,19 @@ impl TlsConnectorWithAlpn<'_> {
             .connect_impl(domain, stream, Some(self.alpn_protocols), |_| ())
     }
 
+    /// [`TlsConnector::connect_with_identity`] with these ALPN protocols.
+    pub fn connect_with_identity<IO>(
+        self,
+        identity: ClientServerIdentity,
+        stream: IO,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner
+            .connect_identity_impl(identity, stream, Some(self.alpn_protocols), |_| ())
+    }
+
     /// [`TlsConnector::connect_with`] with these ALPN protocols.
     pub fn connect_with<IO, F>(self, domain: ServerName<'static>, stream: IO, f: F) -> Connect<IO>
     where
@@ -180,6 +262,22 @@ impl TlsConnectorWithAlpn<'_> {
     {
         self.inner
             .connect_impl(domain, stream, Some(self.alpn_protocols), f)
+    }
+
+    /// [`TlsConnector::connect_with_identity_and_callback`] with these ALPN
+    /// protocols.
+    pub fn connect_with_identity_and_callback<IO, F>(
+        self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        self.inner
+            .connect_identity_impl(identity, stream, Some(self.alpn_protocols), f)
     }
 }
 

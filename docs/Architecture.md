@@ -214,6 +214,60 @@ one of them gains or loses a feature, or when another crate joins it as a
 module. Its `src/lib.rs` carries the crate documentation, the re-exports and
 the doctest hook for the README.
 
+### Certificate service identity
+
+For TLS, DTLS and QUIC, the default verifier checks the end-entity SAN
+against a caller-supplied reference under RFC 9525. DNS and IP connections
+use their existing `ServerName` as a reference. A `ClientServerIdentity`
+lets a client choose an ordered `ServiceIdentity` separately from the
+routing name. The reference order determines the validated identity when
+multiple entries match. DNS and IP identities use their respective SAN
+types. URI and SRV identities also match the scheme or service label.
+Applications choose which alternatives to include, including any DNS
+fallback for a service scoped by URI or SRV. The subject common name is
+outside identity verification.
+
+For example, the Tokio buffered client can authenticate an SRV identity
+while sending the endpoint name in SNI:
+
+```rust
+use browntls::{ClientServerIdentity, ReferenceIdentifier, ServiceIdentity, SrvId};
+use browntls::pki_types::ServerName;
+
+let route = ServerName::try_from("edge.example")?;
+let service = SrvId::try_from("_imaps.mail.example")?;
+let policy = ServiceIdentity::new(vec![ReferenceIdentifier::Srv(service)])?;
+let identity = ClientServerIdentity::new(route, policy);
+let stream = connector.connect_with_identity(identity, socket).await?;
+let matched = stream.get_ref().1.matched_service_identity();
+```
+
+The unbuffered Tokio connector and the core TLS, DTLS and QUIC APIs offer
+the same policy. Linux kTLS uses the authenticated userspace result. The
+low-level `EndEntityCert::verify_service_identity` checks the leaf SAN
+and returns the matching reference. Callers using it directly must also
+verify the certificate path and the peer's proof of possession.
+
+Existing configurations with underscores in DNS labels need valid DNS names
+and corresponding certificates. An underscore is required at the start of
+an SRV service label. Caller-supplied Unicode DNS names use nontransitional
+UTS #46 with STD3 checks. Certificate and wire identifiers use ASCII
+A-labels. Wildcard DNS SANs cover one complete leftmost label and can be
+disabled per reference set. URI and SRV DNS portions use exact matching.
+
+URI and SRV path constraints apply to the relevant SAN type throughout a
+path. An excluded or unprocessable constrained name rejects the path even
+if a different SAN would match the reference. URI constraints use the DNS
+authority host, so a bare SIP URI may satisfy identity matching on an
+unconstrained path but cannot satisfy URI name constraints.
+
+The client caches the matched identity with certificate-authenticated
+sessions and requires the original reference policy, routing name and
+configuration binding before resuming or offering early data. A custom
+certificate verifier must explicitly support the new verification hook to
+authenticate a reference set. PSK-only and raw-key authentication do not
+supply a certificate identity.
+
 ### Certificate inspection
 
 `browntls-pki` parses a certificate once, eagerly: every field and extension

@@ -42,6 +42,83 @@ async fn handshake_and_data_through_the_tokio_module() {
     tokio::join!(server, client);
 }
 
+fn localhost_identity(reference: &str) -> browntls::ClientServerIdentity {
+    use browntls::pki_types::{DnsName, ServerName};
+    use browntls::{ReferenceIdentifier, ServiceIdentity};
+
+    browntls::ClientServerIdentity::new(
+        ServerName::try_from("localhost").unwrap(),
+        ServiceIdentity::new(vec![ReferenceIdentifier::Dns(
+            DnsName::try_from(reference).unwrap().to_owned(),
+        )])
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn rfc9525_identity_matches_and_is_reported_through_facade_tokio() {
+    let pki = Pki::new();
+    let acceptor = TlsAcceptor::from(Arc::new(pki.server_config()));
+    let connector = TlsConnector::from(Arc::new(pki.client_config()));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let server = async {
+        let mut tls = acceptor.accept(server_io).await.unwrap();
+        let mut request = [0u8; 5];
+        tls.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello");
+        tls.write_all(b"world").await.unwrap();
+        tls.flush().await.unwrap();
+    };
+    let client = async {
+        let mut tls = connector
+            .connect_with_identity(localhost_identity("localhost"), client_io)
+            .await
+            .unwrap();
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut reply = [0u8; 5];
+        tls.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"world");
+        let (_, conn) = tls.get_ref();
+        assert_eq!(
+            conn.matched_service_identity(),
+            Some(&browntls::ReferenceIdentifier::Dns(
+                browntls::pki_types::DnsName::try_from("localhost")
+                    .unwrap()
+                    .to_owned()
+            ))
+        );
+    };
+    tokio::join!(server, client);
+}
+
+#[tokio::test]
+async fn rfc9525_identity_mismatch_fails_through_facade_tokio() {
+    let pki = Pki::new();
+    let acceptor = TlsAcceptor::from(Arc::new(pki.server_config()));
+    let connector = TlsConnector::from(Arc::new(pki.client_config()));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let server = async {
+        if let Ok(mut tls) = acceptor.accept(server_io).await {
+            let _ = tokio::io::copy(&mut tls, &mut tokio::io::sink()).await;
+        }
+    };
+    let client = async {
+        let error = connector
+            .connect_with_identity_and_callback(
+                localhost_identity("other.example"),
+                client_io,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    };
+    tokio::join!(server, client);
+}
+
 /// An acceptor whose configuration turns on `enable_grease` (RFC 8701
 /// §4.1) authenticates a client certificate through `browntls::tokio`.
 #[tokio::test]

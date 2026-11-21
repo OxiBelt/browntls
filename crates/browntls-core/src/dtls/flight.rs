@@ -130,6 +130,11 @@ impl Outgoing {
         self.messages.iter().any(|m| m.epoch == epoch)
     }
 
+    /// Each CID message category has its own one-outstanding-message gate.
+    pub(super) fn has_type(&self, typ: HandshakeType) -> bool {
+        self.messages.iter().any(|m| m.typ == u8::from(typ))
+    }
+
     pub(super) fn abandon(&mut self) {
         self.abandoned = true;
         self.messages.clear();
@@ -232,6 +237,7 @@ impl Dtls {
         if self.broken {
             return Err(Error::EncryptError);
         }
+        self.check_cid_mtu(self.settings.mtu)?;
         let start = out.len();
         let mtu = self.settings.mtu;
         let space = |out: &Vec<u8>| mtu.saturating_sub(out.len() - start);

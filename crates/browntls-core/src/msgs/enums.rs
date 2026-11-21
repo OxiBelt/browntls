@@ -104,6 +104,7 @@ enum_builder! {
         SignatureAlgorithmsCert => 0x0032,
         KeyShare => 0x0033,
         TransparencyInfo => 0x0034,
+        ConnectionId => 0x0036,
         ExternalIdHash => 0x0037,
         ExternalSessionId => 0x0038,
         TransportParameters => 0x0039,

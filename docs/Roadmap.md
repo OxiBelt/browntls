@@ -58,7 +58,8 @@ intent.
 | QUIC transport (RFC 9000) | out of scope |
 | DTLS 1.3 (RFC 9147): `browntls_core::dtls` sans-I/O `ClientConnection` and `ServerConnection` (whole datagrams in and out, timers on the caller's clock) over the TLS 1.3 handshake; unified headers with encrypted record numbers, a 128-record replay window per epoch, the integrity limit enforced, fragmentation to the datagram size (256 to 65507 bytes, 1200 by default), reassembly, ACKs and retransmission, KeyUpdate held until acknowledged, resumption with tickets kept apart from TLS ones; the cookie exchange on by default with cookies bound to the caller-provided client address, and a stateless `dtls::Acceptor`; application data never fragmented; every TLS 1.3 suite but CCM_8, on both providers. Tests between browntls endpoints over a simulated lossy network (`crates/browntls-core/tests/cases/dtls.rs`) and the `tls_dtls` fuzz target; no interoperability evidence (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
 | DTLS 1.2 (RFC 6347) | planned |
-| DTLS connection IDs (RFC 9146) and the return routability check (RFC 9853) | planned |
+| DTLS 1.3 connection ID negotiation (RFC 9146), bounded updates (RFC 9147 §9) and checked receive metadata; low-level API only, paths pinned | implemented; execution and independent review pending |
+| DTLS 1.2 CID record protection and connection migration, including the return routability check (RFC 9853) | planned |
 | 0-RTT, Encrypted Client Hello and post-handshake client authentication over DTLS 1.3 | planned |
 | Blocking `std` API for DTLS 1.3: `dtls::UdpClient` (one server) and `dtls::UdpServer` (many clients on one socket) over `std::net::UdpSocket`; stateless cookies through the `dtls::Acceptor`, at most 256 handshakes at once with the oldest replaced, a handshake timeout, read timeouts that still take what has arrived, `ServerEvent`s for connected clients only, clients told apart by address only, no live OCSP. Loopback tests (`crates/browntls-core/tests/cases/dtls_udp.rs`) and the `tls_dtls_udp` fuzz target; no interoperability evidence (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
 | Tokio API for DTLS | planned |
@@ -215,8 +216,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
 - DTLS 1.3 has no interoperability evidence: it is tested between browntls
   endpoints only, over a simulated network and, for the blocking
   `UdpClient` and `UdpServer`, over loopback sockets. Only DTLS 1.3 exists
-  (no DTLS 1.2), without connection IDs, the return routability check,
-  0-RTT, Encrypted Client Hello or post-handshake client authentication,
+  (no DTLS 1.2); its opt-in low-level CID negotiation and update tests
+  await execution and independent review. It has no migration, return
+  routability check, 0-RTT, Encrypted Client Hello or post-handshake
+  client authentication,
   through the low-level datagram API or the blocking `std` API; there is
   no Tokio API. A cookie is bound to whatever address bytes the caller
   passes; `UdpServer` passes the client's socket address and tells clients

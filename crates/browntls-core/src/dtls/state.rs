@@ -14,6 +14,7 @@ use core::fmt;
 use core::ops::Range;
 use core::time::Duration;
 
+use super::cid::{AuthenticatedRecord, Cids, ConnectionIdPolicy};
 use super::flight::Outgoing;
 use super::keys::RecordKeys;
 use super::reassembly::{Fragment, Reassembler};
@@ -74,13 +75,17 @@ struct ReadEpoch {
     failures: u64,
 }
 
-/// Settings chosen when the connection is created.
+/// DTLS settings chosen when a low-level connection is created.
+///
+/// Use [`Self::with_connection_ids`] to opt into CID negotiation. Existing
+/// constructors use defaults; socket wrappers continue to route by address.
 #[derive(Debug, Clone)]
-pub(crate) struct Settings {
+pub struct Settings {
     pub(crate) mtu: usize,
     pub(crate) initial_timeout: Duration,
     pub(crate) peer_address: Vec<u8>,
     pub(crate) require_cookie: bool,
+    pub(crate) connection_ids: Option<ConnectionIdPolicy>,
 }
 
 impl Default for Settings {
@@ -90,6 +95,7 @@ impl Default for Settings {
             initial_timeout: super::flight::INITIAL_TIMEOUT,
             peer_address: Vec::new(),
             require_cookie: true,
+            connection_ids: None,
         }
     }
 }
@@ -112,6 +118,8 @@ pub(crate) enum Incoming {
 /// The DTLS side of a connection's
 /// [`CommonState`](crate::common_state::CommonState).
 pub(crate) struct Dtls {
+    pub(crate) cid: Cids,
+    pub(super) authenticated_record: Option<AuthenticatedRecord>,
     pub(super) side: Side,
     pub(super) settings: Settings,
     /// Sending epochs still needed: the current one (last) and any that
@@ -155,6 +163,8 @@ pub(crate) struct Dtls {
 impl Dtls {
     pub(crate) fn new(side: Side, settings: Settings) -> Self {
         Self {
+            cid: Cids::default(),
+            authenticated_record: None,
             side,
             out: Outgoing::new(settings.initial_timeout),
             settings,
@@ -219,6 +229,7 @@ impl Dtls {
                 "DTLS datagram size {mtu} is outside {MIN_MTU}..={MAX_MTU}"
             )));
         }
+        self.check_cid_mtu(mtu)?;
         self.settings.mtu = mtu;
         Ok(())
     }
@@ -343,11 +354,12 @@ impl Dtls {
         at: &mut usize,
         handshaking: bool,
     ) -> Result<Incoming, Error> {
+        self.authenticated_record = None;
         let base = *at;
         let Some(rest) = datagram.get(base..) else {
             return Ok(Incoming::End);
         };
-        let Some(record) = wire::parse_record(rest, 0) else {
+        let Some(record) = wire::parse_record(rest, self.cid.receive_len()) else {
             *at = datagram.len();
             return Ok(Incoming::End);
         };
@@ -366,16 +378,32 @@ impl Dtls {
                 self.read_plaintext(typ, number, &datagram[body], handshaking)
             }
             Header::Unified {
-                epoch_bits, seq, ..
+                epoch_bits,
+                seq,
+                cid,
             } => {
+                let id = cid
+                    .as_ref()
+                    .map(|range| &datagram[base + range.start..base + range.end]);
+                if !self.cid.matches(id) {
+                    // RFC 9147 §4: another association in this datagram
+                    // makes all remaining records unusable.
+                    *at = datagram.len();
+                    return Ok(Incoming::End);
+                }
                 let record_end = base + record.body.end;
-                self.read_protected(
+                let incoming = self.read_protected(
                     &mut datagram[base..record_end],
                     epoch_bits,
                     seq,
                     record.body,
                     base,
-                )
+                )?;
+                if let Some(metadata) = &mut self.authenticated_record {
+                    let id = cid.map(|range| &datagram[base + range.start..base + range.end]);
+                    metadata.set_connection_id(id.unwrap_or_default());
+                }
+                Ok(incoming)
             }
         }
     }
@@ -457,6 +485,11 @@ impl Dtls {
             seq: opened.seq,
         };
         self.peer_authenticated = true;
+        self.authenticated_record = Some(AuthenticatedRecord::new(
+            base..base + record.len(),
+            number,
+            Vec::new(),
+        ));
         let content = opened.content;
         trace!("DTLS read {:?} {:?}", number, opened.typ);
         match opened.typ {
@@ -689,11 +722,6 @@ impl Dtls {
             .retain(|w| w.epoch == current || out.has_unacknowledged(w.epoch));
     }
 
-    /// The sending epoch `epoch`, if it is still kept.
-    pub(super) fn write_state(&mut self, epoch: u64) -> Option<&mut WriteEpoch> {
-        self.write.iter_mut().find(|w| w.epoch == epoch)
-    }
-
     /// Seals one record of `content` into `out` under `epoch`.
     pub(super) fn seal_record(
         &mut self,
@@ -703,7 +731,8 @@ impl Dtls {
         content: &[u8],
     ) -> Result<RecordNumber, Error> {
         let floor = self.plaintext_seq_floor();
-        let Some(write) = self.write_state(epoch) else {
+        let cid = self.cid.outbound();
+        let Some(write) = self.write.iter_mut().find(|w| w.epoch == epoch) else {
             return Err(Error::EncryptError);
         };
         if epoch == 0 {
@@ -722,7 +751,7 @@ impl Dtls {
                 wire::put_plaintext_header(out, typ, ProtocolVersion::DTLSv1_2, 0, number.seq, len);
                 out.extend_from_slice(content);
             }
-            Some(keys) => keys.seal(out, number, typ, content, &[])?,
+            Some(keys) => keys.seal(out, number, typ, content, cid)?,
         }
         write.next_seq += 1;
         trace!("DTLS sealed {:?} {:?}", number, typ);
@@ -735,7 +764,7 @@ impl Dtls {
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         Some(match &write.keys {
             None => wire::PLAINTEXT_HEADER_LEN + content_len,
-            Some(keys) => keys.sealed_len(content_len, 0),
+            Some(keys) => keys.sealed_len(content_len, self.cid.outbound().len()),
         })
     }
 
@@ -744,7 +773,7 @@ impl Dtls {
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         match &write.keys {
             None => space.checked_sub(wire::PLAINTEXT_HEADER_LEN),
-            Some(keys) => keys.content_room(space, 0),
+            Some(keys) => keys.content_room(space, self.cid.outbound().len()),
         }
     }
 

@@ -34,6 +34,8 @@ pub(crate) static HELLO_RETRY_REQUEST_RANDOM: Random = Random([
 /// The extensions a client may send.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientExtensions {
+    /// RFC 9146: the CID to receive, including an empty CID (DTLS only).
+    pub(crate) connection_id: Option<PayloadU8>,
     pub(crate) server_name: Option<ServerNamePayload<'static>>,
     pub(crate) named_groups: Option<Vec<NamedGroup>>,
     pub(crate) ec_point_formats: Option<Vec<ECPointFormat>>,
@@ -116,6 +118,7 @@ impl ClientExtensions {
                 out.push(t);
             }
         };
+        add(self.connection_id.is_some(), ExtensionType::ConnectionId);
         add(self.server_name.is_some(), ExtensionType::ServerName);
         add(self.named_groups.is_some(), ExtensionType::EllipticCurves);
         add(
@@ -243,6 +246,9 @@ impl ClientExtensions {
         let cookie_first = dtls && self.cookie.is_some();
         if cookie_first && let Some(cookie) = &self.cookie {
             encode_extension(ExtensionType::Cookie, out, |b| cookie.encode(b));
+        }
+        if dtls && let Some(cid) = &self.connection_id {
+            encode_extension(ExtensionType::ConnectionId, out, |b| cid.encode(b));
         }
         if let Some(grease) = self.grease_first {
             encode_extension(ExtensionType::Unknown(grease), out, |_| {});
@@ -423,6 +429,9 @@ impl Codec<'_> for ClientExtensions {
         let mut out = Self::default();
         let seen = read_extensions(r, |typ, body| {
             match typ {
+                ExtensionType::ConnectionId => {
+                    out.connection_id = Some(PayloadU8::read(body)?);
+                }
                 ExtensionType::ServerName => {
                     out.server_name = Some(ServerNamePayload::read_client(body)?.into_owned());
                 }

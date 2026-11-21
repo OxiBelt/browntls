@@ -324,6 +324,8 @@ impl Codec<'_> for ClientTicketRequest {
 /// state machine; the codec only guarantees well-formedness and uniqueness.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ServerExtensions {
+    /// RFC 9146: DTLS ServerHello only, never EncryptedExtensions.
+    pub(crate) connection_id: Option<PayloadU8>,
     pub(crate) server_name_ack: Option<()>,
     pub(crate) alpn: Option<ProtocolName>,
     pub(crate) ec_point_formats: Option<Vec<ECPointFormat>>,
@@ -390,6 +392,7 @@ impl ServerExtensions {
                 out.push(typ);
             }
         };
+        add(self.connection_id.is_some(), ExtensionType::ConnectionId);
         add(self.server_name_ack.is_some(), ExtensionType::ServerName);
         add(self.alpn.is_some(), ExtensionType::ALProtocolNegotiation);
         add(
@@ -484,6 +487,9 @@ impl Codec<'_> for ServerExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        if let Some(cid) = &self.connection_id {
+            encode_extension(ExtensionType::ConnectionId, out, |b| cid.encode(b));
+        }
         if self.server_name_ack.is_some() {
             encode_extension(ExtensionType::ServerName, out, |_| {});
         }
@@ -582,6 +588,9 @@ impl Codec<'_> for ServerExtensions {
         let mut out = Self::default();
         read_extensions(r, |typ, body| {
             match typ {
+                ExtensionType::ConnectionId => {
+                    out.connection_id = Some(PayloadU8::read(body)?);
+                }
                 ExtensionType::ServerName => out.server_name_ack = Some(()),
                 ExtensionType::ALProtocolNegotiation => {
                     let mut names: Vec<ProtocolName> =

@@ -9,6 +9,7 @@ use core::time::Duration;
 
 use browntls_pki::ServerName;
 
+use super::cid::{AuthenticatedRecord, ConnectionIdUsage};
 use super::state::{Dtls, Incoming, Settings};
 use crate::common_state::{CommonState, Side};
 use crate::conn::{ConnectionCore, SideData};
@@ -25,6 +26,7 @@ use crate::sync::Arc;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Received {
     app_data: Vec<Range<usize>>,
+    authenticated_records: Vec<AuthenticatedRecord>,
 }
 
 impl Received {
@@ -32,6 +34,13 @@ impl Received {
     /// datagram buffer per record, where it was decrypted, in order.
     pub fn app_data(&self) -> &[Range<usize>] {
         &self.app_data
+    }
+
+    /// Records checked for this association, traffic-key authentication
+    /// and replay. Unprotected, replayed and rejected records never appear.
+    /// This metadata does not authorize a change of peer address.
+    pub fn authenticated_records(&self) -> &[AuthenticatedRecord] {
+        &self.authenticated_records
     }
 }
 
@@ -100,6 +109,9 @@ impl<Data: SideData> ConnectionCommon<Data> {
                     return Err(self.fail(err));
                 }
             };
+            if let Some(record) = dtls_of(common).authenticated_record.take() {
+                received.authenticated_records.push(record);
+            }
             let message = match incoming {
                 Incoming::End => break,
                 Incoming::Handled => None,
@@ -170,9 +182,18 @@ impl<Data: SideData> ConnectionCommon<Data> {
             if common.pending_revocation.is_some() || common.has_received_close_notify {
                 return Ok(state);
             }
-            let Some((_, bytes)) = dtls_of(common).next_message() else {
+            let Some((epoch, bytes)) = dtls_of(common).next_message() else {
                 return Ok(state);
             };
+            let handshaking = common.is_handshaking();
+            match dtls_of(common).handle_cid_message(epoch, &bytes, handshaking) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err((alert, err)) => {
+                    let err = common.send_fatal_alert(alert, err);
+                    return Err(self.fail(err));
+                }
+            }
             let version = common
                 .negotiated_version
                 .unwrap_or(ProtocolVersion::TLSv1_2);
@@ -204,6 +225,13 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// What follows every input: a KeyUpdate owed to the peer or due for
     /// the confidentiality limit, and the acknowledgement decisions.
     fn after_input(&mut self, now: Duration) -> Result<(), Error> {
+        if let Err(err) = self.dtls_mut().answer_cid_request() {
+            let err = self
+                .core
+                .common_state
+                .send_fatal_alert(AlertDescription::InternalError, err);
+            return Err(self.fail(err));
+        }
         if !self.dtls().key_update_pending() && self.core.common_state.pending_revocation.is_none()
         {
             self.core.maybe_send_key_update()?;
@@ -266,6 +294,50 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.dtls().max_application_data()
     }
 
+    /// The locally issued, nonempty receiving CIDs for wrapper lookup.
+    /// All remain valid for this association's lifetime, including IDs in
+    /// unacknowledged updates. A lookup match still requires
+    /// [`Self::read_datagram`] and its checked metadata before use.
+    pub fn local_connection_ids(&self) -> impl Iterator<Item = &[u8]> {
+        self.dtls().cid.local_ids()
+    }
+
+    /// Issues up to `count` fresh, fixed-length receiving IDs. Returns the
+    /// number actually issued; the lifetime cap includes the initial ID.
+    /// Only one NewConnectionId may await ACK. An immediate update requires
+    /// at least one fresh ID; an exhausted spare response may contain none.
+    pub fn issue_connection_ids(
+        &mut self,
+        count: u8,
+        usage: ConnectionIdUsage,
+    ) -> Result<usize, Error> {
+        self.check_cid_ready()?;
+        self.dtls_mut().issue_cids(count, usage)
+    }
+
+    /// Requests at most [`super::MAX_CONNECTION_IDS`] peer IDs. A new
+    /// request waits for both the previous ACK and a NewConnectionId
+    /// response, which may contain fewer IDs, including none.
+    pub fn request_connection_ids(&mut self, count: u8) -> Result<(), Error> {
+        self.check_cid_ready()?;
+        self.dtls_mut().request_cids(count)
+    }
+
+    fn check_cid_ready(&self) -> Result<(), Error> {
+        if let Err(err) = &self.core.state {
+            return Err(err.clone());
+        }
+        if self.core.common_state.is_handshaking() {
+            return Err(Error::HandshakeNotComplete);
+        }
+        if self.core.common_state.has_sent_close_notify()
+            || self.core.common_state.has_received_close_notify
+        {
+            return Err(Error::General("DTLS connection is closed".into()));
+        }
+        Ok(())
+    }
+
     /// When [`Self::handle_timeout`] is next due, if anything waits on a
     /// timer.
     pub fn next_timeout(&self) -> Option<Duration> {
@@ -291,7 +363,10 @@ impl<Data: SideData> ConnectionCommon<Data> {
 
     /// Sets the largest datagram this connection sends: the path MTU less
     /// the IP and UDP headers. The default, 1200 bytes, suits any IPv6
-    /// path; 256 to 65507 bytes are accepted.
+    /// path; 256 to 65507 bytes are accepted, provided a selected peer CID
+    /// leaves room for a handshake fragment and a one-record ACK. A later
+    /// selection of a longer CID can also make `write_datagram` fail until
+    /// this limit is raised.
     pub fn set_mtu(&mut self, mtu: usize) -> Result<(), Error> {
         self.dtls_mut().set_mtu(mtu)
     }
@@ -381,7 +456,17 @@ impl ClientConnection {
     /// Client Hello and post-handshake client authentication are not
     /// supported over DTLS.
     pub fn new(config: Arc<crate::ClientConfig>, name: ServerName<'static>) -> Result<Self, Error> {
-        let dtls = Dtls::new(Side::Client, Settings::default());
+        Self::new_with_settings(config, name, Settings::default())
+    }
+
+    /// Starts a DTLS 1.3 client with explicit DTLS-only settings.
+    pub fn new_with_settings(
+        config: Arc<crate::ClientConfig>,
+        name: ServerName<'static>,
+        settings: Settings,
+    ) -> Result<Self, Error> {
+        let mut dtls = Dtls::new(Side::Client, settings);
+        dtls.initialize_cids(config.crypto_provider().secure_random)?;
         let core = ConnectionCore::for_dtls_client(config, name, dtls)?;
         Ok(Self {
             inner: ConnectionCommon::new(core),
@@ -430,7 +515,23 @@ impl ServerConnection {
     /// The configuration must therefore set `hello_retry_cookies`, allow
     /// TLS 1.3 and contain a cipher suite usable with DTLS 1.3.
     pub fn new(config: Arc<crate::ServerConfig>, peer_address: &[u8]) -> Result<Self, Error> {
-        Self::with_settings(config, peer_address, true)
+        Self::new_with_settings(config, peer_address, Settings::default())
+    }
+
+    /// Prepares a server with DTLS-only settings and cookie exchange.
+    /// The caller must keep the transport path pinned at this stage.
+    pub fn new_with_settings(
+        config: Arc<crate::ServerConfig>,
+        peer_address: &[u8],
+        mut settings: Settings,
+    ) -> Result<Self, Error> {
+        settings.peer_address = peer_address.to_vec();
+        let mut dtls = Dtls::new(Side::Server, settings);
+        dtls.initialize_cids(config.crypto_provider().secure_random)?;
+        let core = ConnectionCore::for_dtls_server(config, dtls)?;
+        Ok(Self {
+            inner: ConnectionCommon::new(core),
+        })
     }
 
     /// Like [`Self::new`], but without the cookie exchange: for paths
@@ -441,23 +542,20 @@ impl ServerConnection {
         config: Arc<crate::ServerConfig>,
         peer_address: &[u8],
     ) -> Result<Self, Error> {
-        Self::with_settings(config, peer_address, false)
+        Self::new_without_cookie_exchange_with_settings(config, peer_address, Settings::default())
     }
 
-    fn with_settings(
+    /// Combines explicit DTLS settings with the already-verified-path
+    /// requirement of [`Self::new_without_cookie_exchange`]. The caller
+    /// must keep the path pinned; CID authentication does not verify a new
+    /// source address.
+    pub fn new_without_cookie_exchange_with_settings(
         config: Arc<crate::ServerConfig>,
         peer_address: &[u8],
-        require_cookie: bool,
+        mut settings: Settings,
     ) -> Result<Self, Error> {
-        let settings = Settings {
-            peer_address: peer_address.to_vec(),
-            require_cookie,
-            ..Settings::default()
-        };
-        let core = ConnectionCore::for_dtls_server(config, Dtls::new(Side::Server, settings))?;
-        Ok(Self {
-            inner: ConnectionCommon::new(core),
-        })
+        settings.require_cookie = false;
+        Self::new_with_settings(config, peer_address, settings)
     }
 
     /// Before anything is processed: the client's ClientHello answers a

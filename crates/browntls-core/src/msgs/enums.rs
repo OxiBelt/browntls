@@ -157,11 +157,11 @@ enum_builder! {
         MLKEM768 => 0x0201,
         /// ML-KEM-1024 (FIPS 203).
         MLKEM1024 => 0x0202,
-        /// Hybrid secp256r1 + ML-KEM-768 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid secp256r1 + ML-KEM-768 (RFC 10024).
         secp256r1MLKEM768 => 0x11eb,
-        /// Hybrid X25519 + ML-KEM-768 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid X25519 + ML-KEM-768 (RFC 10024).
         X25519MLKEM768 => 0x11ec,
-        /// Hybrid secp384r1 + ML-KEM-1024 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid secp384r1 + ML-KEM-1024 (RFC 10024).
         secp384r1MLKEM1024 => 0x11ed,
     }
 }

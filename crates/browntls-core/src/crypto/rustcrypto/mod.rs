@@ -112,7 +112,8 @@ pub mod cipher_suite {
 /// The individual key exchange groups.
 pub mod kx_group {
     pub use super::kx::{
-        MLKEM768, SECP256R1, SECP256R1MLKEM768, SECP384R1, SECP521R1, X25519, X25519MLKEM768,
+        MLKEM768, SECP256R1, SECP256R1MLKEM768, SECP384R1, SECP384R1MLKEM1024, SECP521R1, X25519,
+        X25519MLKEM768,
     };
 }
 
@@ -132,6 +133,7 @@ pub static DEFAULT_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
 pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::X25519MLKEM768,
     kx::SECP256R1MLKEM768,
+    kx::SECP384R1MLKEM1024,
     kx::MLKEM768,
     kx::X25519,
     kx::SECP256R1,

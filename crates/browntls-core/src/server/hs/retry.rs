@@ -150,6 +150,7 @@ impl ExpectClientHello {
         debug!("continuing a stateless HelloRetryRequest from its cookie");
         self.transcript = HandshakeHashOrBuffer::Hash(transcript);
         self.done_retry = true;
+        self.retry_cert_with_extern_psk = state.cert_with_extern_psk;
         self.retry_choice = Some(RetryChoice {
             suite,
             group,

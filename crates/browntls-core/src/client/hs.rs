@@ -124,6 +124,27 @@ pub(super) struct ClientHelloInput {
 }
 
 impl ClientHelloInput {
+    /// RFC 9973 §5: repeat the offer on retry or abort. ECH rejection has
+    /// already switched the comparison to the original outer ClientHello.
+    fn check_cert_with_extern_psk_retry(
+        &self,
+        common: &mut CommonState,
+        offered: bool,
+    ) -> Result<(), Error> {
+        if self
+            .hello
+            .sent_extensions
+            .contains(&ExtensionType::TlsCertWithExternPsk)
+            != offered
+        {
+            return Err(common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::CertWithExternPskChangedOnRetry,
+            ));
+        }
+        Ok(())
+    }
+
     /// Continues with the outer ClientHello after the server rejected ECH
     /// (RFC 9849 §6.1.6): its random, the public name (which the server
     /// certificate is checked against), its extensions, no ALPN and no

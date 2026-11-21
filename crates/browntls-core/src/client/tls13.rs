@@ -166,6 +166,13 @@ pub(super) fn handle_server_hello(
         .key_share
         .as_ref()
         .ok_or_else(|| cx.common.missing_extension(PeerMisbehaved::MissingKeyShare))?;
+    if server_hello.extensions.cert_with_extern_psk.is_some()
+        && server_hello.extensions.pre_shared_key.is_none()
+    {
+        return Err(cx
+            .common
+            .missing_extension(PeerMisbehaved::CertWithExternPskWithoutExternalPsk));
+    }
 
     // The server may answer our hybrid share with its classical half, which we
     // also offered (when the provider supports that group on its own).

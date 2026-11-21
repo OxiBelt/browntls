@@ -31,10 +31,10 @@ use crate::msgs::enums::NamedGroup;
 use crate::msgs::handshake::SessionId;
 
 /// Separates cookie plaintexts from those of any other sealed token.
-const COOKIE_LABEL: &[u8; 16] = b"browntls hrr ck1";
+const COOKIE_LABEL: &[u8; 16] = b"browntls hrr ck2";
 
 /// The label of a DTLS 1.3 cookie.
-const DTLS_COOKIE_LABEL: &[u8; 16] = b"browntls dtls ck";
+const DTLS_COOKIE_LABEL: &[u8; 16] = b"browntls dtls c2";
 
 /// How long a cookie is accepted after it was issued, in seconds.
 pub(super) const COOKIE_LIFETIME_SECS: u64 = 60;
@@ -53,6 +53,8 @@ pub(super) struct RetryCookie {
     pub(super) session_id: SessionId,
     /// The first ClientHello's server name, empty when it sent none.
     pub(super) server_name: Vec<u8>,
+    /// Whether the first ClientHello offered RFC 9973.
+    pub(super) cert_with_extern_psk: bool,
     /// DTLS 1.3 only: what else the cookie is bound to.
     pub(super) dtls: Option<DtlsRetry>,
 }
@@ -83,6 +85,7 @@ impl RetryCookie {
         self.session_id.encode(&mut out);
         out.push(u8::try_from(self.server_name.len()).ok()?);
         out.extend_from_slice(&self.server_name);
+        out.push(u8::from(self.cert_with_extern_psk));
         if let Some(dtls) = &self.dtls {
             u16::try_from(dtls.peer_address.len()).ok()?;
             PayloadU16::encode_slice(&dtls.peer_address, &mut out);
@@ -109,6 +112,11 @@ impl RetryCookie {
         let session_id = SessionId::read(&mut r).ok()?;
         let name_len = usize::from(u8::read(&mut r).ok()?);
         let server_name = r.take(name_len)?.to_vec();
+        let cert_with_extern_psk = match u8::read(&mut r).ok()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
         let dtls = match dtls {
             true => Some(DtlsRetry {
                 peer_address: PayloadU16::read(&mut r).ok()?.0,
@@ -130,6 +138,7 @@ impl RetryCookie {
             client_hello_hash,
             session_id,
             server_name,
+            cert_with_extern_psk,
             dtls,
         })
     }
@@ -232,6 +241,7 @@ mod tests {
             client_hello_hash: alloc::vec![7; 32],
             session_id: SessionId::read_bytes(&[3, 1, 2, 3]).unwrap(),
             server_name: b"example.com".to_vec(),
+            cert_with_extern_psk: true,
             dtls: None,
         }
     }

@@ -3,8 +3,8 @@
 use std::io::Cursor;
 
 use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
-use browntls_core::ech::EchServerKey;
 use browntls_core::ech::pem::{EchPem, EchPkcs8Codec, NATIVE_PKCS8_CODEC};
+use browntls_core::ech::{EchConfig, EchServerConfig, EchServerKey};
 
 use super::{Fields, KEMS, PUBLIC, config_list, fixture};
 use crate::input::Input;
@@ -67,6 +67,11 @@ pub(super) fn run(input: &mut Input<'_>) {
             let mut output = Vec::new();
             public.write_public_pem(&mut output).unwrap();
             assert_eq!(output, pem.to_public_pem());
+            let selected = EchConfig::from_pem(&public, ALL_SUPPORTED_SUITES).unwrap();
+            assert_eq!(selected.config_id(), key.config_id());
+            let server =
+                EchServerConfig::from_pems(&[private], &[public], ALL_SUPPORTED_SUITES).unwrap();
+            assert_eq!(server.ech_config_list(), &list);
         }
     }
 }

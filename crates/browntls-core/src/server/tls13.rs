@@ -714,7 +714,7 @@ impl CompleteClientHelloHandling {
             supported_groups,
             retry_configs,
             expected_tickets,
-        );
+        )?;
 
         let client_auth = if let Some(server_key) = server_key {
             let offer = if defer_client_auth {

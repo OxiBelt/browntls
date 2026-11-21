@@ -55,6 +55,7 @@ use crate::crypto::hpke::{
 use crate::crypto::tls13::Hkdf;
 use crate::error::{Error, InvalidMessage};
 use crate::msgs::base::PayloadU16;
+use crate::msgs::handshake::MAX_HANDSHAKE_SIZE;
 
 pub(crate) mod client;
 pub(crate) mod codec;
@@ -67,6 +68,12 @@ pub mod svcb;
 mod tests;
 
 use config::{EchConfigContents, EchConfigEntry, HpkeKeyConfig};
+use pem::{EchPem, EchPemError};
+
+/// The largest retry list that fits in EncryptedExtensions by itself. Its
+/// enclosing extensions vector and Extension header use six more bytes.
+const MAX_RETRY_LIST_LEN: usize = MAX_HANDSHAKE_SIZE as usize - 2 - 4;
+const MAX_PEM_DECRYPTION_KEYS: usize = 64;
 
 /// The prefix of the HPKE `info` (RFC 9849 §6.1): `"tls ech" || 0x00`.
 const INFO_PREFIX: &[u8] = b"tls ech\0";
@@ -151,10 +158,7 @@ impl EchConfig {
             let Some(contents) = entry.contents else {
                 continue;
             };
-            if contents.extensions.iter().any(|e| e.is_mandatory()) {
-                continue;
-            }
-            let Some(public_name) = config::valid_public_name(&contents.public_name) else {
+            let Some(public_name) = contents.usable_public_name() else {
                 continue;
             };
             let Some((hpke, cipher_suite)) = select_suite(&contents.key_config, hpke_suites) else {
@@ -172,6 +176,16 @@ impl EchConfig {
         Err(Error::General(String::from(
             "no usable ECH configuration in the list",
         )))
+    }
+
+    /// Chooses a client configuration from the PEM bundle's
+    /// `ECHConfigList` using the same rules as [`Self::new`].
+    ///
+    /// # Errors
+    /// Returns [`EchPemError::Tls`] if the list is malformed or no
+    /// configuration is usable with `suites`.
+    pub fn from_pem(pem: &EchPem, suites: &[&'static dyn Hpke]) -> Result<Self, EchPemError> {
+        Self::new(pem.ech_config_list(), suites).map_err(EchPemError::Tls)
     }
 
     /// The public name the outer ClientHello carries, and which a server
@@ -491,9 +505,9 @@ impl fmt::Debug for EchServerKey {
     }
 }
 
-/// A server's ECH keys (RFC 9849 §7), for a server in shared mode
-/// ([`ServerConfig::ech`](crate::ServerConfig::ech)) or the client-facing
-/// server of split mode ([`split::ClientFacing`]).
+/// A server's ECH keys and retry configurations (RFC 9849 §7), for shared
+/// mode ([`ServerConfig::ech`](crate::ServerConfig::ech)) or the
+/// client-facing server of split mode ([`split::ClientFacing`]).
 #[derive(Debug)]
 pub struct EchServerConfig {
     pub(crate) keys: Vec<EchServerKey>,
@@ -511,22 +525,107 @@ impl EchServerConfig {
     ///
     /// # Errors
     ///
-    /// Fails if `keys` is empty or too large for an `ECHConfigList`.
+    /// Fails if `keys` is empty or the retry list cannot fit in
+    /// EncryptedExtensions.
     pub fn new(keys: Vec<EchServerKey>) -> Result<Self, Error> {
         if keys.is_empty() {
             return Err(Error::General(String::from("no ECH keys")));
         }
-        let total: usize = keys.iter().map(|k| k.encoded.len()).sum();
-        if total > usize::from(u16::MAX) {
+        let total = keys
+            .iter()
+            .fold(0usize, |len, key| len.saturating_add(key.encoded.len()));
+        if total > MAX_RETRY_LIST_LEN - 2 {
             return Err(Error::General(String::from("ECHConfigList too long")));
         }
         let list = config::encode_config_list(keys.iter().map(|k| k.encoded.as_slice()));
-        Ok(Self {
+        Ok(Self::with_keys_and_list(keys, list))
+    }
+
+    /// Installs decryption keys and configures a separate retry list.
+    ///
+    /// The nonempty `decryption` slice supplies bundles with private
+    /// keys. Only entries matching a bundle's KEM and public key, with a
+    /// valid public name, no unknown mandatory extensions and at least
+    /// one supported suite, are installed. Keys are tried in bundle and
+    /// entry order.
+    ///
+    /// The nonempty `retry` slice supplies the configurations sent on
+    /// rejection, in bundle and entry order. Their exact encodings are
+    /// preserved, including unknown versions. A different server can
+    /// hold the keys for the retry list.
+    ///
+    /// # Errors
+    /// Fails if `decryption` is empty, any decryption bundle lacks a key
+    /// or has no usable matching entry, more than 64 entries would be
+    /// installed, or the retry list is empty or too large for
+    /// EncryptedExtensions.
+    pub fn from_pems(
+        decryption: &[EchPem],
+        retry: &[EchPem],
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        if decryption.is_empty() {
+            return Err(EchPemError::NoUsableDecryptionKey);
+        }
+        if retry.is_empty() {
+            return Err(EchPemError::InvalidRetryList);
+        }
+        let mut list = Vec::from([0, 0]);
+        for pem in retry {
+            // EchPem guarantees a valid ECHConfigList with a length prefix.
+            let entries = &pem.ech_config_list()[2..];
+            if entries.len() > MAX_RETRY_LIST_LEN - list.len() {
+                return Err(EchPemError::InvalidRetryList);
+            }
+            list.extend_from_slice(entries);
+        }
+        let len = (list.len() - 2) as u16;
+        list[..2].copy_from_slice(&len.to_be_bytes());
+
+        let mut keys = Vec::new();
+        for pem in decryption {
+            let (kem, private_key, public_key) = pem.key().ok_or(EchPemError::MissingPrivateKey)?;
+            let entries = config::read_config_list(pem.ech_config_list())
+                .map_err(|err| EchPemError::Tls(err.into()))?;
+            let start = keys.len();
+            for entry in entries {
+                let Some(contents) = entry.contents else {
+                    continue;
+                };
+                if contents.key_config.kem_id != kem
+                    || contents.key_config.public_key.0 != public_key.0
+                    || contents.usable_public_name().is_none()
+                {
+                    continue;
+                }
+                let Ok(key) = EchServerKey::from_parts(
+                    entry.encoded,
+                    contents.key_config,
+                    contents.public_name,
+                    private_key.clone(),
+                    suites,
+                ) else {
+                    continue;
+                };
+                if keys.len() == MAX_PEM_DECRYPTION_KEYS {
+                    return Err(EchPemError::TooManyDecryptionKeys);
+                }
+                keys.push(key);
+            }
+            if keys.len() == start {
+                return Err(EchPemError::NoUsableDecryptionKey);
+            }
+        }
+        Ok(Self::with_keys_and_list(keys, list))
+    }
+
+    fn with_keys_and_list(keys: Vec<EchServerKey>, list: Vec<u8>) -> Self {
+        Self {
             keys,
             list,
             trial_decryption: false,
             check_public_name: false,
-        })
+        }
     }
 
     /// Tries every key on every ECH extension, whatever its configuration

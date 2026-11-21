@@ -312,8 +312,8 @@ impl Dtls {
 
     /// Our close_notify is sent: the peer reads nothing after it (RFC 9846
     /// §6.1), so nothing more is queued or retransmitted, except a
-    /// client's last flight, which the server needs to complete its
-    /// handshake: until acknowledged, it is retransmitted with
+    /// final flight, which the peer needs to complete its handshake:
+    /// until acknowledged, it is retransmitted with
     /// close_notify after it.
     fn close_sent(&mut self) {
         if self.holds_last_flight() && !self.out.sending_last {
@@ -325,9 +325,9 @@ impl Dtls {
     }
 
     /// The peer's close_notify was read: nothing it sends is read any
-    /// more, its ACKs included, so nothing is retransmitted. A client
-    /// whose last flight is not completely sent yet still sends it once,
-    /// so that the server can complete its handshake. An ACK we owe is
+    /// more, its ACKs included, so nothing is retransmitted. An endpoint
+    /// whose final flight is not completely sent yet still sends it once,
+    /// so that the peer can complete its handshake. An ACK we owe is
     /// still sent.
     pub(super) fn peer_closed(&mut self) {
         if self.out.sending_last {
@@ -341,13 +341,13 @@ impl Dtls {
         }
     }
 
-    /// Whether we are a client whose unacknowledged flight holds its
-    /// Finished: the last flight of the handshake.
+    /// Whether our unacknowledged Finished belongs to the final flight.
+    /// DTLS 1.2 reverses its sender when resuming; DTLS 1.3 uses the client.
     fn holds_last_flight(&self) -> bool {
         let finished = u8::from(HandshakeType::Finished);
         self.side
             == if self.is_v12() {
-                Side::Server
+                self.v12_last_sender()
             } else {
                 Side::Client
             }
@@ -547,8 +547,9 @@ impl Dtls {
         if self.out.retransmissions > MAX_RETRANSMISSIONS
             && (self.out.closing || (self.is_v12() && self.holds_last_flight()))
         {
-            // We closed: the server may have finished and read our
-            // close_notify, after which it acknowledges nothing.
+            // The peer may have finished and read our close_notify,
+            // after which it acknowledges nothing. A final DTLS 1.2
+            // flight also expires without failing the completed endpoint.
             self.abandon_flights();
             return Ok(());
         }

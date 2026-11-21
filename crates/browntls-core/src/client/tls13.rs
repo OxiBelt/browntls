@@ -29,7 +29,9 @@ use crate::psk::{ExternalPsk, OfferedPsk};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::extensions::{Tls13Message, first_disallowed};
-use crate::tls13::key_schedule::{KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake};
+use crate::tls13::key_schedule::{
+    KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake, Protocol,
+};
 use crate::verify::{HandshakeSignatureValid, ServerCertVerified};
 
 mod finished;
@@ -42,6 +44,7 @@ use server_auth::ExpectCertificateOrCertReq;
 /// with its own hash and label, over the ClientHello up to the binders, and
 /// writes them into the ClientHello.
 pub(super) fn fill_in_psk_binders(
+    protocol: Protocol,
     offered: &[OfferedPsk],
     transcript: &HandshakeHashBuffer,
     hmp: &mut HandshakeMessagePayload<'_>,
@@ -55,7 +58,7 @@ pub(super) fn fill_in_psk_binders(
         .map(|psk| {
             let handshake_hash =
                 transcript.hash_given(psk.suite.common.hash_provider, &binder_plaintext);
-            let binder = KeyScheduleEarly::new(psk.suite, psk.secret.as_ref())
+            let binder = KeyScheduleEarly::new(psk.suite, psk.secret.as_ref(), protocol)
                 .psk_binder(psk.label, handshake_hash.as_ref());
             PresharedKeyBinder::new(binder.as_ref().to_vec())
         })
@@ -98,9 +101,10 @@ pub(super) fn derive_early_traffic_secret(
 /// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446
 /// appendix D.4).
 ///
-/// Never on QUIC, which has no such record (RFC 9001 §8.4).
+/// Never on QUIC, which has no such record (RFC 9001 §8.4), nor on DTLS
+/// (RFC 9147 §5).
 pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {
-    if *sent || common.is_quic() {
+    if *sent || common.is_quic() || common.is_dtls() {
         return;
     }
     let m = Message {
@@ -257,7 +261,8 @@ pub(super) fn handle_server_hello(
             }
             // The schedule continues with the negotiated suite, which may
             // differ from the binder's in everything but the hash.
-            KeyScheduleEarly::new(suite, offered.secret.as_ref()).into_pre_handshake()
+            KeyScheduleEarly::new(suite, offered.secret.as_ref(), Protocol::of(cx.common))
+                .into_pre_handshake()
         }
         None => {
             debug!("Not resuming");
@@ -271,7 +276,7 @@ pub(super) fn handle_server_hello(
             }
             cx.common.early_exporter = None;
             resuming_session = None;
-            KeySchedulePreHandshake::new(suite)
+            KeySchedulePreHandshake::new(suite, Protocol::of(cx.common))
         }
     };
 

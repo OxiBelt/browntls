@@ -177,6 +177,15 @@ pub(crate) fn dtls_cookie_is_valid(
     RetryCookie::open(&**sealer, cookie, now.as_secs(), Some(peer_address)).is_some()
 }
 
+#[cfg(feature = "tls12")]
+pub(crate) fn dtls12_cookie_is_valid(
+    config: &super::ServerConfig,
+    cookie: &[u8],
+    address: &[u8],
+) -> bool {
+    super::hs::dtls12::valid(config, cookie, address)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;

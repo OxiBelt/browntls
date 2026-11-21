@@ -1,5 +1,7 @@
 //! The server handshake up to version and suite negotiation.
 
+#[cfg(feature = "tls12")]
+pub(crate) mod dtls12;
 mod select;
 
 use alloc::boxed::Box;
@@ -139,8 +141,18 @@ impl ExpectClientHello {
         cx.data.authenticators.config = Some(self.config.clone());
         cx.data.authenticators.client_sig_schemes = sig_schemes.clone();
 
-        let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3);
-        let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2);
+        let tls13_enabled = self.config.supports_version(ProtocolVersion::TLSv1_3)
+            && cx
+                .common
+                .dtls
+                .as_ref()
+                .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
+        let tls12_enabled = self.config.supports_version(ProtocolVersion::TLSv1_2)
+            && cx
+                .common
+                .dtls
+                .as_ref()
+                .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_2));
 
         // RFC 9846 §4.3.1: version negotiation.
         let version = if let Some(versions) = &client_hello.extensions.supported_versions {
@@ -218,7 +230,20 @@ impl ExpectClientHello {
         }
 
         crate::quic::tls::require_tls13(cx.common, version)?;
-        crate::tls13::dtls::require_tls13(cx.common, version)?;
+        crate::tls13::dtls::require_enabled_version(cx.common, version)?;
+        if let Some(dtls) = &mut cx.common.dtls {
+            dtls.select_version(version);
+        }
+        if version == ProtocolVersion::TLSv1_3 {
+            crate::tls13::dtls::read_client_hello(cx.common, client_hello)?;
+        }
+        #[cfg(feature = "tls12")]
+        if version == ProtocolVersion::TLSv1_2
+            && cx.common.is_dtls()
+            && self.dtls12_retry(client_hello, cx)?
+        {
+            return Ok(Box::new(self));
+        }
         cx.common.negotiated_version = Some(version);
 
         // RFC 8446 §4.1.2: compression must be null only.
@@ -599,7 +624,7 @@ impl ExpectClientHello {
                     return Err(no_server_certificate(cx));
                 };
                 let using_ems = client_hello.ems_support_offered();
-                if self.config.require_ems && !using_ems {
+                if (self.config.require_ems || cx.common.is_dtls()) && !using_ems {
                     return Err(cx.common.send_fatal_alert(
                         AlertDescription::HandshakeFailure,
                         PeerIncompatible::ExtendedMasterSecretExtensionRequired,
@@ -702,7 +727,16 @@ pub(super) fn process_client_hello<'a>(
     }
 
     crate::quic::tls::read_client_hello(cx.common, client_hello)?;
-    crate::tls13::dtls::read_client_hello(cx.common, client_hello)?;
+    // Preserve the default DTLS 1.3 validation order before cookie handling.
+    // A mixed endpoint checks again once its configured version is selected.
+    if cx
+        .common
+        .dtls
+        .as_ref()
+        .is_some_and(|d| !d.allows(ProtocolVersion::TLSv1_2))
+    {
+        crate::tls13::dtls::read_client_hello(cx.common, client_hello)?;
+    }
 
     // RFC 8446 §4.1.2: the second ClientHello must repeat the server name.
     let sni = client_hello.sni().cloned();

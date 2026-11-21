@@ -253,14 +253,25 @@ fn connection() -> Vec<Vec<u8>> {
 fn pki_cert() -> Vec<Vec<u8>> {
     let identity = identity();
     let mut seeds = Vec::new();
-    for flags in [0u8, 1, 2, 3, 4, 8, 16, 16 | 32, 16 | 64, 16 | 128] {
+    let ordinary = [0u8, 1, 2, 3, 4, 8, 16, 16 | 32, 16 | 64, 16 | 128]
+        .map(|flags| (flags, b"localhost".as_slice()));
+    let service_ids = [
+        b"sip:localhost".as_slice(),
+        b"sip:alice@localhost;transport=tcp",
+        b"service://localhost/path",
+        b"_xmpp-client.localhost",
+        b"127.0.0.1",
+        "bücher.example".as_bytes(),
+    ]
+    .map(|name| (0, name));
+    for (flags, name) in ordinary.into_iter().chain(service_ids) {
         let mut seed = vec![flags];
         field(&mut seed, identity.chain[0].as_ref());
         field(&mut seed, identity.ca.as_ref());
         field(&mut seed, &[]);
         field(&mut seed, identity.ca.as_ref());
         field(&mut seed, &identity.crl);
-        field(&mut seed, b"localhost");
+        field(&mut seed, name);
         seed.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
         seeds.push(seed);
     }

@@ -26,7 +26,7 @@ uses as test oracles. No private key, corpus or crash artifact is committed.
 | `handshake_message` | version and framing byte, then a handshake message or the body of a selected message type | Every handshake message decoder for TLS 1.2 and TLS 1.3; a decoded message must re-encode to something that decodes, with a stable encoding |
 | `deframer` | mode byte, then a byte stream or one record payload | Record headers, handshake reassembly across records, alert and change_cipher_spec decoding |
 | `cert_decompress` | limit selector, then a `CompressedCertificate` body | The zlib, Brotli and Zstandard decompressors under the RFC 8879 length rules, then the Certificate decoder; a result longer than the declared or permitted length is a failure |
-| `pki_cert` | flags, then length-prefixed end entity, two intermediates, trust anchor, CRL and name | X.509 parsing, trust anchor extraction, name matching, path building with budgets, revocation checking, raw public keys |
+| `pki_cert` | flags, then length-prefixed end entity, two intermediates, trust anchor, CRL and reference identifier | X.509 parsing, trust anchor extraction, RFC 9525 identity matching, path building with budgets, revocation checking, raw public keys |
 | `pki_pem` | PEM text | Section iteration, Base64, every `PemObject` type |
 | `pki_crl` | flags, serial number, issuer key, then a CRL | Borrowed and owned CRL parsing, which must agree; entry iteration, serial lookup, signature dispatch |
 | `client` | mode, cut, then bytes for the client | `ClientConnection` through `read_tls` and `process_new_packets` |

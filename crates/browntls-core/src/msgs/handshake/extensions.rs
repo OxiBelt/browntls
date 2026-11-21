@@ -96,8 +96,8 @@ impl ServerNamePayload<'_> {
                     }
                     let s = core::str::from_utf8(&value.0)
                         .map_err(|_| InvalidMessage::InvalidServerName)?;
-                    let dns =
-                        DnsName::try_from(s).map_err(|_| InvalidMessage::InvalidServerName)?;
+                    let dns = DnsName::try_from_ascii(s)
+                        .map_err(|_| InvalidMessage::InvalidServerName)?;
                     name = Some(dns.to_owned());
                 }
                 _ => {

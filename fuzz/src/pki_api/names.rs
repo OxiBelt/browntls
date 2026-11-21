@@ -9,7 +9,7 @@ use browntls_pki::{DnsName, IpAddr, ServerName};
 use crate::input::Input;
 
 /// `DnsName`'s documented syntax: an optional trailing dot, 1 to 253 bytes
-/// otherwise, labels of 1 to 63 bytes of `[A-Za-z0-9_-]` not starting or
+/// otherwise, labels of 1 to 63 bytes of `[A-Za-z0-9-]` not starting or
 /// ending with `-`, and a final label that is not all digits.
 fn dns_model(s: &str) -> bool {
     let name = s.strip_suffix('.').unwrap_or(s);
@@ -24,7 +24,7 @@ fn dns_model(s: &str) -> bool {
             || label.ends_with('-')
             || !label
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         {
             return false;
         }
@@ -139,10 +139,20 @@ pub(super) fn name_op(input: &mut Input<'_>) {
 fn check(s: &str) {
     let ip = check_ip(s);
     let dns = DnsName::try_from(s);
-    assert_eq!(dns.is_ok(), dns_model(s), "{s:?}");
+    // The ASCII syntax model does not implement the IDNA A-label checks.
+    // Compare the conversion paths independently when Unicode is involved.
+    if s.is_ascii()
+        && !s.split('.').any(|label| {
+            label
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("xn--"))
+        })
+    {
+        assert_eq!(dns.is_ok(), dns_model(s), "{s:?}");
+    }
     assert_eq!(DnsName::try_from(s.to_string()).is_ok(), dns.is_ok());
     if let Ok(dns) = &dns {
-        check_dns(dns, s);
+        check_dns(dns, dns.as_ref());
     }
 
     let name = ServerName::try_from(s);

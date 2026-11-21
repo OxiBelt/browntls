@@ -49,6 +49,7 @@ fn client_hello(status_request: bool, sct_request: bool) -> ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random::from([0u8; 32]),
         session_id: SessionId::empty(),
+        legacy_cookie: None,
         cipher_suites: vec![CipherSuite::TLS13_AES_128_GCM_SHA256],
         compression_methods: vec![Compression::Null],
         extensions: ClientExtensions {

@@ -662,7 +662,7 @@ impl ServerConnectionData {
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        Self::for_server_with(config, None)
+        Self::for_server_with(config, None, None)
     }
 
     /// Queues a post-handshake CertificateRequest (RFC 9846 §4.7.2); the
@@ -674,6 +674,11 @@ impl ConnectionCore<ServerConnectionData> {
         if !self.common_state.is_tls13() {
             return Err(Error::General(
                 "post-handshake client authentication requires TLS 1.3".into(),
+            ));
+        }
+        if self.common_state.is_dtls() {
+            return Err(Error::General(
+                "post-handshake client authentication is not supported over DTLS".into(),
             ));
         }
         let state = match &mut self.state {
@@ -731,15 +736,52 @@ impl ConnectionCore<ServerConnectionData> {
                 "Encrypted Client Hello is not supported over QUIC".into(),
             ));
         }
-        Self::for_server_with(config, Some(quic))
+        Self::for_server_with(config, Some(quic), None)
+    }
+
+    /// A DTLS 1.3 server (RFC 9147): TLS 1.3 only, with a DTLS-capable
+    /// suite, without Encrypted Client Hello, and with a cookie sealer when
+    /// `dtls` requires cookies (RFC 9147 §5.1).
+    pub(crate) fn for_dtls_server(
+        config: Arc<ServerConfig>,
+        dtls: crate::dtls::Dtls,
+    ) -> Result<Self, Error> {
+        if !config.supports_version(ProtocolVersion::TLSv1_3) {
+            return Err(Error::General(
+                "TLS 1.3 support is required for DTLS 1.3".into(),
+            ));
+        }
+        if !config
+            .provider
+            .cipher_suites
+            .iter()
+            .any(|cs| cs.usable_for_dtls())
+        {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with DTLS 1.3".into(),
+            ));
+        }
+        if config.ech.is_some() || config.ech_backend {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over DTLS".into(),
+            ));
+        }
+        if dtls.require_cookie() && config.hello_retry_cookies.is_none() {
+            return Err(Error::General(
+                "DTLS servers that require cookies need hello_retry_cookies".into(),
+            ));
+        }
+        Self::for_server_with(config, None, Some(dtls))
     }
 
     fn for_server_with(
         config: Arc<ServerConfig>,
         quic: Option<crate::quic::Quic>,
+        dtls: Option<crate::dtls::Dtls>,
     ) -> Result<Self, Error> {
         let mut common = CommonState::new(Side::Server);
         common.quic = quic.map(alloc::boxed::Box::new);
+        common.dtls = dtls.map(alloc::boxed::Box::new);
         config.apply_to(&mut common)?;
         Ok(Self::new(
             alloc::boxed::Box::new(hs::ExpectClientHello::new(config)),

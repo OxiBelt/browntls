@@ -18,6 +18,7 @@ use crate::sync::{Arc, Weak};
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
 use crate::tls13::Tls13CipherSuite;
+use crate::tls13::key_schedule::Protocol;
 use crate::verify::ServerCertVerifier;
 
 /// A value with the time it was retrieved from storage, for age computations.
@@ -85,6 +86,10 @@ pub struct Tls13ClientSessionValue {
     /// The absolute expiry of the delegated credential that authenticated the
     /// original full handshake. Descendant tickets preserve it unchanged.
     delegated_credential_expiry: Option<UnixTime>,
+    /// The protocol the ticket was issued over, the only one it resumes:
+    /// the binder's label prefix differs between TLS and DTLS (RFC 9147
+    /// §5.9).
+    protocol: Protocol,
 }
 
 impl Tls13ClientSessionValue {
@@ -115,7 +120,20 @@ impl Tls13ClientSessionValue {
             ),
             external_psk: None,
             delegated_credential_expiry: None,
+            protocol: Protocol::Tls13,
         }
+    }
+
+    /// Records the protocol the ticket was issued over (TLS 1.3 unless
+    /// set).
+    pub(crate) fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// The protocol the ticket was issued over.
+    pub(crate) fn protocol(&self) -> Protocol {
+        self.protocol
     }
 
     /// Records the external PSK the session was established with.
@@ -194,6 +212,7 @@ impl fmt::Debug for Tls13ClientSessionValue {
                 "delegated_credential_expiry",
                 &self.delegated_credential_expiry,
             )
+            .field("protocol", &self.protocol)
             .finish_non_exhaustive()
     }
 }
@@ -630,16 +649,21 @@ impl Codec<'_> for ServerSessionValue {
         };
         let delegated_credential_expiry = deadline(1)?;
         let client_delegated_credential_expiry = deadline(2)?;
+        // A DTLS 1.3 session is a TLS 1.3 one issued over DTLS.
+        let tls13 = matches!(
+            version,
+            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
+        );
         // Delegated credentials are TLS 1.3 only, and a client's
         // authenticates a certificate chain.
-        if (deadlines != 0 && version != ProtocolVersion::TLSv1_3)
+        if (deadlines != 0 && !tls13)
             || (client_delegated_credential_expiry.is_some() && client_cert_chain.is_none())
         {
             return Err(InvalidMessage::IllegalEmptyValue);
         }
         let certificate_free = if r.any_left() {
             if u8::read(r)? != 1
-                || version != ProtocolVersion::TLSv1_3
+                || !tls13
                 || external_psk.is_none()
                 || client_cert_chain.is_some()
                 || delegated_credential_expiry.is_some()
@@ -673,4 +697,4 @@ impl Codec<'_> for ServerSessionValue {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

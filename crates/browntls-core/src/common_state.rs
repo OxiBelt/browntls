@@ -218,6 +218,10 @@ pub struct CommonState {
     /// Present on QUIC connections (RFC 9001): handshake messages and alerts
     /// go to the QUIC implementation instead of the record layer.
     pub(crate) quic: Option<alloc::boxed::Box<crate::quic::Quic>>,
+    /// Present on DTLS connections (RFC 9147): handshake messages, alerts
+    /// and application data go to the DTLS record layer and its flights
+    /// instead of the TLS record layer.
+    pub(crate) dtls: Option<alloc::boxed::Box<crate::dtls::Dtls>>,
     /// Driven by the unbuffered API: received application data stays in the
     /// caller's buffer instead of being copied into `received_plaintext`.
     pub(crate) unbuffered: bool,
@@ -281,6 +285,7 @@ impl CommonState {
             encrypt_failed: false,
             fips: false,
             quic: None,
+            dtls: None,
             unbuffered: false,
             app_data_in_place: false,
             external_psk: None,
@@ -338,7 +343,11 @@ impl CommonState {
 
     /// The negotiated protocol version, once agreed.
     pub fn protocol_version(&self) -> Option<ProtocolVersion> {
-        self.negotiated_version
+        match self.negotiated_version {
+            // The state machines run DTLS 1.3 as TLS 1.3.
+            Some(ProtocolVersion::TLSv1_3) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_3),
+            version => version,
+        }
     }
 
     /// How the handshake completed, once it has.
@@ -504,13 +513,22 @@ impl CommonState {
         self.quic.is_some()
     }
 
+    /// Whether this is a DTLS connection (RFC 9147).
+    pub(crate) fn is_dtls(&self) -> bool {
+        self.dtls.is_some()
+    }
+
     /// Queues `m` for sending, encrypting it when `must_encrypt`.
     ///
     /// On a QUIC connection nothing goes to the record layer: handshake
     /// messages are queued for CRYPTO frames at the current encryption level
     /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
     /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
+    /// On a DTLS connection see [`Self::send_to_dtls`].
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        if self.send_to_dtls(&m.payload) {
+            return;
+        }
         if let Some(quic) = &mut self.quic {
             match m.payload {
                 MessagePayload::Handshake { encoded, .. } => {
@@ -540,6 +558,9 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
+        if self.send_plain_to_dtls(&m) {
+            return;
+        }
         if self.send_to_kernel(&m) {
             return;
         }

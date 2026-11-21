@@ -409,6 +409,9 @@ pub enum PeerMisbehaved {
     /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
+    /// A DTLS 1.3 ClientHello whose `legacy_cookie` is not empty (RFC 9147
+    /// §5.3).
+    IllegalDtlsLegacyCookie,
     /// The peer's `external_id_hash` differs from the one expected
     /// (RFC 8844 §3.2).
     ExternalIdHashMismatch,
@@ -469,6 +472,9 @@ pub enum PeerIncompatible {
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).
     ExternalPskRequired,
+    /// On a DTLS connection, the peer offered or selected a version other
+    /// than DTLS 1.3, the only DTLS version implemented.
+    Tls13RequiredForDtls,
     /// The peer sent no `external_id_hash` although one is expected and
     /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §3.2).
     ///

@@ -40,7 +40,7 @@ use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::extensions::{Tls13Message, first_disallowed};
-use crate::tls13::key_schedule::{KeyScheduleHandshake, KeyScheduleTraffic};
+use crate::tls13::key_schedule::{KeyScheduleHandshake, KeyScheduleTraffic, Protocol};
 use crate::verify::{
     DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid, ServerCertVerified,
 };
@@ -200,8 +200,9 @@ impl State<ClientConnectionData> for ExpectFinished {
 
         // RFC 8446 §4.5: EndOfEarlyData is still protected by the early
         // traffic key but follows the server Finished in the transcript.
-        // QUIC clients MUST NOT send it (RFC 9001 §8.3).
-        if cx.common.early_traffic && cx.common.is_quic() {
+        // QUIC clients MUST NOT send it (RFC 9001 §8.3), nor does DTLS 1.3
+        // have it (RFC 9147 §5.6).
+        if cx.common.early_traffic && (cx.common.is_quic() || cx.common.is_dtls()) {
             cx.common.early_traffic = false;
             cx.data.early_data.finished();
         } else if cx.common.early_traffic {
@@ -404,7 +405,8 @@ impl ExpectTraffic {
             cx.common
                 .external_psk_binding(&self.config.provider.cipher_suites, &secret)?,
         )
-        .with_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+        .with_delegated_credential_expiry(cx.data.delegated_credential_expiry)
+        .with_protocol(Protocol::of(cx.common));
         if let Some(params) = cx.common.quic.as_ref().and_then(|q| q.peer_params.as_ref()) {
             value.set_quic_params(params);
         }

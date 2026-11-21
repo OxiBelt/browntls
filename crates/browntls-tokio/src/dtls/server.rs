@@ -638,15 +638,15 @@ impl UdpServer {
             if (!entry.connected || entry.retiring) && entry.expires <= now {
                 self.remove(peer);
             } else {
-                if let Some(paths) = &mut entry.paths {
-                    if let Err(err) = paths.poll(&mut entry.conn, now, &mut |data, destination| {
+                if let Some(paths) = &mut entry.paths
+                    && let Err(err) = paths.poll(&mut entry.conn, now, &mut |data, destination| {
                         if entry.probe.is_none() {
                             entry.probe = Some((destination, data.to_vec()));
                         }
-                    }) {
-                        self.fail(peer, err);
-                        continue;
-                    }
+                    })
+                {
+                    self.fail(peer, err);
+                    continue;
                 }
                 let previous = entry.conn.next_timeout();
                 if !previous.is_some_and(|due| due <= now && Some(due) != entry.serviced_timeout) {
@@ -666,6 +666,11 @@ impl UdpServer {
 
     // Visit peers in rotating address order. One peer can send at most one
     // datagram per pass; send failures remove only the affected peer.
+    fn fail_send(&mut self, peer: SocketAddr, err: &io::Error) {
+        self.fail(peer, Error::General(format!("DTLS UDP send failed: {err}")));
+        self.remove(peer);
+    }
+
     fn poll_output(
         &mut self,
         cx: &mut Context<'_>,
@@ -673,16 +678,23 @@ impl UdpServer {
         target: Option<SocketAddr>,
     ) -> io::Result<()> {
         while *budget > 0 {
-            let Some((_, destination, data)) = self.replies.front_mut() else {
+            let Some((owner, destination, data)) = self.replies.front_mut() else {
                 break;
             };
-            if poll_send_datagram(data, |out| self.socket.poll_send_to(cx, out, *destination))
-                .is_pending()
-            {
+            let owner = *owner;
+            let Poll::Ready(result) =
+                poll_send_datagram(data, |out| self.socket.poll_send_to(cx, out, *destination))
+            else {
                 break;
-            }
+            };
             self.replies.pop_front();
             *budget -= 1;
+            if let Err(err) = result {
+                self.fail_send(owner, &err);
+                if target == Some(owner) {
+                    return Err(err);
+                }
+            }
         }
         if *budget == 0 && !self.replies.is_empty() {
             cx.waker().wake_by_ref();
@@ -724,8 +736,7 @@ impl UdpServer {
                         *budget -= 1;
                     }
                     Poll::Ready(Err(err)) => {
-                        self.fail(peer, Error::General(format!("DTLS UDP send failed: {err}")));
-                        self.remove(peer);
+                        self.fail_send(peer, &err);
                         if target == Some(peer) {
                             return Err(err);
                         }
@@ -755,8 +766,7 @@ impl UdpServer {
                         *budget -= 1;
                     }
                     Poll::Ready(Err(err)) => {
-                        self.fail(peer, Error::General(format!("DTLS UDP send failed: {err}")));
-                        self.remove(peer);
+                        self.fail_send(peer, &err);
                         if target == Some(peer) {
                             return Err(err);
                         }
@@ -830,3 +840,6 @@ impl fmt::Debug for UdpServer {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(all(test, any(feature = "native", feature = "rustcrypto")))]
+mod tests;

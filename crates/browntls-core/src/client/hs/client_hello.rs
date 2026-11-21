@@ -50,18 +50,15 @@ fn find_session(
     if config.external_binding.is_some() {
         return None;
     }
-    if cx
-        .common
-        .dtls
-        .as_ref()
-        .is_some_and(|d| !d.allows(ProtocolVersion::TLSv1_3))
-    {
-        return None;
-    }
     let now = config.current_time().ok()?;
     // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume;
     // so does DTLS 1.3, with its own tickets.
-    let tls13_only = cx.common.is_quic() || cx.common.is_dtls();
+    let tls13_only = cx.common.is_quic()
+        || cx
+            .common
+            .dtls
+            .as_ref()
+            .is_some_and(|d| !d.allows(ProtocolVersion::TLSv1_2));
     // RFC 9849 §6.1: an ECH offer is TLS 1.3 only and may not resume a
     // TLS 1.2 session. Such a session is not even looked up: its session
     // ID went out in the clear next to the hidden server name, so any use
@@ -69,11 +66,20 @@ fn find_session(
     #[cfg(feature = "tls12")]
     let ech_offer = matches!(config.ech_mode, Some(EchMode::Enable(_)));
 
-    let found = take_tls13_ticket(
-        &*config.resumption.store,
-        server_name,
-        Protocol::of(cx.common),
-    )
+    let found = (if cx
+        .common
+        .dtls
+        .as_ref()
+        .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
+    {
+        take_tls13_ticket(
+            &*config.resumption.store,
+            server_name,
+            Protocol::of(cx.common),
+        )
+    } else {
+        None
+    })
     .filter(|ticket| {
         !config.revocation_enabled()
             || (ticket.server_cert_chain().0.is_empty() && ticket.external_psk().is_some())
@@ -89,10 +95,14 @@ fn find_session(
             {
                 return None;
             }
-            config
-                .resumption
-                .store
-                .tls12_session(server_name)
+            let store = &config.resumption.store;
+            let (session, version) = if cx.common.is_dtls() {
+                (store.dtls12_session(server_name), ProtocolVersion::DTLSv1_2)
+            } else {
+                (store.tls12_session(server_name), ProtocolVersion::TLSv1_2)
+            };
+            session
+                .filter(|s| s.protocol_version() == version)
                 .map(ClientSessionValue::Tls12)
         }
         #[cfg(not(feature = "tls12"))]
@@ -154,7 +164,9 @@ fn find_session(
                 && config
                     .find_cipher_suite(inner.suite().common.suite)
                     .is_some()
-                && (!config.require_ems || inner.extended_ms())
+                && (!(config.require_ems || cx.common.is_dtls()) || inner.extended_ms())
+                && (!cx.common.is_dtls()
+                    || SupportedCipherSuite::from(inner.suite()).usable_for_dtls())
         }
     };
     if !usable {
@@ -264,9 +276,13 @@ pub(in crate::client) fn start_handshake(
         }) if !inner.session_id.is_empty() => inner.session_id,
         // RFC 9001 §8.4: a QUIC client MUST NOT request the middlebox
         // compatibility mode, so its legacy_session_id is empty. Nor has
-        // DTLS 1.3 that mode, and we hold no DTLS 1.2 session (RFC 9147
-        // §5, §5.3).
-        _ if cx.common.is_quic() || cx.common.is_dtls() => SessionId::empty(),
+        // DTLS 1.3 that mode (RFC 9147 §5, §5.3). With no ID, DTLS
+        // ticket resumption is distinguished by the next server message.
+        _ if cx.common.is_quic()
+            || (cx.common.is_dtls() && (supports_tls13 || resuming.is_none())) =>
+        {
+            SessionId::empty()
+        }
         // RFC 8446 §4.1.2: a non-empty legacy_session_id helps middleboxes;
         // for TLS 1.2 ticket resumption a random ID lets us detect acceptance.
         _ if supports_tls13 || resuming.is_some() => {
@@ -536,7 +552,6 @@ pub(super) fn emit_client_hello_for_retry(
 
     #[cfg(feature = "tls12")]
     if supports_tls12
-        && !dtls
         && !config.revocation_enabled()
         && config.external_binding.is_none()
         && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets

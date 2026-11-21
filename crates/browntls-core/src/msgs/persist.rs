@@ -217,10 +217,11 @@ impl fmt::Debug for Tls13ClientSessionValue {
     }
 }
 
-/// A TLS 1.2 session (ID and/or ticket) and its master secret.
+/// A stream TLS 1.2 or DTLS 1.2 session and its master secret.
 #[cfg(feature = "tls12")]
 #[derive(Clone)]
 pub struct Tls12ClientSessionValue {
+    version: ProtocolVersion,
     suite: &'static Tls12CipherSuite,
     pub(crate) session_id: SessionId,
     extended_ms: bool,
@@ -245,6 +246,7 @@ impl Tls12ClientSessionValue {
             suite,
             session_id,
             extended_ms,
+            version: ProtocolVersion::TLSv1_2,
             common: ClientSessionCommon::new(
                 ticket,
                 master_secret,
@@ -254,6 +256,15 @@ impl Tls12ClientSessionValue {
                 binding,
             ),
         }
+    }
+
+    /// The transport and version that established this session.
+    pub fn protocol_version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    pub(crate) fn set_dtls12(&mut self) {
+        self.version = ProtocolVersion::DTLSv1_2;
     }
 
     pub(crate) fn extended_ms(&self) -> bool {
@@ -284,6 +295,7 @@ impl core::ops::Deref for Tls12ClientSessionValue {
 impl fmt::Debug for Tls12ClientSessionValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tls12ClientSessionValue")
+            .field("version", &self.version)
             .field("suite", &self.suite.common.suite)
             .field("extended_ms", &self.extended_ms)
             .field("common", &self.common)

@@ -217,8 +217,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   between browntls endpoints. The opt-in
   [DTLS 1.2 certificate handshake layer](DTLS12.md) is tested locally on
   both providers. External interoperability and independent review are
-  pending, and DTLS 1.2 resumption is disabled. Deferred DTLS features
-  include connection IDs, return routability checks,
+  pending. DTLS 1.2 session ID and RFC 5077 ticket resumption are an
+  unqualified local candidate; the added cases await execution and review.
+  Deferred DTLS features include connection IDs, return routability checks,
   0-RTT, Encrypted Client Hello or post-handshake client authentication,
   through the low-level datagram API or the blocking `std` API; there is
   no Tokio API. A cookie is bound to whatever address bytes the caller

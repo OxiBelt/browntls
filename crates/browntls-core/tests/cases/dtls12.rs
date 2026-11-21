@@ -160,7 +160,7 @@ mod dtls12_cases {
     }
 
     #[test]
-    fn session_state_is_never_resumed_and_application_replays_are_dropped() {
+    fn resumption_is_opt_in_and_application_replays_are_dropped() {
         let chain = server_chain(KeyType::EcdsaP256);
         let client = Arc::new(client_config(&chain));
         let server = Arc::new(dtls_server_config(&chain));
@@ -292,4 +292,5 @@ mod dtls12_cases {
         assert!(pair.handshake(&mut sim).is_err());
         assert_eq!(pair.client.protocol_version(), None);
     }
+    include!("dtls12_resumption.rs");
 }

@@ -62,6 +62,8 @@ mod cache {
         kx_hint: Option<NamedGroup>,
         #[cfg(feature = "tls12")]
         tls12: Option<Tls12ClientSessionValue>,
+        #[cfg(feature = "tls12")]
+        dtls12: Option<Tls12ClientSessionValue>,
         tls13: VecDeque<Tls13ClientSessionValue>,
     }
 
@@ -71,6 +73,8 @@ mod cache {
                 kx_hint: None,
                 #[cfg(feature = "tls12")]
                 tls12: None,
+                #[cfg(feature = "tls12")]
+                dtls12: None,
                 tls13: VecDeque::with_capacity(MAX_TLS13_TICKETS_PER_SERVER),
             }
         }
@@ -138,6 +142,33 @@ mod cache {
                 && let Some(data) = servers.get_mut(server_name)
             {
                 data.tls12 = None;
+            }
+        }
+
+        #[cfg(feature = "tls12")]
+        fn set_dtls12_session(
+            &self,
+            server_name: ServerName<'static>,
+            value: Tls12ClientSessionValue,
+        ) {
+            if let Ok(mut servers) = self.servers.lock() {
+                servers.get_or_insert_default_and_edit(server_name, |data| {
+                    data.dtls12 = Some(value);
+                });
+            }
+        }
+
+        #[cfg(feature = "tls12")]
+        fn dtls12_session(&self, server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue> {
+            self.servers.lock().ok()?.get(server_name)?.dtls12.clone()
+        }
+
+        #[cfg(feature = "tls12")]
+        fn remove_dtls12_session(&self, server_name: &ServerName<'static>) {
+            if let Ok(mut servers) = self.servers.lock()
+                && let Some(data) = servers.get_mut(server_name)
+            {
+                data.dtls12 = None;
             }
         }
 

@@ -649,6 +649,14 @@ impl Dtls {
         }
     }
 
+    pub(super) fn v12_last_sender(&self) -> Side {
+        #[cfg(feature = "tls12")]
+        if self.v12.resuming {
+            return Side::Client;
+        }
+        Side::Server
+    }
+
     /// The next complete handshake message of the peer that may be
     /// processed now, in its TLS encoding, with the epoch it came in.
     ///

@@ -21,6 +21,7 @@ use crate::crypto::cipher::{AeadKey, Iv, NONCE_LEN};
 use crate::crypto::tls13::OkmBlock;
 use crate::enums::ContentType;
 use crate::error::Error;
+use crate::msgs::message::MAX_PLAINTEXT_LEN;
 use crate::quic::{self, HeaderProtectionKey, PacketKey};
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::hkdf_expand_label_with_prefix;
@@ -116,6 +117,10 @@ impl RecordKeys {
         (content_len + 1 + tag_len).max(MIN_CIPHERTEXT_LEN)
     }
 
+    pub(super) fn max_ciphertext_len(&self) -> usize {
+        self.body_len(MAX_PLAINTEXT_LEN)
+    }
+
     /// Appends the `DTLSCiphertext` of `content` to `out`, with a 16-bit
     /// sequence number and a length in its header, and `cid` when not
     /// empty. On failure `out` is as it was.
@@ -127,6 +132,9 @@ impl RecordKeys {
         content: &[u8],
         cid: &[u8],
     ) -> Result<(), Error> {
+        if content.len() > MAX_PLAINTEXT_LEN {
+            return Err(Error::EncryptError);
+        }
         let tag_len = self.packet.tag_len();
         let body_len = self.body_len(content.len());
         let Ok(wire_len) = u16::try_from(body_len) else {
@@ -182,7 +190,11 @@ impl RecordKeys {
         body: Range<usize>,
         expected: u64,
     ) -> Option<Opened> {
-        if body.end != record.len() || seq.end > body.start || !(1..=2).contains(&seq.len()) {
+        if body.end != record.len()
+            || body.len() > self.max_ciphertext_len()
+            || seq.end > body.start
+            || !(1..=2).contains(&seq.len())
+        {
             return None;
         }
         let sample = record.get(body.start..body.start + MIN_CIPHERTEXT_LEN)?;

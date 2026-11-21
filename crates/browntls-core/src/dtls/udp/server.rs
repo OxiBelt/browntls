@@ -28,7 +28,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ServerEvent {
-    /// A client completed its handshake.
+    /// A client completed its handshake; its connection is available.
     Connected(SocketAddr),
     /// A datagram of application data from a connected client, possibly
     /// empty (only `UdpClient::recv` skips empty datagrams).
@@ -100,7 +100,8 @@ impl Peer {
     /// the end of its handshake time.
     fn next_due(&self) -> Option<Duration> {
         let timer = self.conn.next_timeout();
-        if self.connected {
+        // after_input flushes before announcing handshake completion.
+        if self.connected || !self.conn.is_handshaking() {
             return timer;
         }
         Some(timer.map_or(self.expires, |timer| timer.min(self.expires)))
@@ -162,17 +163,21 @@ impl UdpServer {
 
     /// Blocks until the next event, or fails with
     /// [`io::ErrorKind::TimedOut`] once the read timeout passes.
+    /// Queued events are returned before further socket or timer work.
     pub fn next_event(&mut self) -> io::Result<ServerEvent> {
         let deadline = self
             .read_timeout
             .map(|timeout| self.now().saturating_add(timeout));
         let mut late = 0;
         loop {
+            if let Some(event) = self.pop_event() {
+                return Ok(event);
+            }
             for peer in core::mem::take(&mut self.touched) {
                 self.flush_peer(peer);
             }
             self.run_timers();
-            if let Some(event) = self.events.pop_front() {
+            if let Some(event) = self.pop_event() {
                 return Ok(event);
             }
             let now = self.now();
@@ -189,8 +194,11 @@ impl UdpServer {
                         // timeout from passing.
                         late += 1;
                         if late >= LAST_LOOKS {
+                            if let Some(event) = self.pop_event() {
+                                return Ok(event);
+                            }
                             self.run_timers();
-                            return self.events.pop_front().ok_or_else(timed_out);
+                            return self.pop_event().ok_or_else(timed_out);
                         }
                     }
                 }
@@ -234,8 +242,16 @@ impl UdpServer {
         }
     }
 
-    /// Forgets the connection with `peer`, without telling it.
+    /// Forgets the connection with `peer`, without telling it, and
+    /// discards its queued events.
     pub fn remove(&mut self, peer: SocketAddr) -> Option<ServerConnection> {
+        self.events.retain(|event| match event {
+            ServerEvent::Connected(addr)
+            | ServerEvent::Received(addr, _)
+            | ServerEvent::Closed(addr)
+            | ServerEvent::Failed(addr, _) => *addr != peer,
+        });
+        self.touched.retain(|addr| *addr != peer);
         let entry = self.peers.remove(&peer)?;
         if !entry.connected {
             self.handshakes -= 1;
@@ -252,8 +268,9 @@ impl UdpServer {
     }
 
     /// The connection with `peer`, once it connected, for example to
-    /// refresh its traffic keys. What the change queues is sent by the next
-    /// [`Self::next_event`] or [`Self::send_to`].
+    /// refresh its traffic keys. What the change queues is sent by
+    /// [`Self::send_to`] or by [`Self::next_event`] after queued events
+    /// have been returned.
     pub fn connection_mut(&mut self, peer: SocketAddr) -> Option<&mut ServerConnection> {
         let entry = self.peers.get_mut(&peer).filter(|entry| entry.connected)?;
         if !self.touched.contains(&peer) {
@@ -282,6 +299,16 @@ impl UdpServer {
 
     fn now(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    /// Keeps negotiated state available through Connected and Received,
+    /// then removes the peer when its Closed event is returned.
+    fn pop_event(&mut self) -> Option<ServerEvent> {
+        let event = self.events.pop_front()?;
+        if let ServerEvent::Closed(peer) = &event {
+            self.remove(*peer);
+        }
+        Some(event)
     }
 
     fn handle_datagram(&mut self, peer: SocketAddr, len: usize) {
@@ -354,6 +381,12 @@ impl UdpServer {
             );
             return;
         }
+        // Flush before announcing new events: a sealing failure removes
+        // the peer, so no event may promise its connection afterwards.
+        self.flush_peer(peer);
+        let Some(entry) = self.peers.get_mut(&peer) else {
+            return;
+        };
         if !entry.connected && !entry.conn.is_handshaking() {
             entry.connected = true;
             self.handshakes -= 1;
@@ -363,16 +396,13 @@ impl UdpServer {
             self.events
                 .push_back(ServerEvent::Received(peer, self.buf[range].to_vec()));
         }
-        self.flush_peer(peer);
-        let closed = self
-            .peers
-            .get(&peer)
-            .filter(|entry| entry.conn.peer_has_closed())
-            .map(|entry| entry.connected);
-        if let Some(connected) = closed {
-            self.remove(peer);
-            if connected {
+        if entry.conn.peer_has_closed() {
+            if entry.connected {
+                // Connected and any Received events still need the
+                // connection. pop_event removes it when returning Closed.
                 self.events.push_back(ServerEvent::Closed(peer));
+            } else {
+                self.remove(peer);
             }
         }
     }

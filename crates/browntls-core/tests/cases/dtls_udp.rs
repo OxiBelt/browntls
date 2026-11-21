@@ -7,10 +7,12 @@
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use browntls_core::dtls::{self, ServerEvent, UdpClient, UdpServer};
+use browntls_core::server::ProducesTickets;
 use browntls_core::{ProtocolVersion, ServerConfig};
 use common::*;
 
@@ -322,17 +324,275 @@ fn a_stream_of_junk_does_not_hold_off_the_read_timeout() {
         let stop = stop.clone();
         thread::spawn(move || {
             let socket = client_socket(addr);
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            while !stop.load(Ordering::Relaxed) {
                 let _ = socket.send(&[0x16; 40]);
                 thread::sleep(Duration::from_micros(200));
             }
         })
     };
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let err = server.next_event().unwrap_err();
     let waited = start.elapsed();
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
     junk.join().unwrap();
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     assert!(waited < Duration::from_secs(2), "{waited:?}");
+}
+
+/// Completes the cookie exchange and reads the server's flight, leaving
+/// the client's Finished queued. The server still counts a handshake.
+fn client_before_finished(
+    server: &mut UdpServer,
+    chain: &Chain,
+    socket: &UdpSocket,
+) -> dtls::ClientConnection {
+    server.set_read_timeout(Some(Duration::ZERO));
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut client =
+        dtls::ClientConnection::new(Arc::new(client_config(chain)), server_name()).unwrap();
+    let mut buf = vec![0; 65535];
+    send_all(&mut client, socket);
+    assert_eq!(
+        server.next_event().unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(server.handshakes(), 0);
+    let len = socket.recv(&mut buf).unwrap();
+    client
+        .read_datagram(&mut buf[..len], Duration::ZERO)
+        .unwrap();
+    send_all(&mut client, socket);
+    assert_eq!(
+        server.next_event().unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(server.handshakes(), 1);
+    while client.is_handshaking() {
+        let len = socket.recv(&mut buf).unwrap();
+        client
+            .read_datagram(&mut buf[..len], Duration::ZERO)
+            .unwrap();
+    }
+    client
+}
+
+/// Combines only records produced by the public API, preserving their
+/// order: queued handshake records, optional application data, then close.
+fn send_flight_and_close(client: &mut dtls::ClientConnection, socket: &UdpSocket, with_data: bool) {
+    let mut datagram = Vec::new();
+    while client
+        .write_datagram(&mut datagram, Duration::ZERO)
+        .unwrap()
+    {}
+    if with_data {
+        client.send(b"before close", &mut datagram).unwrap();
+    }
+    client.send_close_notify();
+    while client
+        .write_datagram(&mut datagram, Duration::ZERO)
+        .unwrap()
+    {}
+    socket.send(&datagram).unwrap();
+}
+
+#[test]
+fn close_events_keep_the_connection_until_prior_events_are_returned() {
+    for (complete_first, with_data) in [(false, false), (false, true), (true, true)] {
+        let chain = server_chain(KeyType::EcdsaP256);
+        let mut server = server(&chain);
+        let socket = client_socket(server.socket().local_addr().unwrap());
+        let peer = socket.local_addr().unwrap();
+        let mut client = client_before_finished(&mut server, &chain, &socket);
+
+        if complete_first {
+            send_all(&mut client, &socket);
+            assert!(matches!(
+                server.next_event().unwrap(),
+                ServerEvent::Connected(addr) if addr == peer
+            ));
+        }
+        send_flight_and_close(&mut client, &socket, with_data);
+        if !complete_first {
+            assert!(matches!(
+                server.next_event().unwrap(),
+                ServerEvent::Connected(addr) if addr == peer
+            ));
+        }
+        assert_eq!(server.handshakes(), 0);
+        let conn = server.connection(peer).unwrap();
+        assert_eq!(conn.protocol_version(), Some(ProtocolVersion::DTLSv1_3));
+        if !complete_first {
+            assert!(conn.peer_has_closed());
+        }
+        assert_eq!(server.peers().collect::<Vec<_>>(), [peer]);
+        if with_data {
+            assert!(matches!(
+                server.next_event().unwrap(),
+                ServerEvent::Received(addr, data) if addr == peer && data == b"before close"
+            ));
+            assert!(server.connection(peer).unwrap().peer_has_closed());
+        }
+        assert!(matches!(
+            server.next_event().unwrap(),
+            ServerEvent::Closed(addr) if addr == peer
+        ));
+        assert!(server.connection(peer).is_none());
+        assert_eq!(server.peers().count(), 0);
+        assert_eq!(server.handshakes(), 0);
+        assert_eq!(
+            server.next_event().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+}
+
+#[test]
+fn explicitly_forgetting_a_peer_discards_its_remaining_events() {
+    for close in [false, true] {
+        let chain = server_chain(KeyType::EcdsaP256);
+        let mut server = server(&chain);
+        let socket = client_socket(server.socket().local_addr().unwrap());
+        let peer = socket.local_addr().unwrap();
+        let mut client = client_before_finished(&mut server, &chain, &socket);
+        send_flight_and_close(&mut client, &socket, true);
+        assert!(matches!(
+            server.next_event().unwrap(),
+            ServerEvent::Connected(addr) if addr == peer
+        ));
+        // Also exercise cleanup of pending connection_mut work.
+        assert!(server.connection_mut(peer).is_some());
+        if close {
+            server.close(peer);
+        } else {
+            assert!(server.remove(peer).is_some());
+        }
+        assert!(server.connection(peer).is_none());
+        assert_eq!(server.peers().count(), 0);
+        assert_eq!(server.handshakes(), 0);
+        assert_eq!(
+            server.next_event().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+}
+
+#[test]
+fn rewrapping_a_client_keeps_its_clock_and_services_an_overdue_retransmission() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let silent = loopback();
+    silent
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let socket = client_socket(silent.local_addr().unwrap());
+    let peer = socket.local_addr().unwrap();
+    let mut conn =
+        dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let start = Instant::now() - Duration::from_secs(120);
+    // A first flight lost two seconds ago: its retransmission is due.
+    // Advance the supplied monotonic time without a wall-clock sleep.
+    let sent_at = start.elapsed() - Duration::from_secs(2);
+    let mut lost = Vec::new();
+    assert!(conn.write_datagram(&mut lost, sent_at).unwrap());
+    // With post-quantum key shares the ClientHello can span datagrams.
+    loop {
+        lost.clear();
+        if !conn.write_datagram(&mut lost, sent_at).unwrap() {
+            break;
+        }
+    }
+    let due = conn.next_timeout().unwrap();
+    assert!(due < start.elapsed());
+
+    let client = UdpClient::from_connection_with_clock(conn, socket, start);
+    assert_eq!(client.connection().next_timeout(), Some(due));
+    let (conn, socket, clock) = client.into_parts_with_clock();
+    assert_eq!(clock, start);
+    assert_eq!(socket.local_addr().unwrap(), peer);
+    assert_eq!(conn.next_timeout(), Some(due));
+    let mut client = UdpClient::from_connection_with_clock(conn, socket, clock);
+    assert_eq!(client.read_timeout(), None);
+    client.set_read_timeout(Some(Duration::ZERO));
+    assert_eq!(
+        client.complete_handshake().unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    // Resetting the origin would defer this send by about two minutes.
+    let mut buf = [0; 2048];
+    let (len, from) = silent.recv_from(&mut buf).unwrap();
+    assert_eq!(from, peer);
+    assert_eq!(buf[0], 22);
+    assert!(len > 100);
+    assert!(client.connection().is_handshaking());
+    assert!(client.connection().next_timeout().unwrap() > due);
+    let (_, _, clock) = client.into_parts_with_clock();
+    assert_eq!(clock, start);
+}
+
+/// Checks the normal cookie-sealing path without altering its encryption
+/// or sending a cookie from a different source. The encoded source is the
+/// last length-prefixed field, followed by the group_named flag.
+#[derive(Debug)]
+struct SourceBoundCookies {
+    inner: Arc<dyn ProducesTickets>,
+    address: Vec<u8>,
+    sealed: AtomicUsize,
+}
+
+impl ProducesTickets for SourceBoundCookies {
+    fn enabled(&self) -> bool {
+        self.inner.enabled()
+    }
+
+    fn lifetime(&self) -> u32 {
+        self.inner.lifetime()
+    }
+
+    fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>> {
+        let (flag, body) = plain.split_last().unwrap();
+        assert!(*flag <= 1);
+        assert!(body.ends_with(&self.address));
+        self.sealed.fetch_add(1, Ordering::Relaxed);
+        self.inner.encrypt(plain)
+    }
+
+    fn decrypt(&self, cipher: &[u8]) -> Option<Vec<u8>> {
+        self.inner.decrypt(cipher)
+    }
+}
+
+#[test]
+fn ipv6_loopback_exchanges_data_with_a_source_bound_cookie() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let server_socket = UdpSocket::bind("[::1]:0").unwrap();
+    let socket = UdpSocket::bind("[::1]:0").unwrap();
+    socket.connect(server_socket.local_addr().unwrap()).unwrap();
+    let SocketAddr::V6(peer) = socket.local_addr().unwrap() else {
+        panic!("expected an IPv6 source");
+    };
+    let mut address = vec![0, 19, 6];
+    address.extend_from_slice(&peer.ip().octets());
+    address.extend_from_slice(&peer.port().to_be_bytes());
+    let cookies = Arc::new(SourceBoundCookies {
+        inner: prov::Ticketer::new().unwrap(),
+        address,
+        sealed: AtomicUsize::new(0),
+    });
+    let mut config = dtls_server_config(&chain);
+    config.hello_retry_cookies = Some(cookies.clone());
+    let mut server = UdpServer::new(Arc::new(config), server_socket).unwrap();
+    server.set_read_timeout(Some(Duration::from_secs(20)));
+    let echo = thread::spawn(move || echo(server, 1));
+    let conn = dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut client = UdpClient::from_connection(conn, socket);
+    client.set_read_timeout(Some(Duration::from_secs(20)));
+    client.complete_handshake().unwrap();
+    client.send(b"IPv6").unwrap();
+    let mut buf = [0; 16];
+    let len = client.recv(&mut buf).unwrap();
+    assert_eq!(&buf[..len], b"IPv6");
+    client.close().unwrap();
+    assert_eq!(echo.join().unwrap(), ["connected", "IPv6", "closed"]);
+    assert!(cookies.sealed.load(Ordering::Relaxed) > 0);
 }

@@ -909,7 +909,7 @@ class Run:
         docker("network", "rm", self.network, check=False)
         docker("volume", "rm", "-f", self.volume, check=False)
 
-    def generate_pki(self) -> None:
+    def generate_pki(self, server_name: str = SERVER_ALIAS) -> None:
         docker(
             "run",
             "--rm",
@@ -921,6 +921,7 @@ class Run:
             self.peer,
             f"{SHARE}/gen-pki.sh",
             "/pki",
+            server_name,
             timeout=600,
         )
 

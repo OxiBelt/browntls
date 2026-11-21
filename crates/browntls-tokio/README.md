@@ -85,6 +85,18 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 }
 ```
 
+## Encrypted Client Hello
+
+The buffered and unbuffered `TlsConnector::from_ech_pem` install a client
+ECH configuration from a parsed `browntls::ech::pem::EchPem`.
+`TlsAcceptor::from_ech_pem` takes separate sets of decryption and retry
+PEM objects for a server that decrypts ECH itself. Both take an owned TLS
+configuration and the HPKE suites to use. They preserve the other TLS
+settings, including certificate validation and the certificate resolver.
+Use a TLS 1.3 configuration for the ECH client. The server's resolver
+must also cover the public name so clients can authenticate an ECH
+rejection.
+
 ## DTLS over UDP
 
 The optional `dtls` feature provides `dtls::UdpClient` over a Tokio

@@ -7,6 +7,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use browntls_core::crypto::hpke::Hpke;
+use browntls_core::ech::pem::{EchPem, EchPemError};
+use browntls_core::ech::{EchConfig, EchMode};
 use browntls_core::pki_types::ServerName;
 use browntls_core::{ClientConfig, ClientConnection, ClientServerIdentity};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
@@ -30,6 +33,19 @@ pub struct TlsConnector {
 }
 
 impl TlsConnector {
+    /// Replaces the ECH mode in `config` with the first usable configuration
+    /// from `pem`, using the caller's HPKE `suites`.
+    ///
+    /// All other client settings are preserved. Real ECH requires TLS 1.3.
+    pub fn from_ech_pem(
+        mut config: ClientConfig,
+        pem: &EchPem,
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        config.ech_mode = Some(EchMode::Enable(EchConfig::from_pem(pem, suites)?));
+        Ok(Self::from(Arc::new(config)))
+    }
+
     /// Answers the certificate status (OCSP) queries of this connector's
     /// connections with `fetcher`: during the handshake, and in reads
     /// after it. Without one, such a query is answered as unavailable at

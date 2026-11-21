@@ -96,3 +96,48 @@ fn public_pem_path() {
         pem.ech_config_list()
     );
 }
+
+#[test]
+fn tokio_pem_constructors() {
+    use std::sync::Arc;
+
+    use browntls_core::{ClientConfig, crypto};
+    use browntls_tokio::{TlsAcceptor, TlsConnector, unbuffered};
+
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(crypto::native::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(fixture().roots.clone())
+            .with_no_client_auth();
+    let server_config = super::handshake::server_config(None, false);
+    let key = EchServerKey::generate(42, PUBLIC, 0, ALL_SUPPORTED_SUITES).unwrap();
+    let list = config_list([key.ech_config()]);
+    let pem = EchPem::from_server_key(&key, &list, &NATIVE_PKCS8_CODEC).unwrap();
+    let public = EchPem::from_config_list(&list).unwrap();
+    let connector =
+        TlsConnector::from_ech_pem(client_config.clone(), &public, ALL_SUPPORTED_SUITES).unwrap();
+    assert!(connector.config().ech_mode.is_some());
+    let connector =
+        unbuffered::TlsConnector::from_ech_pem(client_config, &public, ALL_SUPPORTED_SUITES)
+            .unwrap();
+    assert!(connector.config().ech_mode.is_some());
+    let keys = [pem];
+    let retry = [public];
+    let acceptor = TlsAcceptor::from_ech_pem(
+        server_config.as_ref().clone(),
+        &keys,
+        &retry,
+        ALL_SUPPORTED_SUITES,
+    )
+    .unwrap();
+    assert!(acceptor.config().ech.is_some());
+    let acceptor = unbuffered::TlsAcceptor::from_ech_pem(
+        server_config.as_ref().clone(),
+        &keys,
+        &retry,
+        ALL_SUPPORTED_SUITES,
+    )
+    .unwrap();
+    assert!(acceptor.config().ech.is_some());
+}

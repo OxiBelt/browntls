@@ -45,6 +45,10 @@ pub(super) fn emit_server_hello(
 ) {
     let extensions = ServerExtensions {
         connection_id: common.dtls.as_deref().and_then(|dtls| dtls.cid.response()),
+        return_routability_check: common
+            .dtls
+            .as_deref()
+            .and_then(|dtls| dtls.rrc_negotiated.then_some(())),
         key_share: Some(key_share),
         pre_shared_key: chosen_psk_index.and_then(|i| u16::try_from(i).ok()),
         supported_versions: Some(ProtocolVersion::TLSv1_3),

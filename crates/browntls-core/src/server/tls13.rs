@@ -584,6 +584,7 @@ impl CompleteClientHelloHandling {
         if let Some(dtls) = cx.common.dtls.as_deref_mut() {
             dtls.cid
                 .select(client_hello.extensions.connection_id.as_ref(), true)?;
+            dtls.select_rrc(client_hello.extensions.return_routability_check.is_some());
         }
         emit_server_hello(
             &mut self.transcript,

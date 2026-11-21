@@ -26,6 +26,9 @@
 //! cookie exchange is turned off. Over DTLS this version supports neither
 //! 0-RTT, Encrypted Client Hello nor post-handshake client authentication.
 //! Connection IDs are opt-in through [`Settings::with_connection_ids`].
+//! [`Settings::with_return_routability_checks`] also enables RFC 9853 RRC.
+//! The caller owns path validation, send allowances and routing; this engine
+//! never changes a transport address or sends a validation action itself.
 //!
 //! Internally: records and their headers are in `wire`, record protection
 //! in `keys`, replay windows in `replay`, handshake reassembly in
@@ -39,6 +42,8 @@ mod flight;
 mod keys;
 mod reassembly;
 mod replay;
+pub mod rrc;
+pub(crate) mod rrc_engine;
 mod send;
 mod state;
 #[cfg(feature = "std")]

@@ -39,6 +39,54 @@ fn client_socket(server: SocketAddr) -> UdpSocket {
     socket
 }
 
+#[test]
+fn blocking_udp_adapters_negotiate_rfc9973() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let key = Arc::new(
+        ExternalPsk::new(b"udp-rfc9973".to_vec(), vec![42; 32], HashAlgorithm::SHA256).unwrap(),
+    );
+    let mut server_config = dtls_server_config(&chain);
+    server_config.external_psks = Some(Arc::new(vec![key.clone()]));
+    server_config.require_cert_with_extern_psk = true;
+    let mut server = UdpServer::new(Arc::new(server_config), loopback()).unwrap();
+    server.set_read_timeout(Some(Duration::from_secs(10)));
+    let addr = server.socket().local_addr().unwrap();
+    let server_task = thread::spawn(move || {
+        let ServerEvent::Connected(peer) = server.next_event().unwrap() else {
+            panic!("unexpected handshake event");
+        };
+        assert!(
+            server
+                .connection(peer)
+                .unwrap()
+                .negotiated_cert_with_extern_psk()
+        );
+        let ServerEvent::Received(peer, data) = server.next_event().unwrap() else {
+            panic!("expected an authenticated datagram");
+        };
+        server.send_to(&data, peer).unwrap();
+    });
+    let mut client_config = client_config(&chain);
+    client_config.external_psks = vec![key];
+    client_config.cert_with_extern_psk = true;
+    let mut client =
+        UdpClient::connect(Arc::new(client_config), server_name(), client_socket(addr)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10)));
+    assert!(client.connection().negotiated_cert_with_extern_psk());
+    assert_eq!(
+        client.connection().peer_certificates().unwrap(),
+        chain.cert_chain()
+    );
+    client.send(b"hello").unwrap();
+    let mut data = [0; 32];
+    let len = client.recv(&mut data).unwrap();
+    assert_eq!(&data[..len], b"hello");
+    server_task.join().unwrap();
+}
+
 /// Echoes every datagram back until `clients` clients have closed, and
 /// returns the events it saw.
 fn echo(mut server: UdpServer, clients: usize) -> Vec<String> {

@@ -58,6 +58,50 @@ fn handshake_and_data_through_the_root() {
     });
 }
 
+#[test]
+fn rfc9973_through_the_facade() {
+    let pki = Pki::new();
+    let key = Arc::new(
+        browntls::psk::ExternalPsk::new(
+            b"facade-rfc9973".to_vec(),
+            vec![42; 32],
+            browntls::crypto::hash::HashAlgorithm::SHA256,
+        )
+        .unwrap(),
+    );
+    let mut client = pki.client_config();
+    client.cert_with_extern_psk = true;
+    client.external_psks = vec![key.clone()];
+    let mut server = pki.server_config();
+    server.require_cert_with_extern_psk = true;
+    server.external_psks = Some(Arc::new(vec![key]));
+    let mut client = ClientConnection::new(Arc::new(client), localhost()).unwrap();
+    let mut acceptor = browntls::server::Acceptor::default();
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+    acceptor.read_tls(&mut hello.as_slice()).unwrap();
+    let accepted = acceptor.accept().unwrap().unwrap();
+    assert!(accepted.client_hello().offers_cert_with_extern_psk());
+    let mut server = accepted.into_connection(Arc::new(server)).unwrap();
+
+    let mut flight = Vec::new();
+    for _ in 0..8 {
+        server.write_tls(&mut flight).unwrap();
+        client.read_tls(&mut flight.as_slice()).unwrap();
+        client.process_new_packets().unwrap();
+        flight.clear();
+        client.write_tls(&mut flight).unwrap();
+        server.read_tls(&mut flight.as_slice()).unwrap();
+        server.process_new_packets().unwrap();
+        flight.clear();
+        if !client.is_handshaking() && !server.is_handshaking() {
+            break;
+        }
+    }
+    assert!(client.negotiated_cert_with_extern_psk());
+    assert!(server.negotiated_cert_with_extern_psk());
+}
+
 /// `ServerConfig::enable_grease` (RFC 8701 §4.1) is reachable through the
 /// root: with it on, the server's CertificateRequest and NewSessionTicket
 /// messages carry GREASE values, and a client still authenticates with a

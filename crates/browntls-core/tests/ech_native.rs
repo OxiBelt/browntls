@@ -147,6 +147,36 @@ fn assert_accepted(client: &mut ClientConnection, server: &mut ServerConnection)
     assert_eq!(send_and_receive(server, client, b"reply"), b"reply");
 }
 
+#[test]
+fn rfc9973_offer_and_identity_are_inner_only() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+    use hello_wire::{give, hello_extension_types, take_flight};
+
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(19)]).unwrap());
+    let mut config = client_config(&certs, enable(ech.ech_config_list()));
+    let identity = b"private identity for RFC 9973";
+    let key =
+        Arc::new(ExternalPsk::new(identity.to_vec(), vec![42; 32], HashAlgorithm::SHA256).unwrap());
+    config.external_psks = vec![key.clone()];
+    config.cert_with_extern_psk = true;
+    let mut server_config = server_config(&certs, Some(&ech), None);
+    server_config.external_psks = Some(Arc::new(vec![key]));
+    server_config.require_cert_with_extern_psk = true;
+    let (mut client, mut server) = connect(config, server_config);
+    let outer = take_flight(&mut client);
+    assert!(!hello_extension_types(&outer, true).contains(&0x0021));
+    assert!(!outer.windows(identity.len()).any(|bytes| bytes == identity));
+
+    give(&mut server, &outer);
+    server.process_new_packets().unwrap();
+    assert_accepted(&mut client, &mut server);
+    assert!(client.negotiated_cert_with_extern_psk());
+    assert!(server.negotiated_cert_with_extern_psk());
+    assert_eq!(server.external_psk_identity(), Some(identity.as_slice()));
+}
+
 /// Runs a handshake the server rejects ECH in; returns the client's error.
 fn expect_rejected(client: &mut ClientConnection, server: &mut ServerConnection) -> Error {
     let (client_res, server_res) = do_handshake_until_error(client, server);

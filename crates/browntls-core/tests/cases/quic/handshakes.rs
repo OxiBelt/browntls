@@ -28,6 +28,46 @@ fn handshake_every_quic_suite() {
 }
 
 #[test]
+fn quic_rfc9973_uses_certificate_authentication_with_an_external_psk() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let key = Arc::new(
+        ExternalPsk::new(
+            b"quic-rfc9973".to_vec(),
+            vec![42; 32],
+            HashAlgorithm::SHA256,
+        )
+        .unwrap()
+        .imported(b"quic-test".to_vec())
+        .unwrap(),
+    );
+    let mut client_config = b_client_config(&chain);
+    client_config.external_psks = vec![key.clone()];
+    client_config.cert_with_extern_psk = true;
+    client_config.require_cert_with_extern_psk = true;
+    client_config.require_external_psk = true;
+    client_config.enable_early_data = true;
+    let mut server_config = b_server_config(&chain);
+    server_config.external_psks = Some(Arc::new(vec![key]));
+    server_config.require_cert_with_extern_psk = true;
+    server_config.max_early_data_size = u32::MAX;
+
+    let mut client = b_client(&Arc::new(client_config));
+    let mut server = b_server(&Arc::new(server_config));
+    assert!(!client.conn.cert_with_extern_psk());
+    assert!(!server.conn.cert_with_extern_psk());
+    handshake(&mut client, &mut server).unwrap();
+    assert!(client.conn.cert_with_extern_psk());
+    assert!(server.conn.cert_with_extern_psk());
+    assert!(client.conn.peer_certified());
+    assert!(client.conn.zero_rtt().is_none());
+    assert!(server.conn.zero_rtt().is_none());
+    assert_full_handshake(&mut client, &mut server);
+}
+
+#[test]
 fn handshake_with_hello_retry_request() {
     let chain = server_chain(KeyType::Ed25519);
     let mut client_provider = prov::default_provider();

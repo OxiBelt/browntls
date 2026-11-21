@@ -155,9 +155,16 @@ trait Endpoint {
     fn exporter(&self) -> [u8; 32];
     fn tls_records_pending(&self) -> bool;
     fn peer_certified(&self) -> bool;
+    fn cert_with_extern_psk(&self) -> bool {
+        false
+    }
 }
 
 impl Endpoint for bq::Connection {
+    fn cert_with_extern_psk(&self) -> bool {
+        self.negotiated_cert_with_extern_psk()
+    }
+
     fn write_hs(&mut self, buf: &mut Vec<u8>) -> Option<Change> {
         Some(match bq::Connection::write_hs(self, buf)? {
             bq::KeyChange::Handshake { keys } => Change::Handshake(keys.into()),

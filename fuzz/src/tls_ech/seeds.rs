@@ -348,5 +348,13 @@ pub fn seeds() -> Vec<Vec<u8>> {
     seed.push(0);
     seed.extend_from_slice(&handshake_seed(2, false, 9, true, false));
     seeds.push(seed);
+    for kem in 0..5 {
+        seeds.push(vec![8, 2, kem, 23]);
+    }
+    let mut public = vec![8, 0];
+    let pem = browntls_core::ech::pem::EchPem::from_config_list(&list).unwrap();
+    put_field(&mut public, &pem.to_public_pem());
+    seeds.push(public);
+    seeds.push(vec![8, 1, 0, 4, 0x30, 0x80, 0, 0]);
     seeds
 }

@@ -59,6 +59,7 @@ use crate::msgs::base::PayloadU16;
 pub(crate) mod client;
 pub(crate) mod codec;
 pub(crate) mod config;
+pub mod pem;
 pub(crate) mod server;
 pub mod split;
 pub mod svcb;

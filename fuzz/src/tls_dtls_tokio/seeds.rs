@@ -8,7 +8,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
     // Cross-provider connections, every key type, small-MTU fragmentation,
     // all constructors, and each terminal action. Bit 4 tests rejected
     // sockets/configuration before the genuine session starts.
-    [
+    let mut seeds: Vec<_> = [
         (0, 0x10, 2, 11),
         (1, 3, 0, 12),
         (2, 5, 1, 13),
@@ -40,6 +40,44 @@ pub fn seeds() -> Vec<Vec<u8>> {
             10, // repeated complete_handshake on an established client
             terminal,
         ]);
+        seed
+    })
+    .collect();
+    seeds.extend(session_seeds());
+    seeds
+}
+
+/// Replayed by both the fuzzer and the reusable session contract test.
+pub(super) fn session_seeds() -> Vec<Vec<u8>> {
+    [
+        (0, 0x30, 2, &[8][..]),       // remote close, other peer survives
+        (1, 0x23, 0, &[7, 0x19][..]), // stop admissions, close second peer
+        (2, 0x25, 0, &[10][..]),      // cancel driver with live handles
+        (3, 0x2a, 1, &[11][..]),      // drop handle, then driver shutdown
+        (0, 0x21, 1, &[7][..]),       // idle checks after listener drop
+    ]
+    .into_iter()
+    .map(|(constructor, flags, mtu, tail)| {
+        let mut seed = vec![constructor, flags, mtu];
+        for (op, data) in [
+            (0, b"session input".as_slice()),
+            (1, b"session output".as_slice()),
+            (2, &[0x6b; 255][..]),
+        ] {
+            seed.push(op);
+            put_short_field(&mut seed, data);
+        }
+        seed.extend_from_slice(&[
+            13, // empty datagrams both ways
+            3,  // cancel receive/accept, then resume
+            4,  // cancel queued send and queued/capacity-blocked close
+            5,  // reject above the session byte cap, then usable traffic
+            6,  // second authenticated peer (at most two per input)
+            15, // exercise both distinct sessions
+            12, // address and Debug accessors
+            14, // cancel a queued close, then prove the session is open
+        ]);
+        seed.extend_from_slice(tail);
         seed
     })
     .collect()

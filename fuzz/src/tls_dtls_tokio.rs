@@ -4,6 +4,7 @@
 //! handshake), provider bits 0/1 and key type in bits 2/3, then MTU modulo
 //! three (256, 512, 1200; from_connection only). Up to 24 actions follow;
 //! see `ops.rs`. Payloads use Input::short_field, never stream framing.
+//! Flag bit 5 selects the listener/session program in `sessions.rs`.
 //!
 //! One current-thread runtime drives both endpoints, with no endpoint tasks.
 //! Every wait has an outer two-second bound, and the input has a ten-second
@@ -30,6 +31,7 @@ use crate::tls_dtls::setup::{self, Choice, Side};
 
 mod ops;
 mod seeds;
+mod sessions;
 #[cfg(test)]
 mod tests;
 
@@ -136,6 +138,11 @@ async fn exercise(data: &[u8]) {
     // Keep idle checks about application records rather than ticket timers.
     server_config.send_tls13_tickets = 0;
     let server_config = Arc::new(server_config);
+
+    if flags & 0x20 != 0 {
+        sessions::exercise(config, server_config, constructor, flags, mtu, input).await;
+        return;
+    }
 
     if flags & 0x10 != 0 {
         assert!(UdpClient::new(config.clone(), setup::localhost(), socket().await).is_err());

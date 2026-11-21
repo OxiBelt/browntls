@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use browntls_core::unbuffered::ConnectionState;
-use browntls_core::{Error, HandshakeKind, SupportedProtocolVersion};
+use browntls_core::{
+    Error, HandshakeKind, ReferenceIdentifier, ServiceIdentity, SupportedProtocolVersion,
+};
 use browntls_tokio::unbuffered::{ClientTlsStream, ServerTlsStream, TlsAcceptor, TlsConnector};
 use common::*;
 use gate::{Gate, GateState};
@@ -36,6 +38,18 @@ fn connector(pki: &Pki, version: &'static SupportedProtocolVersion) -> TlsConnec
 
 fn acceptor(pki: &Pki, version: &'static SupportedProtocolVersion) -> TlsAcceptor {
     TlsAcceptor::from(Arc::new(pki.server_config(version)))
+}
+
+fn identity(reference: &str) -> browntls_core::ClientServerIdentity {
+    use browntls_core::pki_types::{DnsName, ServerName};
+
+    browntls_core::ClientServerIdentity::new(
+        ServerName::try_from("localhost").unwrap(),
+        ServiceIdentity::new(vec![ReferenceIdentifier::Dns(
+            DnsName::try_from(reference).unwrap().to_owned(),
+        )])
+        .unwrap(),
+    )
 }
 
 /// Connects an unbuffered client and server over `client_io` and
@@ -106,6 +120,39 @@ async fn handshake_then_echo_in_both_directions() {
             .1
             .export_keying_material([0u8; 32], label, None);
         assert_eq!(ours.unwrap(), theirs.unwrap(), "{version:?}");
+    }
+}
+
+#[tokio::test]
+async fn unbuffered_identity_connector_authenticates_reference_identifier() {
+    let pki = Pki::new();
+    for version in versions() {
+        let (client_io, server_io) = duplex(64 * 1024);
+        let client_connector = connector(&pki, version);
+        let server_acceptor = acceptor(&pki, version);
+        let (client, server) = timeout(LIMIT, async {
+            tokio::join!(
+                client_connector.connect_with_identity_and_callback(
+                    identity("localhost"),
+                    client_io,
+                    |_| {},
+                ),
+                server_acceptor.accept(server_io),
+            )
+        })
+        .await
+        .expect("identity handshake timed out");
+        let client = client.expect("client identity handshake");
+        let _server = server.expect("server identity handshake");
+        assert_eq!(
+            client.get_ref().1.matched_service_identity(),
+            Some(&ReferenceIdentifier::Dns(
+                browntls_core::pki_types::DnsName::try_from("localhost")
+                    .unwrap()
+                    .to_owned()
+            )),
+            "{version:?}"
+        );
     }
 }
 

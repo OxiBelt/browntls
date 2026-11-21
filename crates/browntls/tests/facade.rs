@@ -20,6 +20,21 @@ use browntls::{ClientConnection, HandshakeKind, ServerConnection, StreamOwned};
 use common::*;
 
 #[test]
+fn rfc9525_identity_types_are_reexported_at_the_root() {
+    fn takes_client_identity(_: browntls::ClientServerIdentity) {}
+    fn takes_service_identity(_: browntls::ServiceIdentity) {}
+    fn takes_reference(_: Option<&browntls::ReferenceIdentifier>) {}
+    fn takes_uri_id(_: Option<browntls::UriId>) {}
+    fn takes_srv_id(_: Option<browntls::SrvId>) {}
+
+    let _ = takes_client_identity;
+    let _ = takes_service_identity;
+    let _ = takes_reference;
+    let _ = takes_uri_id;
+    let _ = takes_srv_id;
+}
+
+#[test]
 fn handshake_and_data_through_the_root() {
     let pki = Pki::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

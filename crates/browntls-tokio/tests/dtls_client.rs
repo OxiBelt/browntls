@@ -10,7 +10,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use browntls_core::dtls::{ClientConnection, ServerConnection};
+use browntls_core::dtls::{ClientConnection, ServerConnection, Settings};
 use browntls_core::version::TLS13;
 use browntls_core::{Error, ProtocolVersion};
 use browntls_tokio::dtls::{Recv, UdpClient};
@@ -81,6 +81,69 @@ async fn sockets() -> (UdpSocket, UdpSocket) {
     client.connect(server.local_addr().unwrap()).await.unwrap();
     server.connect(client.local_addr().unwrap()).await.unwrap();
     (client, server)
+}
+
+fn localhost_identity(reference: &str) -> browntls_core::ClientServerIdentity {
+    use browntls_core::pki_types::DnsName;
+    use browntls_core::{ReferenceIdentifier, ServiceIdentity};
+
+    browntls_core::ClientServerIdentity::new(
+        localhost(),
+        ServiceIdentity::new(vec![ReferenceIdentifier::Dns(
+            DnsName::try_from(reference).unwrap().to_owned(),
+        )])
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn identity_constructor_authenticates_and_reports_the_reference() {
+    timeout(LIMIT, async {
+        let pki = Pki::new();
+        let config = Arc::new(pki.client_config(&TLS13));
+        let unconnected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        assert!(
+            UdpClient::new_with_identity(
+                config.clone(),
+                localhost_identity("localhost"),
+                unconnected
+            )
+            .is_err()
+        );
+        let (socket, server_socket) = sockets().await;
+        let mut client = UdpClient::new_with_identity_and_settings(
+            config,
+            localhost_identity("localhost"),
+            socket,
+            Settings::default(),
+        )
+        .unwrap();
+        let conn = ServerConnection::new_without_cookie_exchange(
+            Arc::new(pki.server_config(&TLS13)),
+            b"connected loopback identity test",
+        )
+        .unwrap();
+        let mut peer = Peer {
+            conn,
+            socket: server_socket,
+            start: Instant::now(),
+            received: VecDeque::new(),
+        };
+        let (client_result, server_result) =
+            tokio::join!(client.complete_handshake(), peer.handshake());
+        client_result.unwrap();
+        server_result.unwrap();
+        assert_eq!(
+            client.connection().matched_service_identity(),
+            Some(&browntls_core::ReferenceIdentifier::Dns(
+                browntls_core::pki_types::DnsName::try_from("localhost")
+                    .unwrap()
+                    .to_owned()
+            ))
+        );
+    })
+    .await
+    .expect("identity handshake timed out");
 }
 
 async fn pair(pki: &Pki) -> (UdpClient, Peer) {

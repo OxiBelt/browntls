@@ -23,14 +23,17 @@
 //! The module is allocation-free: encapsulated keys, public keys and secrets
 //! live in fixed-size buffers, and the AEAD operates in place.
 
+mod ber;
 mod context;
 mod kem;
 mod labeled;
+mod pkcs8;
 #[cfg(all(test, feature = "alloc"))]
 mod tests;
 
 pub use context::{RecipientContext, SenderContext};
 pub use kem::{EncapsulatedKey, PrivateKey, PublicKey};
+pub use pkcs8::MAX_PKCS8_DER_LEN;
 
 use crate::Error;
 use crate::rand::SecureRandom;

@@ -5,10 +5,11 @@
 use browntls_core::crypto::hpke::{HpkeAead, HpkeKdf, HpkeKem};
 use browntls_crypto::Error;
 use browntls_crypto::hpke::{
-    Aead, Kdf, Kem, MAX_ENC_LEN, MAX_PRIVATE_KEY_LEN, MAX_PUBLIC_KEY_LEN, NONCE_LEN, PrivateKey,
-    PublicKey, Suite, TAG_LEN,
+    Aead, Kdf, Kem, MAX_ENC_LEN, MAX_PKCS8_DER_LEN, MAX_PRIVATE_KEY_LEN, MAX_PUBLIC_KEY_LEN,
+    NONCE_LEN, PrivateKey, PublicKey, Suite, TAG_LEN,
 };
 use browntls_crypto::rand::{FixedRng, OsRng};
+use browntls_crypto::zeroize::Zeroizing;
 use hpke::{Deserializable as _, Serializable as _};
 
 use super::{exact, mutate};
@@ -186,6 +187,17 @@ pub(super) fn keys(input: &mut Input<'_>) {
             let again = PrivateKey::from_bytes(kem, &bytes).expect("own encoding");
             assert_eq!(again.public_key(), sk.public_key());
             assert_eq!(private_bytes(&again), bytes);
+            let mut der = Zeroizing([0; MAX_PKCS8_DER_LEN]);
+            let restricted = again.with_pkcs8_ecdh_oid();
+            let len = restricted.to_pkcs8_der(&mut der[..]).expect("own PKCS #8");
+            let decoded = PrivateKey::from_pkcs8_der_or_ber(&der[..len]).expect("own DER");
+            assert_eq!(decoded.kem(), kem);
+            assert_eq!(
+                decoded.pkcs8_uses_ecdh_oid(),
+                restricted.pkcs8_uses_ecdh_oid()
+            );
+            assert_eq!(decoded.public_key(), sk.public_key());
+            assert_eq!(private_bytes(&decoded), bytes);
             let mut short = vec![0u8; input.choose(nsk)];
             assert_eq!(sk.write_bytes(&mut short), Err(Error::InvalidLength));
             let mut long = vec![0xa5u8; nsk + 1 + input.choose(8)];

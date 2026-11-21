@@ -158,9 +158,16 @@ trait Endpoint {
     fn cert_with_extern_psk(&self) -> bool {
         false
     }
+    fn negotiated_group(&self) -> Option<browntls_core::NamedGroup> {
+        None
+    }
 }
 
 impl Endpoint for bq::Connection {
+    fn negotiated_group(&self) -> Option<browntls_core::NamedGroup> {
+        Some(self.negotiated_key_exchange_group()?.name())
+    }
+
     fn cert_with_extern_psk(&self) -> bool {
         self.negotiated_cert_with_extern_psk()
     }

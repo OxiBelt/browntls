@@ -190,6 +190,48 @@ async fn both_ends_offloaded_for_every_suite() {
     }
 }
 
+#[tokio::test]
+async fn async_handoff_negotiates_each_hybrid_group_with_each_provider() {
+    if !kernel_tls() {
+        return;
+    }
+    for (expected, provider) in hybrid_providers() {
+        let suite = provider
+            .cipher_suites
+            .iter()
+            .copied()
+            .find(|suite| suite.suite() == browntls_core::CipherSuite::TLS13_AES_128_GCM_SHA256)
+            .expect("provider has a kernel-compatible TLS 1.3 suite");
+        let pki = Pki::new();
+        let client_config = pki.client_config_with_provider(suite, provider.clone());
+        let server_config = pki.server_config_with_provider(suite, provider);
+        let (client, mut server) = userspace_pair(client_config, server_config).await;
+        assert_eq!(
+            client
+                .get_ref()
+                .1
+                .negotiated_key_exchange_group()
+                .unwrap()
+                .name(),
+            expected,
+            "{expected:?} before async handoff"
+        );
+        let mut offloaded = client_kernel(client).await;
+        let server_side = async {
+            let mut request = [0; 6];
+            server.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hybrid");
+            server.write_all(b"passed").await.unwrap();
+            server.shutdown().await.unwrap();
+        };
+        let client_side = async {
+            write_all_async(&mut offloaded, b"hybrid").await;
+            assert_eq!(read_n_async(&mut offloaded, 6).await, b"passed");
+        };
+        tokio::join!(server_side, client_side);
+    }
+}
+
 /// The handover happens with data in flight in both directions: the
 /// server had written more than the client read, and the client's own
 /// records were not flushed. Nothing is lost or reordered, with a

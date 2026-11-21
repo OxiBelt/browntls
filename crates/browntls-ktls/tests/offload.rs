@@ -51,6 +51,52 @@ fn tls13(suite: SupportedCipherSuite) -> bool {
 }
 
 #[test]
+fn blocking_handoff_negotiates_each_hybrid_group_with_each_provider() {
+    if !kernel_tls() {
+        return;
+    }
+    for (expected, provider) in hybrid_providers() {
+        let suite = provider
+            .cipher_suites
+            .iter()
+            .copied()
+            .find(|suite| suite.suite() == browntls_core::CipherSuite::TLS13_AES_128_GCM_SHA256)
+            .expect("provider has a kernel-compatible TLS 1.3 suite");
+        let pki = Pki::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        let server_config = Arc::new(pki.server_config_with_provider(suite, provider.clone()));
+        let client_config = Arc::new(pki.client_config_with_provider(suite, provider));
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                let connection = ServerConnection::new(server_config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = [0; 6];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hybrid");
+                assert_eq!(
+                    stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                    expected,
+                    "{expected:?} blocking server"
+                );
+                stream.write_all(b"passed").unwrap();
+                stream.conn.send_close_notify();
+                stream.flush().unwrap();
+            });
+            let connection = ClientConnection::new(client_config, localhost()).unwrap();
+            let mut stream = KtlsStream::new(connection, tcp).unwrap();
+            stream.write_all(b"hybrid").unwrap();
+            let mut reply = [0; 6];
+            stream.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"passed");
+            server.join().unwrap();
+        });
+    }
+}
+
+#[test]
 fn both_ends_offloaded_for_every_suite() {
     if !kernel_tls() {
         return;

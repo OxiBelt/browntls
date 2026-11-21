@@ -103,6 +103,49 @@ fn client_hands_its_connection_to_the_kernel() {
     });
 }
 
+#[test]
+fn facade_blocking_adapter_hands_off_each_hybrid_group() {
+    if !kernel_tls() {
+        return;
+    }
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let mut client_config = pki.client_config_with_provider(provider.clone());
+        client_config.enable_secret_extraction = true;
+        let client_config = Arc::new(client_config);
+        let server_config = Arc::new(pki.server_config_with_provider(provider));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                let connection = ServerConnection::new(server_config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = [0; 6];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hybrid");
+                assert_eq!(
+                    stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                    expected,
+                    "{expected:?} facade kTLS peer"
+                );
+                stream.write_all(b"passed").unwrap();
+                stream.conn.send_close_notify();
+                stream.flush().unwrap();
+            });
+            let connection = ClientConnection::new(client_config, localhost()).unwrap();
+            let mut tls = KtlsStream::new(connection, tcp).unwrap();
+            tls.write_all(b"hybrid").unwrap();
+            let mut reply = [0; 6];
+            tls.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"passed");
+            server.join().unwrap();
+        });
+    }
+}
+
 /// `native` reaches `browntls-ktls`: its load-aware routing exists.
 #[test]
 fn routing_module_follows_the_native_feature() {

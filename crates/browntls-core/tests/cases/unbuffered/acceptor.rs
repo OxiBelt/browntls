@@ -49,6 +49,67 @@ mod acceptor {
         exchange(&mut client, &mut server, b"lazy RFC 9973");
     }
 
+    #[test]
+    fn rfc10024_hybrids_through_direct_and_acceptor_paths() {
+        let chain = server_chain(KeyType::EcdsaP256);
+        for group in [
+            prov::kx_group::X25519MLKEM768,
+            prov::kx_group::SECP256R1MLKEM768,
+            prov::kx_group::SECP384R1MLKEM1024,
+        ] {
+            let mut provider = prov::default_provider();
+            provider.kx_groups = vec![group];
+            let provider = Arc::new(provider);
+            let cc = Arc::new(
+                ClientConfig::builder_with_provider(provider.clone())
+                    .with_protocol_versions(&[&version::TLS13])
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+                    .with_no_client_auth(),
+            );
+            let sc = Arc::new(
+                ServerConfig::builder_with_provider(provider)
+                    .with_protocol_versions(&[&version::TLS13])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(chain.cert_chain(), chain.private_key())
+                    .unwrap(),
+            );
+
+            let mut client = ub_client(&cc, Feed::Whole);
+            let mut server = ub_server(&sc, Feed::Whole);
+            handshake(&mut client, &mut server);
+            assert_eq!(
+                client.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            assert_eq!(
+                server.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            exchange(&mut client, &mut server, b"direct RFC 10024");
+
+            let mut client = ub_client(&cc, Feed::Whole);
+            let mut server = Accepting::with(Feed::Whole, &sc);
+            handshake(&mut client, &mut server);
+            assert_eq!(
+                client.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            assert_eq!(
+                server
+                    .server()
+                    .conn
+                    .negotiated_key_exchange_group()
+                    .unwrap()
+                    .name(),
+                group.name()
+            );
+            exchange(&mut client, &mut server, b"acceptor RFC 10024");
+        }
+    }
+
     /// An unbuffered server that reads the ClientHello with an
     /// `UnbufferedAcceptor`, chooses its configuration from it, then goes on
     /// as an `UnbufferedServerConnection` with the bytes not discarded.

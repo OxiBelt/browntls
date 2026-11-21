@@ -117,6 +117,49 @@ fn rfc9973_through_the_facade() {
     assert!(server.negotiated_cert_with_extern_psk());
 }
 
+#[test]
+fn hybrid_key_exchange_groups_negotiate_through_the_facade_root() {
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let client_config = Arc::new(pki.client_config_with_provider(provider.clone()));
+        let server_config = Arc::new(pki.server_config_with_provider(provider));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                let connection = ServerConnection::new(server_config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = [0; 6];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hybrid");
+                assert_eq!(
+                    stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                    expected,
+                    "{expected:?} server"
+                );
+                stream.write_all(b"passed").unwrap();
+                stream.conn.send_close_notify();
+                stream.flush().unwrap();
+            });
+            let connection = ClientConnection::new(client_config, localhost()).unwrap();
+            let mut stream = StreamOwned::new(connection, tcp);
+            stream.write_all(b"hybrid").unwrap();
+            let mut reply = [0; 6];
+            stream.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"passed");
+            assert_eq!(
+                stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                expected,
+                "{expected:?} client"
+            );
+            server.join().unwrap();
+        });
+    }
+}
+
 /// `ServerConfig::enable_grease` (RFC 8701 §4.1) is reachable through the
 /// root: with it on, the server's CertificateRequest and NewSessionTicket
 /// messages carry GREASE values, and a client still authenticates with a

@@ -68,6 +68,34 @@ fn quic_rfc9973_uses_certificate_authentication_with_an_external_psk() {
 }
 
 #[test]
+fn quic_v1_negotiates_each_rfc10024_hybrid() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    for group in [
+        prov::kx_group::X25519MLKEM768,
+        prov::kx_group::SECP256R1MLKEM768,
+        prov::kx_group::SECP384R1MLKEM1024,
+    ] {
+        let mut provider = prov::default_provider();
+        provider.kx_groups = vec![group];
+        let client_config = Arc::new(b_client_config_with(&chain, provider.clone()));
+        let mut server_config =
+            browntls_core::ServerConfig::builder_with_provider(Arc::new(provider))
+                .with_protocol_versions(&[&version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(chain.cert_chain(), chain.private_key())
+                .unwrap();
+        server_config.alpn_protocols = vec![ALPN.to_vec()];
+        let mut client = b_client(&client_config);
+        let mut server = b_server(&Arc::new(server_config));
+        handshake(&mut client, &mut server).unwrap();
+        assert_full_handshake(&mut client, &mut server);
+        assert_eq!(client.conn.negotiated_group(), Some(group.name()));
+        assert_eq!(server.conn.negotiated_group(), Some(group.name()));
+    }
+}
+
+#[test]
 fn handshake_with_hello_retry_request() {
     let chain = server_chain(KeyType::Ed25519);
     let mut client_provider = prov::default_provider();

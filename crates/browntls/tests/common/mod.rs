@@ -27,6 +27,36 @@ pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(browntls::crypto::native::default_provider())
 }
 
+/// One explicit provider policy for each RFC 10024 group it must implement.
+pub fn hybrid_providers() -> Vec<(browntls::NamedGroup, CryptoProvider)> {
+    use browntls::NamedGroup;
+    use browntls::crypto::SupportedKxGroup;
+
+    let mut cases = Vec::new();
+    let mut add = |provider: CryptoProvider, groups: &[&'static dyn SupportedKxGroup]| {
+        for name in [
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::secp256r1MLKEM768,
+            NamedGroup::secp384r1MLKEM1024,
+        ] {
+            let mut provider = provider.clone();
+            provider.kx_groups = vec![*groups.iter().find(|group| group.name() == name).unwrap()];
+            cases.push((name, provider));
+        }
+    };
+    #[cfg(feature = "native")]
+    add(
+        browntls::crypto::native::default_provider(),
+        browntls::crypto::native::ALL_KX_GROUPS,
+    );
+    #[cfg(feature = "rustcrypto")]
+    add(
+        browntls::crypto::rustcrypto::default_provider(),
+        browntls::crypto::rustcrypto::ALL_KX_GROUPS,
+    );
+    cases
+}
+
 /// A CA, a `localhost` server certificate and a `client.example` client
 /// certificate it issued (ECDSA P-256).
 pub struct Pki {
@@ -114,8 +144,12 @@ impl Pki {
 
     /// A server configuration for every protocol version that is built.
     pub fn server_config(&self) -> ServerConfig {
+        self.server_config_with_provider(provider())
+    }
+
+    pub fn server_config_with_provider(&self, provider: Arc<CryptoProvider>) -> ServerConfig {
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
-        ServerConfig::builder_with_provider(provider())
+        ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()
@@ -155,7 +189,11 @@ impl Pki {
 
     /// A client configuration that trusts the CA.
     pub fn client_config(&self) -> ClientConfig {
-        ClientConfig::builder_with_provider(provider())
+        self.client_config_with_provider(provider())
+    }
+
+    pub fn client_config_with_provider(&self, provider: Arc<CryptoProvider>) -> ClientConfig {
+        ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(self.roots())

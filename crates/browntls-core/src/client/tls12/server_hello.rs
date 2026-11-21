@@ -129,8 +129,10 @@ impl CompleteServerHelloHandling {
         // Certificate means a full handshake; NewSessionTicket or CCS
         // means an abbreviated handshake. A dual-version DTLS client
         // cannot invent a compatibility ID (RFC 9147 section 5.3).
+        // The returned session ID is irrelevant to this decision.
         if cx.common.is_dtls()
-            && server_hello.session_id.is_empty()
+            && self.config.resumption.tls12_resumption
+                == super::super::Tls12Resumption::SessionIdOrTickets
             && self
                 .resuming_session
                 .as_ref()

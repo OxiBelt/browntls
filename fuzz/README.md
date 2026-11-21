@@ -68,7 +68,7 @@ and re-encoding stability.
 | `tls_quic` | tls-extensions | QUIC-TLS (RFC 9001): Initial keys, packet and header protection, key updates, Retry tags and CRYPTO_ERROR codes against their properties; in-process QUIC handshakes on both providers with fuzzed suites, groups, ALPN, transport parameters, resumption, 0-RTT, split and damaged CRYPTO data, and post-handshake bytes |
 | `tls_dtls` | tls-extensions | DTLS 1.3 (RFC 9147): in-process handshakes on both providers with fuzz-chosen versions, suites (CCM_8 refused), key types, groups and datagram sizes, the cookie exchange on or off, the stateless `Acceptor` (also with a cookie from another address), a deferred revocation check and resumption, over a network that drops, duplicates, reorders, damages and forges datagrams with a fuzz-driven clock; then data both ways, key updates, close_notify, exporters, MTU changes, and datagrams shaped like DTLS records (plaintext and unified headers, ACKs, handshake fragments) and replays fed to established connections, and to fresh clients, servers and the `Acceptor`. An undamaged handshake must complete with matching exporters and DTLS 1.3, data must arrive exactly once, datagrams must fit the MTU, and nothing forged or replayed may fail an established connection |
 | `tls_dtls_udp` | tls-extensions | The blocking DTLS 1.3 API, `dtls::UdpClient` and `dtls::UdpServer`, over loopback sockets: a server run with short read timeouts in the harness's thread, clients connected with `connect` (the server then on a scoped thread) or with `from_connection` and handshake rounds (also with small MTUs), then data both ways (short buffers, oversized data), close_notify from either side, key updates through `connection_mut`, `remove`, the handshake limit and timeout, read timeouts down to zero, `into_parts` and `from_connection`, a verifier asking for live OCSP, and datagrams shaped like DTLS records sent to the server from other sockets and from clients' sockets, and to clients from the server's socket. The server must report events only for connected clients and never `Failed`, data must arrive intact and once, `handshakes()` must keep to the limit, blocking calls must keep to their read timeout (also under a flood of junk), and junk must never fail a connection |
-| `tls_dtls_tokio` | tls-extensions | The real `browntls_tokio::dtls::{UdpClient, UdpServer}` public APIs over ephemeral loopback sockets on a bounded current-thread runtime: all client constructors, authenticated cookie handshakes, separate and empty datagrams, short-buffer retention, oversized rejection, operation deadlines, cancellation and resumption, traffic key updates, close from either side, removal, limits and accessors; deterministic seed replay checks meaningful paths |
+| `tls_dtls_tokio` | tls-extensions | The real `browntls_tokio::dtls::{UdpClient, UdpServer, UdpListener, SessionLimits, SessionDriver, UdpSession}` public APIs over ephemeral loopback sockets on a bounded current-thread runtime: constructors, authenticated cookie handshakes, separate and empty datagrams, short-buffer retention, oversized rejection, operation deadlines, cancellation and resumption, traffic key updates, close from either side, removal, limits, session isolation, driver lifecycle and accessors; deterministic seed replay checks meaningful paths |
 | `tls_auth` | tls-extensions | Delegated credentials (decoding, issuing, validity windows, `validate` against an independent validation, handshakes with a server's credential, and client authentication with a client's credential in or after the handshake, against a buffered or unbuffered server that asks for one or not, with fuzz-chosen schemes, sides and clocks, and resumption) and exported authenticators between connected peers, and client certificate URLs (RFC 6066 §5): PkiPath decoding and encoding, URL entries and lists against a model, TLS 1.2 handshakes whose server pauses for the chain (buffered, unbuffered and the six Tokio acceptors with a fetcher) with fuzz-chosen policies, URLs and answers; a query surfaces exactly when the policy allows every URL, a paused server reads nothing and refuses a wrong id |
 | `tls_codec` | tls-codec | The doc-hidden codec re-exports, record payload types, distinguished names and stored session values |
 
@@ -86,9 +86,10 @@ signature.
 
 `tls_dtls_tokio` enables the existing `browntls-tokio/dtls` feature and reuses
 `src/tls_dtls/setup.rs` with real providers, generated localhost certificates,
-root verification and cookie sealing. Each input creates one client and one
-event server on `127.0.0.1:0`. Both run in the calling thread with real I/O and
-monotonic timers; there are no endpoint tasks or external destinations.
+root verification and cookie sealing. Each input creates an event server and
+one client, or a session listener/driver with at most two authenticated clients,
+on `127.0.0.1:0`. They run in the calling thread with real I/O and monotonic
+timers; there are no endpoint tasks or external destinations.
 The runtime and all sockets are dropped when the input ends or unwinds.
 
 The three-byte header selects the client constructor modulo four (`new`,
@@ -129,11 +130,52 @@ milestones without depending on mutations. The shared seed smoke test also
 runs their truncations and mutations. Actual public-function coverage is
 established by the LLVM coverage command below, after execution.
 
-Cancellation is deterministic for pending handshake, receive and event
-futures. The close action polls once and resumes, but a writable socket may
-finish the first poll. This target does not force socket backpressure,
-cancel a sealed send, test multiple-peer admission/eviction or inject forged
-traffic. These are coverage limits, not reasons to exempt public functions.
+Bit 5 of the second header byte selects the session program below. Inputs
+with that bit clear retain the existing event-server program and its four
+seeds. In session mode, even constructor selectors use `UdpListener::new`;
+odd selectors use `new_with_versions` with explicit DTLS 1.3. Clients use
+`from_connection` for selector 1 and `new` otherwise. The MTU choice also
+selects receive queues of 2--4 datagrams and command queues of 1--2 commands.
+Both handle and accept limits are two. `SessionLimits::default` and Debug
+implementations are exercised without allocating the default queues. Bit 4
+tests zero/oversized counts, overflowing and excessive byte budgets,
+connected sockets and configurations without cookies before a valid listener.
+
+The session action byte uses its low nibble as the operation and its high
+nibble modulo the current peer count as the peer selector. Up to 24 actions
+run; at most two handshakes occur, even with repeated admission actions.
+
+| Low nibble | Arguments and session action |
+|---|---|
+| 0, 1, 2 | One-byte-length payload: client send, session send, or two distinct datagrams each way before separate receives |
+| 3 | Cancel pending session receive and listener accept, then prove receive resumes |
+| 4 | Cancel a queued send and a queued or capacity-blocked close, then exchange data both ways |
+| 5 | Reject a 65,536-byte session send, then prove the session remains usable |
+| 6 | Authenticate and accept a second client, if admissions remain open and only one handshake has occurred |
+| 7 | Drop the listener, then prove existing sessions still exchange data |
+| 8, 9 | Remote or local graceful close; check drained input, repeated EOF/close, send rejection and unrelated peer usability; end the program |
+| 10 | Drop the running driver; check `BrokenPipe` from live session operations and listener accept; end the program |
+| 11 | Drop the selected handle; end the program and check driver shutdown after all remaining handles drop |
+| 12, 13, 14, 15 | Address/Debug accessors, empty datagrams both ways, cancel a queued close then send, or exchange distinct traffic on every live peer |
+
+The driver future is polled alongside application operations without spawning
+a task. Cancellation setup polls only the application, ensuring queued
+commands cannot execute before cancellation. Shared association contracts
+compare entire datagrams, clamp client payloads to its MTU-dependent limit,
+and check terminal behavior. Nonterminal program completion pumps I/O through
+short idle deadlines to check for unexpected data or a delayed close.
+Five additional seeds register through the existing target and corpus
+generator; `tls_dtls_tokio::tests::session_seeds_reach_public_api_contracts`
+asserts their listener, session, cancellation and driver milestones. The
+shared seed smoke test also mutates and truncates these seeds. LLVM coverage
+must still establish actual function reachability after execution.
+
+Cancellation is deterministic for pending handshake, receive, event and
+session-command futures. The event-server close action polls once and
+resumes, but a writable socket may finish the first poll. This target does
+not force socket backpressure, cancel a sealed send, saturate session receive
+or accept queues, test admission eviction or inject forged traffic. These
+are coverage limits, not reasons to exempt public functions.
 
 ### Connection targets
 

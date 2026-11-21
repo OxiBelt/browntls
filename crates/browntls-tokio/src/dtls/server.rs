@@ -1,6 +1,6 @@
 //! Event-driven DTLS associations on a caller-created Tokio UDP socket.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::io;
@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use browntls_core::dtls::{Accepted, Acceptor, ServerConnection, Versions};
+use browntls_core::dtls::{
+    Accepted, Acceptor, CidDemux, ServerConnection, Settings, UdpPathValidation, Versions,
+    rrc::Selection,
+};
 use browntls_core::{Error, ServerConfig};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
@@ -38,21 +41,27 @@ pub enum ServerEvent {
     Closed(SocketAddr),
     /// An established peer failed; other associations remain usable.
     Failed(SocketAddr, Error),
+    /// The validated physical address changed for this stable handle.
+    PeerAddressChanged(SocketAddr, SocketAddr),
 }
 
 /// Many DTLS 1.3 associations on a caller-created, unconnected UDP socket.
 ///
 /// The caller supplies the runtime, socket, I/O driver and time driver.
 /// No background task is started: poll an operation to advance the server.
-/// An address identifies one association, with no migration or rebinding.
+/// Events and methods use the original address as a stable handle.
+/// Negotiated CID/RRC may validate a new physical address.
 /// Cookie validation through [`Acceptor`] precedes handshake allocation.
 /// There are at most 256 handshakes and 1024 established peers by default;
 /// a new validated handshake evicts the oldest pending handshake, and a
 /// handshake completing at the established-peer limit is rejected.
 ///
-/// Each peer has at most one sealed output datagram in the adapter, and
-/// there is one additional stateless cookie reply. Core bounds its own
-/// protocol queues. Application input is buffered for one UDP datagram;
+/// Each peer has at most one sealed ordinary output and one protected
+/// path probe in the adapter, plus one stateless cookie reply overall.
+/// A new probe generated while its slot is occupied is dropped like a
+/// lost UDP datagram; its existing destination and ciphertext are retained.
+/// Core bounds its own protocol queues. Application input is buffered for
+/// one UDP datagram;
 /// its events are consumed before another receive. Events from timers are
 /// bounded by the peer slots. Unauthenticated input cannot grow a queue
 /// across receives. Live OCSP queries are unsupported and fail that peer.
@@ -60,6 +69,10 @@ pub struct UdpServer {
     socket: UdpSocket,
     acceptor: Acceptor,
     peers: BTreeMap<SocketAddr, Peer>,
+    physical: BTreeMap<SocketAddr, SocketAddr>,
+    cids: CidDemux<SocketAddr>,
+    touched: BTreeSet<SocketAddr>,
+    path_selection: Selection,
     events: VecDeque<ServerEvent>,
     retry: Option<(SocketAddr, Vec<u8>)>,
     send_cursor: Option<SocketAddr>,
@@ -85,6 +98,9 @@ struct Peer {
     // Never call write_datagram or send while this is nonempty. It is
     // already sealed and belongs to the association until sent or removed.
     out: Vec<u8>,
+    active: SocketAddr,
+    paths: Option<UdpPathValidation>,
+    probe: Option<(SocketAddr, Vec<u8>)>,
 }
 
 impl Peer {
@@ -95,7 +111,14 @@ impl Peer {
         let timer = self
             .conn
             .next_timeout()
-            .filter(|due| Some(*due) != self.serviced_timeout);
+            .filter(|due| Some(*due) != self.serviced_timeout)
+            .into_iter()
+            .chain(
+                self.paths
+                    .as_ref()
+                    .and_then(UdpPathValidation::next_timeout),
+            )
+            .min();
         if self.connected {
             timer
         } else {
@@ -118,18 +141,31 @@ impl UdpServer {
         socket: UdpSocket,
         versions: Versions,
     ) -> io::Result<Self> {
+        Self::new_with_settings(config, socket, Settings::default().with_versions(versions))
+    }
+
+    /// Creates a server with explicit CID and return-routability settings.
+    pub fn new_with_settings(
+        config: Arc<ServerConfig>,
+        socket: UdpSocket,
+        settings: Settings,
+    ) -> io::Result<Self> {
         if socket.peer_addr().is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a DTLS server requires an unconnected UDP socket",
             ));
         }
-        let acceptor = Acceptor::new_with_versions(config, versions)
+        let acceptor = Acceptor::new_with_settings(config, settings)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         Ok(Self {
             socket,
             acceptor,
             peers: BTreeMap::new(),
+            physical: BTreeMap::new(),
+            cids: CidDemux::default(),
+            touched: BTreeSet::new(),
+            path_selection: Selection::Enhanced,
             events: VecDeque::new(),
             retry: None,
             send_cursor: None,
@@ -141,6 +177,19 @@ impl UdpServer {
             timer: None,
             buf: vec![0; MAX_DATAGRAM],
         })
+    }
+
+    /// Selects basic or enhanced validation for newly initialized paths.
+    pub fn set_path_selection(&mut self, selection: Selection) {
+        self.path_selection = selection;
+    }
+
+    /// Returns the current validated physical address for a stable handle.
+    pub fn peer_addr(&self, peer: SocketAddr) -> Option<SocketAddr> {
+        self.peers
+            .get(&peer)
+            .filter(|entry| entry.connected && !entry.retiring)
+            .map(|entry| entry.active)
     }
 
     /// Bounds pending handshakes (at least one), evicting the oldest
@@ -227,7 +276,11 @@ impl UdpServer {
 
     /// Removes a peer immediately, discarding its pending output.
     pub fn remove(&mut self, peer: SocketAddr) -> Option<ServerConnection> {
-        self.peers.remove(&peer).map(|entry| entry.conn)
+        let entry = self.peers.remove(&peer)?;
+        self.physical.remove(&entry.active);
+        self.cids.remove(peer);
+        self.touched.remove(&peer);
+        Some(entry.conn)
     }
 
     /// The established connection for an address.
@@ -241,10 +294,12 @@ impl UdpServer {
     /// Mutates an established connection, for example to request new keys.
     /// Subsequent operations drive any protocol output it queues.
     pub fn connection_mut(&mut self, peer: SocketAddr) -> Option<&mut ServerConnection> {
-        self.peers
+        let entry = self
+            .peers
             .get_mut(&peer)
-            .filter(|entry| entry.connected && !entry.retiring)
-            .map(|entry| &mut entry.conn)
+            .filter(|entry| entry.connected && !entry.retiring)?;
+        self.touched.insert(peer);
+        Some(&mut entry.conn)
     }
 
     /// Addresses of the established, usable associations.
@@ -291,6 +346,9 @@ impl UdpServer {
         loop {
             // Check timers before consuming even an already-ready event or
             // socket. Continuous successful receives cannot starve expiry.
+            for peer in std::mem::take(&mut self.touched) {
+                self.refresh_peer(peer);
+            }
             self.run_timers();
             // Reserve receive work even when many associations have
             // continuously ready output.
@@ -343,7 +401,11 @@ impl UdpServer {
             Some(entry) if !closing && (!entry.connected || entry.retiring) => {
                 return Poll::Ready(Err(not_connected()));
             }
-            Some(entry) if entry.out.is_empty() && !entry.conn.wants_write(self.now()) => {
+            Some(entry)
+                if entry.probe.is_none()
+                    && entry.out.is_empty()
+                    && !entry.conn.wants_write(self.now()) =>
+            {
                 return Poll::Ready(Ok(()));
             }
             _ => {}
@@ -373,12 +435,78 @@ impl UdpServer {
 
     fn handle_datagram(&mut self, peer: SocketAddr, len: usize) {
         let now = self.now();
-        if let Some(entry) = self.peers.get_mut(&peer) {
-            if entry.retiring {
+        let source = peer;
+        let has_cid = CidDemux::<SocketAddr>::has_cid(&self.buf[..len]);
+        let owner = if has_cid {
+            self.cids.lookup(&self.buf[..len])
+        } else {
+            self.physical.get(&source).copied()
+        };
+        if let Some(peer) = owner {
+            if (source != peer && self.peers.contains_key(&source))
+                || self
+                    .physical
+                    .get(&source)
+                    .is_some_and(|owner| *owner != peer)
+            {
                 return;
             }
-            let received = entry.conn.read_datagram(&mut self.buf[..len], now);
-            self.after_input(peer, received.map(|received| received.app_data().to_vec()));
+            let Some(entry) = self.peers.get_mut(&peer) else {
+                return;
+            };
+            if entry.retiring
+                || (source != entry.active
+                    && (!entry.connected
+                        || !has_cid
+                        || entry.paths.is_none()
+                        || entry
+                            .paths
+                            .as_ref()
+                            .and_then(UdpPathValidation::pending)
+                            .is_some_and(|pending| pending != source)))
+            {
+                return;
+            }
+            let datagram = &mut self.buf[..len];
+            let result = entry
+                .conn
+                .read_datagram(datagram, now)
+                .and_then(|received| {
+                    if entry.paths.is_none()
+                        && entry.conn.return_routability_checks_negotiated()
+                        && !entry.conn.peer_has_closed()
+                        && !entry.conn.local_close_notify_queued()
+                    {
+                        entry.paths = Some(UdpPathValidation::new(
+                            &entry.conn,
+                            entry.active,
+                            self.path_selection,
+                        )?);
+                    }
+                    if let Some(paths) = &mut entry.paths {
+                        paths.input(
+                            &mut entry.conn,
+                            &received,
+                            datagram,
+                            source,
+                            now,
+                            &mut |data, destination| {
+                                if entry.probe.is_none() {
+                                    entry.probe = Some((destination, data.to_vec()));
+                                }
+                            },
+                        )
+                    } else {
+                        Ok(received.app_data().to_vec())
+                    }
+                });
+            if result.is_ok() {
+                self.refresh_peer(peer);
+            }
+            self.after_input(peer, result);
+            return;
+        }
+        if has_cid || self.peers.contains_key(&source) {
             return;
         }
         let mut out = Vec::new();
@@ -401,9 +529,14 @@ impl UdpServer {
                         retiring: false,
                         serviced_timeout: None,
                         out: Vec::new(),
+                        active: peer,
+                        paths: None,
+                        probe: None,
                     },
                 );
+                self.physical.insert(peer, peer);
                 self.after_input(peer, Ok(Vec::new()));
+                self.refresh_peer(peer);
             }
             // Unvalidated traffic has no association to fail. A full
             // cookie-reply slot behaves like UDP packet loss.
@@ -452,6 +585,22 @@ impl UdpServer {
         }
     }
 
+    fn refresh_peer(&mut self, peer: SocketAddr) {
+        if let Some(entry) = self.peers.get_mut(&peer) {
+            self.cids.replace(peer, entry.conn.local_connection_ids());
+            if let Some(paths) = &entry.paths {
+                let active = paths.active();
+                if active != entry.active {
+                    self.physical.remove(&entry.active);
+                    self.physical.insert(active, peer);
+                    entry.active = active;
+                    self.events
+                        .push_back(ServerEvent::PeerAddressChanged(peer, active));
+                }
+            }
+        }
+    }
+
     fn fail(&mut self, peer: SocketAddr, err: Error) {
         let expires = self.now().saturating_add(DRAIN_TIMEOUT);
         if let Some(entry) = self.peers.get_mut(&peer) {
@@ -481,7 +630,21 @@ impl UdpServer {
             if (!entry.connected || entry.retiring) && entry.expires <= now {
                 self.remove(peer);
             } else {
+                if let Some(paths) = &mut entry.paths {
+                    if let Err(err) = paths.poll(&mut entry.conn, now, &mut |data, destination| {
+                        if entry.probe.is_none() {
+                            entry.probe = Some((destination, data.to_vec()));
+                        }
+                    }) {
+                        self.fail(peer, err);
+                        continue;
+                    }
+                }
                 let previous = entry.conn.next_timeout();
+                if !previous.is_some_and(|due| due <= now && Some(due) != entry.serviced_timeout) {
+                    self.refresh_peer(peer);
+                    continue;
+                }
                 match entry.conn.handle_timeout(now) {
                     Ok(()) => {
                         entry.serviced_timeout = previous
@@ -528,6 +691,30 @@ impl UdpServer {
             let Some(entry) = self.peers.get_mut(&peer) else {
                 continue;
             };
+            self.cids.replace(peer, entry.conn.local_connection_ids());
+            if let Some((destination, probe)) = &mut entry.probe {
+                match poll_send_datagram(probe, |out| {
+                    self.socket.poll_send_to(cx, out, *destination)
+                }) {
+                    Poll::Ready(Ok(())) => {
+                        entry.probe = None;
+                        *budget -= 1;
+                    }
+                    Poll::Ready(Err(err)) => {
+                        self.fail(peer, Error::General(format!("DTLS UDP send failed: {err}")));
+                        self.remove(peer);
+                        if target == Some(peer) {
+                            return Err(err);
+                        }
+                        continue;
+                    }
+                    Poll::Pending => continue,
+                }
+                if *budget == 0 {
+                    more = true;
+                    continue;
+                }
+            }
             if entry.out.is_empty() {
                 if let Err(err) = entry.conn.write_datagram(&mut entry.out, now) {
                     entry.out.clear();
@@ -538,7 +725,7 @@ impl UdpServer {
             }
             if !entry.out.is_empty() {
                 match poll_send_datagram(&mut entry.out, |out| {
-                    self.socket.poll_send_to(cx, out, peer)
+                    self.socket.poll_send_to(cx, out, entry.active)
                 }) {
                     Poll::Ready(Ok(())) => {
                         entry.serviced_timeout = None;

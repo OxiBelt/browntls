@@ -298,6 +298,11 @@ impl<Data: SideData> ConnectionCommon<Data> {
         result
     }
 
+    /// Whether this endpoint has queued a `close_notify` for transmission.
+    pub fn local_close_notify_queued(&self) -> bool {
+        self.core.common_state.has_sent_close_notify()
+    }
+
     /// Whether the peer sent `close_notify`; nothing it sends afterwards
     /// is processed.
     pub fn peer_has_closed(&self) -> bool {

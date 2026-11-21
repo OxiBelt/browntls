@@ -483,3 +483,79 @@ fn invalid_configuration_and_connected_sockets_are_rejected() {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     });
 }
+
+async fn event_migration(
+    version: &'static browntls_core::SupportedProtocolVersion,
+    versions: browntls_core::dtls::Versions,
+    selection: browntls_core::dtls::rrc::Selection,
+) {
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+    use browntls_tokio::dtls::{Recv, UdpClient};
+
+    let settings = || {
+        Settings::default()
+            .with_versions(versions)
+            .with_return_routability_checks(ConnectionIdPolicy::new(8, true).unwrap())
+    };
+    let pki = Pki::new();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let remote = socket.local_addr().unwrap();
+    let mut server =
+        UdpServer::new_with_settings(config_for(&pki, version), socket, settings()).unwrap();
+    server.set_path_selection(selection);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(remote).await.unwrap();
+    let admitted = socket.local_addr().unwrap();
+    let mut client = UdpClient::new_with_settings(
+        Arc::new(pki.client_config_with_cert(version)),
+        common::localhost(),
+        socket,
+        settings(),
+    )
+    .unwrap();
+    let (handshake, event) = together(client.complete_handshake(), server.next_event()).await;
+    handshake.unwrap();
+    assert!(matches!(event.unwrap(), ServerEvent::Connected(peer) if peer == admitted));
+    let replacement = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    replacement.connect(remote).await.unwrap();
+    let migrated = replacement.local_addr().unwrap();
+    drop(client.replace_socket(replacement).unwrap());
+    client.send(b"candidate").await.unwrap();
+    let (event, ()) = together(async {
+        let event = server.next_event().await.unwrap();
+        assert!(matches!(event, ServerEvent::PeerAddressChanged(peer, addr) if peer == admitted && addr == migrated));
+        assert_eq!(server.peer_addr(admitted), Some(migrated));
+        assert!(server.connection(migrated).is_none());
+        server.send_to(b"validated", admitted).await.unwrap();
+    }, async {
+        let mut buf = [0; 32];
+        assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(9));
+        assert_eq!(&buf[..9], b"validated");
+    }).await;
+    let (sent, event) = together(client.send(b"after"), server.next_event()).await;
+    sent.unwrap();
+    assert!(
+        matches!(event.unwrap(), ServerEvent::Received(peer, data) if peer == admitted && data == b"after")
+    );
+}
+
+#[test]
+fn event_server_migrates_dtls13_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    run_with_limit(Duration::from_secs(20), async {
+        for selection in [Selection::Basic, Selection::Enhanced] {
+            event_migration(&browntls_core::version::TLS13, Versions::V1_3, selection).await;
+        }
+    });
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn event_server_migrates_dtls12_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    run_with_limit(Duration::from_secs(20), async {
+        for selection in [Selection::Basic, Selection::Enhanced] {
+            event_migration(&browntls_core::version::TLS12, Versions::V1_2, selection).await;
+        }
+    });
+}

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use browntls_core::dtls::{ClientConnection, Versions};
+use browntls_core::dtls::{
+    ClientConnection, Settings, UdpPathValidation, Versions, rrc::Selection,
+};
 use browntls_core::pki_types::ServerName;
 use browntls_core::{ClientConfig, Error};
 use tokio::io::ReadBuf;
@@ -41,6 +43,8 @@ pub struct UdpClient {
     input: Vec<u8>,
     // Exactly one sealed datagram, never a stream or a queue of plaintext.
     out: Vec<u8>,
+    paths: Option<UdpPathValidation>,
+    probe: Option<(std::net::SocketAddr, Vec<u8>)>,
     closing: bool,
     // Protocol errors are terminal, even if sending their alert blocks.
     failure: Option<Error>,
@@ -66,10 +70,54 @@ impl UdpClient {
         socket: UdpSocket,
         versions: Versions,
     ) -> io::Result<Self> {
+        Self::new_with_settings(
+            config,
+            name,
+            socket,
+            Settings::default().with_versions(versions),
+        )
+    }
+
+    /// Creates a client with explicit CID and return-routability settings.
+    pub fn new_with_settings(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        socket: UdpSocket,
+        settings: Settings,
+    ) -> io::Result<Self> {
         Self::from_connection(
-            ClientConnection::new_with_versions(config, name, versions).map_err(io_error)?,
+            ClientConnection::new_with_settings(config, name, settings).map_err(io_error)?,
             socket,
         )
+    }
+
+    /// Replaces the local socket of a live CID/RRC association. The new
+    /// socket must be connected to the same server. Pending ciphertext and
+    /// the connection clock are retained. Drive receive to answer probes;
+    /// application data sent before path validation can be discarded.
+    pub fn replace_socket(&mut self, socket: UdpSocket) -> io::Result<UdpSocket> {
+        if !self.conn.return_routability_checks_negotiated()
+            || self.conn.peer_has_closed()
+            || self.conn.local_close_notify_queued()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "a live CID/RRC association is required",
+            ));
+        }
+        if self.conn.outbound_connection_id().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a peer receiving CID is required",
+            ));
+        }
+        if socket.peer_addr()? != self.socket.peer_addr()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replacement socket has a different remote address",
+            ));
+        }
+        Ok(std::mem::replace(&mut self.socket, socket))
     }
 
     /// Takes a freshly created connection, configured as needed (for
@@ -85,6 +133,8 @@ impl UdpClient {
             received: VecDeque::new(),
             input: vec![0; MAX_DATAGRAM],
             out: Vec::new(),
+            paths: None,
+            probe: None,
             closing: false,
             failure: None,
         })
@@ -249,6 +299,18 @@ impl UdpClient {
                 return Poll::Pending;
             }
             *budget -= 1;
+            if let Some((_, probe)) = &mut self.probe {
+                match poll_send_datagram(probe, |data| self.socket.poll_send(cx, data)) {
+                    Poll::Pending => {
+                        wait.poll_wake(cx, self.start, None);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Poll::Ready(result) => result?,
+                }
+                self.probe = None;
+                continue;
+            }
             if self.out.is_empty() {
                 let now = self.now();
                 if !self
@@ -290,6 +352,18 @@ impl UdpClient {
             ready!(self.poll_flush(cx, wait, &mut budget))?;
             let now = self.now();
             wait.check(now)?;
+            if let Some(paths) = &mut self.paths {
+                paths
+                    .poll(&mut self.conn, now, &mut |data, destination| {
+                        if self.probe.is_none() {
+                            self.probe = Some((destination, data.to_vec()));
+                        }
+                    })
+                    .map_err(io_error)?;
+                if self.probe.is_some() {
+                    continue;
+                }
+            }
             // Even a send-only caller must service elapsed retransmission
             // and ACK timers before considering the operation complete.
             if self.conn.next_timeout().is_some_and(|timer| timer <= now) {
@@ -335,7 +409,19 @@ impl UdpClient {
             let mut input = ReadBuf::new(&mut self.input);
             match self.socket.poll_recv(cx, &mut input) {
                 Poll::Pending => {
-                    wait.poll_wake(cx, self.start, self.conn.next_timeout());
+                    wait.poll_wake(
+                        cx,
+                        self.start,
+                        self.conn
+                            .next_timeout()
+                            .into_iter()
+                            .chain(
+                                self.paths
+                                    .as_ref()
+                                    .and_then(UdpPathValidation::next_timeout),
+                            )
+                            .min(),
+                    );
                     return Poll::Pending;
                 }
                 Poll::Ready(Err(error)) if transient(&error) => continue,
@@ -343,8 +429,39 @@ impl UdpClient {
                 Poll::Ready(Ok(())) => {
                     let len = input.filled().len();
                     let now = self.now();
-                    match self.conn.read_datagram(&mut self.input[..len], now) {
-                        Ok(received) => self.received.extend(received.app_data().iter().cloned()),
+                    let source = self.socket.peer_addr()?;
+                    let datagram = &mut self.input[..len];
+                    let result = self.conn.read_datagram(datagram, now).and_then(|received| {
+                        if self.paths.is_none()
+                            && self.conn.return_routability_checks_negotiated()
+                            && !self.conn.peer_has_closed()
+                            && !self.conn.local_close_notify_queued()
+                        {
+                            self.paths = Some(UdpPathValidation::new(
+                                &self.conn,
+                                source,
+                                Selection::Basic,
+                            )?);
+                        }
+                        if let Some(paths) = &mut self.paths {
+                            paths.input(
+                                &mut self.conn,
+                                &received,
+                                datagram,
+                                source,
+                                now,
+                                &mut |data, destination| {
+                                    if self.probe.is_none() {
+                                        self.probe = Some((destination, data.to_vec()));
+                                    }
+                                },
+                            )
+                        } else {
+                            Ok(received.app_data().to_vec())
+                        }
+                    });
+                    match result {
+                        Ok(ranges) => self.received.extend(ranges),
                         Err(error) => self.failure = Some(error),
                     }
                 }

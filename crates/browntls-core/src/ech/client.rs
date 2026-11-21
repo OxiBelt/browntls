@@ -170,7 +170,7 @@ impl EchOffer {
         // Sensitive, and not needed to authenticate a rejection.
         exts.protocols = None;
         exts.early_data = None;
-        // RFC 8773: says that the inner hello offers an external PSK.
+        // RFC 9973: says that the inner hello offers an external PSK.
         exts.cert_with_extern_psk = None;
         // RFC 8844: they identify the signaling session.
         crate::external_binding::handshake::strip_from_outer(exts);

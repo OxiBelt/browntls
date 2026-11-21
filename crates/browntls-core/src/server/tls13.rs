@@ -289,6 +289,7 @@ impl CompleteClientHelloHandling {
         let mut chosen_psk_index = None;
         let mut resumedata = None;
         let mut external: Option<(ExternalPskCandidate, PskSecret)> = None;
+        let cert_with_extern_psk_offered = client_hello.extensions.cert_with_extern_psk.is_some();
         if let Some(psk_offer) = &client_hello.extensions.preshared_key {
             let dhe_allowed = client_hello
                 .extensions
@@ -326,13 +327,20 @@ impl CompleteClientHelloHandling {
                             psk_offer.binders[i].as_ref(),
                         ) {
                             return Err(cx.common.send_fatal_alert(
-                                AlertDescription::DecryptError,
+                                if cert_with_extern_psk_offered {
+                                    AlertDescription::IllegalParameter
+                                } else {
+                                    AlertDescription::DecryptError
+                                },
                                 PeerMisbehaved::IncorrectBinder,
                             ));
                         }
                         chosen_psk_index = Some(i);
                         external = Some((external_psks.swap_remove(pos), secret));
                         break;
+                    }
+                    if cert_with_extern_psk_offered {
+                        continue;
                     }
                     let Some(resume) = self.attempt_tls13_ticket_decryption(&psk_id.identity.0)
                     else {
@@ -455,22 +463,28 @@ impl CompleteClientHelloHandling {
             // Reported once the client's Finished verifies.
             cx.common.external_psk = Some(candidate.psk.clone());
         }
+        // RFC 9973: certificate authentication on top of an external PSK,
+        // when the client asked and we have a certificate to show.
+        let cert_with_extern_psk = external.is_some()
+            && (self.config.cert_with_extern_psk || self.config.require_cert_with_extern_psk)
+            && cert_with_extern_psk_offered
+            && server_key.is_some()
+            && !sigschemes.is_empty();
+        if self.config.require_cert_with_extern_psk && !cert_with_extern_psk {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::CertWithExternPskRequired,
+            ));
+        }
         if self.config.require_external_psk && cx.common.external_psk.is_none() {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::ExternalPskRequired,
             ));
         }
+        cx.common.cert_with_extern_psk = cert_with_extern_psk;
 
-        // RFC 8773: certificate authentication on top of an external PSK,
-        // when the client asked and we have a certificate to show.
-        let cert_with_extern_psk = external.is_some()
-            && self.config.cert_with_extern_psk
-            && client_hello.extensions.cert_with_extern_psk.is_some()
-            && server_key.is_some()
-            && !sigschemes.is_empty();
-
-        // Without a PSK (or with RFC 8773) we authenticate with our
+        // Without a PSK (or with RFC 9973) we authenticate with our
         // certificate, which needs one and a signature scheme for it.
         let psk_selected = resumedata.is_some() || external.is_some();
         let server_key = match server_key {
@@ -562,7 +576,7 @@ impl CompleteClientHelloHandling {
                 // Start reading under the early traffic key: it carries any
                 // 0-RTT data, and is replaced below when we do not accept it.
                 // DTLS has no 0-RTT here, so no early key either.
-                if !cx.common.is_dtls() {
+                if !cx.common.is_dtls() && !cert_with_extern_psk {
                     early.client_early_traffic_secret(
                         client_hello_hash.as_ref(),
                         &*self.config.key_log,
@@ -677,6 +691,7 @@ impl CompleteClientHelloHandling {
         // RFC 8844 §5: no session of a bound connection is kept for later.
         if (client_revocation_enabled(&self.config) && !cx.data.certificate_free)
             || self.config.external_binding.is_some()
+            || self.config.require_cert_with_extern_psk
         {
             send_tickets = 0;
             expected_tickets = expected_tickets.map(|_| 0);

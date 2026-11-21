@@ -115,6 +115,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
             external_psks: None,
             cert_with_extern_psk: false,
+            require_cert_with_extern_psk: false,
             require_external_psk: false,
             client_certificate_url: None,
             enable_delegated_credentials: false,

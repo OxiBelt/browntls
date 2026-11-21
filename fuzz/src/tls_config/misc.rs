@@ -15,7 +15,7 @@ use browntls_core::server::{
 use browntls_core::sign::CertifiedKey;
 use browntls_core::ticketer::TicketRotator;
 use browntls_core::time_provider::TimeProvider;
-use browntls_core::{CipherSuite, KeyLog, KeyLogFile, NamedGroup};
+use browntls_core::{CipherSuite, KeyLog, KeyLogFile, NamedGroup, ProtocolVersion};
 
 use super::fixtures;
 use super::sign::{load, loadable};
@@ -220,6 +220,13 @@ pub(super) fn server_cache_op(input: &mut Input<'_>) {
     let size = input.choose(6);
     let cache = ServerSessionMemoryCache::new(size);
     assert!(cache.can_cache());
+    let session = vec![0, 3, 4];
+    assert!(cache.put(vec![0xff], session.clone()));
+    assert_eq!(
+        cache.session_version(&[0xff]),
+        Some(ProtocolVersion::TLSv1_3)
+    );
+    assert_eq!(cache.take(&[0xff]), Some(session));
     let mut model = CacheModel::new(size);
     // Few distinct keys, so that operations collide.
     let key = |input: &mut Input<'_>| vec![input.byte() % 8; input.choose(3)];
@@ -243,6 +250,7 @@ pub(super) fn server_cache_op(input: &mut Input<'_>) {
     }
     let none = browntls_core::server::NoServerSessionStorage {};
     assert!(!none.can_cache());
+    assert!(none.session_version(&[1]).is_none());
     assert!(!none.put(vec![1], vec![2]) || none.get(&[1]).is_none());
 }
 

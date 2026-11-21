@@ -45,6 +45,18 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
     /// Fetches the value under `key`, leaving it in place.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
 
+    /// Reads the protocol version without consuming the stored session.
+    ///
+    /// RFC 9973 can call this once per distinct PSK identity. The default
+    /// fetches the value using [`Self::get`]. Stores can override this method
+    /// to read version metadata without fetching the full value.
+    fn session_version(&self, key: &[u8]) -> Option<ProtocolVersion> {
+        let mut value = self.get(key)?;
+        let version = crate::msgs::persist::ServerSessionValue::encoded_version(&value);
+        crate::crypto::zeroize_vec(&mut value);
+        version
+    }
+
     /// Fetches and removes the value under `key`.
     fn take(&self, key: &[u8]) -> Option<Vec<u8>>;
 
@@ -282,15 +294,22 @@ pub struct ServerConfig {
     /// Finds the external PSKs (RFC 9846 §4.3.11) clients may offer; `None`
     /// (the default) accepts none. See [`crate::psk`].
     ///
-    /// A TLS 1.3 handshake that selects an external PSK authenticates
-    /// through it and sends no certificate, so [`Self::cert_resolver`] may
-    /// return nothing for a client that offers one.
+    /// An ordinary TLS 1.3 external-PSK handshake can proceed when
+    /// [`Self::cert_resolver`] returns no certificate.
     pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
 
     /// Whether to authenticate with our certificate as well when the
-    /// client asks for it with `tls_cert_with_extern_psk` (RFC 8773) and an
+    /// client asks for it with `tls_cert_with_extern_psk` (RFC 9973) and an
     /// external PSK is selected. Off by default.
     pub cert_with_extern_psk: bool,
+
+    /// Require a fresh RFC 9973 handshake on every connection.
+    ///
+    /// This implies [`Self::cert_with_extern_psk`] and requires a usable
+    /// server credential and an external PSK. Client authentication follows
+    /// the configured client verifier. The server issues no tickets under
+    /// this policy. Off by default.
+    pub require_cert_with_extern_psk: bool,
 
     /// Whether to refuse a client that does not authenticate through one of
     /// [`Self::external_psks`]: the handshake fails unless an external PSK

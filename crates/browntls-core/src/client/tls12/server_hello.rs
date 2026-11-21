@@ -89,6 +89,7 @@ impl CompleteServerHelloHandling {
         if server_hello.extensions.key_share.is_some()
             || server_hello.extensions.pre_shared_key.is_some()
             || server_hello.extensions.ticket_request.is_some()
+            || server_hello.extensions.cert_with_extern_psk.is_some()
         {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::UnsupportedExtension,

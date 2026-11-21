@@ -107,7 +107,7 @@ pub(crate) struct ClientExtensions {
     pub(crate) unknown: Vec<ExtensionType>,
     /// Always encoded last (RFC 8446 §4.2.11).
     pub(crate) preshared_key: Option<PresharedKeyOffer>,
-    /// RFC 8773 `tls_cert_with_extern_psk`: an empty extension.
+    /// RFC 9973 `tls_cert_with_extern_psk`: an empty extension.
     pub(crate) cert_with_extern_psk: Option<()>,
 }
 

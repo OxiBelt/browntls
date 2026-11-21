@@ -381,7 +381,7 @@ pub(crate) struct ServerExtensions {
     pub(crate) cached_info: Option<crate::cached_info::ServerHelloCachedInfo>,
     /// Extension types that were present but not understood, in order.
     pub(crate) unknown: Vec<ExtensionType>,
-    /// RFC 8773 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
+    /// RFC 9973 `tls_cert_with_extern_psk` (ServerHello): an empty extension.
     pub(crate) cert_with_extern_psk: Option<()>,
 }
 

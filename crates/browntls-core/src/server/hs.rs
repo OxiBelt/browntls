@@ -240,6 +240,20 @@ impl ExpectClientHello {
                 &client_hello.extensions,
                 self.done_retry.then_some(self.retry_cert_with_extern_psk),
             )?;
+            cert_with_extern_psk::reject_tickets(
+                cx.common,
+                &self.config,
+                &client_hello.extensions,
+            )?;
+        }
+        if self.config.require_cert_with_extern_psk
+            && (version != ProtocolVersion::TLSv1_3
+                || client_hello.extensions.cert_with_extern_psk.is_none())
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::CertWithExternPskRequired,
+            ));
         }
         if let Some(dtls) = &mut cx.common.dtls {
             dtls.select_version(version);

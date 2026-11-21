@@ -31,6 +31,7 @@
 //! repeating both permits either. With no `--tls`, DTLS remains 1.3 only.
 //! Each DTLS invocation performs one full certificate handshake and a
 //! request/reversed reply exchange, then checks both close alerts.
+//! `--dtls-cid` opts into nonempty bidirectional connection IDs.
 //!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values (a client in its
@@ -193,6 +194,7 @@ struct Options {
     backends: Vec<(String, String)>,
     /// Client and server I/O through `browntls-tokio` (`--async`).
     async_io: bool,
+    dtls_cid: bool,
 }
 
 impl Options {
@@ -218,6 +220,7 @@ impl Options {
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
                 "--async" => Some(&mut o.async_io),
+                "--dtls-cid" => Some(&mut o.dtls_cid),
                 _ => None,
             };
             if let Some(switch) = switch {

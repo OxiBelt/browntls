@@ -68,10 +68,11 @@ The deterministic public-path cases are in
 test targets. They cover endpoint policy, all existing ECDHE AEAD suites,
 mTLS, fragmentation, loss, reordering, duplication, stateless cookies,
 replay rejection, repeated full handshakes and timeout behavior. Existing
-DTLS 1.3 cases remain in both targets. These added cases have not yet been
-compiled or executed in the implementation worktree; compilation, execution,
-feature-matrix checks, external interoperability and independent review
-remain qualification requirements.
+DTLS 1.3 cases remain in both targets. The
+[Docker interoperability tests](../tests/e2e/README.md#dtls-interoperability)
+cover mutual certificate authentication with OpenSSL in both roles, with
+1.2-only and mixed-version browntls endpoints, ECDSA P-256, AES-128-GCM,
+application data and authenticated closure.
 
 Protocol references: [RFC 6347](https://www.rfc-editor.org/rfc/rfc6347),
 [RFC 7627](https://www.rfc-editor.org/rfc/rfc7627), and

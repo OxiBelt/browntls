@@ -26,6 +26,12 @@
 //!         --ech-retry
 //! ```
 //!
+//! `dtls-client` and `dtls-server` use UDP with the same credentials and
+//! `--tls` options: `1.2` selects DTLS 1.2, `1.3` selects DTLS 1.3, and
+//! repeating both permits either. With no `--tls`, DTLS remains 1.3 only.
+//! Each DTLS invocation performs one full certificate handshake and a
+//! request/reversed reply exchange, then checks both close alerts.
+//!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values (a client in its
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
@@ -317,6 +323,24 @@ impl Options {
             browntls::DEFAULT_VERSIONS
         } else {
             &self.versions
+        }
+    }
+
+    fn dtls_versions(&self) -> browntls::dtls::Versions {
+        use browntls::dtls::Versions;
+
+        let tls12 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS12.version);
+        let tls13 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS13.version);
+        match (tls12, tls13) {
+            (true, true) => Versions::V1_2And1_3,
+            (true, false) => Versions::V1_2,
+            _ => Versions::V1_3,
         }
     }
 

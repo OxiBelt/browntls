@@ -37,8 +37,12 @@ pub(super) fn client(options: &Options) -> Result<()> {
     let socket = UdpSocket::bind(bind).map_err(|error| error.to_string())?;
     socket.connect(peer).map_err(|error| error.to_string())?;
     let name = ServerName::try_from(name.to_owned()).map_err(|error| error.to_string())?;
-    let conn = browntls::dtls::ClientConnection::new(Arc::new(config), name)
-        .map_err(|error| error.to_string())?;
+    let conn = browntls::dtls::ClientConnection::new_with_versions(
+        Arc::new(config),
+        name,
+        options.dtls_versions(),
+    )
+    .map_err(|error| error.to_string())?;
     let mut client = UdpClient::from_connection(conn, socket);
     client.set_read_timeout(Some(IO_TIMEOUT));
     client
@@ -81,7 +85,8 @@ pub(super) fn server(options: &Options) -> Result<()> {
         .hello_retry_cookies = Some(Arc::new(cookies));
     let listen = required(options.listen.as_ref(), "--listen")?;
     let socket = UdpSocket::bind(listen).map_err(|error| format!("bind {listen}: {error}"))?;
-    let mut server = UdpServer::new(config, socket).map_err(|error| error.to_string())?;
+    let mut server = UdpServer::new_with_versions(config, socket, options.dtls_versions())
+        .map_err(|error| error.to_string())?;
     server.set_read_timeout(Some(IO_TIMEOUT));
     emit(&[("event", "listening".into())]);
 

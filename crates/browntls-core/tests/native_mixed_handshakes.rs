@@ -346,7 +346,7 @@ fn every_suite_group_and_key_type_both_directions() {
             }
         }
     }
-    // Per direction: 3 TLS 1.3 suites x 4 key types x 7 groups, and with
+    // Per direction: 3 TLS 1.3 suites x 4 key types x 8 groups, and with
     // TLS 1.2 3 ECDHE_ECDSA suites x 3 key types x 4 groups and 3 ECDHE_RSA
     // suites x 4 groups.
     let tls12 = if cfg!(feature = "tls12") {
@@ -354,7 +354,7 @@ fn every_suite_group_and_key_type_both_directions() {
     } else {
         0
     };
-    assert_eq!(handshakes, 2 * (3 * 4 * 7 + tls12));
+    assert_eq!(handshakes, 2 * (3 * 4 * 8 + tls12));
 }
 
 #[test]

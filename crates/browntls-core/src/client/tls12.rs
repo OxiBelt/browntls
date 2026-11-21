@@ -162,7 +162,7 @@ impl CompleteServerHelloHandling {
             server_hello.extensions.cached_info.as_ref(),
         )?;
 
-        if self.config.require_ems && !self.using_ems {
+        if (self.config.require_ems || cx.common.is_dtls()) && !self.using_ems {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::ExtendedMasterSecretExtensionRequired,
@@ -654,7 +654,7 @@ fn emit_certificate(
             chain,
         ))),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -668,7 +668,7 @@ fn emit_client_kx(transcript: &mut HandshakeHash, pub_key: &[u8], common: &mut C
             HandshakePayload::ClientKeyExchange(Payload::new(ecdh.get_encoding())),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -691,7 +691,7 @@ fn emit_certverify(
             HandshakePayload::CertificateVerify(DigitallySignedStruct::new(scheme, sig)),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(())
 }
@@ -709,7 +709,7 @@ fn emit_finished(
             Payload::new(verify_data),
         ))),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, true);
 }
 
@@ -752,6 +752,10 @@ struct ExpectCcs {
 }
 
 impl State<ClientConnectionData> for ExpectCcs {
+    fn expects_dtls12_ccs(&self) -> bool {
+        true
+    }
+
     fn handle(self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
         match m.payload {
             MessagePayload::ChangeCipherSpec(..) => {}
@@ -763,7 +767,7 @@ impl State<ClientConnectionData> for ExpectCcs {
             }
         }
         // RFC 5246 §7.1: everything after this is protected.
-        cx.common.record_layer.start_decrypting();
+        cx.common.start_decrypting_tls12();
         Ok(Box::new(ExpectFinished {
             config: self.config,
             secrets: self.secrets,
@@ -799,7 +803,10 @@ struct ExpectFinished {
 impl ExpectFinished {
     fn save_session(&mut self, cx: &mut ClientContext<'_>) {
         // RFC 8844 §5: nothing of a bound connection is used in another.
-        if self.config.revocation_enabled() || self.config.external_binding.is_some() {
+        if cx.common.is_dtls()
+            || self.config.revocation_enabled()
+            || self.config.external_binding.is_some()
+        {
             return;
         }
         let (ticket, lifetime) = self.ticket.take().unwrap_or_default();

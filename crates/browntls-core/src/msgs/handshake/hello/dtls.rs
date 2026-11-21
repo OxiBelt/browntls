@@ -46,9 +46,8 @@ impl<'a> HandshakeMessagePayload<'a> {
     /// versions in place of the DTLS ones.
     ///
     /// EndOfEarlyData does not exist in DTLS 1.3 (RFC 9147 §5.6),
-    /// HelloVerifyRequest belongs to DTLS 1.2 (§5.1) and connection IDs
-    /// (§9) are not supported: such a message reads as an unknown one,
-    /// which every handshake state refuses with `unexpected_message`.
+    /// HelloVerifyRequest is left opaque for the DTLS 1.2 initial client
+    /// state. Connection IDs (§9) are not supported and remain unknown.
     pub(crate) fn read_dtls(
         r: &mut Reader<'a>,
         version: ProtocolVersion,

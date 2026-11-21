@@ -26,6 +26,12 @@
 //!         --ech-retry
 //! ```
 //!
+//! `dtls-client` and `dtls-server` use UDP with the same credentials and
+//! `--tls` options: `1.2` selects DTLS 1.2, `1.3` selects DTLS 1.3, and
+//! repeating both permits either. With no `--tls`, DTLS remains 1.3 only.
+//! Each DTLS invocation performs one full certificate handshake and a
+//! request/reversed reply exchange, then checks both close alerts.
+//!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values (a client in its
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
@@ -76,6 +82,7 @@
 
 mod async_io;
 mod client_facing;
+mod dtls;
 mod output;
 
 use std::io::{Read, Write};
@@ -114,6 +121,12 @@ fn main() {
     let result = match args.split_first() {
         Some((cmd, rest)) if cmd == "server" => Options::parse(rest).and_then(|o| server(&o)),
         Some((cmd, rest)) if cmd == "client" => Options::parse(rest).and_then(|o| client(&o)),
+        Some((cmd, rest)) if cmd == "dtls-server" => {
+            Options::parse(rest).and_then(|o| dtls::server(&o))
+        }
+        Some((cmd, rest)) if cmd == "dtls-client" => {
+            Options::parse(rest).and_then(|o| dtls::client(&o))
+        }
         Some((cmd, rest)) if cmd == "client-facing" => {
             Options::parse(rest).and_then(|o| client_facing(&o))
         }
@@ -124,10 +137,11 @@ fn main() {
             info();
             Ok(())
         }
-        _ => Err(
-            "usage: browntls-e2e info | ech-keygen | server | client-facing | client [OPTIONS]"
-                .into(),
-        ),
+        _ => Err(concat!(
+            "usage: browntls-e2e info | ech-keygen | server | client-facing | client",
+            " | dtls-server | dtls-client [OPTIONS]"
+        )
+        .into()),
     };
     if let Err(e) = result {
         emit(&[("event", "error".into()), ("message", e.into())]);
@@ -309,6 +323,24 @@ impl Options {
             browntls::DEFAULT_VERSIONS
         } else {
             &self.versions
+        }
+    }
+
+    fn dtls_versions(&self) -> browntls::dtls::Versions {
+        use browntls::dtls::Versions;
+
+        let tls12 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS12.version);
+        let tls13 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS13.version);
+        match (tls12, tls13) {
+            (true, true) => Versions::V1_2And1_3,
+            (true, false) => Versions::V1_2,
+            _ => Versions::V1_3,
         }
     }
 

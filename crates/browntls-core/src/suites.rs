@@ -85,11 +85,16 @@ impl SupportedCipherSuite {
         self.tls13().is_some_and(|suite| suite.quic.is_some())
     }
 
-    /// Whether this suite can be used with DTLS 1.3: a TLS 1.3 suite whose
-    /// QUIC algorithm also encrypts DTLS record numbers (RFC 9147 §4.2.3).
-    /// That leaves out CCM_8, which DTLS 1.3 must not use (§4.5.3).
+    /// DTLS 1.3 needs record number protection (and excludes CCM_8).
+    /// DTLS 1.2 accepts the existing ECDHE AEAD suites only.
     pub(crate) fn usable_for_dtls(&self) -> bool {
-        self.usable_for_quic()
+        match self {
+            Self::Tls13(_) => self.usable_for_quic(),
+            #[cfg(feature = "tls12")]
+            Self::Tls12(suite) => {
+                suite.kx == KeyExchangeAlgorithm::ECDHE && !suite.record.is_block_cipher()
+            }
+        }
     }
 
     /// The protocol version this suite belongs to.

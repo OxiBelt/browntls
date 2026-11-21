@@ -9,14 +9,17 @@ impl CommonState {
     /// On a DTLS connection, handshake messages join the flight being
     /// prepared and alerts are sent once, both under the current sending
     /// epoch whatever the caller asked about encryption. There is no
-    /// ChangeCipherSpec in DTLS 1.3 (RFC 9147 §5), and application data
-    /// does not come this way. Returns whether this is a DTLS connection.
+    /// ChangeCipherSpec in DTLS 1.3 (RFC 9147 §5). DTLS 1.2 queues CCS in
+    /// its flight; application data does not come this way. Returns whether
+    /// this is a DTLS connection.
     pub(crate) fn send_to_dtls(&mut self, payload: &MessagePayload<'_>) -> bool {
         let Some(dtls) = &mut self.dtls else {
             return false;
         };
         match payload {
             MessagePayload::Handshake { encoded, .. } => dtls.queue_handshake(encoded.bytes()),
+            #[cfg(feature = "tls12")]
+            MessagePayload::ChangeCipherSpec(_) if dtls.is_v12() => dtls.queue_v12_ccs(),
             MessagePayload::Alert(alert) => dtls.queue_alert(alert.level, alert.description),
             _ => {}
         }

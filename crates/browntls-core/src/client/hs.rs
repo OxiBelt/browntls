@@ -235,7 +235,12 @@ impl State<ClientConnectionData> for ExpectServerHello {
         trace!("We got ServerHello {:#?}", server_hello);
 
         let config = &self.input.config;
-        let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3);
+        let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3)
+            && cx
+                .common
+                .dtls
+                .as_ref()
+                .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
 
         // RFC 9846 §4.3.1: version negotiation. A supported_versions value
         // we did not offer, or one below TLS 1.3, is illegal_parameter.
@@ -274,7 +279,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
 
         // RFC 9001 §4.2: QUIC requires TLS 1.3; we offered nothing else.
         crate::quic::tls::require_tls13(cx.common, version)?;
-        crate::tls13::dtls::require_tls13(cx.common, version)?;
+        crate::tls13::dtls::require_enabled_version(cx.common, version)?;
 
         // RFC 8446 §4.2.10: a server that answers a 0-RTT offer with TLS 1.2
         // cannot have read the early data; fail rather than fall back.
@@ -435,7 +440,22 @@ impl State<ClientConnectionData> for ExpectServerHello {
             other => self.input.ech = other,
         }
 
+        #[cfg(feature = "tls12")]
+        if version == ProtocolVersion::TLSv1_2
+            && let Some(dtls) = &mut cx.common.dtls
+        {
+            dtls.select_version(version);
+            self.transcript_buffer = self.transcript_buffer.for_dtls12(dtls.outgoing_hello_seq());
+        }
         let mut transcript = self.transcript_buffer.start_hash(suite.hash_provider());
+        #[cfg(feature = "tls12")]
+        if version == ProtocolVersion::TLSv1_2 && cx.common.is_dtls() {
+            let seq = cx.common.dtls.as_ref().map_or(0, |d| d.received_seq);
+            transcript.add(&crate::dtls::canonical12(handshake_bytes(&m), seq));
+        } else {
+            transcript.add_message(&m);
+        }
+        #[cfg(not(feature = "tls12"))]
         transcript.add_message(&m);
 
         let randoms = ConnectionRandoms::new(self.input.random, server_hello.random);
@@ -699,7 +719,23 @@ impl ExpectServerHelloOrHelloRetryRequest {
 }
 
 impl State<ClientConnectionData> for ExpectServerHelloOrHelloRetryRequest {
-    fn handle(self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+    #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
+    fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        #[cfg(feature = "tls12")]
+        if let MessagePayload::Handshake {
+            parsed:
+                HandshakeMessagePayload(HandshakePayload::Unknown((
+                    crate::enums::HandshakeType::HelloVerifyRequest,
+                    body,
+                ))),
+            ..
+        } = &m.payload
+        {
+            self.next.transcript_buffer = crate::dtls::retry_client_hello(cx.common, body.bytes())?;
+            self.next.input.resuming = None;
+            self.next.offered_psks.clear();
+            return Ok(Box::new(self.next));
+        }
         match &m.payload {
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHello(..)),

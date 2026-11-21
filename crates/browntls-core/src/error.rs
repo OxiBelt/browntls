@@ -472,9 +472,10 @@ pub enum PeerIncompatible {
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).
     ExternalPskRequired,
-    /// On a DTLS connection, the peer offered or selected a version other
-    /// than DTLS 1.3, the only DTLS version implemented.
+    /// The default DTLS endpoint policy requires DTLS 1.3.
     Tls13RequiredForDtls,
+    /// The peer selected a version disabled by explicit DTLS endpoint policy.
+    DtlsVersionDisabledByEndpoint,
     /// The peer sent no `external_id_hash` although one is expected and
     /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §3.2).
     ///

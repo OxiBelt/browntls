@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library,
-with DTLS 1.3 over datagrams, written from scratch in Rust, targeting the
+with DTLS over datagrams, written from scratch in Rust, targeting the
 feature level of rustls 0.23, with its own cryptographic primitives behind a
 pluggable provider interface.
 Implementation status is tracked in [Status](#status); the
@@ -2510,8 +2510,11 @@ low-level, sans-I/O API: `dtls::ClientConnection` and
 (which decrypts application data in place and returns its ranges), produce
 whole datagrams with `write_datagram`, and leave the socket and the clock to
 the caller, who passes a monotonic time to every call and fires
-`handle_timeout` once `next_timeout` has passed. Only DTLS 1.3 is
-implemented; there is no DTLS 1.2.
+`handle_timeout` once `next_timeout` has passed. DTLS 1.3 is the default.
+Explicit endpoint policy can enable DTLS 1.2 full certificate handshakes
+with the `tls12` feature; see [DTLS 1.2](DTLS12.md) for the API, protocol
+boundaries, disabled resumption and outstanding qualification. The following
+record and handshake details describe DTLS 1.3.
 
 - Handshake: the TLS 1.3 state machines with the DTLS hello encoding
   (`legacy_cookie`, DTLS version numbers, an empty session ID that is never
@@ -2580,7 +2583,8 @@ implemented; there is no DTLS 1.2.
 With the `std` feature, `dtls::UdpClient` and `dtls::UdpServer` run these
 connections over `std::net::UdpSocket` with blocking calls. While a call
 blocks it retransmits and acknowledges as the connections ask, on a clock
-that starts when the object is made.
+that starts when the object is made, unless a client retains an existing
+clock origin.
 
 - `UdpClient` holds one connection over a socket connected to its server.
   `connect` returns once the handshake completes (`from_connection` pairs a
@@ -2590,7 +2594,13 @@ that starts when the object is made.
   datagrams and returns 0 once the server sent close_notify. `connection_mut`
   reaches the connection, for example to refresh its keys, and
   `into_parts` returns it with the socket, dropping what was received and
-  not yet returned.
+  not yet returned. `from_connection` starts a clock at zero and is for a
+  connection not yet driven. To rewrap an in-progress connection, use
+  `into_parts_with_clock` and `from_connection_with_clock`: they transfer
+  the original `Instant`, so retained retransmission and acknowledgement
+  deadlines include time spent outside the wrapper. Low-level I/O between
+  wrappers must use durations measured as `start.elapsed()`. Neither parts
+  method transfers the read timeout or buffered application data.
 - `UdpServer` holds many clients on one socket and tells them apart by their
   address only. `next_event` returns the next `ServerEvent`, and only for
   clients that completed a handshake: `Connected`, `Received` (one datagram of
@@ -2599,7 +2609,12 @@ that starts when the object is made.
   (close_notify, then the connection is forgotten), `remove` (forgotten without
   a word) and `connection_mut` act on a connected client. A ClientHello from the
   address of an existing connection, such as a client restarted on the same
-  port, is ignored until that connection is removed.
+  port, is ignored until that connection is removed. Queued events precede
+  further socket or timer work. If Finished, data and close_notify arrive
+  together, the connection remains available through `Connected` and
+  `Received`, and is removed when `Closed` is returned. Closing a retained
+  connection discards its queued events. `remove` also discards queued
+  events for an address whose connection has already been removed.
 - Cookies: every datagram from an address without a connection goes to a
   `dtls::Acceptor`, so the server configuration needs
   `hello_retry_cookies`, and a client costs nothing but one
@@ -2634,14 +2649,20 @@ Evidence: in-memory handshakes between browntls endpoints over a simulated
 network with loss, duplication, reordering, corruption and small datagrams
 on both providers (`crates/browntls-core/tests/cases/dtls.rs`), unit tests
 of the record, reassembly, replay and hello codecs, and the `tls_dtls` fuzz
-target ([`fuzz/`](../fuzz/README.md)). The blocking API is tested over
-loopback sockets on both providers
-(`crates/browntls-core/tests/cases/dtls_udp.rs`) and by the `tls_dtls_udp`
-fuzz target, which drives a server and several clients over loopback
-through fuzz-chosen calls and junk datagrams; loopback neither loses nor
-reorders datagrams, so its retransmissions are exercised only by the
-simulated network of the sans-I/O tests. No other DTLS implementation has
-been tested against.
+target ([`fuzz/`](../fuzz/README.md)). The blocking API has tests over IPv4
+and IPv6 loopback sockets on both providers
+(`crates/browntls-core/tests/cases/dtls_udp.rs`). The `tls_dtls_udp` fuzz
+target drives a server and several clients over loopback through fuzz-chosen
+calls and junk datagrams. Targeted blocking regressions
+cover combined Finished/data/close events, explicit peer removal and a
+retained overdue retransmission after client rewrapping; the IPv6 test
+asserts the cookie contains the source address and port. Scoped IPv6
+addresses are not covered. Loopback neither loses nor reorders datagrams;
+broader loss recovery is exercised by the simulated network of the
+sans-I/O tests. The
+[Docker DTLS suite](../tests/e2e/README.md#dtls-13-interoperability)
+covers mutually authenticated full DTLS 1.3 handshakes against wolfSSL in
+both roles, with ECDSA P-256, application data and `close_notify`.
 
 ### Cargo features (`browntls-core`)
 
@@ -3187,7 +3208,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128 with and without vector crypto, and VLEN 256 and 1024 with vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), DTLS 1.3 handshakes between browntls endpoints over a simulated lossy, reordering and corrupting network (`crates/browntls-core/tests/cases/dtls.rs`; no DTLS interoperability test yet), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), DTLS 1.3 handshakes between browntls endpoints over a simulated lossy, reordering and corrupting network (`crates/browntls-core/tests/cases/dtls.rs` and the Docker wolfSSL peer), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
 | Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed; `browntls` defines no function of its own) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
 | Facade | `browntls` adds paths and features, no behaviour: a handshake through each of its three paths (the root, `browntls::tokio`, and `browntls::ktls` against the running kernel), probes that the forwarded features reach the crates behind it, the feature sets an application picks in their own CI job, and a manifest check of the feature tables (`crates/browntls/tests/`, `tests/scripts/check_facade_features.py`; see [Facade crate](#facade-tests)) |

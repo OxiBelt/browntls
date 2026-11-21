@@ -2,8 +2,6 @@
 //!
 //! No task is spawned. The caller must poll [`SessionDriver::run`] alongside
 //! listener and session operations, with Tokio's I/O and time drivers enabled.
-//! Integration must enable Tokio `sync`, declare this module, and re-export
-//! its public types from the parent DTLS module.
 #![deny(unsafe_code)]
 
 use std::collections::BTreeMap;
@@ -16,6 +14,7 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use browntls_core::ServerConfig;
+use browntls_core::dtls::Versions;
 use tokio::net::UdpSocket;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
@@ -146,8 +145,19 @@ impl UdpListener {
         socket: UdpSocket,
         limits: SessionLimits,
     ) -> io::Result<(Self, SessionDriver)> {
+        Self::new_with_versions(config, socket, Versions::default(), limits)
+    }
+
+    /// Wraps an unconnected socket with an explicit DTLS version policy.
+    /// Returns the listener and its driver without starting any task.
+    pub fn new_with_versions(
+        config: Arc<ServerConfig>,
+        socket: UdpSocket,
+        versions: Versions,
+        limits: SessionLimits,
+    ) -> io::Result<(Self, SessionDriver)> {
         let limits = limits.validate()?;
-        let mut server = UdpServer::new(config, socket)?;
+        let mut server = UdpServer::new_with_versions(config, socket, versions)?;
         server.set_max_peers(limits.max_sessions);
         let (accepted_tx, accepted) = mpsc::channel(limits.accept_queue);
         let (commands_tx, commands) = mpsc::channel(limits.command_queue);

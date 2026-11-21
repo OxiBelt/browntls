@@ -22,8 +22,11 @@ use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
-fn config(pki: &Pki) -> Arc<ServerConfig> {
-    let mut config = pki.server_config_with_client_auth(&browntls_core::version::TLS13);
+fn config(
+    pki: &Pki,
+    version: &'static browntls_core::SupportedProtocolVersion,
+) -> Arc<ServerConfig> {
+    let mut config = pki.server_config_with_client_auth(version);
     #[cfg(feature = "native")]
     let cookies = Arc::new(
         browntls_core::ticketer::TicketRotator::new(3600, || {
@@ -43,8 +46,12 @@ fn config(pki: &Pki) -> Arc<ServerConfig> {
 async fn listener(pki: &Pki) -> (SocketAddr, UdpListener, SessionDriver) {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
-    let (listener, driver) =
-        UdpListener::new(config(pki), socket, SessionLimits::default()).unwrap();
+    let (listener, driver) = UdpListener::new(
+        config(pki, &browntls_core::version::TLS13),
+        socket,
+        SessionLimits::default(),
+    )
+    .unwrap();
     (address, listener, driver)
 }
 
@@ -175,6 +182,45 @@ async fn retained_stale_handle_cannot_send_to_or_close_a_reconnected_peer() {
         assert_eq!(&buf[..9], b"new reply");
         drop(old);
         drop(current);
+        drop(listener);
+    })
+    .await;
+}
+
+#[cfg(feature = "tls12")]
+#[tokio::test]
+async fn session_listener_accepts_opt_in_dtls12() {
+    use browntls_core::{dtls::Versions, version::TLS12};
+
+    let pki = Pki::new();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let (mut listener, driver) = UdpListener::new_with_versions(
+        config(&pki, &TLS12),
+        socket,
+        Versions::V1_2,
+        SessionLimits::default(),
+    )
+    .unwrap();
+    let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client_socket.connect(address).await.unwrap();
+    let mut client = UdpClient::new_with_versions(
+        Arc::new(pki.client_config_with_cert(&TLS12)),
+        ServerName::try_from("localhost").unwrap(),
+        client_socket,
+        Versions::V1_2,
+    )
+    .unwrap();
+    drive(driver, async move {
+        let mut session = accept(&mut listener, &mut client).await;
+        client.send(b"legacy datagram").await.unwrap();
+        assert_eq!(
+            session.recv().await.unwrap(),
+            Some(b"legacy datagram".to_vec())
+        );
+        session.close().await.unwrap();
+        let mut out = [0; 32];
+        assert_eq!(client.recv(&mut out).await.unwrap(), Recv::Closed);
         drop(listener);
     })
     .await;

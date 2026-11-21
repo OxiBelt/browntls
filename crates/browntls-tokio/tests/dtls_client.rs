@@ -298,6 +298,24 @@ async fn construction_rejects_an_unconnected_socket() {
 }
 
 #[tokio::test]
+async fn closing_an_incomplete_handshake_terminates_later_operations() {
+    let pki = Pki::new();
+    let (socket, _silent_peer) = sockets().await;
+    let mut client =
+        UdpClient::new(Arc::new(pki.client_config(&TLS13)), localhost(), socket).unwrap();
+    assert_eq!(client.timeout(), None);
+    timeout(LIMIT, async {
+        client.close().await.unwrap();
+        let error = client.complete_handshake().await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        let error = client.recv(&mut [0; 8]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    })
+    .await
+    .expect("local close must stop an incomplete handshake");
+}
+
+#[tokio::test]
 async fn authentication_failure_stays_a_protocol_error() {
     timeout(LIMIT, async {
         let pki = Pki::new();

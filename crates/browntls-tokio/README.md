@@ -152,8 +152,10 @@ the application's data; the next operation first drains pending output.
 Retrying the plaintext can therefore duplicate an application message. DTLS
 does not reliably deliver application data. Close sends `close_notify`
 without waiting for acknowledgement, can be resumed after cancellation,
-and forbids later sends while allowing receives. Dropping the client drops
-buffered state and closes its socket without performing asynchronous I/O.
+and forbids later sends. Established clients can still receive. If a client
+closes during the handshake, later handshake and receive calls return
+`ConnectionAborted`. Dropping the client releases the socket and buffered
+state.
 
 `dtls::UdpServer` serves multiple peers on one unconnected Tokio UDP
 socket. Call `next_event` to receive `Connected`, `Received`, `Closed`,
@@ -168,6 +170,10 @@ Each accepted `UdpSession` receives whole datagrams and can send and close
 independently. `SessionLimits` bounds retained sessions and all queues.
 Sends wait for command capacity. A full receive queue drops newly arriving
 application datagrams while retaining close and error state.
+
+The client, event server, and session listener default to DTLS 1.3. Use `new_with_versions` with
+`browntls::dtls::Versions` to enable DTLS 1.2 explicitly. The certificates
+and suites in the shared TLS configuration still determine the handshake.
 
 ## Choosing the configuration per ClientHello
 

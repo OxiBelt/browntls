@@ -30,6 +30,11 @@ use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 
 /// One position in the handshake state machine.
 pub(crate) trait State<Data>: Send + Sync {
+    #[cfg(feature = "tls12")]
+    fn expects_dtls12_ccs(&self) -> bool {
+        false
+    }
+
     /// Handles `message`, returning the next state.
     fn handle(
         self: Box<Self>,
@@ -502,7 +507,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         self.common_state.pending_revocation = None;
         self.common_state.pending_certificate_url = None;
         self.data
-            .on_fatal_error(self.common_state.negotiated_version);
+            .on_fatal_error(self.common_state.protocol_version());
         self.state = Err(err.clone());
         err
     }

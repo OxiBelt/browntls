@@ -132,7 +132,11 @@ suites, policy binding, cross-transport cache separation and invalidation,
 legacy custom stores, expiry, cookie ordering, mixed-version negotiation,
 empty-ID ticket acceptance and decline, failed ticket renewal, deterministic
 abbreviated-flight loss/reordering, and immediate client closure. Existing
-DTLS 1.3 cases remain in both targets.
+DTLS 1.3 cases remain in both targets. On a DTLS 1.2-only endpoint the stateless
+acceptor can challenge an initial ClientHello split across datagrams before
+allocating peer state. This supports large certificate-bound session tickets.
+A mixed endpoint needs the first ClientHello in one datagram for version
+selection.
 
 The [Docker interoperability tests](../tests/e2e/README.md#dtls-interoperability)
 cover mutual certificate authentication with OpenSSL in both roles, with

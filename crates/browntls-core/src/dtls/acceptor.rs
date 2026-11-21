@@ -87,6 +87,34 @@ impl Acceptor {
         let Some((header, fragment)) = first_client_hello(datagram) else {
             return Ok(Accepted::Ignored);
         };
+        #[cfg(feature = "tls12")]
+        if header.message_seq == 0
+            && header.fragment_offset == 0
+            && header.fragment_length < header.length
+            && header.length <= crate::msgs::handshake::MAX_HANDSHAKE_SIZE
+            && fragment.len() >= 34
+            && self.versions.allows(crate::ProtocolVersion::TLSv1_2)
+            && !self.versions.allows(crate::ProtocolVersion::TLSv1_3)
+        {
+            // The address-only cookie needs no transcript. Challenge a
+            // fragmented first hello without keeping pre-cookie state.
+            let encoded =
+                crate::server::cookie::dtls12_hello_verify_request(&self.config, peer_address)?;
+            let challenge = super::v12::canonical(&encoded, 0);
+            if wire::PLAINTEXT_HEADER_LEN + challenge.len() <= datagram.len() {
+                wire::put_plaintext_header(
+                    out,
+                    ContentType::Handshake,
+                    crate::ProtocolVersion::DTLSv1_2,
+                    0,
+                    0,
+                    challenge.len() as u16,
+                );
+                out.extend_from_slice(&challenge);
+                return Ok(Accepted::Retry);
+            }
+            return Ok(Accepted::Ignored);
+        }
         let retried = match header.message_seq {
             0 => false,
             // Nothing is kept for a second ClientHello unless it starts

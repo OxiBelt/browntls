@@ -85,6 +85,89 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 }
 ```
 
+## DTLS over UDP
+
+The optional `dtls` feature provides `dtls::UdpClient` over a Tokio
+`UdpSocket` the application binds and connects. Through the facade, enable
+`browntls`'s `dtls` feature (which also enables `tokio`). This is a datagram
+API, separate from the stream connector and acceptor above.
+
+```rust,no_run
+# #[cfg(feature = "dtls")]
+# async fn example(config: std::sync::Arc<browntls_tokio::browntls::ClientConfig>) -> std::io::Result<()> {
+use browntls_tokio::dtls::{Recv, UdpClient};
+use browntls_tokio::browntls::pki_types::ServerName;
+use std::time::Duration;
+use tokio::net::UdpSocket;
+
+let socket = UdpSocket::bind("127.0.0.1:0").await?;
+socket.connect("127.0.0.1:4433").await?;
+let name = ServerName::try_from("localhost").expect("valid DNS name");
+let mut client = UdpClient::new(config, name, socket)?;
+client.set_timeout(Some(Duration::from_secs(10)));
+client.complete_handshake().await?;
+assert!(!client.connection().is_handshaking());
+client.send(b"hello").await?;
+let mut buf = [0; 2048];
+match client.recv(&mut buf).await? {
+    Recv::Data(len) => { /* buf[..len], including a possible empty datagram */ }
+    Recv::Closed => { /* authenticated close_notify */ }
+}
+client.close().await?;
+# Ok(())
+# }
+```
+
+The client takes ownership of the socket and starts no background task.
+Enable the runtime's I/O and time drivers. Handshake, send, receive and close
+drive core's datagrams and timers using elapsed `tokio::time::Instant` from
+one fixed origin. `set_timeout` bounds each complete operation, including an
+implicit handshake and protocol writes; incoming traffic does not restart
+the deadline. Zero expires immediately. Without that limit core's handshake
+retransmission limit still applies. Idle clients do no work; call an I/O
+operation to process messages or overdue timers.
+
+`new` and `from_connection` return before I/O; `connect` is a convenience
+constructor that completes the handshake. Use the former constructors to
+retain the client when cancelling a handshake. A `from_connection` connection
+must be fresh, with no timers already driven under another clock origin.
+`connection()` exposes negotiated parameters directly without a wrapper
+cache. Live OCSP queries return `Unsupported` without bypassing verification.
+
+Each send seals one whole application datagram. Oversized data returns
+`InvalidInput`; inspect `connection().max_application_data()` after the
+handshake for the current limit. Receive keeps whole records from one UDP
+payload until consumed. A short application buffer returns `InvalidInput`
+and retains the record; empty records return `Recv::Data(0)`, while only an
+authenticated close returns `Recv::Closed`. Ordinary UDP payloads are read
+into a 65,535-byte buffer; IPv6 jumbograms are unsupported. The receive side
+never accumulates another UDP payload while plaintext from the current one
+remains. Each poll does a bounded burst of work and then yields.
+
+Cancellation and operation timeouts retain the client's protocol state,
+plaintext ranges and pending ciphertext. Sealed ciphertext stays byte for
+byte unchanged until the socket accepts the entire datagram, including after
+an I/O error. A cancelled or failed send may already have accepted or sent
+the application's data; the next operation first drains pending output.
+Retrying the plaintext can therefore duplicate an application message. DTLS
+does not reliably deliver application data. Close sends `close_notify`
+without waiting for acknowledgement, can be resumed after cancellation,
+and forbids later sends. Established clients can still receive. If a client
+closes during the handshake, later handshake and receive calls return
+`ConnectionAborted`. Dropping the client releases the socket and buffered
+state.
+
+`dtls::UdpServer` serves multiple peers on one unconnected Tokio UDP
+socket. Call `next_event` to receive `Connected`, `Received`, `Closed`,
+and `Failed` events. `send_to` and `close` address a peer by its socket
+address. The server requires a cookie sealer. It bounds pending handshakes,
+established peers, and queued datagrams. Poll an operation to drive both
+socket I/O and retransmission timers.
+
+Both adapters default to DTLS 1.3. Use `new_with_versions` with
+`browntls::dtls::Versions` to enable DTLS 1.2 explicitly. The certificates
+and suites in the shared TLS configuration still determine the handshake.
+
 ## Choosing the configuration per ClientHello
 
 `LazyConfigAcceptor` reads the ClientHello before the server picks a
@@ -377,6 +460,10 @@ counts still does).
 
 `ocsp` enables `browntls_tokio::revocation` (see above). It enables Tokio's
 `time` feature for the deadlines, which adds no dependency.
+
+`dtls` enables the datagram client described above and Tokio's `net` and
+`time` features. It adds no dependency and leaves the default feature set
+unchanged.
 
 ## Minimum supported Rust and Tokio versions
 

@@ -218,6 +218,7 @@ impl CompleteServerHelloHandling {
         cx.common
             .start_encryption_tls12(&secrets, Side::Client, mac_order(self.using_etm));
         cx.common.peer_certificates = Some(resuming.server_cert_chain().clone());
+        cx.common.matched_service_identity = resuming.matched_service_identity.clone();
         cx.common.handshake_kind = Some(HandshakeKind::Resumed);
         if let Some(dtls) = &mut cx.common.dtls {
             dtls.set_v12_resuming();

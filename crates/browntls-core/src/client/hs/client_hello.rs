@@ -118,16 +118,15 @@ fn find_session(
         return None;
     }
 
-    // The session was authenticated under another configuration's server
-    // certificate verifier or client credentials (a shared store): resuming
-    // would skip this configuration's verifier entirely.
-    let compatible = match &found.value {
-        ClientSessionValue::Tls13(inner) => inner.compatible_config(&config.session_binding()),
+    let session = match &found.value {
+        ClientSessionValue::Tls13(inner) => &inner.common,
         #[cfg(feature = "tls12")]
-        ClientSessionValue::Tls12(inner) => inner.compatible_config(&config.session_binding()),
+        ClientSessionValue::Tls12(inner) => &inner.common,
     };
-    if !compatible {
-        debug!("Not resuming session: established under another verifier or client credentials");
+    if !session.compatible_config(&config.session_binding())
+        || !session.compatible_server_identity(server_name, cx.data.service_identity.as_deref())
+    {
+        debug!("Not resuming session: authentication policy differs");
         return None;
     }
 
@@ -585,19 +584,23 @@ pub(super) fn emit_client_hello_for_retry(
     // clear after the server rejected ECH at the HelloRetryRequest (RFC
     // 9849 §6.1.5): their identities belong to the inner hello.
     let ech_rejected_at_retry = matches!(input.ech, Some(ClientEch::RejectedAtRetry { .. }));
-    let external_offers =
-        if supports_tls13 && !config.external_psks.is_empty() && !ech_rejected_at_retry {
-            crate::psk::client_external_offers(
-                &config.external_psks,
-                &config.provider.cipher_suites,
-                committed_suite.and_then(|s| s.tls13()),
-                &input.server_name,
-                &input.alpn_protocols,
-                Protocol::of(cx.common),
-            )
-        } else {
-            Vec::new()
-        };
+    let can_offer_external = cx.data.service_identity.is_none() || config.cert_with_extern_psk;
+    let external_offers = if supports_tls13
+        && !config.external_psks.is_empty()
+        && !ech_rejected_at_retry
+        && can_offer_external
+    {
+        crate::psk::client_external_offers(
+            &config.external_psks,
+            &config.provider.cipher_suites,
+            committed_suite.and_then(|s| s.tls13()),
+            &input.server_name,
+            &input.alpn_protocols,
+            Protocol::of(cx.common),
+        )
+    } else {
+        Vec::new()
+    };
     let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
     if cert_with_extern_psk {
         exts.cert_with_extern_psk = Some(());

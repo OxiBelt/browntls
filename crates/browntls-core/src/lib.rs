@@ -158,6 +158,7 @@ pub mod client {
     mod common;
     pub(super) mod handy;
     mod hs;
+    mod identity;
     #[cfg(feature = "tls12")]
     mod tls12;
     pub(crate) mod tls13;
@@ -173,12 +174,16 @@ pub mod client {
     #[cfg(feature = "std")]
     pub use handy::ClientSessionMemoryCache;
     pub use handy::NoClientSessionStorage;
+    pub use identity::ClientServerIdentity;
 
     /// Dangerous configuration that must be audited and used with extreme care.
     pub mod danger {
         pub use super::builder::danger::DangerousClientConfigBuilder;
         pub use super::client_conn::danger::DangerousClientConfig;
-        pub use crate::verify::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+        pub use crate::verify::{
+            CertificateIdentity, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+            ServerCertificateVerification,
+        };
     }
 
     #[cfg(feature = "tls12")]
@@ -186,13 +191,14 @@ pub mod client {
     pub use crate::msgs::persist::Tls13ClientSessionValue;
     pub use crate::webpki::{
         ServerCertVerifierBuilder, VerifierBuilderError, WebPkiServerVerifier,
-        verify_server_cert_signed_by_trust_anchor, verify_server_name,
+        verify_server_cert_signed_by_trust_anchor, verify_server_identity, verify_server_name,
     };
 }
 
-pub use client::ClientConfig;
+pub use browntls_pki::{ReferenceIdentifier, ServiceIdentity, SrvId, UriId, WildcardPolicy};
 #[cfg(feature = "std")]
 pub use client::ClientConnection;
+pub use client::{ClientConfig, ClientServerIdentity};
 
 /// Items for use by TLS servers.
 pub mod server {

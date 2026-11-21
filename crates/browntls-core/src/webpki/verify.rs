@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use browntls_pki::{
-    CertificateDer, EndEntityCert, ServerName, SignatureVerificationAlgorithm, TrustAnchor,
-    UnixTime,
+    CertificateDer, EndEntityCert, ReferenceIdentifier, ServerName, ServiceIdentity,
+    SignatureVerificationAlgorithm, TrustAnchor, UnixTime,
 };
 
 use super::pki_error;
@@ -94,6 +94,16 @@ pub fn verify_server_name(
     cert.0
         .verify_is_valid_for_subject_name(server_name)
         .map_err(pki_error)
+}
+
+/// Matches the leaf SANs against the caller's RFC 9525 reference set.
+///
+/// Authenticate the certificate path separately before using the result.
+pub fn verify_server_identity<'a>(
+    cert: &ParsedCertificate<'_>,
+    identity: &'a ServiceIdentity,
+) -> Result<&'a ReferenceIdentifier, Error> {
+    cert.0.verify_service_identity(identity).map_err(pki_error)
 }
 
 /// Verifies that `cert`, with `intermediates`, chains to one of `roots` at

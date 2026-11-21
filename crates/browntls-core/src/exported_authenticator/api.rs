@@ -73,9 +73,22 @@ fn client_validate(
             &offered,
             &data.authenticators,
             |ee, intermediates| {
-                verifier
-                    .verify_server_cert(ee, intermediates, &data.server_name, &[], now)
-                    .map(|_| ())
+                let identity = data.certificate_identity(&data.server_name);
+                if data.service_identity.is_none() {
+                    return verifier
+                        .verify_server_cert(ee, intermediates, &data.server_name, &[], now)
+                        .map(|_| ());
+                }
+                let verification = verifier.verify_server_cert_with_identity(
+                    ee,
+                    intermediates,
+                    identity,
+                    &[],
+                    now,
+                    false,
+                )?;
+                identity.matched_reference(verification.matched_reference)?;
+                crate::revocation::require_local(verification.revocation).map(|_| ())
             },
             |msg, ee, dss| verifier.verify_tls13_signature(msg, ee, dss),
         )?

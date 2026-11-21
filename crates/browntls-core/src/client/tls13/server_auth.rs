@@ -326,17 +326,28 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
         }
 
         let now = self.config.current_time()?;
-        let (check, transparency_status) = self
+        let identity = cx.data.certificate_identity(&self.server_name);
+        let verification = self
             .config
             .verifier()
-            .verify_server_cert_with_transparency(
+            .verify_server_cert_with_identity(
                 end_entity,
                 intermediates,
-                &self.server_name,
+                identity,
                 &self.server_cert.evidence(),
                 now,
+                true,
             )
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
+        let matched_identity = if cx.data.ech_status == EchStatus::Rejected {
+            None
+        } else {
+            identity
+                .matched_reference(verification.matched_reference)
+                .map_err(|err| send_cert_path_error_alert(cx.common, err))?
+        };
+        let transparency_status = verification.transparency;
+        let check = verification.revocation;
 
         let message = construct_server_verify_message(&handshake_hash);
         let (sig_verified, delegated_credential_expiry) = match &self.delegated_credential {
@@ -395,6 +406,7 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
             cx.data.delegated_credential = self.delegated_credential;
             cx.data.delegated_credential_expiry = delegated_credential_expiry;
             cx.common.peer_certificates = Some(self.server_cert.cert_chain);
+            cx.common.matched_service_identity = matched_identity;
             cx.common.peer_revocation_status = status;
             cx.data.transparency.info = self.server_cert.transparency_info;
             cx.data.transparency.status = transparency_status;

@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{DnsName, UnixTime};
+use browntls_pki::{DnsName, ReferenceIdentifier, ServerName, ServiceIdentity, UnixTime};
 
 use super::base::{PayloadU8, PayloadU16};
 use super::codec::{Codec, Reader};
@@ -325,6 +325,9 @@ pub struct ClientSessionCommon {
     epoch: u64,
     lifetime_secs: u32,
     server_cert_chain: Arc<CertificateChain<'static>>,
+    routing_name: Option<ServerName<'static>>,
+    service_identity: Option<Arc<ServiceIdentity>>,
+    pub(crate) matched_service_identity: Option<ReferenceIdentifier>,
     /// Identity of the verifier that authenticated the server. A `Weak`
     /// keeps the allocation (so its address cannot be reused by another
     /// verifier while the session lives) without keeping the verifier
@@ -349,6 +352,9 @@ impl ClientSessionCommon {
             epoch: time_now.as_secs(),
             lifetime_secs: lifetime_secs.min(MAX_TICKET_LIFETIME),
             server_cert_chain,
+            routing_name: None,
+            service_identity: None,
+            matched_service_identity: None,
             server_cert_verifier: Arc::downgrade(binding.server_cert_verifier),
             client_creds: Arc::downgrade(binding.client_creds),
         }
@@ -368,6 +374,31 @@ impl ClientSessionCommon {
             self.client_creds.as_ptr(),
             Arc::as_ptr(binding.client_creds),
         )
+    }
+
+    pub(crate) fn bind_server_identity(
+        &mut self,
+        routing_name: &ServerName<'static>,
+        service_identity: Option<&Arc<ServiceIdentity>>,
+        matched: Option<&ReferenceIdentifier>,
+    ) {
+        self.routing_name = Some(routing_name.clone());
+        self.service_identity = service_identity.cloned();
+        self.matched_service_identity = matched.cloned();
+    }
+
+    pub(crate) fn compatible_server_identity(
+        &self,
+        routing_name: &ServerName<'_>,
+        service_identity: Option<&ServiceIdentity>,
+    ) -> bool {
+        self.routing_name
+            .as_ref()
+            .is_none_or(|saved| saved == routing_name)
+            && self.service_identity.as_deref() == service_identity
+            && (service_identity.is_none()
+                || (self.matched_service_identity.is_some()
+                    && !self.server_cert_chain.0.is_empty()))
     }
 
     pub(crate) fn server_cert_chain(&self) -> &CertificateChain<'static> {

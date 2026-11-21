@@ -217,9 +217,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   both client and server in Docker. Resumption and loss recovery are tested
   between browntls endpoints. The opt-in
   [DTLS 1.2 certificate handshake layer](DTLS12.md) is tested on both
-  providers and against OpenSSL in Docker. DTLS 1.2 resumption is disabled.
-  The low-level DTLS 1.3 API supports opt-in connection IDs. Deferred DTLS
-  features include DTLS 1.2 CID record protection, return routability checks,
+  providers and against OpenSSL in Docker. DTLS 1.2 session ID and RFC 5077
+  ticket resumption are opt-in and exercised between browntls peers.
+  CID and return routability checks are opt-in. Deferred DTLS features include
   0-RTT, Encrypted Client Hello or post-handshake client authentication,
   through the low-level datagram API or the blocking `std` API; there is
   no Tokio API. A cookie is bound to whatever address bytes the caller

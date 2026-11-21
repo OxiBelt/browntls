@@ -472,8 +472,13 @@ impl State<ClientConnectionData> for ExpectServerHello {
 
         match suite {
             SupportedCipherSuite::Tls13(suite) => {
-                // RFC 8446 §4.1.3: the session ID must be echoed exactly.
-                if server_hello.session_id != self.input.session_id {
+                // RFC 9147 section 5: DTLS 1.3 never echoes an old ID.
+                let expected_id = if cx.common.is_dtls() {
+                    SessionId::empty()
+                } else {
+                    self.input.session_id
+                };
+                if server_hello.session_id != expected_id {
                     return Err(cx.common.send_fatal_alert(
                         AlertDescription::IllegalParameter,
                         PeerMisbehaved::ServerEchoedCompatibilitySessionId,
@@ -588,7 +593,12 @@ impl ExpectServerHelloOrHelloRetryRequest {
                 PeerMisbehaved::IllegalServerHelloLegacyVersion,
             ));
         }
-        if hrr.session_id != self.next.input.session_id {
+        let expected_id = if cx.common.is_dtls() {
+            SessionId::empty()
+        } else {
+            self.next.input.session_id
+        };
+        if hrr.session_id != expected_id {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::IllegalHelloRetryRequestWithWrongSessionId,
@@ -742,7 +752,14 @@ impl State<ClientConnectionData> for ExpectServerHelloOrHelloRetryRequest {
         } = &m.payload
         {
             self.next.transcript_buffer = crate::dtls::retry_client_hello(cx.common, body.bytes())?;
-            self.next.input.resuming = None;
+            // The repeated hello still offers its DTLS 1.2 session.
+            // TLS 1.3 binders, however, do not survive a legacy retry.
+            if matches!(
+                self.next.input.resuming.as_ref().map(|r| &r.value),
+                Some(ClientSessionValue::Tls13(_))
+            ) {
+                self.next.input.resuming = None;
+            }
             self.next.offered_psks.clear();
             return Ok(Box::new(self.next));
         }

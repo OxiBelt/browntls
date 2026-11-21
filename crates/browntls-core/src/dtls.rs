@@ -6,7 +6,9 @@
 //! both versions or only DTLS 1.2. Negotiation prefers 1.3 when both allow
 //! it; retransmission never downgrades. DTLS 1.2 requires EMS, uses the
 //! existing ECDHE AEAD suites and certificate authentication (including
-//! mTLS), and never resumes or stores TLS 1.2 sessions.
+//! mTLS). DTLS 1.2 resumption is separately enabled by
+//! `ServerConfig::enable_dtls12_resumption` with `tls12`, using independent
+//! client cache entries and `ServerConfig::dtls12_ticketer`.
 //!
 //! [`ClientConnection`] and [`ServerConnection`] are the low-level API: they
 //! take and produce whole datagrams and leave the transport, and the

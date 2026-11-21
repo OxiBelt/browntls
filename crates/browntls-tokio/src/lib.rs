@@ -230,6 +230,8 @@ macro_rules! ready {
 pub mod certificate_url;
 pub mod client;
 mod common;
+#[cfg(feature = "dtls")]
+pub mod dtls;
 pub mod kernel;
 #[cfg(feature = "ocsp")]
 pub mod revocation;

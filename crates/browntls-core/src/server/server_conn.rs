@@ -95,6 +95,15 @@ pub struct ServerConfig {
     /// How tickets are produced; disabled by default.
     pub ticketer: Arc<dyn ProducesTickets>,
 
+    /// DTLS 1.2 RFC 5077 tickets, disabled by default. Configure a producer
+    /// with independent keys from `ticketer` and `hello_retry_cookies`.
+    /// Also call [`Self::enable_dtls12_resumption`] after selecting policy.
+    #[cfg(feature = "tls12")]
+    pub dtls12_ticketer: Arc<dyn ProducesTickets>,
+
+    #[cfg(feature = "tls12")]
+    pub(crate) dtls12_resumption_context: Option<Arc<super::tls12::resumption::Context>>,
+
     /// Chooses the server certificate.
     pub cert_resolver: Arc<dyn ResolvesServerCert>,
 
@@ -403,6 +412,18 @@ impl ServerConfig {
     /// with the configuration or given it by an acceptor.
     pub(super) fn apply_to(&self, common: &mut CommonState) -> Result<(), Error> {
         self.check_cookie_sealer()?;
+        #[cfg(feature = "tls12")]
+        if common.is_dtls()
+            && (Arc::ptr_eq(&self.dtls12_ticketer, &self.ticketer)
+                || self
+                    .hello_retry_cookies
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &self.dtls12_ticketer)))
+        {
+            return Err(Error::General(
+                "DTLS 1.2 tickets need independent keys from TLS tickets and cookies".into(),
+            ));
+        }
         self.check_ech_role()?;
         common.set_max_fragment_size(self.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
@@ -422,6 +443,21 @@ impl ServerConfig {
             )),
             _ => Ok(()),
         }
+    }
+
+    /// Enables DTLS 1.2 session IDs and configured RFC 5077 tickets under
+    /// a fresh server authentication policy context. Clones retain it;
+    /// calling this again invalidates previous sessions for this config.
+    ///
+    /// Call after configuring the client verifier and server credentials.
+    /// Replacing either object disables resumption until this is called
+    /// again. Mutable policies must rotate this context when they change.
+    /// RNG failure leaves the previous context unchanged and returns an error.
+    #[cfg(feature = "tls12")]
+    pub fn enable_dtls12_resumption(&mut self) -> Result<(), Error> {
+        let context = super::tls12::resumption::Context::new(self)?;
+        self.dtls12_resumption_context = Some(Arc::new(context));
+        Ok(())
     }
 
     pub(super) fn current_time(&self) -> Result<UnixTime, Error> {
@@ -569,6 +605,8 @@ pub struct ServerConnectionData {
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
+    #[cfg(feature = "tls12")]
+    pub(super) dtls12_session_binding: Option<Vec<u8>>,
     /// What was decided about Encrypted Client Hello.
     pub(crate) ech: crate::ech::server::ServerEch,
     /// State for exported authenticators (RFC 9261).

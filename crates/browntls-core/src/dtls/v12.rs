@@ -25,6 +25,7 @@ pub(super) struct State {
     dec: Option<Box<dyn MessageDecrypter>>,
     pub(super) read_active: bool,
     pub(super) ccs_pending: bool,
+    pub(super) resuming: bool,
     limit: u64,
     failures: u64,
     window: ReplayWindow,
@@ -37,6 +38,7 @@ impl Default for State {
             dec: None,
             read_active: false,
             ccs_pending: false,
+            resuming: false,
             limit: 0,
             failures: 0,
             window: ReplayWindow::new(),
@@ -76,6 +78,10 @@ impl crate::common_state::CommonState {
 }
 
 impl Dtls {
+    pub(crate) fn set_v12_resuming(&mut self) {
+        self.v12.resuming = true;
+    }
+
     pub(crate) fn prepare_v12(
         &mut self,
         enc: Box<dyn MessageEncrypter>,

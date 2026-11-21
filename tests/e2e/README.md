@@ -270,3 +270,31 @@ workflow do not invoke it automatically.
 [openssl-ems]: https://docs.openssl.org/3.5/man3/SSL_get_extms_support/
 [openssl-set-session]: https://docs.openssl.org/3.5/man3/SSL_set_session/
 [openssl-session-context]: https://docs.openssl.org/3.5/man3/SSL_CTX_set_session_id_context/
+
+## Certificate with external PSK (RFC 9973)
+
+Build the browntls peer image and the pinned wolfSSL 5.9.4 independent peer,
+then run the four full handshakes:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:psk-amd64
+python3 -B tests/e2e/extern_psk.py --image browntls-e2e:psk-amd64 --build-peer
+python3 -B -m unittest discover -s tests/e2e -p 'test_extern_psk.py'
+```
+
+The runner covers browntls as client and server over TLS 1.3/TCP and
+DTLS 1.3/UDP. It requires browntls to report the negotiated
+`cert_with_extern_psk` result and peer certificate verification at the client,
+checks both application payloads, and requires wolfSSL to complete with an
+external PSK and verify the server certificate. TCP runs through
+`browntls::tokio`. wolfSSL v5.9.4 is checksum-pinned and built with PSK,
+TLS/DTLS 1.3, and certificate-with-external-PSK support.
+
+The runner creates a uniquely named Docker network and volume and removes
+those resources and its exact named containers on exit. A fresh random PSK is
+sent through the container's standard input into a temporary volume file; its
+bytes are not command-line arguments or log output. The generated CA and
+certificates and the PSK are discarded with that volume. The peer image is
+kept for reuse; select an unused `--peer-image` tag if you need to avoid
+replacing an existing local image. These opt-in cases are not added to the
+architecture matrix or its CI job.

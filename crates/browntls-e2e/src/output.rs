@@ -101,6 +101,10 @@ pub(super) fn negotiated(common: &CommonState) -> Vec<(&'static str, Value)> {
             "peer_certificates",
             Value::Num(common.peer_certificates().map_or(0, <[_]>::len)),
         ),
+        (
+            "cert_with_extern_psk",
+            Value::Bool(common.negotiated_cert_with_extern_psk()),
+        ),
     ]
 }
 

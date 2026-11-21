@@ -97,11 +97,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use browntls::client::{ClientHelloPadding, TicketRequest};
+use browntls::crypto::hash::HashAlgorithm;
 use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
 use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
 use browntls::pki_types::pem::PemObject;
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use browntls::psk::ExternalPsk;
 use browntls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use browntls::sign::CertifiedKey;
 use browntls::{
@@ -201,6 +203,8 @@ struct Options {
     /// Client and server I/O through `browntls-tokio` (`--async`).
     async_io: bool,
     dtls_cid: bool,
+    external_psk_file: Option<String>,
+    external_psk_identity: Option<String>,
 }
 
 impl Options {
@@ -245,6 +249,8 @@ impl Options {
                 "--client-ca" => o.client_ca = Some(value),
                 "--cert" => o.cert = Some(value),
                 "--key" => o.key = Some(value),
+                "--external-psk-file" => o.external_psk_file = Some(value),
+                "--external-psk-identity" => o.external_psk_identity = Some(value),
                 "--message" => o.message = Some(value),
                 "--dtls-rebind" => {
                     if !matches!(value.as_str(), "basic" | "enhanced") {
@@ -369,6 +375,23 @@ impl Options {
             }
             (None, None) => Ok(None),
             _ => Err("--cert and --key go together".into()),
+        }
+    }
+
+    /// Loads the per-run PSK from a file. Its bytes are never accepted on the
+    /// command line or included in peer output.
+    fn external_psk(&self) -> Result<Option<Arc<ExternalPsk>>> {
+        match (&self.external_psk_file, &self.external_psk_identity) {
+            (Some(path), Some(identity)) => ExternalPsk::new(
+                identity.as_bytes().to_vec(),
+                read_file(path)?,
+                HashAlgorithm::SHA256,
+            )
+            .map(Arc::new)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+            (None, None) => Ok(None),
+            _ => Err("--external-psk-file and --external-psk-identity go together".into()),
         }
     }
 }
@@ -569,6 +592,12 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    if let Some(psk) = o.external_psk()? {
+        config.external_psks = Some(Arc::new(vec![psk]));
+        config.cert_with_extern_psk = true;
+        config.require_cert_with_extern_psk = true;
+        config.require_external_psk = true;
+    }
     config.ech = ech;
     config.ech_backend = o.ech_backend;
     Ok(Arc::new(config))
@@ -703,6 +732,12 @@ fn client(o: &Options) -> Result<()> {
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    if let Some(psk) = o.external_psk()? {
+        config.external_psks.push(psk);
+        config.cert_with_extern_psk = true;
+        config.require_cert_with_extern_psk = true;
+        config.require_external_psk = true;
+    }
     config.tls13_ticket_request = o.ticket_request;
     if let Some(n) = o.padding {
         config.client_hello_padding = ClientHelloPadding::AtLeast(n);

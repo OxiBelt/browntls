@@ -459,7 +459,7 @@ Interactions with other features:
   included; it has no CT test of its own.
 - Early data is sent only on resumption or with an external PSK, before
   any server certificate arrives. A resumption evaluates no certificate;
-  an RFC 8773 handshake (certificate with an external PSK) evaluates the
+  an RFC 9973 handshake (certificate with an external PSK) evaluates the
   certificate like a full handshake, after the 0-RTT data was sent.
 - Delegated credentials (RFC 9345): the policy covers the end-entity
   certificate that signs the credential; the credential is not logged.
@@ -997,12 +997,11 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
 - Server: the first offered external PSK usable with a suite the server
   could select narrows the suite choice to the suites it is usable with (the
   server "MUST ensure that it selects a compatible PSK (if any) and cipher
-  suite"). Of the first 16 identities (a local bound on lookups and ticket
-  decryption; later ones are ignored), the first that names a usable external
+  suite"). Of the first 16 identities, the first that names a usable external
   PSK or ticket is selected and only its binder is checked, in constant time;
   a wrong binder is `decrypt_error`. An identity whose binder length is not
-  that of the key's hash is passed over. A handshake that selects an external
-  PSK sends no certificate. When a TLS 1.3 client offered a `psk_dhe_ke` PSK
+  that of the key's hash is passed over. Ordinary external PSK authentication
+  uses the key alone. When a TLS 1.3 client offered a `psk_dhe_ke` PSK
   and none was selected, a server without a certificate fails with
   `handshake_failure`; otherwise (no PSK offered, `psk_ke` only, or TLS 1.2)
   it fails as any server without a certificate does, with `unrecognised_name`
@@ -1023,20 +1022,48 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   HKDF-Extract(0, epsk), "derived psk", Hash(ImportedIdentity), L)` under the
   EPSK's hash; the server parses the identity, resolves its external identity
   and requires the same context. The EPSK's hash must be that of one of the
-  provider's TLS 1.3 suites. No published test vectors exist; the derivation
-  is checked against an independent HMAC computation and across providers.
-- Certificate authentication with an external PSK (RFC 8773,
-  `tls_cert_with_extern_psk`, 0x0021): opt-in on both sides
-  (`cert_with_extern_psk`). A client sends the extension only when it offers
-  an external PSK, and then no 0-RTT under one; a server echoes it in its
-  ServerHello only when it selected an external PSK and has a certificate,
-  and then authenticates with Certificate and CertificateVerify (and may
-  request client authentication) on top of the PSK and (EC)DHE. A client
-  rejects the extension without an external PSK (`illegal_parameter`) and,
-  with `require_cert_with_extern_psk`, a server that does not negotiate it.
-  A client that sends the extension offers no resumption ticket alongside,
-  so the server cannot skip the requested certificate by resuming instead (a
-  conservative choice, not an RFC 8773 requirement).
+  provider's TLS 1.3 suites. Stream TLS and QUIC use the TLS 1.3 target and
+  importer label. DTLS uses the DTLS 1.3 target and `dtls13` label. The
+  derivation is checked against independent HMAC computations and across
+  providers. Deployments that used browntls's earlier TLS-labelled DTLS
+  importer must upgrade both DTLS endpoints together.
+- Certificate authentication with an external PSK ([RFC 9973],
+  `tls_cert_with_extern_psk`, 0x0021) is opt-in on both sides
+  (`cert_with_extern_psk`). The client prefers a fresh handshake when it has
+  an eligible key. Its offer excludes resumption tickets and 0-RTT. The
+  server scans the full wire-bounded list for recognizable tickets, checking
+  each distinct identity once without consuming stateful tickets. A
+  recognizable ticket or a bad binder for the selected external PSK triggers
+  `illegal_parameter`. External key resolution
+  and selection remain limited to the first 16 identities. An opaque identity
+  the server cannot recognize is handled as an unknown external identity.
+  The in-memory cache reads only the stored version. Custom
+  `StoresServerSessions` implementations can override `session_version()`
+  to avoid fetching a full value for the scan.
+  The extension combines the key exchange and external PSK in the TLS key
+  schedule. Server authentication still uses Certificate and CertificateVerify
+  with a certificate or configured raw public key. The server can also request
+  client authentication. The external PSK contributes to confidentiality.
+- With ECH, the real external identity and extension are in the inner
+  ClientHello. Without ECH, an observer can associate repeated uses of the
+  same identity. Rotate identities as appropriate for the deployment. The
+  retry must repeat the extension on the effective hello or fail. Retry cookies
+  carry that decision, so an upgrade rejects old in-flight retry cookies.
+- For a client that requires fresh RFC 9973 on every connection, set
+  `cert_with_extern_psk`, `require_cert_with_extern_psk`, and
+  `require_external_psk` to `true` and use
+  `client.resumption = Resumption::disabled()`. Set
+  `server.require_cert_with_extern_psk = true` to require a fresh handshake
+  on the server too. Use a server config with a credential and an external
+  key resolver. Strict servers issue no tickets and use the configured
+  verifier for any client authentication. Both configs apply through the
+  buffered, unbuffered, Tokio, QUIC and DTLS APIs.
+- The server's resolver or acceptor can inspect the visible hello with
+  `ClientHello::offers_cert_with_extern_psk()`. Treat this as an
+  unauthenticated routing signal. On both sides
+  `CommonState::negotiated_cert_with_extern_psk()` reports fresh RFC 9973
+  after the handshake completes. A resumed connection can report the
+  inherited external identity through `external_psk_identity()`.
 - `CommonState::external_psk_identity` reports the key used, once the peer's
   Finished has verified (until then the peer has not proven it holds the
   key); such a handshake is `HandshakeKind::Full`. A peer that offers or
@@ -1058,6 +1085,8 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   key bytes or the optional generation therefore invalidates existing tickets;
   removing the key does too. Identity-only ticket records from older browntls
   revisions fail closed rather than resuming without a key binding.
+
+[RFC 9973]: https://www.rfc-editor.org/rfc/rfc9973.html
 
 RFC 9257 guidance and what browntls enforces:
 
@@ -2215,7 +2244,7 @@ be built with a struct literal; `CertifiedKey::new` remains.
   Finished so a handshake that crossed the deadline cannot complete. Every
   descendant ticket carries the original deadline unchanged; the server also
   caps its advertised ticket lifetime to the remaining credential lifetime
-  and sends no ticket when none remains. This is independent of an RFC 8773
+  and sends no ticket when none remains. This is independent of an RFC 9973
   external-PSK binding; both properties are retained when both authenticated
   the session. A server keeps the deadline of a client's credential the same
   way, next to its own: a ticket is passed over at or after either deadline,

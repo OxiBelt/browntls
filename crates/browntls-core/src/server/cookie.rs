@@ -186,6 +186,9 @@ pub(crate) fn dtls12_cookie_is_valid(
     super::hs::dtls12::valid(config, cookie, address)
 }
 
+#[cfg(feature = "tls12")]
+pub(crate) use super::hs::dtls12::hello_verify_request as dtls12_hello_verify_request;
+
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;

@@ -181,8 +181,47 @@ harness. Peers use ECDSA P-256 credentials and run as both client and server,
 verify certificates, exchange exact request and reversed reply bytes (without
 a newline), and check `close_notify` in each direction. The harness requires
 successful exits on both sides, the selected DTLS version, a full handshake,
-peer certificates, both payloads and closure. No resumption is exercised or
-claimed. Pass `--skip-peer-build` to reuse previously built peer images.
+peer certificates, both payloads and closure. These default exchanges remain
+one-shot. Pass `--skip-peer-build` to reuse previously built peer images.
+
+Run the isolated DTLS 1.2 resumption cases explicitly after building an image
+with the DTLS 1.2 resumption implementation:
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl --resumption
+python3 -B -m unittest discover -s tests/e2e -p 'test_dtls*.py'
+```
+
+This selects exactly four cases: RFC 6347 session IDs and RFC 5077 tickets,
+each with browntls as client and as server. Each case requires an initial
+full mTLS handshake, then both peers must report `Resumed` on a fresh
+connection. Each handshake must exchange the exact payloads and complete
+bidirectional closure. The harness checks two ordered connection records
+from each peer, including the mechanism, version, cipher and retained peer
+certificates; OpenSSL additionally checks EMS on each handshake. A second
+full handshake fails the case. The existing six default exchanges and the
+TLS matrix are unchanged.
+
+The browntls peer uses `--tls 1.2 --dtls12-resumption session-id|ticket` with
+`--connections 2` as client or `--accept 2` as server. It reuses one client
+configuration/cache or server configuration/resumption context. The server
+calls `ServerConfig::enable_dtls12_resumption()` after setting credentials
+and the client verifier. Ticket mode installs a separate
+`ServerConfig::dtls12_ticketer` with independent keys and disables session-ID
+storage; ID mode keeps tickets disabled and uses a bounded memory cache.
+The client selects `Tls12Resumption::SessionIdOnly` or
+`SessionIdOrTickets`; ticket isolation is enforced by disabling ID storage
+on the selected server. These APIs must be integrated before compiling.
+
+The OpenSSL peer's optional final argument is `session-id` or `ticket`.
+It keeps one `SSL_CTX` across two fresh `SSL` objects and, as client,
+retains an `SSL_SESSION` and supplies it to the second handshake with
+[`SSL_set_session`][openssl-set-session]. ID mode disables tickets; ticket
+mode disables the ID cache. The server sets a fixed per-process mTLS
+[session-ID context][openssl-session-context]. Both implementations retain
+the UDP endpoint across orderly shutdowns, so the connected OpenSSL socket
+continues to serve the same isolated peer without a rebind race. This is a
+two-exchange oracle, not a multi-client server.
 
 The browntls peer's existing repeatable `--tls` option selects the DTLS
 endpoint policy: `--tls 1.2` uses `dtls::Versions::V1_2`, `--tls 1.3` uses
@@ -206,16 +245,18 @@ total runtime, verifies the server's DNS name as a client, and requires a
 verified client certificate as a server. It restricts negotiation to DTLS 1.2
 and `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` with P-256. After the handshake
 it requires [extended master secret][openssl-ems]
-and rejects a reused session before exchanging application data. Session
-caching and tickets are disabled on the OpenSSL side. Success requires both
-authenticated close alerts and a completed bidirectional shutdown.
+and, by default, rejects a reused session before exchanging application data.
+Session caching and tickets are disabled in that default mode. Success
+requires both authenticated close alerts and a completed bidirectional shutdown.
 
 The mock runner checks need no Docker or Cargo; they validate command
 construction and success/failure gates, not a DTLS implementation. Actual
-interoperability requires the Docker commands above. This one-connection
+interoperability requires the Docker commands above. This bounded
 oracle runs only on the isolated test network; it does not implement a
 multi-client server, stateless cookie defense, or packet loss/reordering
 testing. This suite is a separate runner; the existing TLS matrix and CI
 workflow do not invoke it automatically.
 
 [openssl-ems]: https://docs.openssl.org/3.5/man3/SSL_get_extms_support/
+[openssl-set-session]: https://docs.openssl.org/3.5/man3/SSL_set_session/
+[openssl-session-context]: https://docs.openssl.org/3.5/man3/SSL_CTX_set_session_id_context/

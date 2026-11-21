@@ -964,7 +964,7 @@ impl Dtls {
             {
                 return Err(Error::EncryptError);
             }
-            self.seal_record(out, epoch, ContentType::ApplicationData, data)?;
+            self.seal_record(out, epoch, typ, data)?;
             return Ok(false);
         }
         let (limit, next_seq) = match self.write.last() {

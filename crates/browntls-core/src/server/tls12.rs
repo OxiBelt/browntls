@@ -109,6 +109,7 @@ impl CompleteClientHelloHandling {
         if let Some(dtls) = cx.common.dtls.as_deref_mut() {
             dtls.cid
                 .select(client_hello.extensions.connection_id.as_ref(), true)?;
+            dtls.select_rrc(client_hello.extensions.return_routability_check.is_some());
         }
         let client_supports_secure_renegotiation = client_hello
             .cipher_suites
@@ -378,6 +379,11 @@ impl CompleteClientHelloHandling {
                 .dtls
                 .as_deref()
                 .and_then(|dtls| dtls.cid.response()),
+            return_routability_check: cx
+                .common
+                .dtls
+                .as_deref()
+                .and_then(|dtls| dtls.rrc_negotiated.then_some(())),
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
             // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),

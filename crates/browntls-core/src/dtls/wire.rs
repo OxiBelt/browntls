@@ -99,6 +99,7 @@ pub(crate) fn parse_record(input: &[u8], cid_len: usize) -> Option<Record> {
         | ContentType::Handshake
         | ContentType::ApplicationData
         | ContentType::Tls12Cid
+        | ContentType::ReturnRoutabilityCheck
         | ContentType::Ack) => typ,
         _ => return None,
     };

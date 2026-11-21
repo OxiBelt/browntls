@@ -62,8 +62,21 @@ fn rrc_negotiates_only_with_mutual_opt_in_and_cid() {
 
 #[test]
 fn rrc_protected_round_trip_drives_only_caller_owned_validation() {
+    protected_path_validation(dtls::Versions::V1_3);
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn dtls12_rrc_protected_control_and_path_validation() {
+    protected_path_validation(dtls::Versions::V1_2);
+}
+
+fn protected_path_validation(versions: dtls::Versions) {
     use dtls::rrc::{Action, DEFAULT_TIMEOUT, Selection};
-    let mut pair = cid_pair(rrc_settings(8, true), rrc_settings(16, true));
+    let mut pair = cid_pair(
+        rrc_settings(8, true).with_versions(versions),
+        rrc_settings(16, true).with_versions(versions),
+    );
     let mut sim = Sim::perfect();
     pair.handshake(&mut sim).unwrap();
     let ids: Vec<Vec<u8>> = pair

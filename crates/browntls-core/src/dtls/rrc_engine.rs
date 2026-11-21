@@ -183,7 +183,14 @@ impl<Data: SideData> ConnectionCommon<Data> {
         now: Duration,
     ) -> Result<Action<P>, Error> {
         self.check_rrc_ready()?;
-        if record.epoch() < APPLICATION_EPOCH {
+        let application_epoch = if self.dtls().is_v12() {
+            1
+        } else {
+            APPLICATION_EPOCH
+        };
+        if record.epoch() < application_epoch
+            || (&path != validation.bound_path() && record.connection_id().is_none())
+        {
             return Ok(Action::None);
         }
         validation

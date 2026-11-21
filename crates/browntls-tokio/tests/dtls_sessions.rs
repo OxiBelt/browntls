@@ -225,3 +225,101 @@ async fn session_listener_accepts_opt_in_dtls12() {
     })
     .await;
 }
+
+async fn migration_roundtrip(
+    version: &'static browntls_core::SupportedProtocolVersion,
+    versions: browntls_core::dtls::Versions,
+    selection: browntls_core::dtls::rrc::Selection,
+    client_cid_len: u8,
+) {
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+
+    let settings = |len| {
+        Settings::default()
+            .with_versions(versions)
+            .with_return_routability_checks(ConnectionIdPolicy::new(len, true).unwrap())
+    };
+    let pki = Pki::new();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let (mut listener, driver) = UdpListener::new_with_settings(
+        config(&pki, version),
+        socket,
+        settings(8),
+        selection,
+        SessionLimits::default(),
+    )
+    .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(address).await.unwrap();
+    let admitted = socket.local_addr().unwrap();
+    let mut client = UdpClient::new_with_settings(
+        Arc::new(pki.client_config_with_cert(version)),
+        ServerName::try_from("localhost").unwrap(),
+        socket,
+        settings(client_cid_len),
+    )
+    .unwrap();
+    drive(driver, async move {
+        let mut session = accept(&mut listener, &mut client).await;
+        assert_eq!(session.original_peer_addr(), admitted);
+        client.send(b"before").await.unwrap();
+        assert_eq!(session.recv().await.unwrap(), Some(b"before".to_vec()));
+        let replacement = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        replacement.connect(address).await.unwrap();
+        let migrated = replacement.local_addr().unwrap();
+        drop(client.replace_socket(replacement).unwrap());
+        client.send(b"candidate").await.unwrap();
+        let ((), ()) = tokio::join!(
+            async {
+                assert_eq!(session.peer_addr_changed().await.unwrap(), migrated);
+                assert_eq!(session.peer_addr(), migrated);
+                assert_eq!(session.original_peer_addr(), admitted);
+                session.send(b"validated").await.unwrap();
+            },
+            async {
+                let mut buf = [0; 32];
+                assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(9));
+                assert_eq!(&buf[..9], b"validated");
+            }
+        );
+        client.send(b"after").await.unwrap();
+        assert_eq!(session.recv().await.unwrap(), Some(b"after".to_vec()));
+        session.close().await.unwrap();
+        drop(listener);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dtls13_rebind_keeps_session_identity_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    for selection in [Selection::Basic, Selection::Enhanced] {
+        for len in [0, 8] {
+            migration_roundtrip(
+                &browntls_core::version::TLS13,
+                Versions::V1_3,
+                selection,
+                len,
+            )
+            .await;
+        }
+    }
+}
+
+#[cfg(feature = "tls12")]
+#[tokio::test]
+async fn dtls12_rebind_keeps_session_identity_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    for selection in [Selection::Basic, Selection::Enhanced] {
+        for len in [0, 8] {
+            migration_roundtrip(
+                &browntls_core::version::TLS12,
+                Versions::V1_2,
+                selection,
+                len,
+            )
+            .await;
+        }
+    }
+}

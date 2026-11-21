@@ -361,6 +361,11 @@ impl State<ClientConnectionData> for ExpectServerHello {
             server_hello.extensions.connection_id.as_ref(),
         )?;
 
+        crate::dtls::rrc_engine::select_server_hello(
+            cx.common,
+            server_hello.extensions.return_routability_check.is_some(),
+        )?;
+
         let suite = config
             .find_cipher_suite(server_hello.cipher_suite)
             .ok_or_else(|| {

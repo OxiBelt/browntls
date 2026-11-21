@@ -44,6 +44,10 @@ pub fn seeds() -> Vec<Vec<u8>> {
     })
     .collect();
     seeds.extend(session_seeds());
+    // Both selection policies and both receiving-CID directions.
+    for constructor in 0..4 {
+        seeds.push(vec![constructor, 0x40, 2]);
+    }
     seeds
 }
 

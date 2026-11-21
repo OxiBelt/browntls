@@ -31,6 +31,80 @@ async fn drive<F: Future<Output = io::Result<()>>, A: Future>(
     .await
 }
 
+pub(super) async fn migration(
+    config: Arc<ClientConfig>,
+    server_config: Arc<ServerConfig>,
+    constructor: usize,
+    _flags: u8,
+) {
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings, rrc::Selection};
+    let settings = |len| {
+        Settings::default()
+            .with_return_routability_checks(ConnectionIdPolicy::new(len, true).unwrap())
+    };
+    let selection = if constructor & 1 == 0 {
+        Selection::Basic
+    } else {
+        Selection::Enhanced
+    };
+    let transport = socket().await;
+    let server_addr = transport.local_addr().unwrap();
+    let (mut listener, driver) = UdpListener::new_with_settings(
+        server_config,
+        transport,
+        settings(8),
+        selection,
+        SessionLimits::default(),
+    )
+    .unwrap();
+    let transport = connected_socket(server_addr).await;
+    let original = transport.local_addr().unwrap();
+    let client = UdpClient::new_with_settings(
+        config,
+        setup::localhost(),
+        transport,
+        settings(if constructor & 2 == 0 { 0 } else { 8 }),
+    )
+    .unwrap();
+    let mut driver = Box::pin(driver.run());
+    drive(driver.as_mut(), async {
+        let mut association = Association::accept(&mut listener, client).await;
+        assert_eq!(association.session.original_peer_addr(), original);
+        association.send_to_server(b"before migration").await;
+        let replacement = connected_socket(server_addr).await;
+        let migrated = replacement.local_addr().unwrap();
+        drop(association.client.replace_socket(replacement).unwrap());
+        bounded(association.client.send(b"candidate"))
+            .await
+            .unwrap();
+        let ((), ()) = together(
+            async {
+                assert_eq!(
+                    association.session.peer_addr_changed().await.unwrap(),
+                    migrated
+                );
+                assert_eq!(association.session.peer_addr(), migrated);
+                assert_eq!(association.session.original_peer_addr(), original);
+                association.session.send(b"validated").await.unwrap();
+            },
+            async {
+                let mut buffer = [0; 32];
+                assert_eq!(
+                    association.client.recv(&mut buffer).await.unwrap(),
+                    Recv::Data(9)
+                );
+                assert_eq!(&buffer[..9], b"validated");
+            },
+        )
+        .await;
+        association.send_to_server(b"after migration").await;
+        reached("session migration");
+    })
+    .await;
+    drop(listener);
+    bounded(driver).await.expect("driver shutdown");
+}
+
 pub(super) async fn exercise(
     config: Arc<ClientConfig>,
     server_config: Arc<ServerConfig>,

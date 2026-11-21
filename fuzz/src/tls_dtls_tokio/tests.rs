@@ -50,6 +50,7 @@ fn seeds_reach_public_api_sequences() {
         "server close",
         "close polled once",
         "remove",
+        "session migration",
     ] {
         assert!(
             reached.contains(expected),

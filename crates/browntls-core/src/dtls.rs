@@ -28,6 +28,9 @@
 //! cookie exchange is turned off. Over DTLS this version supports neither
 //! 0-RTT, Encrypted Client Hello nor post-handshake client authentication.
 //! Connection IDs are opt-in through [`Settings::with_connection_ids`].
+//! [`Settings::with_return_routability_checks`] also enables RFC 9853 RRC.
+//! The caller owns path validation, send allowances and routing; this engine
+//! never changes a transport address or sends a validation action itself.
 //!
 //! Internally: records and their headers are in `wire`, record protection
 //! in `keys`, replay windows in `replay`, handshake reassembly in
@@ -41,6 +44,8 @@ mod flight;
 mod keys;
 mod reassembly;
 mod replay;
+pub mod rrc;
+pub(crate) mod rrc_engine;
 mod send;
 mod state;
 #[cfg(feature = "std")]
@@ -59,7 +64,7 @@ pub use connection::{ClientConnection, ConnectionCommon, Received, ServerConnect
 pub(crate) use state::Dtls;
 pub use state::Settings;
 #[cfg(feature = "std")]
-pub use udp::{ServerEvent, UdpClient, UdpServer};
+pub use udp::{CidDemux, ServerEvent, UdpClient, UdpPathValidation, UdpServer};
 
 /// The `HKDF-Expand-Label` prefix of DTLS 1.3 (RFC 9147 §5.9). It has no
 /// trailing space, unlike that of TLS 1.3.

@@ -77,7 +77,7 @@ jobs:
           retention-days: 1
 
   dtls:
-    name: DTLS 1.3 vs wolfSSL
+    name: DTLS interoperability
     needs: image
     runs-on: ubuntu-26.04
     timeout-minutes: 40
@@ -98,8 +98,8 @@ jobs:
       - name: Load amd64 image
         run: docker load --input "${RUNNER_TEMP}/browntls-e2e-image/browntls-e2e-amd64.tar"
 
-      - name: Exchange DTLS datagrams with wolfSSL
-        run: python3 -B tests/e2e/dtls.py --arch amd64
+      - name: Exchange DTLS datagrams with wolfSSL and OpenSSL
+        run: python3 -B tests/e2e/dtls.py --arch amd64 --suite all
 
   e2e:
     name: E2E ${{ matrix.label }} vs ${{ matrix.description }}

@@ -132,10 +132,12 @@ suites, policy binding, cross-transport cache separation and invalidation,
 legacy custom stores, expiry, cookie ordering, mixed-version negotiation,
 empty-ID ticket acceptance and decline, failed ticket renewal, deterministic
 abbreviated-flight loss/reordering, and immediate client closure. Existing
-DTLS 1.3 cases remain in both targets. These cases have not been compiled or
-executed in this implementation worktree; compilation, execution,
-feature-matrix checks, external interoperability and independent review
-remain qualification requirements.
+DTLS 1.3 cases remain in both targets.
+
+The [Docker interoperability tests](../tests/e2e/README.md#dtls-interoperability)
+cover mutual certificate authentication with OpenSSL in both roles, with
+1.2-only and mixed-version browntls endpoints, ECDSA P-256, AES-128-GCM,
+application data and authenticated closure.
 
 Protocol references: [RFC 6347](https://www.rfc-editor.org/rfc/rfc6347),
 [RFC 5077](https://www.rfc-editor.org/rfc/rfc5077),

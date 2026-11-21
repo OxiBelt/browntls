@@ -57,7 +57,7 @@ intent.
 | QUIC-TLS (RFC 9001): `browntls_core::quic` handshake API shaped like `rustls::quic`, Initial/Handshake/0-RTT/1-RTT keys, AES and ChaCha20 header protection, AES-GCM, ChaCha20-Poly1305 and AES-128-CCM packet protection on both providers (CCM native only), key update, Retry integrity tag, RFC 9001 Appendix A vectors, rustls interop in both directions (see [Architecture](Architecture.md#quic-tls-rfc-9001)) | done |
 | QUIC transport (RFC 9000) | out of scope |
 | DTLS 1.3 (RFC 9147): `browntls_core::dtls` sans-I/O `ClientConnection` and `ServerConnection` (whole datagrams in and out, timers on the caller's clock) over the TLS 1.3 handshake; unified headers with encrypted record numbers, a 128-record replay window per epoch, the integrity limit enforced, fragmentation to the datagram size (256 to 65507 bytes, 1200 by default), reassembly, ACKs and retransmission, KeyUpdate held until acknowledged, resumption with tickets kept apart from TLS ones; the cookie exchange on by default with cookies bound to the caller-provided client address, and a stateless `dtls::Acceptor`; application data never fragmented; every TLS 1.3 suite but CCM_8, on both providers. Tests between browntls endpoints over a simulated lossy network (`crates/browntls-core/tests/cases/dtls.rs`) and the `tls_dtls` fuzz target and [wolfSSL Docker interoperability](../tests/e2e/README.md#dtls-13-interoperability) (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
-| DTLS 1.2 (RFC 6347) | planned |
+| DTLS 1.2 (RFC 6347) | full opt-in certificate handshakes with ECDHE AEAD, EMS and address-bound cookies. Tested on both providers and in both roles against OpenSSL. Resumption planned. See [DTLS 1.2](DTLS12.md) |
 | DTLS connection IDs (RFC 9146) and the return routability check (RFC 9853) | planned |
 | 0-RTT, Encrypted Client Hello and post-handshake client authentication over DTLS 1.3 | planned |
 | Blocking `std` API for DTLS 1.3: `dtls::UdpClient` (one server) and `dtls::UdpServer` (many clients on one socket) over `std::net::UdpSocket`; stateless cookies through the `dtls::Acceptor`, at most 256 handshakes at once with the oldest replaced, a handshake timeout, read timeouts that still take what has arrived, `ServerEvent`s for connected clients only, clients told apart by address only, no live OCSP. Loopback tests (`crates/browntls-core/tests/cases/dtls_udp.rs`) and the `tls_dtls_udp` fuzz target and [wolfSSL Docker interoperability](../tests/e2e/README.md#dtls-13-interoperability) (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
@@ -215,10 +215,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
 - DTLS 1.3 interoperability covers full handshakes against wolfSSL as
   both client and server in Docker. Resumption and loss recovery are tested
   between browntls endpoints. The opt-in
-  [DTLS 1.2 certificate handshake layer](DTLS12.md) is tested locally on
-  both providers. External interoperability and independent review are
-  pending. DTLS 1.2 session ID and RFC 5077 ticket resumption are an
-  unqualified local candidate; the added cases await execution and review.
+  [DTLS 1.2 certificate handshake layer](DTLS12.md) is tested on both
+  providers and against OpenSSL in Docker. DTLS 1.2 session ID and RFC 5077
+  ticket resumption are opt-in and exercised between browntls peers.
   Deferred DTLS features include connection IDs, return routability checks,
   0-RTT, Encrypted Client Hello or post-handshake client authentication,
   through the low-level datagram API or the blocking `std` API; there is

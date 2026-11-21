@@ -14,7 +14,7 @@ pub enum Versions {
     V1_3,
     /// Prefer DTLS 1.3, allowing DTLS 1.2 certificate handshakes.
     V1_2And1_3,
-    /// DTLS 1.2 certificate handshakes only; resumption is disabled.
+    /// DTLS 1.2 only, including configured session resumption.
     V1_2,
 }
 

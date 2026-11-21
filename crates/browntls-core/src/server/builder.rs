@@ -93,6 +93,10 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             #[cfg(not(feature = "std"))]
             session_storage: Arc::new(handy::NoServerSessionStorage {}),
             ticketer: Arc::new(handy::NeverProducesTickets {}),
+            #[cfg(feature = "tls12")]
+            dtls12_ticketer: Arc::new(handy::NeverProducesTickets {}),
+            #[cfg(feature = "tls12")]
+            dtls12_resumption_context: None,
             alpn_protocols: Vec::new(),
             versions: self.state.versions,
             key_log: Arc::new(NoKeyLog {}),

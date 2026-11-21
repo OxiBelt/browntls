@@ -57,7 +57,7 @@ impl Received {
 /// handshake progress; [`CommonState::protocol_version`] reports
 /// [`ProtocolVersion::DTLSv1_3`] or [`ProtocolVersion::DTLSv1_2`].
 pub struct ConnectionCommon<Data> {
-    core: ConnectionCore<Data>,
+    pub(super) core: ConnectionCore<Data>,
 }
 
 impl<Data: SideData> ConnectionCommon<Data> {
@@ -67,14 +67,14 @@ impl<Data: SideData> ConnectionCommon<Data> {
         Self { core }
     }
 
-    fn dtls(&self) -> &Dtls {
+    pub(super) fn dtls(&self) -> &Dtls {
         match &self.core.common_state.dtls {
             Some(dtls) => dtls,
             None => unreachable!("DTLS connection without DTLS state"),
         }
     }
 
-    fn dtls_mut(&mut self) -> &mut Dtls {
+    pub(super) fn dtls_mut(&mut self) -> &mut Dtls {
         dtls_of(&mut self.core.common_state)
     }
 
@@ -298,6 +298,11 @@ impl<Data: SideData> ConnectionCommon<Data> {
         result
     }
 
+    /// Whether this endpoint has queued a `close_notify` for transmission.
+    pub fn local_close_notify_queued(&self) -> bool {
+        self.core.common_state.has_sent_close_notify()
+    }
+
     /// Whether the peer sent `close_notify`; nothing it sends afterwards
     /// is processed.
     pub fn peer_has_closed(&self) -> bool {
@@ -340,6 +345,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.dtls().cid.local_ids()
     }
 
+    /// The nonempty CID used to send protected records to the peer.
+    pub fn outbound_connection_id(&self) -> Option<&[u8]> {
+        let id = self.dtls().cid.outbound();
+        (!id.is_empty()).then_some(id)
+    }
+
     /// Issues up to `count` fresh, fixed-length receiving IDs. Returns the
     /// number actually issued; the lifetime cap includes the initial ID.
     /// Only one NewConnectionId may await ACK. An immediate update requires
@@ -349,7 +360,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
         count: u8,
         usage: ConnectionIdUsage,
     ) -> Result<usize, Error> {
-        self.check_cid_ready()?;
+        self.check_cid_rotation_ready()?;
         self.dtls_mut().issue_cids(count, usage)
     }
 
@@ -357,18 +368,23 @@ impl<Data: SideData> ConnectionCommon<Data> {
     /// request waits for both the previous ACK and a NewConnectionId
     /// response, which may contain fewer IDs, including none.
     pub fn request_connection_ids(&mut self, count: u8) -> Result<(), Error> {
-        self.check_cid_ready()?;
+        self.check_cid_rotation_ready()?;
         self.dtls_mut().request_cids(count)
     }
 
-    fn check_cid_ready(&self) -> Result<(), Error> {
-        if let Err(err) = &self.core.state {
-            return Err(err.clone());
-        }
+    fn check_cid_rotation_ready(&self) -> Result<(), Error> {
+        self.check_cid_ready()?;
         if self.dtls().is_v12() {
             return Err(Error::General(
                 "DTLS 1.2 connection IDs do not rotate".into(),
             ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_cid_ready(&self) -> Result<(), Error> {
+        if let Err(err) = &self.core.state {
+            return Err(err.clone());
         }
         if self.core.common_state.is_handshaking() {
             return Err(Error::HandshakeNotComplete);

@@ -139,6 +139,11 @@ async fn exercise(data: &[u8]) {
     server_config.send_tls13_tickets = 0;
     let server_config = Arc::new(server_config);
 
+    if flags & 0x40 != 0 {
+        sessions::migration(config, server_config, constructor, flags).await;
+        return;
+    }
+
     if flags & 0x20 != 0 {
         sessions::exercise(config, server_config, constructor, flags, mtu, input).await;
         return;
@@ -161,6 +166,7 @@ async fn exercise(data: &[u8]) {
     }
 
     let mut server = UdpServer::new(server_config, socket().await).expect("event server");
+    server.set_path_selection(browntls_core::dtls::rrc::Selection::Basic);
     server.set_max_handshakes(2);
     server.set_max_peers(2);
     server.set_handshake_timeout(LIMIT);
@@ -209,6 +215,7 @@ async fn exercise(data: &[u8]) {
         peer,
         server_addr,
     };
+    assert_eq!(session.server.peer_addr(peer), Some(peer));
     session.inspect(true);
     for _ in 0..MAX_ACTIONS {
         if input.is_empty() {

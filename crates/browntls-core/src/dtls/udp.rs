@@ -17,8 +17,12 @@ use crate::error::Error;
 use crate::log::debug;
 use crate::sync::Arc;
 
+mod demux;
+mod migration;
 mod server;
 
+pub use demux::CidDemux;
+pub use migration::UdpPathValidation;
 pub use server::{ServerEvent, UdpServer};
 
 /// The largest UDP payload over IPv4 or IPv6 (without jumbograms).
@@ -47,6 +51,7 @@ pub struct UdpClient {
     received: VecDeque<Vec<u8>>,
     buf: Vec<u8>,
     out: Vec<u8>,
+    paths: Option<UdpPathValidation>,
 }
 
 impl UdpClient {
@@ -74,8 +79,24 @@ impl UdpClient {
         socket: UdpSocket,
         versions: super::Versions,
     ) -> io::Result<Self> {
+        Self::connect_with_settings(
+            config,
+            name,
+            socket,
+            super::Settings::default().with_versions(versions),
+        )
+    }
+
+    /// Connects with explicit endpoint settings, including opt-in CID/RRC.
+    /// Negotiated RRC challenges are answered on this connected socket.
+    pub fn connect_with_settings(
+        config: Arc<crate::ClientConfig>,
+        name: ServerName<'static>,
+        socket: UdpSocket,
+        settings: super::Settings,
+    ) -> io::Result<Self> {
         socket.set_nonblocking(false)?;
-        let conn = ClientConnection::new_with_versions(config, name, versions).map_err(io_error)?;
+        let conn = ClientConnection::new_with_settings(config, name, settings).map_err(io_error)?;
         let mut client = Self::from_connection(conn, socket);
         client.complete_handshake()?;
         Ok(client)
@@ -112,6 +133,7 @@ impl UdpClient {
             received: VecDeque::new(),
             buf: alloc::vec![0; MAX_DATAGRAM],
             out: Vec::new(),
+            paths: None,
         }
     }
 
@@ -246,6 +268,43 @@ impl UdpClient {
         &self.socket
     }
 
+    /// Replaces the local socket after CID/RRC negotiation, retaining the
+    /// association, clock, read timeout and queued application datagrams.
+    ///
+    /// The new socket must be connected to the same remote address. It is
+    /// also necessary for the peer to have selected a nonempty receiving
+    /// CID, so it can route records from the new local address. The socket is
+    /// put in blocking mode. The caller should stop reading the returned
+    /// old socket; enhanced validation then falls back to the new path
+    /// after the old-path timeout. Send fresh application data to trigger
+    /// the server's validation, then drive `recv` to answer its probes.
+    /// Data sent before validation may be discarded by the server.
+    pub fn replace_socket(&mut self, socket: UdpSocket) -> io::Result<UdpSocket> {
+        if !self.conn.return_routability_checks_negotiated()
+            || self.conn.peer_has_closed()
+            || self.conn.has_sent_close_notify()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "socket replacement requires a live CID/RRC association",
+            ));
+        }
+        if self.conn.outbound_connection_id().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "socket replacement requires a nonempty peer receiving CID",
+            ));
+        }
+        if socket.peer_addr()? != self.socket.peer_addr()? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replacement socket has a different remote address",
+            ));
+        }
+        socket.set_nonblocking(false)?;
+        Ok(core::mem::replace(&mut self.socket, socket))
+    }
+
     /// The connection and the socket. Application data received but not
     /// yet returned by [`Self::recv`] is lost.
     ///
@@ -281,12 +340,45 @@ impl UdpClient {
     /// Sends what the connection has queued.
     fn flush(&mut self) -> io::Result<()> {
         let now = self.now();
+        self.ensure_paths()?;
+        if let Some(paths) = &mut self.paths {
+            paths
+                .poll(&mut self.conn, now, &mut |datagram, _| {
+                    if let Err(err) = self.socket.send(datagram) {
+                        debug!("DTLS: could not send an RRC probe: {err}");
+                    }
+                })
+                .map_err(io_error)?;
+        }
+        self.flush_protocol(now)
+    }
+
+    /// Drain protocol output even after an error invalidates RRC readiness.
+    fn flush_protocol(&mut self, now: Duration) -> io::Result<()> {
         flush(&mut self.conn, &mut self.out, now, |datagram| {
             match self.socket.send(datagram) {
                 Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => Ok(()),
                 result => result.map(|_| ()),
             }
         })
+    }
+
+    fn ensure_paths(&mut self) -> io::Result<()> {
+        if self.paths.is_none()
+            && self.conn.return_routability_checks_negotiated()
+            && !self.conn.peer_has_closed()
+            && !self.conn.has_sent_close_notify()
+        {
+            self.paths = Some(
+                UdpPathValidation::new(
+                    &self.conn,
+                    self.socket.peer_addr()?,
+                    super::rrc::Selection::Basic,
+                )
+                .map_err(io_error)?,
+            );
+        }
+        Ok(())
     }
 
     /// Sends what is queued, acts on a timer that is due, then waits for
@@ -302,7 +394,16 @@ impl UdpClient {
             self.flush()?;
         }
         // Past the deadline this waits briefly: the caller's last look.
-        let wait = wait_until(now, [self.conn.next_timeout(), deadline]);
+        let wait = wait_until(
+            now,
+            [
+                self.conn.next_timeout(),
+                self.paths
+                    .as_ref()
+                    .and_then(UdpPathValidation::next_timeout),
+                deadline,
+            ],
+        );
         self.socket.set_read_timeout(wait)?;
         let len = match self.socket.recv(&mut self.buf) {
             Ok(len) => len,
@@ -317,13 +418,45 @@ impl UdpClient {
             Ok(received) => received,
             Err(err) => {
                 // Send the alert, then report the failure.
-                let _ = self.flush();
+                let _ = self.flush_protocol(now);
                 return Err(io_error(err));
             }
         };
+        if self.paths.is_none()
+            && self.conn.return_routability_checks_negotiated()
+            && !self.conn.peer_has_closed()
+            && !self.conn.has_sent_close_notify()
+        {
+            self.paths = Some(
+                UdpPathValidation::new(
+                    &self.conn,
+                    self.socket.peer_addr()?,
+                    super::rrc::Selection::Basic,
+                )
+                .map_err(io_error)?,
+            );
+        }
         // An empty datagram carries nothing, and `recv` returning 0 means
         // that the server closed.
-        for range in received.app_data().iter().filter(|r| !r.is_empty()) {
+        let ranges = if let Some(paths) = &mut self.paths {
+            paths
+                .input(
+                    &mut self.conn,
+                    &received,
+                    datagram,
+                    self.socket.peer_addr()?,
+                    now,
+                    &mut |datagram, _| {
+                        if let Err(err) = self.socket.send(datagram) {
+                            debug!("DTLS: could not send an RRC reply: {err}");
+                        }
+                    },
+                )
+                .map_err(io_error)?
+        } else {
+            received.app_data().to_vec()
+        };
+        for range in ranges.iter().filter(|r| !r.is_empty()) {
             self.received.push_back(datagram[range.clone()].to_vec());
         }
         Ok(true)

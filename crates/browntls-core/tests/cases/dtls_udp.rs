@@ -596,3 +596,187 @@ fn ipv6_loopback_exchanges_data_with_a_source_bound_cookie() {
     assert_eq!(echo.join().unwrap(), ["connected", "IPv6", "closed"]);
     assert!(cookies.sealed.load(Ordering::Relaxed) > 0);
 }
+
+fn migration_settings(versions: dtls::Versions, receive_len: u8) -> dtls::Settings {
+    dtls::Settings::default()
+        .with_versions(versions)
+        .with_return_routability_checks(dtls::ConnectionIdPolicy::new(receive_len, true).unwrap())
+}
+
+#[test]
+fn local_socket_replacement_preserves_the_association_and_stable_server_handle() {
+    for selection in [dtls::rrc::Selection::Basic, dtls::rrc::Selection::Enhanced] {
+        exchange_across_rebind(dtls::Versions::V1_3, selection);
+    }
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn dtls12_local_socket_replacement_preserves_the_association() {
+    for selection in [dtls::rrc::Selection::Basic, dtls::rrc::Selection::Enhanced] {
+        exchange_across_rebind(dtls::Versions::V1_2, selection);
+    }
+}
+
+fn exchange_across_rebind(versions: dtls::Versions, selection: dtls::rrc::Selection) {
+    // The client may have an empty receiving CID: its remote never changes.
+    for client_cid_len in [0, 8] {
+        let chain = server_chain(KeyType::EcdsaP256);
+        let mut server = UdpServer::new_with_settings(
+            Arc::new(dtls_server_config(&chain)),
+            loopback(),
+            migration_settings(versions, 8),
+        )
+        .unwrap();
+        server.set_path_selection(selection);
+        server.set_read_timeout(Some(Duration::from_millis(100)));
+        let remote = server.socket().local_addr().unwrap();
+        let socket = client_socket(remote);
+        let admitted = socket.local_addr().unwrap();
+        let replacement = client_socket(remote);
+        let migrated = replacement.local_addr().unwrap();
+        let serving = thread::spawn(move || {
+            let stop = Instant::now() + Duration::from_secs(20);
+            let mut connected = false;
+            let mut announced = false;
+            let mut received = Vec::new();
+            loop {
+                assert!(Instant::now() < stop, "migration did not finish");
+                match server.next_event() {
+                    Ok(ServerEvent::Connected(peer)) => {
+                        assert_eq!(peer, admitted);
+                        assert!(!connected);
+                        connected = true;
+                        assert!(
+                            server
+                                .connection(peer)
+                                .unwrap()
+                                .return_routability_checks_negotiated()
+                        );
+                    }
+                    Ok(ServerEvent::Received(peer, data)) => {
+                        assert_eq!(peer, admitted);
+                        assert_ne!(data, b"unvalidated");
+                        server.send_to(&data, peer).unwrap();
+                        received.push(data);
+                    }
+                    Ok(ServerEvent::Closed(peer)) => {
+                        assert_eq!(peer, admitted);
+                        assert!(server.connection(peer).is_none());
+                        assert!(server.peer_addr(peer).is_none());
+                        assert_eq!(server.peers().count(), 0);
+                        return received;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
+                    other => panic!("{other:?}"),
+                }
+                if !announced && server.peer_addr(admitted) == Some(migrated) {
+                    assert_eq!(server.peers().collect::<Vec<_>>(), [admitted]);
+                    assert!(server.connection(migrated).is_none());
+                    server.send_to(b"validated", admitted).unwrap();
+                    announced = true;
+                }
+            }
+        });
+        let conn = dtls::ClientConnection::new_with_settings(
+            Arc::new(client_config(&chain)),
+            server_name(),
+            migration_settings(versions, client_cid_len),
+        )
+        .unwrap();
+        let start = Instant::now();
+        let mut client = UdpClient::from_connection_with_clock(conn, socket, start);
+        let timeout = Some(Duration::from_secs(10));
+        client.set_read_timeout(timeout);
+        client.complete_handshake().unwrap();
+        client.send(b"before").unwrap();
+        // Preserve already queued plaintext across the replacement too.
+        assert_eq!(
+            client.recv(&mut [0; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let wrong_remote = loopback();
+        let wrong = client_socket(wrong_remote.local_addr().unwrap());
+        assert_eq!(
+            client.replace_socket(wrong).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(client.socket().local_addr().unwrap(), admitted);
+        drop(client.replace_socket(replacement).unwrap());
+        assert_eq!(client.read_timeout(), timeout);
+        assert_eq!(client.socket().peer_addr().unwrap(), remote);
+        let mut buf = [0; 32];
+        let len = client.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"before");
+        client.send(b"unvalidated").unwrap();
+        let len = client.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"validated");
+        client.send(b"after").unwrap();
+        let len = client.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"after");
+        client.close().unwrap();
+        assert_eq!(client.into_parts_with_clock().2, start);
+        assert_eq!(
+            serving.join().unwrap(),
+            [b"before".to_vec(), b"after".to_vec()]
+        );
+    }
+}
+
+#[test]
+fn default_client_does_not_replace_its_socket() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let server = server(&chain);
+    let remote = server.socket().local_addr().unwrap();
+    let serving = thread::spawn(move || echo(server, 1));
+    let socket = client_socket(remote);
+    let admitted = socket.local_addr().unwrap();
+    let conn = dtls::ClientConnection::new(Arc::new(client_config(&chain)), server_name()).unwrap();
+    let mut client = UdpClient::from_connection(conn, socket);
+    client.set_read_timeout(Some(Duration::from_secs(10)));
+    client.complete_handshake().unwrap();
+    assert!(!client.connection().return_routability_checks_negotiated());
+    assert_eq!(
+        client
+            .replace_socket(client_socket(remote))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotConnected
+    );
+    assert_eq!(client.socket().local_addr().unwrap(), admitted);
+    client.close().unwrap();
+    assert_eq!(serving.join().unwrap(), ["connected", "closed"]);
+}
+
+#[test]
+fn socket_replacement_requires_the_servers_nonempty_receiving_cid() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut server = UdpServer::new_with_settings(
+        Arc::new(dtls_server_config(&chain)),
+        loopback(),
+        migration_settings(dtls::Versions::V1_3, 0),
+    )
+    .unwrap();
+    server.set_read_timeout(Some(Duration::from_secs(20)));
+    let remote = server.socket().local_addr().unwrap();
+    let serving = thread::spawn(move || echo(server, 1));
+    let mut client = UdpClient::connect_with_settings(
+        Arc::new(client_config(&chain)),
+        server_name(),
+        client_socket(remote),
+        migration_settings(dtls::Versions::V1_3, 8),
+    )
+    .unwrap();
+    let admitted = client.socket().local_addr().unwrap();
+    assert!(client.connection().return_routability_checks_negotiated());
+    assert_eq!(
+        client
+            .replace_socket(client_socket(remote))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(client.socket().local_addr().unwrap(), admitted);
+    client.close().unwrap();
+    assert_eq!(serving.join().unwrap(), ["connected", "closed"]);
+}

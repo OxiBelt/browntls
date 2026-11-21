@@ -272,6 +272,11 @@ pub fn seeds() -> Vec<Vec<u8>> {
     }
 
     fresh(&mut seeds);
+    // A CID-enabled, protected path validation and CID update program.
+    let mut seed = Vec::new();
+    handshake(&mut seed, Hs { flags: 32, ..BASE }, &[], &[]);
+    seed.push(10);
+    seeds.push(seed);
     seeds.extend(super::cid_api::seeds());
     seeds
 }

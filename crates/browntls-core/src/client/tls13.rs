@@ -126,7 +126,13 @@ pub(super) fn validate_server_hello(
             .extensions
             .present_types()
             .into_iter()
-            .filter(|ext| !common.is_dtls() || *ext != ExtensionType::ConnectionId),
+            .filter(|ext| {
+                !common.is_dtls()
+                    || !matches!(
+                        ext,
+                        ExtensionType::ConnectionId | ExtensionType::ReturnRoutabilityCheck
+                    )
+            }),
         Tls13Message::ServerHello,
     )
     .is_some()

@@ -165,7 +165,7 @@ pub(crate) fn reject_invalid_records(
         b"content\xff\0",
         b"content\x19\0",
         b"content\x1a",
-        b"content\x1b",
+        b"content\x1c",
         &[20, 0],
         &[21, 0],
         &[22, 0],
@@ -248,7 +248,6 @@ pub(crate) fn reject_invalid_records(
     for typ in [
         ContentType::Tls12Cid,
         ContentType::Ack,
-        ContentType::ReturnRoutabilityCheck,
         ContentType::Unknown(0),
         ContentType::Unknown(255),
     ] {

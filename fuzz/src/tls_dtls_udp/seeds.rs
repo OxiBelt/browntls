@@ -125,6 +125,9 @@ impl Program {
 #[must_use]
 pub fn seeds() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
+    for mode in 0..4 {
+        seeds.push(vec![0x80 | mode]);
+    }
 
     // A blocking connect on each provider and key type: traffic, key
     // updates on both sides, read timeouts, a split client, accessors,

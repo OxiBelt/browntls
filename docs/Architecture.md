@@ -2592,9 +2592,9 @@ record and handshake details describe DTLS 1.3.
   selected nonempty CID in their authenticated unified header. A missing
   or wrong receiving CID discards the rest of the datagram (RFC 9147 §4).
   `Received::authenticated_records` reports only records that passed
-  association, traffic-key authentication and replay checks. It proves no
-  address reachability and grants no migration authority; wrappers must
-  keep the path pinned. `local_connection_ids` supplies wrapper lookup IDs,
+  association, traffic-key authentication and replay checks. Path
+  migration also requires an independent return-routability check.
+  `local_connection_ids` supplies wrapper lookup IDs,
   including those in pending updates, after negotiation.
   Wrappers must detect collisions when registering IDs across associations;
   local generation checks uniqueness only within its own association.
@@ -2606,17 +2606,27 @@ record and handshake details describe DTLS 1.3.
   `too_many_cids_requested`. At most 16 local IDs are ever issued per
   association, including its initial ID, with four generation attempts per
   ID to avoid reuse. All issued IDs remain valid until the association
-  ends; this stage has no CID retirement or migration timer. Peer spare
+  ends. Peer spare
   storage is capped at 16 and duplicates are coalesced. Immediate updates
   select the first provided ID; spare updates retain the current one.
   When the local quota is exhausted, spare responses contain no IDs and
-  local immediate issuance fails. New tests have not yet been executed;
-  independent review and interoperability qualification remain pending.
-- Not supported over DTLS: 0-RTT (a server rejects an offer), Encrypted
-  Client Hello (configurations with it are refused), post-handshake client
-  authentication (not offered; a request is refused), DTLS 1.2 CID record
-  protection and the return routability check (RFC 9853). There is no
-  Tokio API for DTLS yet.
+  local immediate issuance fails. DTLS 1.2 uses the RFC 9146 type-25
+  header and AEAD authentication data, without connection ID rotation.
+  Both built-in providers support either CID direction for DTLS 1.2.
+- Path validation: `Settings::with_return_routability_checks` opts into
+  RFC 9853 with CID. A new address can become active after a fresh,
+  authenticated record advances the receiving sequence and the peer
+  answers a protected challenge on that address. Enhanced validation
+  probes the existing path first. Candidate responses and probes share a
+  three-times received-byte limit. Transport adapters keep ordinary output
+  on the validated address and discard candidate application input while
+  validation is pending. Blocking and Tokio clients can replace a
+  connected local UDP socket while retaining the association and clock.
+  A server handle stays bound to the originally admitted address and its
+  current validated address is reported separately. See
+  [Tokio DTLS](../crates/browntls-tokio/README.md#dtls-over-udp).
+- DTLS currently omits 0-RTT, Encrypted Client Hello, and post-handshake
+  client authentication.
 
 With the `std` feature, `dtls::UdpClient` and `dtls::UdpServer` run these
 connections over `std::net::UdpSocket` with blocking calls. While a call

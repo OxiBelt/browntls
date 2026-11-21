@@ -237,7 +237,8 @@ pub trait MessageDecrypter: Send + Sync {
     /// `msg` holds only the encrypted body, including any explicit nonce and
     /// the full tag. Its type must be `Tls12Cid`, its version `DTLSv1_2`.
     /// The encoded inner plaintext, including type and padding, is limited to
-    /// 16384 bytes. The supported inner types are 20 through 24 and RFC 9853 RRC;
+    /// 16384 bytes. The supported inner types are 20 through 24 and
+    /// RFC 9853 RRC.
     /// only application data may be empty. No other AAD/tag format is tried.
     /// On error the body is unspecified and must not be used as plaintext.
     /// The default implementation fails without modifying `msg`.
@@ -280,7 +281,8 @@ pub trait MessageEncrypter: Send + Sync {
 
     /// Encrypts `content || msg.typ || zeros[padding_len]` with RFC 9146
     /// §5.3 AAD. `msg.version` must be `DTLSv1_2`, `cid` must contain
-    /// 1..=255 bytes, and `msg.typ` must be a DTLS 1.2 type (20 through 24) or RFC 9853 RRC.
+    /// 1..=255 bytes, and `msg.typ` must be a DTLS 1.2 type (20 through 24)
+    /// or RFC 9853 RRC.
     /// Only application data may be empty. The entire encoded inner
     /// plaintext must fit in 16384 bytes, so unpadded content is at most
     /// 16383 bytes. Invalid input fails with [`Error::EncryptError`].

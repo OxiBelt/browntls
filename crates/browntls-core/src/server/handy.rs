@@ -226,7 +226,7 @@ mod sni_resolver {
     impl ResolvesServerCert for ResolvesServerCertUsingSni {
         fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
             let name = client_hello.server_name()?;
-            let dns = DnsName::try_from(name).ok()?.to_lowercase_owned();
+            let dns = DnsName::try_from_ascii(name).ok()?.to_lowercase_owned();
             self.by_name.get(&dns).cloned()
         }
     }

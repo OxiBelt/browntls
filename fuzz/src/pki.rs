@@ -7,9 +7,9 @@ use browntls_pki::{
     AlgorithmIdentifier, BorrowedCertRevocationList, CertRevocationList, CertificateDer,
     CertificateRevocationListDer, CertificateSigningRequestDer, DnsName, EndEntityCert,
     ExpirationPolicy, InvalidSignature, KeyUsage, OwnedCertRevocationList, PrivateKeyDer,
-    RawPublicKeyEntity, RevocationCheckDepth, RevocationOptionsBuilder, ServerName,
-    SignatureVerificationAlgorithm, SubjectPublicKeyInfoDer, UnixTime, UnknownStatusPolicy, alg_id,
-    anchor_from_trusted_cert,
+    RawPublicKeyEntity, ReferenceIdentifier, RevocationCheckDepth, RevocationOptionsBuilder,
+    ServerName, ServiceIdentity, SignatureVerificationAlgorithm, SrvId, SubjectPublicKeyInfoDer,
+    UnixTime, UnknownStatusPolicy, UriId, WildcardPolicy, alg_id, anchor_from_trusted_cert,
 };
 
 use crate::{take_byte, take_field};
@@ -108,6 +108,7 @@ pub fn pki_cert(mut data: &[u8]) {
 
     // Names are parsed whatever the certificate turns out to be.
     let server_name = ServerName::try_from(name).ok();
+    let identity = core::str::from_utf8(name).ok().and_then(service_identity);
     if let Ok(text) = core::str::from_utf8(name)
         && let Ok(dns) = DnsName::try_from(text)
     {
@@ -146,6 +147,9 @@ pub fn pki_cert(mut data: &[u8]) {
     let _ = (cert.der(), cert.serial(), cert.issuer(), cert.subject());
     if let Some(server_name) = &server_name {
         let _ = cert.verify_is_valid_for_subject_name(server_name);
+    }
+    if let Some(identity) = &identity {
+        let _ = cert.verify_service_identity(identity);
     }
     for alg in &algorithms {
         let _ = cert.verify_signature(*alg, b"message", signature);
@@ -203,6 +207,27 @@ pub fn pki_cert(mut data: &[u8]) {
         let _ = path.anchor().subject.as_ref();
         assert!(path.intermediate_certificates().count() <= intermediates.len());
     }
+}
+
+/// Parse the caller's input even if the certificate is malformed.
+fn service_identity(text: &str) -> Option<ServiceIdentity> {
+    let mut identifiers = Vec::new();
+    if let Ok(uri) = UriId::try_from(text) {
+        let _ = (uri.scheme(), uri.domain());
+        identifiers.push(ReferenceIdentifier::Uri(uri));
+    }
+    if let Ok(srv) = SrvId::try_from(text) {
+        let _ = (srv.service(), srv.domain());
+        identifiers.push(ReferenceIdentifier::Srv(srv));
+    }
+    match ServerName::try_from(text) {
+        Ok(ServerName::DnsName(dns)) => identifiers.push(ReferenceIdentifier::Dns(dns.to_owned())),
+        Ok(ServerName::IpAddress(ip)) => identifiers.push(ReferenceIdentifier::Ip(ip)),
+        _ => {}
+    }
+    ServiceIdentity::new(identifiers)
+        .ok()
+        .map(|set| set.with_wildcard_policy(WildcardPolicy::Deny))
 }
 
 /// PEM decoding (`fuzz_targets/pki_pem.rs`): section iteration, Base64, and

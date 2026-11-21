@@ -246,7 +246,7 @@ pub(crate) fn valid_public_name(name: &[u8]) -> Option<DnsName<'static>> {
     {
         return None;
     }
-    DnsName::try_from(alloc::string::String::from(s)).ok()
+    DnsName::try_from_ascii(s).ok().map(|dns| dns.to_owned())
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ fn dns_names() {
         "example.com.",
         "a.wild.example.com",
         "A.Wild.Example.COM.",
-        "a-b_c.wild.example.com",
+        "a-b-c.wild.example.com",
     ] {
         assert_eq!(check(&cert, ok), Ok(()), "{ok}");
     }

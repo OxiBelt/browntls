@@ -1,5 +1,5 @@
 //! DNS identifier matching for `dNSName` presented identifiers, reference
-//! identifiers (RFC 6125 §6.4) and `dNSName` name constraints (RFC 5280
+//! identifiers (RFC 9525 §6.3) and `dNSName` name constraints (RFC 5280
 //! §4.2.1.10).
 //!
 //! Rules, which follow the consensus of NSS, Chromium and webpki rather than
@@ -39,11 +39,22 @@ pub(crate) enum IdRole {
 
 /// Checks that some `dNSName` in `san` matches `reference`.
 pub(crate) fn verify_dns_name(reference: &DnsName<'_>, san: Option<&[u8]>) -> Result<(), Error> {
+    verify_dns_name_with_wildcards(reference, san, true)
+}
+
+pub(crate) fn verify_dns_name_with_wildcards(
+    reference: &DnsName<'_>,
+    san: Option<&[u8]>,
+    allow_wildcards: bool,
+) -> Result<(), Error> {
     let reference = reference.as_ref().as_bytes();
     for name in GeneralNames::new(san) {
         let GeneralName::DnsName(presented) = name? else {
             continue;
         };
+        if !allow_wildcards && presented.starts_with(b"*.") {
+            continue;
+        }
         match presented_matches(presented, IdRole::Reference, reference) {
             Ok(true) => return Ok(()),
             // A malformed presented identifier can match nothing; keep
@@ -59,7 +70,11 @@ pub(crate) fn verify_dns_name(reference: &DnsName<'_>, san: Option<&[u8]>) -> Re
 /// preferred syntax, optionally with a leading `*.` wildcard label followed
 /// by at least two labels): the names [`verify_dns_name`] can match.
 pub(crate) fn is_valid_presented_dns_id(name: &[u8]) -> bool {
-    is_valid_dns_id(name, IdRole::Presented, true)
+    if !is_valid_dns_id(name, IdRole::Presented, true) {
+        return false;
+    }
+    let domain = name.strip_prefix(b"*.").unwrap_or(name);
+    core::str::from_utf8(domain).is_ok_and(|domain| DnsName::try_from_ascii(domain).is_ok())
 }
 
 /// Whether `presented` matches `reference`, interpreted according to `role`.
@@ -68,10 +83,14 @@ pub(crate) fn presented_matches(
     role: IdRole,
     reference: &[u8],
 ) -> Result<bool, Error> {
-    if !is_valid_dns_id(presented, IdRole::Presented, true) {
+    if !is_valid_presented_dns_id(presented) {
         return Err(Error::MalformedDnsIdentifier);
     }
-    if !is_valid_dns_id(reference, role, false) {
+    let valid_constraint = !matches!(role, IdRole::Constraint(_))
+        || reference.is_empty()
+        || core::str::from_utf8(reference.strip_prefix(b".").unwrap_or(reference))
+            .is_ok_and(|domain| DnsName::try_from_ascii(domain).is_ok());
+    if !is_valid_dns_id(reference, role, false) || !valid_constraint {
         return Err(match role {
             IdRole::Constraint(_) => Error::MalformedNameConstraint,
             _ => Error::MalformedDnsIdentifier,
@@ -127,11 +146,16 @@ const MAX_LABEL_LEN: usize = 63;
 const MAX_NAME_LEN: usize = 253;
 
 /// RFC 1034 §3.5 preferred name syntax as modified by RFC 1123 §2.1, with
-/// underscores tolerated for compatibility, wildcard labels when
-/// `allow_wildcard`, and the role-specific rules described in the module
+/// wildcard labels when `allow_wildcard`, and the role-specific rules
+/// described in the module
 /// documentation.
 fn is_valid_dns_id(name: &[u8], role: IdRole, allow_wildcard: bool) -> bool {
-    if name.len() > MAX_NAME_LEN {
+    let relative = if role == IdRole::Reference {
+        name.strip_suffix(b".").unwrap_or(name)
+    } else {
+        name
+    };
+    if relative.len() > MAX_NAME_LEN {
         return false;
     }
     let constraint = matches!(role, IdRole::Constraint(_));
@@ -174,7 +198,7 @@ fn is_valid_dns_id(name: &[u8], role: IdRole, allow_wildcard: bool) -> bool {
                 ends_with_hyphen = false;
                 label_len += 1;
             }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+            b'a'..=b'z' | b'A'..=b'Z' => {
                 all_numeric = false;
                 ends_with_hyphen = false;
                 label_len += 1;
@@ -248,7 +272,7 @@ mod tests {
         // Underscores and digits.
         assert_eq!(
             reference(b"_sip.example.com", b"_sip.example.com"),
-            Ok(true)
+            Err(Error::MalformedDnsIdentifier)
         );
         assert_eq!(
             reference(b"1.2.3.4", b"1.2.3.4"),

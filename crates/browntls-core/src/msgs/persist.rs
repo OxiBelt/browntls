@@ -613,7 +613,7 @@ impl Codec<'_> for ServerSessionValue {
                 let s =
                     core::str::from_utf8(&raw.0).map_err(|_| InvalidMessage::InvalidServerName)?;
                 Some(
-                    DnsName::try_from(s)
+                    DnsName::try_from_ascii(s)
                         .map_err(|_| InvalidMessage::InvalidServerName)?
                         .to_owned(),
                 )

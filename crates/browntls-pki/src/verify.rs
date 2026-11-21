@@ -83,8 +83,8 @@ impl<'a> EndEntityCert<'a> {
     }
 
     /// Verifies that the certificate is valid for `name` (DNS SAN matching
-    /// with wildcard rules per RFC 6125 §6.4.3 as profiled by the CA/B Forum;
-    /// IP SAN matching for addresses). The subject CN is never consulted.
+    /// with the RFC 9525 wildcard rules and this crate's DNS profile, or IP
+    /// SAN matching for addresses). The subject common name is never used.
     ///
     /// # Errors
     ///

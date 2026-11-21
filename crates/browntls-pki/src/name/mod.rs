@@ -12,8 +12,9 @@
 //! [`EndEntityCert::verify_is_valid_for_subject_name`]: crate::EndEntityCert::verify_is_valid_for_subject_name
 
 pub(crate) mod constraints;
-mod dns;
+pub(crate) mod dns;
 mod ip;
+pub(crate) mod service;
 mod x500;
 
 pub(crate) use dns::{is_valid_presented_dns_id, verify_dns_name};

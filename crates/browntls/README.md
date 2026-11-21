@@ -67,6 +67,34 @@ tls.read_to_end(&mut response).await?;
 # }
 ```
 
+
+## Choosing a post-quantum hybrid group
+
+Both built-in providers support the three RFC 10024 groups. To require
+`SecP384r1MLKEM1024`, set the provider's group list before building each
+endpoint's configuration. This example uses the native provider.
+
+```rust
+use std::sync::Arc;
+use browntls::{ClientConfig, ServerConfig, crypto::native, version::TLS13};
+
+let mut provider = native::default_provider();
+provider.kx_groups = vec![native::kx_group::SECP384R1MLKEM1024];
+let provider = Arc::new(provider);
+
+let client = ClientConfig::builder_with_provider(provider.clone())
+    .with_protocol_versions(&[&TLS13]).unwrap();
+let server = ServerConfig::builder_with_provider(provider)
+    .with_protocol_versions(&[&TLS13]).unwrap();
+// Complete the builders with the usual verifier and certificate settings.
+```
+
+The same group policy applies through the core, Tokio and DTLS APIs, the
+QUIC v1 handshake, and the handshake that precedes a kTLS handoff. Use
+`negotiated_key_exchange_group()` on the connection to inspect the result.
+The matching RustCrypto provider and group are in `crypto::rustcrypto`.
+
+
 ## Kernel TLS (Linux)
 
 The handshake runs in userspace; the kernel then encrypts and decrypts

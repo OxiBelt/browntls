@@ -600,6 +600,32 @@ Appendix B.3), including the client's own early-data records.
 
 The RustCrypto provider does not implement the non-preferred tier.
 
+### Post-quantum hybrid key agreement (RFC 10024)
+
+Both the native and RustCrypto providers implement the three
+[RFC 10024](https://www.rfc-editor.org/rfc/rfc10024.html) groups. They work
+with TLS 1.3, DTLS 1.3, and TLS 1.3 over QUIC v1. The default lists include
+`X25519MLKEM768`, with its position controlled by the
+`prefer-post-quantum` feature. The P-256 and P-384 hybrids are opt-in
+through each provider's `kx_group` module or `ALL_KX_GROUPS`.
+
+Set `CryptoProvider::kx_groups` before constructing the client and server
+configurations. A list containing only hybrid groups requires a hybrid
+exchange. Include a classical group if the endpoint may negotiate one.
+Buffered and unbuffered connections, QUIC, and Tokio use those same
+configurations. kTLS uses the traffic keys derived by the userspace
+handshake. The connection's `negotiated_key_exchange_group()` exposes the
+result once the exchange completes.
+
+The protocol concatenates the ECDHE and ML-KEM components in the order
+defined for each group, then feeds the result into the existing TLS 1.3
+key schedule. First-generation Kyber draft identifiers are obsolete.
+When an initial DTLS ClientHello with a hybrid share would exceed the
+datagram budget, the client offers the group with an empty key-share
+list. The HelloRetryRequest selects the group, and the second ClientHello
+can carry the share across fragments after the cookie in its first
+fragment. This keeps the stateless acceptor's address-validation policy.
+
 ### TLS 1.2 record protection
 
 TLS 1.2 suites are either `GenericAEADCipher` or `GenericBlockCipher`

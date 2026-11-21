@@ -139,6 +139,29 @@ fn rfc10024_wire_and_combiner_match_component_exchanges() {
     }
 }
 
+#[test]
+fn rfc10024_uses_implicit_rejection_in_each_hybrid() {
+    for (native, rustcrypto) in common_groups() {
+        let ciphertext_octet = match native.name() {
+            NamedGroup::X25519MLKEM768 => 0,
+            NamedGroup::secp256r1MLKEM768 => 65,
+            NamedGroup::secp384r1MLKEM1024 => 97,
+            _ => continue,
+        };
+        for group in [native, rustcrypto] {
+            let client = group.start().unwrap();
+            let mut server = group.start_and_complete(client.pub_key()).unwrap();
+            server.pub_key[ciphertext_octet] ^= 1;
+            let fallback = client.complete(&server.pub_key).unwrap();
+            assert_eq!(
+                fallback.secret_bytes().len(),
+                server.secret.secret_bytes().len()
+            );
+            assert_ne!(fallback.secret_bytes(), server.secret.secret_bytes());
+        }
+    }
+}
+
 #[cfg(feature = "tls12")]
 #[test]
 fn tls12_completion_matches() {

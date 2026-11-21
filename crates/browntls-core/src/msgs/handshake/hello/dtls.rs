@@ -47,7 +47,8 @@ impl<'a> HandshakeMessagePayload<'a> {
     ///
     /// EndOfEarlyData does not exist in DTLS 1.3 (RFC 9147 §5.6),
     /// HelloVerifyRequest is left opaque for the DTLS 1.2 initial client
-    /// state. Connection IDs (§9) are not supported and remain unknown.
+    /// state. The DTLS engine handles CID updates before this shared parser,
+    /// leaving them unknown to stream TLS and QUIC.
     pub(crate) fn read_dtls(
         r: &mut Reader<'a>,
         version: ProtocolVersion,

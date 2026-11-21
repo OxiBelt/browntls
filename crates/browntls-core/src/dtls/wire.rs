@@ -46,13 +46,13 @@ pub(crate) struct RecordNumber {
 /// What a record header says, before any deprotection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Header {
-    /// A `DTLSPlaintext` header, also the header of every DTLS 1.2 record
-    /// without a connection ID.
+    /// A legacy record header, including DTLS 1.2 with an optional CID.
     Plaintext {
         typ: ContentType,
         version: ProtocolVersion,
         epoch: u16,
         seq: u64,
+        cid: Option<Range<usize>>,
     },
     /// The unified header of a `DTLSCiphertext` (RFC 9147 §4, figure 3).
     Unified {
@@ -98,6 +98,7 @@ pub(crate) fn parse_record(input: &[u8], cid_len: usize) -> Option<Record> {
         | ContentType::Alert
         | ContentType::Handshake
         | ContentType::ApplicationData
+        | ContentType::Tls12Cid
         | ContentType::Ack) => typ,
         _ => return None,
     };
@@ -106,8 +107,18 @@ pub(crate) fn parse_record(input: &[u8], cid_len: usize) -> Option<Record> {
     let epoch = u16::from_be_bytes([header[3], header[4]]);
     let mut seq = [0u8; 8];
     seq[2..].copy_from_slice(&header[5..11]);
-    let len = usize::from(u16::from_be_bytes([header[11], header[12]]));
-    let end = PLAINTEXT_HEADER_LEN.checked_add(len)?;
+    let cid = if typ == ContentType::Tls12Cid {
+        if cid_len == 0 || epoch == 0 || version != ProtocolVersion::DTLSv1_2 {
+            return None;
+        }
+        Some(11..11usize.checked_add(cid_len)?)
+    } else {
+        None
+    };
+    let length_at = cid.as_ref().map_or(11, |range| range.end);
+    let body_start = length_at.checked_add(2)?;
+    let encoded_len: [u8; 2] = input.get(length_at..body_start)?.try_into().ok()?;
+    let end = body_start.checked_add(usize::from(u16::from_be_bytes(encoded_len)))?;
     if input.len() < end {
         return None;
     }
@@ -117,8 +128,9 @@ pub(crate) fn parse_record(input: &[u8], cid_len: usize) -> Option<Record> {
             version,
             epoch,
             seq: u64::from_be_bytes(seq),
+            cid,
         },
-        body: PLAINTEXT_HEADER_LEN..end,
+        body: body_start..end,
     })
 }
 
@@ -169,10 +181,36 @@ pub(crate) fn put_plaintext_header(
     seq: u64,
     len: u16,
 ) {
+    put_legacy_header(out, typ, version, epoch, seq, &[], len);
+}
+
+#[cfg(feature = "tls12")]
+pub(super) fn put_v12_cid_header(out: &mut Vec<u8>, seq: u64, cid: &[u8], len: u16) {
+    put_legacy_header(
+        out,
+        ContentType::Tls12Cid,
+        ProtocolVersion::DTLSv1_2,
+        1,
+        seq,
+        cid,
+        len,
+    );
+}
+
+fn put_legacy_header(
+    out: &mut Vec<u8>,
+    typ: ContentType,
+    version: ProtocolVersion,
+    epoch: u16,
+    seq: u64,
+    cid: &[u8],
+    len: u16,
+) {
     out.push(u8::from(typ));
     out.extend_from_slice(&u16::from(version).to_be_bytes());
     out.extend_from_slice(&epoch.to_be_bytes());
     out.extend_from_slice(&seq.to_be_bytes()[2..]);
+    out.extend_from_slice(cid);
     out.extend_from_slice(&len.to_be_bytes());
 }
 
@@ -326,6 +364,7 @@ mod tests {
                 version: ProtocolVersion::DTLSv1_2,
                 epoch: 0,
                 seq: 0x0102_0304_0506,
+                cid: None,
             }
         );
         assert_eq!(record.body, 13..16);

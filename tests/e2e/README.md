@@ -172,7 +172,17 @@ OpenSSL. Select `--suite wolfssl` or `--suite openssl` to run one peer only:
 ```sh
 python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl
 python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite wolfssl
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite wolfssl-cid
 ```
+
+The opt-in `wolfssl-cid` suite runs both roles with DTLS 1.2 RFC 9146 and
+DTLS 1.3 initial connection IDs. Both peers opt in to nonempty receiving
+IDs; wolfSSL requires nonempty negotiated receive and transmit IDs before
+the authenticated payload and close exchange. The runner also requires full
+mutual certificate authentication and the expected version on both sides.
+The suite does not exercise CID rotation, migration, or packet loss. It is
+not included in `--suite all`. The browntls `--dtls-cid` switch selects an
+eight-byte receiving ID and allows sending the peer's ID.
 
 The runner builds the selected peer images and reuses the full mutual
 authentication runner and ephemeral PKI generator. Each suite gets its own

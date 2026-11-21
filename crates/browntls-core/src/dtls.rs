@@ -26,8 +26,8 @@
 //! A server answers a ClientHello without a cookie with a HelloRetryRequest
 //! carrying one, bound to the client's address (RFC 9147 §5.1), unless the
 //! cookie exchange is turned off. Over DTLS this version supports neither
-//! 0-RTT, Encrypted Client Hello, post-handshake client authentication nor
-//! connection IDs.
+//! 0-RTT, Encrypted Client Hello nor post-handshake client authentication.
+//! Connection IDs are opt-in through [`Settings::with_connection_ids`].
 //!
 //! Internally: records and their headers are in `wire`, record protection
 //! in `keys`, replay windows in `replay`, handshake reassembly in
@@ -35,6 +35,7 @@
 //! acknowledgements and timers in `flight`.
 
 mod acceptor;
+pub(crate) mod cid;
 mod connection;
 mod flight;
 mod keys;
@@ -53,10 +54,10 @@ pub(crate) use v12::{canonical as canonical12, retry_client_hello};
 pub use versions::Versions;
 
 pub use acceptor::{Accepted, Acceptor};
+pub use cid::{AuthenticatedRecord, ConnectionIdPolicy, ConnectionIdUsage, MAX_CONNECTION_IDS};
 pub use connection::{ClientConnection, ConnectionCommon, Received, ServerConnection};
 pub(crate) use state::Dtls;
-#[cfg(test)]
-pub(crate) use state::Settings;
+pub use state::Settings;
 #[cfg(feature = "std")]
 pub use udp::{ServerEvent, UdpClient, UdpServer};
 

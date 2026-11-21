@@ -268,6 +268,15 @@ impl UdpServer {
         &self.socket
     }
 
+    pub(super) fn has_queued_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_event_for_test(&mut self, event: ServerEvent) {
+        self.events.push_back(event);
+    }
+
     fn now(&self) -> Duration {
         Instant::now().saturating_duration_since(self.start)
     }

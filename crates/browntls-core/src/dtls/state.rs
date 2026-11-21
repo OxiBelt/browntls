@@ -775,15 +775,12 @@ impl Dtls {
                 }
                 return;
             }
-            if !self.is_v12() {
+            if self.uses_acknowledgements() {
                 self.ack_due = Some(now);
             }
             return;
         }
-        if self.is_v12() {
-            return;
-        }
-        if !self.saw_handshake {
+        if !self.uses_acknowledgements() || !self.saw_handshake {
             return;
         }
         if self.out.flight_started_this_input() {
@@ -796,6 +793,12 @@ impl Dtls {
             let soon = now + self.out.timeout() / 4;
             self.ack_due = Some(self.ack_due.map_or(soon, |due| due.min(soon)));
         }
+    }
+
+    fn uses_acknowledgements(&self) -> bool {
+        // A DTLS 1.2-only endpoint cannot emit a DTLS 1.3 ACK while
+        // assembling a fragmented initial or retried ClientHello.
+        !self.is_v12() && self.allows(ProtocolVersion::TLSv1_3)
     }
 
     /// The server's unprotected records continue the sequence numbers of

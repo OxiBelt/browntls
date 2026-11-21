@@ -357,3 +357,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(feature = "tls12")]
+pub(crate) use super::hs::dtls12::hello_verify_request as dtls12_hello_verify_request;

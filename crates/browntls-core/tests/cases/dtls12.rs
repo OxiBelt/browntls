@@ -41,6 +41,75 @@ mod dtls12_cases {
     }
 
     #[test]
+    fn stateless_acceptor_challenges_a_fragmented_initial_dtls12_hello() {
+        let chain = server_chain(KeyType::EcdsaP256);
+        let mut config = client_config(&chain);
+        config.alpn_protocols = vec![vec![b'x'; 230], vec![b'y'; 230]];
+        let mut client = dtls::ClientConnection::new_with_versions(
+            Arc::new(config),
+            server_name(),
+            dtls::Versions::V1_2,
+        )
+        .unwrap();
+        client.set_mtu(256).unwrap();
+        let acceptor = dtls::Acceptor::new_with_versions(
+            Arc::new(dtls_server_config(&chain)),
+            dtls::Versions::V1_2,
+        )
+        .unwrap();
+        let now = Duration::from_secs(1);
+        let mut first = Vec::new();
+        assert!(client.write_datagram(&mut first, now).unwrap());
+        let first_len = first.len();
+        let mut second = Vec::new();
+        assert!(client.write_datagram(&mut second, now).unwrap());
+        let mut challenge = Vec::new();
+        assert!(matches!(
+            acceptor
+                .accept(&mut second, PEER, &mut challenge, now)
+                .unwrap(),
+            dtls::Accepted::Ignored
+        ));
+        assert!(challenge.is_empty());
+        assert!(matches!(
+            acceptor
+                .accept(&mut first, PEER, &mut challenge, now)
+                .unwrap(),
+            dtls::Accepted::Retry
+        ));
+        assert!(challenge.len() <= first_len);
+        // A retransmission has the same handshake sequence but a new
+        // record sequence. The stateless answer must mirror it.
+        first[5..11].copy_from_slice(&[0, 0, 0, 0, 0, 7]);
+        challenge.clear();
+        assert!(matches!(
+            acceptor
+                .accept(&mut first, PEER, &mut challenge, now)
+                .unwrap(),
+            dtls::Accepted::Retry
+        ));
+        assert_eq!(&challenge[5..11], &[0, 0, 0, 0, 0, 7]);
+        client.read_datagram(&mut challenge, now).unwrap();
+        let mut answer = Vec::new();
+        assert!(client.write_datagram(&mut answer, now).unwrap());
+        let dtls::Accepted::Connection(server) = acceptor
+            .accept(&mut answer, PEER, &mut Vec::new(), now)
+            .unwrap()
+        else {
+            panic!("the retry cookie must allow allocation before the final fragment");
+        };
+        let mut server = *server;
+        assert!(
+            !server
+                .write_datagram(&mut Vec::new(), now + Duration::from_millis(500))
+                .unwrap()
+        );
+        let mut pair = Pair { client, server };
+        pair.handshake(&mut Sim::perfect()).unwrap();
+        assert_v12(&pair);
+    }
+
+    #[test]
     fn endpoint_policy_negotiates_highest_mutual_version() {
         use dtls::Versions::{V1_2, V1_2And1_3, V1_3};
         let chain = server_chain(KeyType::EcdsaP256);

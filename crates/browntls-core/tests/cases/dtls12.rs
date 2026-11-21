@@ -78,6 +78,17 @@ mod dtls12_cases {
             dtls::Accepted::Retry
         ));
         assert!(challenge.len() <= first_len);
+        // A retransmission has the same handshake sequence but a new
+        // record sequence. The stateless answer must mirror it.
+        first[5..11].copy_from_slice(&[0, 0, 0, 0, 0, 7]);
+        challenge.clear();
+        assert!(matches!(
+            acceptor
+                .accept(&mut first, PEER, &mut challenge, now)
+                .unwrap(),
+            dtls::Accepted::Retry
+        ));
+        assert_eq!(&challenge[5..11], &[0, 0, 0, 0, 0, 7]);
         client.read_datagram(&mut challenge, now).unwrap();
         let mut answer = Vec::new();
         assert!(client.write_datagram(&mut answer, now).unwrap());

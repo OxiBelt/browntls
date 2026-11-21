@@ -84,9 +84,11 @@ impl Acceptor {
         out: &mut Vec<u8>,
         now: Duration,
     ) -> Result<Accepted, Error> {
-        let Some((header, fragment)) = first_client_hello(datagram) else {
+        let Some((header, fragment, record_seq)) = first_client_hello(datagram) else {
             return Ok(Accepted::Ignored);
         };
+        #[cfg(not(feature = "tls12"))]
+        let _ = record_seq;
         #[cfg(feature = "tls12")]
         if header.message_seq == 0
             && header.fragment_offset == 0
@@ -107,7 +109,7 @@ impl Acceptor {
                     ContentType::Handshake,
                     crate::ProtocolVersion::DTLSv1_2,
                     0,
-                    0,
+                    record_seq,
                     challenge.len() as u16,
                 );
                 out.extend_from_slice(&challenge);
@@ -158,7 +160,7 @@ impl Acceptor {
 
 /// The ClientHello fragment that starts `datagram`, if it starts with an
 /// unprotected handshake record holding one.
-fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8])> {
+fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8], u64)> {
     let record = wire::parse_record(datagram, 0)?;
     if record.body.len() > crate::msgs::message::MAX_PLAINTEXT_LEN {
         return None;
@@ -166,13 +168,14 @@ fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8])> {
     let Header::Plaintext {
         typ: ContentType::Handshake,
         epoch: 0,
+        seq,
         ..
     } = record.header
     else {
         return None;
     };
     let (header, fragment, _) = HandshakeHeader::read(datagram.get(record.body)?)?;
-    (header.typ == u8::from(HandshakeType::ClientHello)).then_some((header, fragment))
+    (header.typ == u8::from(HandshakeType::ClientHello)).then_some((header, fragment, seq))
 }
 
 /// The cookie of a ClientHello from its first fragment, wherever it is

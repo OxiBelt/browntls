@@ -532,6 +532,7 @@ impl ExpectClientHello {
                         .map(|(id, binder)| (id.identity.0.as_slice(), binder.as_ref().len())),
                     cx.data.sni.as_ref(),
                     cx.common.alpn_protocol.as_deref(),
+                    crate::tls13::key_schedule::Protocol::of(cx.common),
                 )
             }
             _ => Vec::new(),

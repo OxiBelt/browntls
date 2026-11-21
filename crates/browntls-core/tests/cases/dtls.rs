@@ -970,3 +970,5 @@ fn a_server_close_read_in_a_later_datagram_still_gets_the_finished() {
         assert_eq!(received.app_data().len(), 1, "MTU {mtu}");
     }
 }
+
+include!("dtls/rfc9973.rs");

@@ -101,12 +101,19 @@ pub(crate) fn derive_imported_psk(
     epsk_suite: &Tls13CipherSuite,
     epsk: &[u8],
     imported_identity: &[u8],
+    protocol: Protocol,
     target_len: usize,
 ) -> Vec<u8> {
     let epskx = epsk_suite.hkdf_provider.extract_from_secret(None, epsk);
     let identity_hash = epsk_suite.common.hash_provider.hash(imported_identity);
     let mut out = alloc::vec![0u8; target_len];
-    hkdf_expand_label(&*epskx, b"derived psk", identity_hash.as_ref(), &mut out);
+    hkdf_expand_label_with_prefix(
+        &*epskx,
+        protocol.label_prefix(),
+        b"derived psk",
+        identity_hash.as_ref(),
+        &mut out,
+    );
     out
 }
 

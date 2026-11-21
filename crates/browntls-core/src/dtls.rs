@@ -1,8 +1,16 @@
-//! DTLS 1.3 (RFC 9147): TLS 1.3 over datagrams.
+//! DTLS over datagrams: DTLS 1.3 by default, with explicit DTLS 1.2
+//! certificate handshakes when the `tls12` feature is enabled.
+//!
+//! [`Versions`] is an endpoint policy, intersected with the TLS config and
+//! provider suites. Use the `new_with_versions` constructors to allow
+//! both versions or only DTLS 1.2. Negotiation prefers 1.3 when both allow
+//! it; retransmission never downgrades. DTLS 1.2 requires EMS, uses the
+//! existing ECDHE AEAD suites and certificate authentication (including
+//! mTLS), and never resumes or stores TLS 1.2 sessions.
 //!
 //! [`ClientConnection`] and [`ServerConnection`] are the low-level API: they
 //! take and produce whole datagrams and leave the transport, and the
-//! clock, to the caller. They run the TLS 1.3 handshake with the DTLS
+//! clock, to the caller. They run the shared handshake with the DTLS
 //! record layer: records that carry their own epoch and sequence number,
 //! encrypted record numbers, a replay window per epoch, handshake messages
 //! that are fragmented, reordered and retransmitted, and acknowledgements.
@@ -34,7 +42,13 @@ mod send;
 mod state;
 #[cfg(feature = "std")]
 mod udp;
+#[cfg(feature = "tls12")]
+mod v12;
+mod versions;
 mod wire;
+#[cfg(feature = "tls12")]
+pub(crate) use v12::{canonical as canonical12, retry_client_hello};
+pub use versions::Versions;
 
 pub use acceptor::{Accepted, Acceptor};
 pub use connection::{ClientConnection, ConnectionCommon, Received, ServerConnection};

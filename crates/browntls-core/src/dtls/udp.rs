@@ -64,8 +64,18 @@ impl UdpClient {
         name: ServerName<'static>,
         socket: UdpSocket,
     ) -> io::Result<Self> {
+        Self::connect_with_versions(config, name, socket, super::Versions::default())
+    }
+
+    /// Connects with an explicit DTLS endpoint version policy.
+    pub fn connect_with_versions(
+        config: Arc<crate::ClientConfig>,
+        name: ServerName<'static>,
+        socket: UdpSocket,
+        versions: super::Versions,
+    ) -> io::Result<Self> {
         socket.set_nonblocking(false)?;
-        let conn = ClientConnection::new(config, name).map_err(io_error)?;
+        let conn = ClientConnection::new_with_versions(config, name, versions).map_err(io_error)?;
         let mut client = Self::from_connection(conn, socket);
         client.complete_handshake()?;
         Ok(client)

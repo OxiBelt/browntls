@@ -153,7 +153,9 @@ works with a remote Docker daemon.
   randomizes configuration identifiers, so those scenarios have a browntls
   client.
 
-## DTLS 1.3 interoperability
+<a id="dtls-13-interoperability"></a>
+
+## DTLS interoperability
 
 Run from the repository root with Docker and the musl Rust target for the
 chosen architecture installed. Use a separate image tag for the DTLS peer.
@@ -161,11 +163,59 @@ chosen architecture installed. Use a separate image tag for the DTLS peer.
 ```sh
 python3 tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:dtls-amd64
 python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64
+python3 -B -m unittest discover -s tests/e2e -p 'test_dtls.py'
 ```
 
-The runner builds a pinned wolfSSL peer image and generates ephemeral
-credentials on an isolated Docker network. Each peer runs as both client and
-server, verifies certificates, exchanges a request and reply, and observes
-the other peer's `close_notify`. This suite covers certificate-authenticated
-full handshakes using ECDSA P-256. Pass `--skip-peer-build` to reuse the
-previously built wolfSSL image.
+The default `--suite all` runs DTLS 1.3 against wolfSSL and DTLS 1.2 against
+OpenSSL. Select `--suite wolfssl` or `--suite openssl` to run one peer only:
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite wolfssl
+```
+
+The runner builds the selected peer images and reuses the full mutual
+authentication runner and ephemeral PKI generator. Each suite gets its own
+run-specific Docker network and PKI volume, cleaned up by the existing
+harness. Peers use ECDSA P-256 credentials and run as both client and server,
+verify certificates, exchange exact request and reversed reply bytes (without
+a newline), and check `close_notify` in each direction. The harness requires
+successful exits on both sides, the selected DTLS version, a full handshake,
+peer certificates, both payloads and closure. No resumption is exercised or
+claimed. Pass `--skip-peer-build` to reuse previously built peer images.
+
+The browntls peer's existing repeatable `--tls` option selects the DTLS
+endpoint policy: `--tls 1.2` uses `dtls::Versions::V1_2`, `--tls 1.3` uses
+`V1_3`, and `--tls 1.2 --tls 1.3` uses `V1_2And1_3`. Omitting it preserves
+the DTLS 1.3 default. The OpenSSL suite runs four exchanges: each browntls
+role with DTLS 1.2 only, then each role explicitly permitting both DTLS 1.2
+and 1.3. The mixed cases enable a suite for each version and must negotiate
+DTLS 1.2 with OpenSSL.
+
+[`peer/openssl-dtls.c`](peer/openssl-dtls.c) is a small independent OpenSSL
+C peer because the OpenSSL CLI does not support `s_server -rev` with DTLS.
+[`peer/openssl-dtls.Dockerfile`](peer/openssl-dtls.Dockerfile) uses the same
+pinned Alpine 3.24 base as the existing OpenSSL suite. It installs the
+distribution's OpenSSL 3.5 packages and builds with warnings treated as
+errors; it downloads no separate sources. Build and runtime reject a
+different OpenSSL minor version. Distribution package patch versions still
+depend on the repositories at build time.
+
+The OpenSSL peer uses a connected UDP datagram BIO, bounds socket I/O and
+total runtime, verifies the server's DNS name as a client, and requires a
+verified client certificate as a server. It restricts negotiation to DTLS 1.2
+and `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` with P-256. After the handshake
+it requires [extended master secret][openssl-ems]
+and rejects a reused session before exchanging application data. Session
+caching and tickets are disabled on the OpenSSL side. Success requires both
+authenticated close alerts and a completed bidirectional shutdown.
+
+The mock runner checks need no Docker or Cargo; they validate command
+construction and success/failure gates, not a DTLS implementation. Actual
+interoperability requires the Docker commands above. This one-connection
+oracle runs only on the isolated test network; it does not implement a
+multi-client server, stateless cookie defense, or packet loss/reordering
+testing. This suite is a separate runner; the existing TLS matrix and CI
+workflow do not invoke it automatically.
+
+[openssl-ems]: https://docs.openssl.org/3.5/man3/SSL_get_extms_support/

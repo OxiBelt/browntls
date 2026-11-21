@@ -432,6 +432,21 @@ pub(crate) struct ServerSessionValue {
 }
 
 impl ServerSessionValue {
+    /// Classifies a stored or authenticated session without copying its
+    /// certificate chain, key material or application data.
+    pub(crate) fn encoded_version(plaintext: &[u8]) -> Option<ProtocolVersion> {
+        let mut reader = Reader::init(plaintext);
+        match u8::read(&mut reader).ok()? {
+            0 => {}
+            1 => {
+                let name_len = u8::read(&mut reader).ok()?;
+                reader.take(usize::from(name_len))?;
+            }
+            _ => return None,
+        }
+        ProtocolVersion::read(&mut reader).ok()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sni: Option<&DnsName<'_>>,

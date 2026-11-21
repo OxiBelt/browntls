@@ -169,3 +169,49 @@ fn rfc9973_uses_illegal_parameter_for_a_selected_bad_binder() {
         Error::AlertReceived(AlertDescription::IllegalParameter)
     );
 }
+
+#[test]
+fn rfc9973_checks_repeated_identities_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use browntls_core::server::StoresServerSessions;
+
+    #[derive(Debug, Default)]
+    struct CountingCache(AtomicUsize);
+
+    impl StoresServerSessions for CountingCache {
+        fn put(&self, _key: Vec<u8>, _value: Vec<u8>) -> bool {
+            false
+        }
+
+        fn get(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+
+        fn take(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            panic!("RFC 9973 cannot select a ticket");
+        }
+
+        fn can_cache(&self) -> bool {
+            false
+        }
+    }
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let keys = (0..24)
+        .map(|_| psk(b"repeated", HashAlgorithm::SHA256))
+        .chain(core::iter::once(psk(b"distinct", HashAlgorithm::SHA256)))
+        .collect();
+    let mut config = client_with(&chain, keys);
+    config.cert_with_extern_psk = true;
+    let cache = Arc::new(CountingCache::default());
+    let mut server_config = cert_and_psk_server(&chain, vec![]);
+    server_config.session_storage = cache.clone();
+    server_config.send_tls13_tickets = 0;
+    let (mut client, mut server) = connect(config, server_config);
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(cache.0.load(Ordering::Relaxed), 2);
+    assert!(client.peer_certificates().is_some());
+    assert!(!client.negotiated_cert_with_extern_psk());
+}

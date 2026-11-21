@@ -1,7 +1,9 @@
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
+
 use crate::common_state::CommonState;
 use crate::enums::{AlertDescription, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
-use crate::msgs::codec::Codec;
 use crate::msgs::enums::PskKeyExchangeMode;
 use crate::msgs::handshake::ClientExtensions;
 use crate::msgs::persist::ServerSessionValue;
@@ -70,8 +72,15 @@ pub(super) fn reject_tickets(
         return Ok(());
     };
     let stateless = config.ticketer.enabled();
-    for candidate in &offer.identities {
-        let identity = &candidate.identity.0;
+    let mut checked = BTreeSet::new();
+    for identity in offer
+        .identities
+        .iter()
+        .map(|candidate| candidate.identity.0.as_slice())
+    {
+        if !checked.insert(identity) {
+            continue;
+        }
         if is_tls13_ticket(config.session_storage.get(identity))
             || (stateless && is_tls13_ticket(config.ticketer.decrypt(identity)))
         {
@@ -84,16 +93,14 @@ pub(super) fn reject_tickets(
     Ok(())
 }
 
-fn is_tls13_ticket(plaintext: Option<alloc::vec::Vec<u8>>) -> bool {
+fn is_tls13_ticket(plaintext: Option<Vec<u8>>) -> bool {
     let Some(mut plaintext) = plaintext else {
         return false;
     };
-    let session = ServerSessionValue::read_bytes(&plaintext);
+    let version = ServerSessionValue::encoded_version(&plaintext);
     crate::crypto::zeroize_vec(&mut plaintext);
-    session.is_ok_and(|session| {
-        matches!(
-            session.version,
-            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
-        )
-    })
+    matches!(
+        version,
+        Some(ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3)
+    )
 }

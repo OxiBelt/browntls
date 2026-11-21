@@ -13,7 +13,7 @@ use common::*;
 fn tls13_only_client(
     chain: &Chain,
     suites: Option<&[browntls_core::SupportedCipherSuite]>,
-    groups: Option<&[&'static dyn browntls_core::crypto::SupportedKxGroup]>,
+    groups: Option<&[&'static dyn SupportedKxGroup]>,
 ) -> ClientConfig {
     let mut provider = prov::default_provider();
     if let Some(suites) = suites {
@@ -42,3 +42,5 @@ fn connect(
 include!("tls13/handshake.rs");
 include!("tls13/early_data.rs");
 include!("tls13/conformance.rs");
+
+include!("tls13/rfc10024.rs");

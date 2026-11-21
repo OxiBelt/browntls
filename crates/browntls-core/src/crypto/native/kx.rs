@@ -347,7 +347,7 @@ where
         let ss = self
             .dk
             .decapsulate(peer_pub_key)
-            .map_err(|_| invalid_share())?;
+            .map_err(|_| Error::general("ML-KEM decapsulation failed"))?;
         Ok(shared_secret(ss))
     }
 

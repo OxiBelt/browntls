@@ -973,3 +973,6 @@ fn a_server_close_read_in_a_later_datagram_still_gets_the_finished() {
 
 include!("dtls/rfc9973.rs");
 include!("dtls/service_identity.rs");
+
+#[path = "dtls/rfc10024.rs"]
+mod rfc10024;

@@ -314,6 +314,11 @@ pub(super) fn handle_server_hello(
                 Error::PeerMisbehaved(_) => cx
                     .common
                     .send_fatal_alert(AlertDescription::IllegalParameter, err),
+                // RFC 10024 §4.2 distinguishes invalid peer input from
+                // a local ML-KEM decapsulation failure.
+                other if their_key_share.group.is_rfc10024_hybrid() => cx
+                    .common
+                    .send_fatal_alert(AlertDescription::InternalError, other),
                 other => other,
             })?;
     cx.common.kx_state.complete();

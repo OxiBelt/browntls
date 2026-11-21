@@ -74,11 +74,30 @@ impl UdpClient {
     /// Pairs `conn`, configured as needed (for example its MTU), with
     /// `socket`, connected to the server, without doing any I/O yet. The
     /// socket must be in blocking mode (the default).
+    ///
+    /// This starts a new monotonic clock at zero. Use it before driving
+    /// `conn`; for a connection already driven with a clock, use
+    /// [`Self::from_connection_with_clock`] to preserve its deadlines.
     pub fn from_connection(conn: ClientConnection, socket: UdpSocket) -> Self {
+        Self::from_connection_with_clock(conn, socket, Instant::now())
+    }
+
+    /// Pairs an in-progress `conn` with `socket`, preserving its clock.
+    ///
+    /// `start` must be the same monotonic origin used to drive `conn`:
+    /// protocol times must have been measured as `start.elapsed()`. Time
+    /// spent outside the wrapper still counts toward its deadlines. Use
+    /// [`Self::into_parts_with_clock`] to transfer an existing client's
+    /// origin. The socket must be connected and in blocking mode.
+    pub fn from_connection_with_clock(
+        conn: ClientConnection,
+        socket: UdpSocket,
+        start: Instant,
+    ) -> Self {
         Self {
             conn,
             socket,
-            start: Instant::now(),
+            start,
             read_timeout: None,
             received: VecDeque::new(),
             buf: alloc::vec![0; MAX_DATAGRAM],
@@ -219,8 +238,20 @@ impl UdpClient {
 
     /// The connection and the socket. Application data received but not
     /// yet returned by [`Self::recv`] is lost.
+    ///
+    /// This discards the clock origin. To continue driving the connection
+    /// with its existing deadlines, use [`Self::into_parts_with_clock`].
     pub fn into_parts(self) -> (ClientConnection, UdpSocket) {
         (self.conn, self.socket)
+    }
+
+    /// The connection, socket and monotonic clock origin, for continuing
+    /// with [`Self::from_connection_with_clock`] or the low-level API.
+    /// Low-level protocol times must be measured as `start.elapsed()`.
+    /// Application data not yet returned by [`Self::recv`] is lost, and
+    /// the wrapper's read timeout is not transferred.
+    pub fn into_parts_with_clock(self) -> (ClientConnection, UdpSocket, Instant) {
+        (self.conn, self.socket, self.start)
     }
 
     fn now(&self) -> Duration {

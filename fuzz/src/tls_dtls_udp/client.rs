@@ -81,15 +81,15 @@ impl Client {
         reached("client read timeout");
     }
 
-    /// `into_parts`, then `from_connection`: what was received and not
-    /// returned is lost, which only leaves entries in `to_client`.
+    /// Split and rewrap with the original clock: what was received and
+    /// not returned is lost, which only leaves entries in `to_client`.
     pub(super) fn split(&mut self) {
         let Some(udp) = self.udp.take() else { return };
         let handshaking = udp.connection().is_handshaking();
-        let (conn, socket) = udp.into_parts();
+        let (conn, socket, start) = udp.into_parts_with_clock();
         assert_eq!(conn.is_handshaking(), handshaking);
         assert_eq!(socket.local_addr().ok(), Some(self.addr));
-        self.attach(UdpClient::from_connection(conn, socket));
+        self.attach(UdpClient::from_connection_with_clock(conn, socket, start));
     }
 
     pub(super) fn accessors(&self, server: SocketAddr) {

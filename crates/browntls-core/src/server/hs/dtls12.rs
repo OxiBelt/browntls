@@ -48,25 +48,32 @@ impl ExpectClientHello {
         {
             return Ok(false);
         }
-        let mut plain = Vec::from(LABEL);
-        plain.extend_from_slice(&self.config.current_time()?.as_secs().to_be_bytes());
-        plain.extend_from_slice(dtls.peer_address());
-        let cookie = self
-            .config
-            .hello_retry_cookies
-            .as_ref()
-            .and_then(|sealer| sealer.encrypt(&plain))
-            .filter(|c| !c.is_empty() && c.len() <= 255)
-            .ok_or_else(|| Error::General("DTLS 1.2 cookie sealing failed".into()))?;
-        let mut encoded = Vec::new();
-        encoded.push(u8::from(HandshakeType::HelloVerifyRequest));
-        crate::msgs::codec::u24((3 + cookie.len()) as u32).encode(&mut encoded);
-        // RFC 6347 section 4.2.1: DTLS 1.0 here avoids version intolerance;
-        // this field never commits the client to a negotiated version.
-        ProtocolVersion::DTLSv1_0.encode(&mut encoded);
-        encoded.push(cookie.len() as u8);
-        encoded.extend_from_slice(&cookie);
+        let encoded = hello_verify_request(&self.config, dtls.peer_address())?;
         dtls.queue_handshake(&encoded);
         Ok(true)
     }
+}
+
+/// Builds the handshake encoding of an address-only DTLS 1.2 challenge.
+pub(crate) fn hello_verify_request(
+    config: &crate::ServerConfig,
+    address: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut plain = Vec::from(LABEL);
+    plain.extend_from_slice(&config.current_time()?.as_secs().to_be_bytes());
+    plain.extend_from_slice(address);
+    let cookie = config
+        .hello_retry_cookies
+        .as_ref()
+        .and_then(|sealer| sealer.encrypt(&plain))
+        .filter(|c| !c.is_empty() && c.len() <= 255)
+        .ok_or_else(|| Error::General("DTLS 1.2 cookie sealing failed".into()))?;
+    let mut encoded = Vec::new();
+    encoded.push(u8::from(HandshakeType::HelloVerifyRequest));
+    crate::msgs::codec::u24((3 + cookie.len()) as u32).encode(&mut encoded);
+    // RFC 6347 section 4.2.1: DTLS 1.0 here avoids version intolerance.
+    ProtocolVersion::DTLSv1_0.encode(&mut encoded);
+    encoded.push(cookie.len() as u8);
+    encoded.extend_from_slice(&cookie);
+    Ok(encoded)
 }

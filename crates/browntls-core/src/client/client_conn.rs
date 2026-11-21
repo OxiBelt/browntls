@@ -26,9 +26,6 @@ use crate::key_log::KeyLog;
 use crate::log::trace;
 use crate::msgs::enums::NamedGroup;
 use crate::msgs::persist::ClientConfigBinding;
-#[cfg(feature = "tls12")]
-use crate::msgs::persist::Tls12ClientSessionValue;
-use crate::msgs::persist::Tls13ClientSessionValue;
 use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -36,35 +33,8 @@ use crate::time_provider::TimeProvider;
 use crate::verify::ServerCertVerifier;
 use crate::versions::EnabledVersions;
 
-/// Stores session state for resumption, keyed by server name.
-pub trait ClientSessionStore: fmt::Debug + Send + Sync {
-    /// Remembers which key exchange group `server_name` accepted.
-    fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup);
-
-    /// The group `server_name` last accepted, if remembered.
-    fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup>;
-
-    /// Stores a TLS 1.2 session for `server_name`.
-    #[cfg(feature = "tls12")]
-    fn set_tls12_session(&self, server_name: ServerName<'static>, value: Tls12ClientSessionValue);
-
-    /// The stored TLS 1.2 session for `server_name`, if any.
-    #[cfg(feature = "tls12")]
-    fn tls12_session(&self, server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue>;
-
-    /// Forgets the TLS 1.2 session for `server_name`.
-    #[cfg(feature = "tls12")]
-    fn remove_tls12_session(&self, server_name: &ServerName<'static>);
-
-    /// Stores a TLS 1.3 ticket for `server_name`.
-    fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue);
-
-    /// Removes and returns a TLS 1.3 ticket for `server_name`.
-    fn take_tls13_ticket(
-        &self,
-        server_name: &ServerName<'static>,
-    ) -> Option<Tls13ClientSessionValue>;
-}
+mod session;
+pub use session::ClientSessionStore;
 
 /// Chooses the client certificate to present.
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
@@ -517,7 +487,7 @@ impl Resumption {
         }
     }
 
-    /// Sets how TLS 1.2 sessions may be resumed.
+    /// Sets how stream TLS 1.2 and DTLS 1.2 sessions may be resumed.
     pub fn tls12_resumption(mut self, tls12: Tls12Resumption) -> Self {
         self.tls12_resumption = tls12;
         self
@@ -538,7 +508,7 @@ impl Default for Resumption {
     }
 }
 
-/// How TLS 1.2 sessions may be resumed.
+/// How stream TLS 1.2 and DTLS 1.2 sessions may be resumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tls12Resumption {
     /// Never resume TLS 1.2 sessions.
@@ -731,6 +701,10 @@ impl SideData for ClientConnectionData {
         #[cfg(feature = "tls12")]
         if negotiated_version == Some(ProtocolVersion::TLSv1_2) {
             self.session_store.remove_tls12_session(&self.server_name);
+        }
+        #[cfg(feature = "tls12")]
+        if negotiated_version == Some(ProtocolVersion::DTLSv1_2) {
+            self.session_store.remove_dtls12_session(&self.server_name);
         }
         #[cfg(not(feature = "tls12"))]
         let _ = negotiated_version;

@@ -342,6 +342,34 @@ fn dtls_imported_psk_sha256_and_sha384_expected_values() {
         derive_imported_psk(suite384, &epsk384, &identity384, Protocol::Dtls13, 48),
         expected384
     );
+
+    #[cfg(feature = "native")]
+    {
+        use crate::crypto::native::cipher_suite::{
+            TLS13_AES_128_GCM_SHA256, TLS13_AES_256_GCM_SHA384,
+        };
+
+        assert_eq!(
+            derive_imported_psk(
+                TLS13_AES_128_GCM_SHA256.tls13().unwrap(),
+                &epsk256,
+                &identity,
+                Protocol::Dtls13,
+                32,
+            ),
+            expected256
+        );
+        assert_eq!(
+            derive_imported_psk(
+                TLS13_AES_256_GCM_SHA384.tls13().unwrap(),
+                &epsk384,
+                &identity384,
+                Protocol::Dtls13,
+                48,
+            ),
+            expected384
+        );
+    }
 }
 
 #[test]

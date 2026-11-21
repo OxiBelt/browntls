@@ -406,7 +406,7 @@ pub enum PeerMisbehaved {
     /// The server selected an external PSK and an ALPN protocol other than
     /// the one the key is restricted to.
     SelectedExternalPskWithOtherAlpn,
-    /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
+    /// The server negotiated `tls_cert_with_extern_psk` (RFC 9973) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
     /// RFC 9973 was offered with early data or without the required mode.
@@ -415,6 +415,8 @@ pub enum PeerMisbehaved {
     MissingCertWithExternPskCompanion,
     /// The RFC 9973 offer changed between the two effective ClientHellos.
     CertWithExternPskChangedOnRetry,
+    /// An RFC 9973 ClientHello offered a recognizable resumption ticket.
+    ResumptionPskOfferedWithCertWithExternPsk,
     /// A DTLS 1.3 ClientHello whose `legacy_cookie` is not empty (RFC 9147
     /// §5.3).
     IllegalDtlsLegacyCookie,
@@ -472,8 +474,8 @@ pub enum PeerIncompatible {
     /// The client offered neither a PSK we could use nor anything a server
     /// without a certificate could authenticate with.
     NoUsablePskForServerWithoutCertificate,
-    /// The server selected an external PSK without the certificate
-    /// authentication (RFC 8773) our configuration requires.
+    /// The peer would complete a handshake without the fresh certificate
+    /// and external PSK combination (RFC 9973) required by our policy.
     CertWithExternPskRequired,
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).

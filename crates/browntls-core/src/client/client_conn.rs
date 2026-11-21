@@ -253,13 +253,13 @@ pub struct ClientConfig {
     /// order, after any resumption ticket. Empty by default. See
     /// [`crate::psk`].
     ///
-    /// A server that selects one authenticates through it and sends no
-    /// certificate; a server that selects none is authenticated with its
-    /// certificate as usual, through the configured verifier.
+    /// Ordinary external PSKs authenticate the server through the key.
+    /// Certificate verification is used for certificate-based handshakes
+    /// and when RFC 9973 is negotiated.
     pub external_psks: Vec<Arc<crate::psk::ExternalPsk>>,
 
     /// Whether to ask a server that selects an external PSK to authenticate
-    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 8773).
+    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 9973).
     /// Off by default. The server may decline; set
     /// [`Self::require_cert_with_extern_psk`] to refuse a server that does.
     pub cert_with_extern_psk: bool,
@@ -267,6 +267,10 @@ pub struct ClientConfig {
     /// With [`Self::cert_with_extern_psk`], whether a server that selects an
     /// external PSK without also authenticating with its certificate is
     /// refused. Off by default.
+    ///
+    /// To require fresh RFC 9973 on every connection, enable this field,
+    /// [`Self::cert_with_extern_psk`] and [`Self::require_external_psk`],
+    /// and use [`Resumption::disabled`].
     pub require_cert_with_extern_psk: bool,
 
     /// Whether to refuse a server that does not authenticate through one of

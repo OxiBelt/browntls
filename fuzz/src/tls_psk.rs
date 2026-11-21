@@ -572,6 +572,8 @@ fn handshake(input: &mut Input) {
     let name = ServerName::try_from("localhost").expect("name");
     let mut client = ClientConnection::new(Arc::new(client_config), name).expect("client");
     let mut server = ServerConnection::new(Arc::new(server_config)).expect("server");
+    assert!(!client.negotiated_cert_with_extern_psk());
+    assert!(!server.negotiated_cert_with_extern_psk());
     let mut sent_early = Vec::new();
     if let Some(mut early) = client.early_data() {
         // 0-RTT is offered only under a pinned suite, with the PSK first.
@@ -595,6 +597,14 @@ fn handshake(input: &mut Input) {
         assert_eq!(client.external_psk_identity(), Some(&shared.identity[..]));
         assert_eq!(server.external_psk_identity(), Some(&shared.identity[..]));
         assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+        assert_eq!(
+            client.negotiated_cert_with_extern_psk(),
+            mode == ServerMode::CertWithPsk,
+        );
+        assert_eq!(
+            server.negotiated_cert_with_extern_psk(),
+            mode == ServerMode::CertWithPsk,
+        );
         assert_eq!(
             client.peer_certificates().is_some(),
             mode == ServerMode::CertWithPsk
@@ -622,6 +632,8 @@ fn handshake(input: &mut Input) {
 
     // A PSK the two sides do not share is never used.
     if completed {
+        assert!(!client.negotiated_cert_with_extern_psk());
+        assert!(!server.negotiated_cert_with_extern_psk());
         assert!(client.external_psk_identity().is_none(), "{deviation:?}");
         assert!(server.external_psk_identity().is_none(), "{deviation:?}");
         assert!(client.peer_certificates().is_some());

@@ -18,6 +18,7 @@ pub struct ClientHello<'a> {
     pub(in crate::server) signature_schemes: &'a [SignatureScheme],
     pub(in crate::server) alpn: Option<&'a [ProtocolName]>,
     pub(in crate::server) cipher_suites: &'a [CipherSuite],
+    cert_with_extern_psk: bool,
     pub(in crate::server) certificate_authorities: Option<&'a [DistinguishedName]>,
     pub(in crate::server) named_groups: Option<&'a [NamedGroup]>,
     pub(in crate::server) client_cert_types: Option<&'a [CertificateType]>,
@@ -41,6 +42,7 @@ impl<'a> ClientHello<'a> {
             signature_schemes,
             alpn: payload.alpn_protocols(),
             cipher_suites: &payload.cipher_suites,
+            cert_with_extern_psk: payload.extensions.cert_with_extern_psk.is_some(),
             certificate_authorities: payload.extensions.certificate_authorities.as_deref(),
             named_groups: payload.named_groups(),
             client_cert_types: payload.extensions.client_certificate_types.as_deref(),
@@ -87,6 +89,14 @@ impl<'a> ClientHello<'a> {
     /// The cipher suites the client offered.
     pub fn cipher_suites(&self) -> &[CipherSuite] {
         self.cipher_suites
+    }
+
+    /// Whether this view of the ClientHello offers RFC 9973.
+    ///
+    /// This is a peer-controlled routing signal. Before ECH is processed a
+    /// view of the outer ClientHello does not reveal the inner offer.
+    pub fn offers_cert_with_extern_psk(&self) -> bool {
+        self.cert_with_extern_psk
     }
 
     /// The certificate authorities the client trusts, if it said.

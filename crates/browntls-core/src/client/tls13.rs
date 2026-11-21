@@ -351,6 +351,7 @@ pub(super) fn handle_server_hello(
             PeerIncompatible::CertWithExternPskRequired,
         ));
     }
+    cx.common.cert_with_extern_psk = cert_with_extern_psk;
 
     Ok(Box::new(ExpectEncryptedExtensions {
         config,

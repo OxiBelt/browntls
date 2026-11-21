@@ -237,6 +237,7 @@ pub struct CommonState {
     /// Whether the peer's Finished has verified, which authenticates the
     /// peer's knowledge of [`Self::external_psk`].
     pub(crate) external_psk_confirmed: bool,
+    pub(crate) cert_with_extern_psk: bool,
     /// Present once the connection is handed to the kernel: records go to
     /// this queue as plaintext for the kernel to protect
     /// ([`crate::kernel::KernelConnection`]).
@@ -293,6 +294,7 @@ impl CommonState {
             app_data_in_place: false,
             external_psk: None,
             external_psk_confirmed: false,
+            cert_with_extern_psk: false,
             kernel: None,
             peer_external_binding: None,
             cached_info: Default::default(),
@@ -367,7 +369,7 @@ impl CommonState {
     ///
     /// Such a handshake is reported as [`HandshakeKind::Full`] (or
     /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
-    /// authentication was negotiated on top of it (RFC 8773), there are no
+    /// authentication was negotiated on top of it (RFC 9973), there are no
     /// peer certificates. A session resumed from a ticket issued on such a
     /// connection ([`HandshakeKind::Resumed`]) reports the same identity.
     ///
@@ -381,6 +383,14 @@ impl CommonState {
             .as_ref()
             .filter(|_| self.external_psk_confirmed)
             .map(|psk| psk.identity())
+    }
+
+    /// Whether this completed handshake negotiated RFC 9973 with a fresh
+    /// external PSK and server certificate or raw public key authentication.
+    ///
+    /// Returns false during the handshake and for resumed sessions.
+    pub fn negotiated_cert_with_extern_psk(&self) -> bool {
+        self.cert_with_extern_psk && self.external_psk_confirmed && !self.is_handshaking()
     }
 
     /// The external PSK to record in a ticket issued on this connection.

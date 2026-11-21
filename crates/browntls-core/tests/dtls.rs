@@ -17,3 +17,5 @@ include!("cases/dtls.rs");
 include!("cases/dtls_attacks.rs");
 
 include!("cases/dtls_cid.rs");
+
+include!("cases/dtls_rrc.rs");

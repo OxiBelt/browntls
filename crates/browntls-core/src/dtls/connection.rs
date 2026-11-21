@@ -57,7 +57,7 @@ impl Received {
 /// handshake progress; [`CommonState::protocol_version`] reports
 /// [`ProtocolVersion::DTLSv1_3`].
 pub struct ConnectionCommon<Data> {
-    core: ConnectionCore<Data>,
+    pub(super) core: ConnectionCore<Data>,
 }
 
 impl<Data: SideData> ConnectionCommon<Data> {
@@ -67,14 +67,14 @@ impl<Data: SideData> ConnectionCommon<Data> {
         Self { core }
     }
 
-    fn dtls(&self) -> &Dtls {
+    pub(super) fn dtls(&self) -> &Dtls {
         match &self.core.common_state.dtls {
             Some(dtls) => dtls,
             None => unreachable!("DTLS connection without DTLS state"),
         }
     }
 
-    fn dtls_mut(&mut self) -> &mut Dtls {
+    pub(super) fn dtls_mut(&mut self) -> &mut Dtls {
         dtls_of(&mut self.core.common_state)
     }
 
@@ -323,7 +323,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.dtls_mut().request_cids(count)
     }
 
-    fn check_cid_ready(&self) -> Result<(), Error> {
+    pub(super) fn check_cid_ready(&self) -> Result<(), Error> {
         if let Err(err) = &self.core.state {
             return Err(err.clone());
         }

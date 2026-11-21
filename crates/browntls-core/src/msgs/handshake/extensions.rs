@@ -326,6 +326,8 @@ impl Codec<'_> for ClientTicketRequest {
 pub(crate) struct ServerExtensions {
     /// RFC 9146: DTLS ServerHello only, never EncryptedExtensions.
     pub(crate) connection_id: Option<PayloadU8>,
+    /// RFC 9853: empty RRC indication, DTLS hello messages only.
+    pub(crate) return_routability_check: Option<()>,
     pub(crate) server_name_ack: Option<()>,
     pub(crate) alpn: Option<ProtocolName>,
     pub(crate) ec_point_formats: Option<Vec<ECPointFormat>>,
@@ -393,6 +395,10 @@ impl ServerExtensions {
             }
         };
         add(self.connection_id.is_some(), ExtensionType::ConnectionId);
+        add(
+            self.return_routability_check.is_some(),
+            ExtensionType::ReturnRoutabilityCheck,
+        );
         add(self.server_name_ack.is_some(), ExtensionType::ServerName);
         add(self.alpn.is_some(), ExtensionType::ALProtocolNegotiation);
         add(
@@ -487,6 +493,9 @@ impl Codec<'_> for ServerExtensions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        if self.return_routability_check.is_some() {
+            encode_extension(ExtensionType::ReturnRoutabilityCheck, out, |_| {});
+        }
         if let Some(cid) = &self.connection_id {
             encode_extension(ExtensionType::ConnectionId, out, |b| cid.encode(b));
         }
@@ -588,6 +597,9 @@ impl Codec<'_> for ServerExtensions {
         let mut out = Self::default();
         read_extensions(r, |typ, body| {
             match typ {
+                ExtensionType::ReturnRoutabilityCheck => {
+                    out.return_routability_check = Some(());
+                }
                 ExtensionType::ConnectionId => {
                     out.connection_id = Some(PayloadU8::read(body)?);
                 }

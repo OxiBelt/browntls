@@ -70,6 +70,7 @@ pub struct AuthenticatedRecord {
     range: Range<usize>,
     number: RecordNumber,
     cid: Vec<u8>,
+    rrc_payload: Option<Range<usize>>,
 }
 
 impl AuthenticatedRecord {
@@ -94,7 +95,22 @@ impl AuthenticatedRecord {
     }
 
     pub(super) fn new(range: Range<usize>, number: RecordNumber, cid: Vec<u8>) -> Self {
-        Self { range, number, cid }
+        Self {
+            range,
+            number,
+            cid,
+            rrc_payload: None,
+        }
+    }
+
+    /// RRC plaintext within the decrypted datagram, independently of app data.
+    /// Present only for negotiated, authenticated, replay-checked RRC.
+    pub fn rrc_payload_range(&self) -> Option<Range<usize>> {
+        self.rrc_payload.clone()
+    }
+
+    pub(super) fn set_rrc_payload(&mut self, range: Range<usize>) {
+        self.rrc_payload = Some(range);
     }
 
     pub(super) fn set_connection_id(&mut self, cid: &[u8]) {
@@ -158,6 +174,10 @@ impl Cids {
         self.peer = alloc::vec![peer.0.clone()];
         self.negotiated = true;
         Ok(())
+    }
+
+    pub(super) fn random(&self) -> Option<&'static dyn SecureRandom> {
+        self.random
     }
 
     pub(crate) fn response(&self) -> Option<PayloadU8> {

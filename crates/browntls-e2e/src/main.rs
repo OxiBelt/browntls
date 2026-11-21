@@ -4,6 +4,7 @@
 //! ```text
 //! browntls-e2e info
 //! browntls-e2e ech-keygen --out DIR --public-name NAME [--config-id N]
+//!                        [--ech-pem [--ech-kem KEM]]
 //! browntls-e2e server --listen ADDR --cert FILE --key FILE [--client-ca FILE]
 //!                     [--accept N] [--sni-cert NAME,CERT,KEY]...
 //!                     [ECH-SERVER...] [COMMON...]
@@ -62,7 +63,11 @@
 //! name, or completes the handshake itself (with the public name's
 //! certificate and the retry configurations) when ECH is not accepted.
 //! `--sni-cert` adds a certificate for one server name, such as the public
-//! name. A client with `--ech-config-list` offers ECH (`--ech-grease` sends
+//! name. For RFC 9934, `ech-keygen --ech-pem` writes `ech.pem` and
+//! `ech-public.pem`. Shared and client-facing servers take repeatable
+//! `--ech-pem FILE` decryption bundles and ordered `--ech-retry-pem FILE`
+//! retry lists. Clients can use one public-only `--ech-pem FILE`.
+//! A client with `--ech-config-list` offers ECH (`--ech-grease` sends
 //! GREASE instead); with `--ech-retry` it retries once with the server's
 //! retry configurations after a rejection.
 //!
@@ -92,6 +97,7 @@
 mod async_io;
 mod client_facing;
 mod dtls;
+mod ech_options;
 mod output;
 
 use std::io::{Read, Write};
@@ -102,9 +108,9 @@ use std::time::{Duration, Instant};
 
 use browntls::client::{ClientHelloPadding, TicketRequest};
 use browntls::crypto::hash::HashAlgorithm;
-use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
+use browntls::crypto::hpke::HpkeKem;
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
-use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
+use browntls::ech::EchServerConfig;
 use browntls::pki_types::pem::PemObject;
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use browntls::psk::ExternalPsk;
@@ -130,19 +136,19 @@ type Result<T, E = String> = std::result::Result<T, E>;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.split_first() {
-        Some((cmd, rest)) if cmd == "server" => Options::parse(rest).and_then(|o| server(&o)),
-        Some((cmd, rest)) if cmd == "client" => Options::parse(rest).and_then(|o| client(&o)),
+        Some((cmd, rest)) if cmd == "server" => Options::parse(rest, cmd).and_then(|o| server(&o)),
+        Some((cmd, rest)) if cmd == "client" => Options::parse(rest, cmd).and_then(|o| client(&o)),
         Some((cmd, rest)) if cmd == "dtls-server" => {
-            Options::parse(rest).and_then(|o| dtls::server(&o))
+            Options::parse(rest, cmd).and_then(|o| dtls::server(&o))
         }
         Some((cmd, rest)) if cmd == "dtls-client" => {
-            Options::parse(rest).and_then(|o| dtls::client(&o))
+            Options::parse(rest, cmd).and_then(|o| dtls::client(&o))
         }
         Some((cmd, rest)) if cmd == "client-facing" => {
-            Options::parse(rest).and_then(|o| client_facing(&o))
+            Options::parse(rest, cmd).and_then(|o| client_facing(&o))
         }
         Some((cmd, rest)) if cmd == "ech-keygen" => {
-            Options::parse(rest).and_then(|o| ech_keygen(&o))
+            Options::parse(rest, cmd).and_then(|o| ech_options::keygen(&o))
         }
         Some((cmd, rest)) if cmd == "info" && rest.is_empty() => {
             info();
@@ -196,6 +202,10 @@ struct Options {
     ech_config: Option<String>,
     ech_key: Option<String>,
     ech_config_list: Option<String>,
+    ech_pems: Vec<String>,
+    ech_retry_pems: Vec<String>,
+    ech_keygen_pem: bool,
+    ech_kem: Option<HpkeKem>,
     ech_backend: bool,
     ech_grease: bool,
     ech_random_config_id: bool,
@@ -213,7 +223,7 @@ struct Options {
 }
 
 impl Options {
-    fn parse(args: &[String]) -> Result<Self> {
+    fn parse(args: &[String], command: &str) -> Result<Self> {
         let mut o = Self {
             accept: 1,
             connections: 1,
@@ -232,6 +242,7 @@ impl Options {
                 "--ech-grease" => Some(&mut o.ech_grease),
                 "--ech-random-config-id" => Some(&mut o.ech_random_config_id),
                 "--ech-retry" => Some(&mut o.ech_retry),
+                "--ech-pem" if command == "ech-keygen" => Some(&mut o.ech_keygen_pem),
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
                 "--async" => Some(&mut o.async_io),
@@ -322,6 +333,9 @@ impl Options {
                 "--ech-config" => o.ech_config = Some(value),
                 "--ech-key" => o.ech_key = Some(value),
                 "--ech-config-list" => o.ech_config_list = Some(value),
+                "--ech-pem" => o.ech_pems.push(value),
+                "--ech-retry-pem" => o.ech_retry_pems.push(value),
+                "--ech-kem" => o.ech_kem = Some(ech_options::parse_kem(&value)?),
                 "--backend" => {
                     let (name, addr) = value
                         .split_once('=')
@@ -331,6 +345,7 @@ impl Options {
                 _ => return Err(format!("unknown option {flag}")),
             }
         }
+        o.validate_ech_options(command)?;
         Ok(o)
     }
 
@@ -437,59 +452,6 @@ fn roots(path: &str) -> Result<Arc<RootCertStore>> {
 
 fn read_file(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
-}
-
-/// The native HPKE suites with the X25519 KEM (the one every ECH
-/// implementation supports).
-fn x25519_hpke_suites() -> Vec<&'static dyn browntls::crypto::hpke::Hpke> {
-    native::hpke::ALL_SUPPORTED_SUITES
-        .iter()
-        .copied()
-        .filter(|s| s.suite().kem == HpkeKem::DHKEM_X25519_HKDF_SHA256)
-        .collect()
-}
-
-impl Options {
-    /// The ECH keys of `--ech-config` and `--ech-key`, if given.
-    fn ech_server(&self) -> Result<Option<Arc<EchServerConfig>>> {
-        let (config, key) = match (&self.ech_config, &self.ech_key) {
-            (Some(config), Some(key)) => (read_file(config)?, read_file(key)?),
-            (None, None) => return Ok(None),
-            _ => return Err("--ech-config and --ech-key go together".into()),
-        };
-        let suites = x25519_hpke_suites();
-        let key = EchServerKey::new(&config, HpkePrivateKey::from(key), &suites)
-            .map_err(|e| format!("ECH key: {e}"))?;
-        let mut ech = EchServerConfig::new(vec![key]).map_err(|e| e.to_string())?;
-        if self.ech_trial_decryption {
-            ech = ech.with_trial_decryption();
-        }
-        if self.ech_public_name_check {
-            ech = ech.with_public_name_check();
-        }
-        Ok(Some(Arc::new(ech)))
-    }
-
-    /// The client's ECH mode, if any; `list` replaces `--ech-config-list`
-    /// on a retry.
-    fn ech_client(&self, list: Option<&[u8]>) -> Result<Option<EchMode>> {
-        let suites = native::hpke::ALL_SUPPORTED_SUITES;
-        if self.ech_grease {
-            let grease =
-                EchGreaseConfig::generate(x25519_hpke_suites()[0]).map_err(|e| e.to_string())?;
-            return Ok(Some(EchMode::Grease(grease)));
-        }
-        let list = match (list, &self.ech_config_list) {
-            (Some(list), _) => list.to_vec(),
-            (None, Some(path)) => read_file(path)?,
-            (None, None) => return Ok(None),
-        };
-        let mut config = EchConfig::new(&list, suites).map_err(|e| format!("ECH: {e}"))?;
-        if self.ech_random_config_id {
-            config = config.with_random_config_id();
-        }
-        Ok(Some(EchMode::Enable(config)))
-    }
 }
 
 /// Picks the certificate for the ClientHello's server name, falling back to
@@ -688,31 +650,6 @@ fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Res
     fields.push(("sent", reply.into()));
     emit(&fields);
     close(&mut tls);
-    Ok(())
-}
-
-// ------------------------------------------------------------------ ech-keygen
-
-fn ech_keygen(o: &Options) -> Result<()> {
-    let out = std::path::PathBuf::from(required(o.out.as_ref(), "--out")?);
-    let public_name = required(o.public_name.as_ref(), "--public-name")?;
-    let key = EchServerKey::generate(o.config_id, public_name, 0, &x25519_hpke_suites())
-        .map_err(|e| e.to_string())?;
-    let list = EchServerConfig::new(vec![key.clone()]).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    for (name, bytes) in [
-        ("ech-config", key.ech_config()),
-        ("ech-config-list", list.ech_config_list()),
-        ("ech-key", key.private_key().secret_bytes()),
-    ] {
-        let path = out.join(name);
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    emit(&[
-        ("event", "ech-key".into()),
-        ("config_id", Value::Num(usize::from(o.config_id))),
-        ("public_name", public_name.into()),
-    ]);
     Ok(())
 }
 

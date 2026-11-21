@@ -77,3 +77,26 @@ endpoints use the Tokio adapters. The client verifies the Service DNS
 identity, and the runner checks negotiated group, retry behavior and data
 in both directions. Only the server pod mounts the private key. The run
 uses its own namespace and image tag.
+
+## ECH PEM over TCP Services
+
+Run the ECH harness against an existing running minikube profile. Use an
+image built for the profile's node architecture.
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64
+python3 -B tests/kubernetes/ech_service.py --image browntls-e2e:amd64 \
+  --profile PROFILE
+```
+
+The first TLS 1.3 exchange uses Tokio and the current public configuration.
+The second starts with a stale configuration. The blocking client must
+authenticate the public-name certificate, receive usable retry configs, and
+reconnect with ECH accepted. The server must observe `ech_required` before
+the accepted connection. Both cases verify the inner-name certificate and
+the application request and reply through a Kubernetes TCP Service.
+
+The server Secret holds the current private key and the retry configuration.
+Each client mounts only the CA and its starting public configuration. The run
+removes its temporary namespace, uniquely labelled image, and fixture files.
+The caller manages the minikube profile lifecycle.

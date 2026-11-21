@@ -16,7 +16,7 @@ use super::{Options, Result, connect_with_retry, listen, serve, server_config, s
 pub(super) fn client_facing(o: &Options) -> Result<()> {
     let ech = o
         .ech_server()?
-        .ok_or("--ech-config and --ech-key are required")?;
+        .ok_or("client-facing requires an ECH decryption configuration")?;
     if o.backends.is_empty() {
         return Err("--backend is required".into());
     }

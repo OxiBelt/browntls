@@ -94,7 +94,8 @@ impl UdpClient {
 
     /// Completes the handshake and sends its queued output. Calling again
     /// after cancellation or an operation timeout continues the handshake.
-    /// Live OCSP queries return `Unsupported`; no verification is bypassed.
+    /// Closing before the handshake finishes causes `ConnectionAborted`.
+    /// Live OCSP queries return `Unsupported`.
     pub async fn complete_handshake(&mut self) -> io::Result<()> {
         let mut wait = self.wait();
         self.handshake_until(&mut wait).await
@@ -159,7 +160,8 @@ impl UdpClient {
     /// Sends `close_notify` after pending ciphertext. Repeated calls are
     /// harmless and resume a cancelled close. Does not await a peer reply
     /// or confirm delivery. Future sends fail with `BrokenPipe`; receiving
-    /// remains possible. This does not wait for handshake completion.
+    /// remains possible after the handshake. Closing before completion
+    /// aborts subsequent handshake and receive operations.
     pub async fn close(&mut self) -> io::Result<()> {
         let mut wait = self.wait();
         self.closing = true;
@@ -206,6 +208,12 @@ impl UdpClient {
     }
 
     async fn handshake_until(&mut self, wait: &mut Wait) -> io::Result<()> {
+        if self.closing && self.conn.is_handshaking() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "DTLS client closed during the handshake",
+            ));
+        }
         poll_fn(|cx| self.poll_run(cx, wait, Goal::Handshake)).await
     }
 

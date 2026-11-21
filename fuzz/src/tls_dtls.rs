@@ -45,6 +45,7 @@ use browntls_core::{CipherSuite, Error, HandshakeKind, PeerMisbehaved, ProtocolV
 
 use crate::input::Input;
 
+mod cid_api;
 mod migration;
 mod net;
 mod seeds;
@@ -129,6 +130,10 @@ struct Session<'a> {
 ///     handshake.
 pub fn run(data: &[u8]) {
     crate::init();
+    if let Some(program) = data.strip_prefix(cid_api::PREFIX) {
+        cid_api::run(program);
+        return;
+    }
     let mut input = Input::new(data);
     let mut session: Option<Session> = None;
     let mut handshakes = 0;

@@ -72,6 +72,15 @@ and re-encoding stability.
 | `tls_auth` | tls-extensions | Delegated credentials (decoding, issuing, validity windows, `validate` against an independent validation, handshakes with a server's credential, and client authentication with a client's credential in or after the handshake, against a buffered or unbuffered server that asks for one or not, with fuzz-chosen schemes, sides and clocks, and resumption) and exported authenticators between connected peers, and client certificate URLs (RFC 6066 §5): PkiPath decoding and encoding, URL entries and lists against a model, TLS 1.2 handshakes whose server pauses for the chain (buffered, unbuffered and the six Tokio acceptors with a fetcher) with fuzz-chosen policies, URLs and answers; a query surfaces exactly when the policy allows every URL, a paused server reads nothing and refuses a wrong id |
 | `tls_codec` | tls-codec | The doc-hidden codec re-exports, record payload types, distinguished names and stored session values |
 
+The `tls_dtls` CID API programs select DTLS 1.2 or 1.3, either provider,
+three server construction paths and nonempty or empty CID directions. They
+exchange authenticated application records over the bounded simulated network;
+DTLS 1.3 also requests and issues IDs and checks immediate rotation. DTLS 1.2
+checks the negotiated AEAD capability and exercises CID record protection via
+the connection. The blocking server constructor is exercised when a loopback
+socket can be bound. These programs use a fixed address and do not model path
+migration or return routability checks.
+
 The protocol targets generate certificates and keys once per process and
 handshake randomness comes from the operating system, as in the connection
 targets below.

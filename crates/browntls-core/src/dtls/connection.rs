@@ -515,7 +515,7 @@ impl ClientConnection {
     /// Client Hello and post-handshake client authentication are not
     /// supported over DTLS.
     pub fn new(config: Arc<crate::ClientConfig>, name: ServerName<'static>) -> Result<Self, Error> {
-        Self::new_with_settings(config, name, Settings::default())
+        Self::new_with_versions(config, name, super::Versions::default())
     }
 
     /// Starts a handshake under an explicit endpoint version policy.
@@ -583,7 +583,7 @@ impl ServerConnection {
     /// The configuration must therefore set `hello_retry_cookies`, allow
     /// TLS 1.3 and contain a cipher suite usable with DTLS 1.3.
     pub fn new(config: Arc<crate::ServerConfig>, peer_address: &[u8]) -> Result<Self, Error> {
-        Self::new_with_settings(config, peer_address, Settings::default())
+        Self::new_with_versions(config, peer_address, super::Versions::default())
     }
 
     /// Accepts certificate handshakes under an explicit version policy.

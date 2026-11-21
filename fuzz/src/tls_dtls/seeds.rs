@@ -277,5 +277,6 @@ pub fn seeds() -> Vec<Vec<u8>> {
     handshake(&mut seed, Hs { flags: 32, ..BASE }, &[], &[]);
     seed.push(10);
     seeds.push(seed);
+    seeds.extend(super::cid_api::seeds());
     seeds
 }

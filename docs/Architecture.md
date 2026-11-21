@@ -2580,7 +2580,8 @@ implemented; there is no DTLS 1.2.
 With the `std` feature, `dtls::UdpClient` and `dtls::UdpServer` run these
 connections over `std::net::UdpSocket` with blocking calls. While a call
 blocks it retransmits and acknowledges as the connections ask, on a clock
-that starts when the object is made.
+that starts when the object is made, unless a client retains an existing
+clock origin.
 
 - `UdpClient` holds one connection over a socket connected to its server.
   `connect` returns once the handshake completes (`from_connection` pairs a
@@ -2590,7 +2591,13 @@ that starts when the object is made.
   datagrams and returns 0 once the server sent close_notify. `connection_mut`
   reaches the connection, for example to refresh its keys, and
   `into_parts` returns it with the socket, dropping what was received and
-  not yet returned.
+  not yet returned. `from_connection` starts a clock at zero and is for a
+  connection not yet driven. To rewrap an in-progress connection, use
+  `into_parts_with_clock` and `from_connection_with_clock`: they transfer
+  the original `Instant`, so retained retransmission and acknowledgement
+  deadlines include time spent outside the wrapper. Low-level I/O between
+  wrappers must use durations measured as `start.elapsed()`. Neither parts
+  method transfers the read timeout or buffered application data.
 - `UdpServer` holds many clients on one socket and tells them apart by their
   address only. `next_event` returns the next `ServerEvent`, and only for
   clients that completed a handshake: `Connected`, `Received` (one datagram of
@@ -2599,7 +2606,11 @@ that starts when the object is made.
   (close_notify, then the connection is forgotten), `remove` (forgotten without
   a word) and `connection_mut` act on a connected client. A ClientHello from the
   address of an existing connection, such as a client restarted on the same
-  port, is ignored until that connection is removed.
+  port, is ignored until that connection is removed. Queued events precede
+  further socket or timer work. If Finished, data and close_notify arrive
+  together, the connection remains available through `Connected` and
+  `Received`, and is removed when `Closed` is returned. Explicit `close`
+  and `remove` discard that peer's queued events.
 - Cookies: every datagram from an address without a connection goes to a
   `dtls::Acceptor`, so the server configuration needs
   `hello_retry_cookies`, and a client costs nothing but one
@@ -2634,14 +2645,17 @@ Evidence: in-memory handshakes between browntls endpoints over a simulated
 network with loss, duplication, reordering, corruption and small datagrams
 on both providers (`crates/browntls-core/tests/cases/dtls.rs`), unit tests
 of the record, reassembly, replay and hello codecs, and the `tls_dtls` fuzz
-target ([`fuzz/`](../fuzz/README.md)). The blocking API is tested over
-loopback sockets on both providers
-(`crates/browntls-core/tests/cases/dtls_udp.rs`) and by the `tls_dtls_udp`
-fuzz target, which drives a server and several clients over loopback
-through fuzz-chosen calls and junk datagrams; loopback neither loses nor
-reorders datagrams, so its retransmissions are exercised only by the
-simulated network of the sans-I/O tests. No other DTLS implementation has
-been tested against.
+target ([`fuzz/`](../fuzz/README.md)). The blocking API has tests over IPv4
+and IPv6 loopback sockets on both providers
+(`crates/browntls-core/tests/cases/dtls_udp.rs`). The `tls_dtls_udp` fuzz
+target drives a server and several clients over loopback through fuzz-chosen
+calls and junk datagrams. Targeted blocking regressions
+cover combined Finished/data/close events, explicit peer removal and a
+retained overdue retransmission after client rewrapping; the IPv6 test
+asserts the cookie contains the source address and port. Scoped IPv6
+addresses are not covered. Loopback neither loses nor reorders datagrams;
+broader loss recovery is exercised by the simulated network of the
+sans-I/O tests. No other DTLS implementation has been tested against.
 
 ### Cargo features (`browntls-core`)
 

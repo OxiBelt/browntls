@@ -96,6 +96,11 @@ pub const TARGETS: &[Target] = &[
     ),
     ("tls_quic", crate::tls_quic::run, crate::tls_quic::seeds),
     ("tls_dtls", crate::tls_dtls::run, crate::tls_dtls::seeds),
+    (
+        "tls_dtls_udp",
+        crate::tls_dtls_udp::run,
+        crate::tls_dtls_udp::seeds,
+    ),
     ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),
     ("tls_codec", crate::tls_codec::run, crate::tls_codec::seeds),
     ("tls_tokio", crate::tls_tokio::run, crate::tls_tokio::seeds),

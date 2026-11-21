@@ -47,8 +47,8 @@ use crate::input::Input;
 
 mod net;
 mod seeds;
-mod setup;
-mod shape;
+pub(crate) mod setup;
+pub(crate) mod shape;
 #[cfg(test)]
 mod tests;
 

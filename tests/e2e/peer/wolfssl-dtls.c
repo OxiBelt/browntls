@@ -115,7 +115,7 @@ int main(int argc, char **argv)
         (server ? wolfDTLSv1_2_server_method() : wolfDTLSv1_2_client_method()) :
         (server ? wolfDTLSv1_3_server_method() : wolfDTLSv1_3_client_method()));
     if (ctx == NULL)
-        fail("create DTLS 1.3 context");
+        fail("create DTLS context");
     snprintf(file, sizeof(file), "%sca.pem", path);
     if (wolfSSL_CTX_load_verify_locations(ctx, file, NULL) != WOLFSSL_SUCCESS)
         fail("load test CA");
@@ -131,6 +131,8 @@ int main(int argc, char **argv)
     WOLFSSL *ssl = wolfSSL_new(ctx);
     if (ssl == NULL)
         fail("allocate DTLS connection");
+    if (v12)
+        check(ssl, wolfSSL_UseSecureRenegotiation(ssl), "enable RFC 5746 indication");
     if (cid) {
         unsigned char local_cid[] = {0x11, 0x23, 0x35, 0x47, 0x59, 0x6b, 0x7d, 0x8f};
         check(ssl, wolfSSL_dtls_cid_use(ssl), "enable CID");

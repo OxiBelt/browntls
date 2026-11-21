@@ -10,6 +10,8 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
+use super::demux::CidDemux;
+use super::migration::UdpPathValidation as Paths;
 use super::{
     LAST_LOOKS, MAX_DATAGRAM, address_bytes, flush, io_error, is_transient, timed_out, wait_until,
 };
@@ -25,6 +27,8 @@ const DEFAULT_MAX_HANDSHAKES: usize = 256;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What [`UdpServer::next_event`] reports.
+/// Addresses are stable handles: the source admitted by the cookie exchange,
+/// even after the physical destination changes through validated migration.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ServerEvent {
@@ -41,7 +45,15 @@ pub enum ServerEvent {
 
 /// A DTLS 1.3 server for many clients over one UDP socket.
 ///
-/// Clients are told apart by their address. A client's first ClientHello
+/// Client handles are the addresses originally admitted by the cookie
+/// exchange. They stay stable through migration: events and methods use
+/// that original address, while [`Self::peer_addr`] reports the active
+/// physical address. With settings that negotiate CID/RRC, an authenticated
+/// CID record from a new address starts enhanced path validation. Ordinary
+/// output stays on the active path; candidate application input is dropped
+/// until validation succeeds. Without negotiated RRC, routing stays pinned.
+///
+/// A client's first ClientHello
 /// gets a HelloRetryRequest with a cookie and leaves no state behind (see
 /// [`Acceptor`]); a connection exists only for a client that answered it.
 /// Handshakes that do not complete within the handshake timeout are
@@ -70,6 +82,10 @@ pub struct UdpServer {
     socket: UdpSocket,
     acceptor: Acceptor,
     peers: HashMap<SocketAddr, Peer>,
+    /// Active physical address to stable handle; admission addresses stay
+    /// reserved in `peers` for the association's lifetime.
+    physical: HashMap<SocketAddr, SocketAddr>,
+    cids: CidDemux<SocketAddr>,
     timers: BinaryHeap<Reverse<(Duration, SocketAddr)>>,
     events: VecDeque<ServerEvent>,
     /// Peers changed through [`Self::connection_mut`], to flush.
@@ -77,6 +93,7 @@ pub struct UdpServer {
     handshakes: usize,
     max_handshakes: usize,
     handshake_timeout: Duration,
+    path_selection: crate::dtls::rrc::Selection,
     read_timeout: Option<Duration>,
     start: Instant,
     buf: Vec<u8>,
@@ -93,13 +110,21 @@ struct Peer {
     connected: bool,
     /// The due time of its entry in the timer queue, if it has one.
     scheduled: Option<Duration>,
+    active: SocketAddr,
+    paths: Option<Paths>,
 }
 
 impl Peer {
     /// When this peer next needs attention: its connection's timer, or
     /// the end of its handshake time.
     fn next_due(&self) -> Option<Duration> {
-        let timer = self.conn.next_timeout();
+        let timer = [
+            self.conn.next_timeout(),
+            self.paths.as_ref().and_then(Paths::next_timeout),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         // after_input flushes before announcing handshake completion.
         if self.connected || !self.conn.is_handshaking() {
             return timer;
@@ -123,19 +148,42 @@ impl UdpServer {
         socket: UdpSocket,
         versions: super::super::Versions,
     ) -> io::Result<Self> {
-        let acceptor = Acceptor::new_with_versions(config, versions)
+        Self::new_with_settings(
+            config,
+            socket,
+            crate::dtls::Settings::default().with_versions(versions),
+        )
+    }
+
+    /// Serves clients with explicit endpoint settings. CID/RRC must be
+    /// negotiated to enable migration. Enhanced selection probes the old
+    /// path first, with one second per stage and at most three probes per
+    /// stage. Candidate state expires within three seconds even if it
+    /// cannot send a probe within the amplification limit.
+    ///
+    /// A new address cannot displace another client's active or originally
+    /// admitted address. Applications continue to use the original handle.
+    pub fn new_with_settings(
+        config: Arc<crate::ServerConfig>,
+        socket: UdpSocket,
+        settings: crate::dtls::Settings,
+    ) -> io::Result<Self> {
+        let acceptor = Acceptor::new_with_settings(config, settings)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         socket.set_nonblocking(false)?;
         Ok(Self {
             socket,
             acceptor,
             peers: HashMap::new(),
+            physical: HashMap::new(),
+            cids: CidDemux::default(),
             timers: BinaryHeap::new(),
             events: VecDeque::new(),
             touched: Vec::new(),
             handshakes: 0,
             max_handshakes: DEFAULT_MAX_HANDSHAKES,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            path_selection: crate::dtls::rrc::Selection::Enhanced,
             read_timeout: None,
             start: Instant::now(),
             buf: alloc::vec![0; MAX_DATAGRAM],
@@ -152,6 +200,11 @@ impl UdpServer {
     /// the next handshake on.
     pub fn set_handshake_timeout(&mut self, timeout: Duration) {
         self.handshake_timeout = timeout;
+    }
+
+    /// Selects the path validation mode for newly established associations.
+    pub fn set_path_selection(&mut self, selection: crate::dtls::rrc::Selection) {
+        self.path_selection = selection;
     }
 
     /// Sets how long [`Self::next_event`] waits for an event; `None` (the
@@ -212,12 +265,8 @@ impl UdpServer {
     /// Sends `data` to the connected client `peer` as one datagram of
     /// application data.
     pub fn send_to(&mut self, data: &[u8], peer: SocketAddr) -> io::Result<()> {
-        let conn = match self.peers.get_mut(&peer) {
-            Some(Peer {
-                conn,
-                connected: true,
-                ..
-            }) => conn,
+        let entry = match self.peers.get_mut(&peer) {
+            Some(entry) if entry.connected => entry,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
@@ -226,8 +275,8 @@ impl UdpServer {
             }
         };
         let mut datagram = Vec::new();
-        conn.send(data, &mut datagram).map_err(io_error)?;
-        self.socket.send_to(&datagram, peer)?;
+        entry.conn.send(data, &mut datagram).map_err(io_error)?;
+        self.socket.send_to(&datagram, entry.active)?;
         // The confidentiality limit may have queued a KeyUpdate.
         self.flush_peer(peer);
         Ok(())
@@ -253,6 +302,8 @@ impl UdpServer {
         });
         self.touched.retain(|addr| *addr != peer);
         let entry = self.peers.remove(&peer)?;
+        self.physical.remove(&entry.active);
+        self.cids.remove(peer);
         if !entry.connected {
             self.handshakes -= 1;
         }
@@ -279,12 +330,21 @@ impl UdpServer {
         Some(&mut entry.conn)
     }
 
-    /// The addresses of the connected clients.
+    /// Stable handles of connected clients: their original admission addresses.
     pub fn peers(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.peers
             .iter()
             .filter(|(_, entry)| entry.connected)
             .map(|(addr, _)| *addr)
+    }
+
+    /// The validated physical destination for the stable client handle.
+    /// Pending candidates are never returned as send destinations.
+    pub fn peer_addr(&self, peer: SocketAddr) -> Option<SocketAddr> {
+        self.peers
+            .get(&peer)
+            .filter(|entry| entry.connected)
+            .map(|entry| entry.active)
     }
 
     /// How many handshakes are in progress.
@@ -311,15 +371,77 @@ impl UdpServer {
         Some(event)
     }
 
-    fn handle_datagram(&mut self, peer: SocketAddr, len: usize) {
+    fn handle_datagram(&mut self, source: SocketAddr, len: usize) {
         let now = self.now();
         let datagram = &mut self.buf[..len];
-        if let Some(entry) = self.peers.get_mut(&peer) {
-            let result = entry.conn.read_datagram(datagram, now);
-            let result = result.map(|received| received.app_data().to_vec());
+        let has_cid = CidDemux::<SocketAddr>::has_cid(datagram);
+        let peer = if has_cid {
+            self.cids.lookup(datagram)
+        } else {
+            self.physical.get(&source).copied()
+        };
+        if let Some(peer) = peer {
+            if (source != peer && self.peers.contains_key(&source))
+                || self
+                    .physical
+                    .get(&source)
+                    .is_some_and(|owner| *owner != peer)
+            {
+                return;
+            }
+            let Some(entry) = self.peers.get_mut(&peer) else {
+                return;
+            };
+            if source != entry.active
+                && (!entry.connected
+                    || !has_cid
+                    || entry.paths.is_none()
+                    || entry
+                        .paths
+                        .as_ref()
+                        .and_then(Paths::pending)
+                        .is_some_and(|pending| pending != source))
+            {
+                return;
+            }
+            let result = entry
+                .conn
+                .read_datagram(datagram, now)
+                .and_then(|received| {
+                    if entry.paths.is_none()
+                        && entry.conn.return_routability_checks_negotiated()
+                        && !entry.conn.peer_has_closed()
+                        && !entry.conn.has_sent_close_notify()
+                    {
+                        entry.paths =
+                            Some(Paths::new(&entry.conn, entry.active, self.path_selection)?);
+                    }
+                    if let Some(paths) = &mut entry.paths {
+                        paths.input(
+                            &mut entry.conn,
+                            &received,
+                            datagram,
+                            source,
+                            now,
+                            &mut |datagram, destination| {
+                                if let Err(err) = self.socket.send_to(datagram, destination) {
+                                    debug!("DTLS: could not send an RRC reply: {err}");
+                                }
+                            },
+                        )
+                    } else {
+                        Ok(received.app_data().to_vec())
+                    }
+                });
             self.after_input(peer, result);
             return;
         }
+        // Unknown/ambiguous CID records never fall back to address routing.
+        // A stable handle remains reserved even after its physical path moves.
+        if has_cid || self.peers.contains_key(&source) {
+            return;
+        }
+        let peer = source;
         self.out.clear();
         let accepted = self
             .acceptor
@@ -345,8 +467,11 @@ impl UdpServer {
                         expires: now.saturating_add(self.handshake_timeout),
                         connected: false,
                         scheduled: None,
+                        active: peer,
+                        paths: None,
                     },
                 );
+                self.physical.insert(peer, peer);
                 // The acceptor processed the datagram, which cannot hold
                 // application data yet.
                 self.after_input(peer, Ok(Vec::new()));
@@ -410,6 +535,9 @@ impl UdpServer {
     /// Sends the alert of `peer`'s failed connection, forgets it, and
     /// reports the failure if it had connected.
     fn fail(&mut self, peer: SocketAddr, err: Error) {
+        if let Some(entry) = self.peers.get_mut(&peer) {
+            entry.paths = None;
+        }
         self.flush_peer(peer);
         if let Some(entry) = self.peers.get(&peer) {
             let connected = entry.connected;
@@ -430,13 +558,31 @@ impl UdpServer {
             return;
         };
         let socket = &self.socket;
-        let result = flush(&mut entry.conn, &mut self.out, now, |datagram| {
-            // A datagram that cannot be sent is as good as lost.
-            if let Err(err) = socket.send_to(datagram, peer) {
-                debug!("DTLS: could not send a datagram: {err}");
+        let result = (|| {
+            if let Some(paths) = &mut entry.paths {
+                paths
+                    .poll(&mut entry.conn, now, &mut |datagram, destination| {
+                        if let Err(err) = socket.send_to(datagram, destination) {
+                            debug!("DTLS: could not send an RRC probe: {err}");
+                        }
+                    })
+                    .map_err(io_error)?;
+                let active = paths.active();
+                if active != entry.active {
+                    self.physical.remove(&entry.active);
+                    self.physical.insert(active, peer);
+                    entry.active = active;
+                }
             }
-            Ok(())
-        });
+            flush(&mut entry.conn, &mut self.out, now, |datagram| {
+                // A datagram that cannot be sent is as good as lost.
+                if let Err(err) = socket.send_to(datagram, entry.active) {
+                    debug!("DTLS: could not send a datagram: {err}");
+                }
+                Ok(())
+            })
+        })();
+        self.cids.replace(peer, entry.conn.local_connection_ids());
         let due = entry.next_due();
         let scheduled = due != entry.scheduled && due.is_some();
         if due != entry.scheduled {

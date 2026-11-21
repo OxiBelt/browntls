@@ -340,6 +340,12 @@ impl<Data: SideData> ConnectionCommon<Data> {
         self.dtls().cid.local_ids()
     }
 
+    /// The nonempty CID used to send protected records to the peer.
+    pub fn outbound_connection_id(&self) -> Option<&[u8]> {
+        let id = self.dtls().cid.outbound();
+        (!id.is_empty()).then_some(id)
+    }
+
     /// Issues up to `count` fresh, fixed-length receiving IDs. Returns the
     /// number actually issued; the lifetime cap includes the initial ID.
     /// Only one NewConnectionId may await ACK. An immediate update requires

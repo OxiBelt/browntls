@@ -62,7 +62,7 @@ pub use connection::{ClientConnection, ConnectionCommon, Received, ServerConnect
 pub(crate) use state::Dtls;
 pub use state::Settings;
 #[cfg(feature = "std")]
-pub use udp::{ServerEvent, UdpClient, UdpServer};
+pub use udp::{CidDemux, ServerEvent, UdpClient, UdpPathValidation, UdpServer};
 
 /// The `HKDF-Expand-Label` prefix of DTLS 1.3 (RFC 9147 §5.9). It has no
 /// trailing space, unlike that of TLS 1.3.

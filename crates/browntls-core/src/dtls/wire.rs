@@ -106,6 +106,11 @@ pub(crate) fn parse_record(input: &[u8], cid_len: usize) -> Option<Record> {
     let header = input.get(..PLAINTEXT_HEADER_LEN)?;
     let version = ProtocolVersion::from(u16::from_be_bytes([header[1], header[2]]));
     let epoch = u16::from_be_bytes([header[3], header[4]]);
+    if typ == ContentType::ReturnRoutabilityCheck
+        && (epoch == 0 || version != ProtocolVersion::DTLSv1_2)
+    {
+        return None;
+    }
     let mut seq = [0u8; 8];
     seq[2..].copy_from_slice(&header[5..11]);
     let cid = if typ == ContentType::Tls12Cid {

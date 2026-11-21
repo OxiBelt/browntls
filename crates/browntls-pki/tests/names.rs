@@ -445,3 +445,76 @@ fn reference_name_types() {
     );
     let _ = CertificateParams::default();
 }
+
+fn short_der(tag: u8, body: &[u8]) -> Vec<u8> {
+    let len = u8::try_from(body.len()).unwrap();
+    assert!(len < 128);
+    [&[tag, len], body].concat()
+}
+
+fn srv_other_name(service_domain: &[u8]) -> Vec<u8> {
+    let oid = b"\x06\x08\x2b\x06\x01\x05\x05\x07\x08\x07";
+    let explicit = short_der(0xa0, &short_der(0x16, service_domain));
+    short_der(0xa0, &[oid.as_slice(), &explicit].concat())
+}
+
+fn check_service_constraint(
+    base: &[u8],
+    excluded: bool,
+    sans: &[&[u8]],
+    on_intermediate: bool,
+) -> Result<(), Error> {
+    let subtree = short_der(0x30, base);
+    let list = short_der(if excluded { 0xa1 } else { 0xa0 }, &subtree);
+    let mut constraint = CustomExtension::from_oid_content(&[2, 5, 29, 30], short_der(0x30, &list));
+    constraint.set_criticality(true);
+    let mut root = ca_params("root");
+    let mut intermediate = ca_params("intermediate");
+    if on_intermediate {
+        intermediate.custom_extensions.push(constraint);
+    } else {
+        root.custom_extensions.push(constraint);
+    }
+    let mut leaf = ee_params(&[]);
+    let san = CustomExtension::from_oid_content(&[2, 5, 29, 17], short_der(0x30, &sans.concat()));
+    leaf.custom_extensions.push(san);
+    Chain::build(
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+        root,
+        vec![intermediate],
+        &leaf,
+    )
+    .verify_at(NOW)
+}
+
+#[test]
+fn service_constraints_cover_all_presented_names() {
+    let good_uri = short_der(0x86, b"service://inside.example.com/path");
+    let bad_uri = short_der(0x86, b"service://outside.example.net/path");
+    let uri_base = short_der(0x86, b".example.com");
+    let good_srv = srv_other_name(b"_imap.inside.example.com");
+    let wrong_service = srv_other_name(b"_smtp.inside.example.com");
+    let srv_base = srv_other_name(b"_imap.example.com");
+    for intermediate in [false, true] {
+        assert_eq!(
+            check_service_constraint(&uri_base, false, &[&good_uri, &good_srv], intermediate),
+            Ok(())
+        );
+        assert_eq!(
+            check_service_constraint(&uri_base, false, &[&good_uri, &bad_uri], intermediate),
+            Err(Error::NameConstraintViolation)
+        );
+        assert_eq!(
+            check_service_constraint(&srv_base, false, &[&good_srv, &good_uri], intermediate),
+            Ok(())
+        );
+        assert_eq!(
+            check_service_constraint(&srv_base, false, &[&good_srv, &wrong_service], intermediate),
+            Err(Error::NameConstraintViolation)
+        );
+        assert_eq!(
+            check_service_constraint(&srv_base, true, &[&wrong_service, &good_srv], intermediate),
+            Err(Error::NameConstraintViolation)
+        );
+    }
+}

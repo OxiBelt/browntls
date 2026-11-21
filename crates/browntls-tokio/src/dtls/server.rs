@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use browntls_core::dtls::{Accepted, Acceptor, ServerConnection};
+use browntls_core::dtls::{Accepted, Acceptor, ServerConnection, Versions};
 use browntls_core::{Error, ServerConfig};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
@@ -108,13 +108,23 @@ impl UdpServer {
     /// Uses `socket` without changing its options. `config` must enable
     /// hello-retry cookies; the socket must be unconnected.
     pub fn new(config: Arc<ServerConfig>, socket: UdpSocket) -> io::Result<Self> {
+        Self::new_with_versions(config, socket, Versions::default())
+    }
+
+    /// Creates a server with an explicit DTLS version policy.
+    /// Peer admission remains stateless until its address cookie is verified.
+    pub fn new_with_versions(
+        config: Arc<ServerConfig>,
+        socket: UdpSocket,
+        versions: Versions,
+    ) -> io::Result<Self> {
         if socket.peer_addr().is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a DTLS server requires an unconnected UDP socket",
             ));
         }
-        let acceptor = Acceptor::new(config)
+        let acceptor = Acceptor::new_with_versions(config, versions)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         Ok(Self {
             socket,

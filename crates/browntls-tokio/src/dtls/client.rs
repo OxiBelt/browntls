@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use browntls_core::dtls::ClientConnection;
+use browntls_core::dtls::{ClientConnection, Versions};
 use browntls_core::pki_types::ServerName;
 use browntls_core::{ClientConfig, Error};
 use tokio::io::ReadBuf;
@@ -55,8 +55,19 @@ impl UdpClient {
         name: ServerName<'static>,
         socket: UdpSocket,
     ) -> io::Result<Self> {
+        Self::new_with_versions(config, name, socket, Versions::default())
+    }
+
+    /// Creates a client with an explicit DTLS version policy.
+    /// The supplied TLS configuration must also permit each usable version.
+    pub fn new_with_versions(
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+        socket: UdpSocket,
+        versions: Versions,
+    ) -> io::Result<Self> {
         Self::from_connection(
-            ClientConnection::new(config, name).map_err(io_error)?,
+            ClientConnection::new_with_versions(config, name, versions).map_err(io_error)?,
             socket,
         )
     }

@@ -164,6 +164,10 @@ address. The server requires a cookie sealer. It bounds pending handshakes,
 established peers, and queued datagrams. Poll an operation to drive both
 socket I/O and retransmission timers.
 
+Both adapters default to DTLS 1.3. Use `new_with_versions` with
+`browntls::dtls::Versions` to enable DTLS 1.2 explicitly. The certificates
+and suites in the shared TLS configuration still determine the handshake.
+
 ## Choosing the configuration per ClientHello
 
 `LazyConfigAcceptor` reads the ClientHello before the server picks a

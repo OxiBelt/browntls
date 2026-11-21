@@ -63,7 +63,14 @@ fn run_with_limit(limit: Duration, test: impl Future<Output = ()>) {
 }
 
 fn config(pki: &Pki) -> Arc<ServerConfig> {
-    let mut config = pki.server_config_with_client_auth(&browntls_core::version::TLS13);
+    config_for(pki, &browntls_core::version::TLS13)
+}
+
+fn config_for(
+    pki: &Pki,
+    version: &'static browntls_core::SupportedProtocolVersion,
+) -> Arc<ServerConfig> {
+    let mut config = pki.server_config_with_client_auth(version);
     #[cfg(feature = "native")]
     let cookies = Arc::new(
         browntls_core::ticketer::TicketRotator::new(3600, || {
@@ -84,6 +91,46 @@ fn config(pki: &Pki) -> Arc<ServerConfig> {
 async fn server(pki: &Pki) -> UdpServer {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     UdpServer::new(config(pki), socket).unwrap()
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn tokio_adapters_apply_the_explicit_dtls12_policy() {
+    use browntls_core::dtls::Versions;
+    use browntls_core::version::TLS12;
+    use browntls_tokio::dtls::UdpClient;
+
+    run(async {
+        let pki = Pki::new();
+        let listening = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = listening.local_addr().unwrap();
+        let mut server =
+            UdpServer::new_with_versions(config_for(&pki, &TLS12), listening, Versions::V1_2)
+                .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = socket.local_addr().unwrap();
+        socket.connect(remote).await.unwrap();
+        let mut client = UdpClient::new_with_versions(
+            Arc::new(pki.client_config_with_cert(&TLS12)),
+            common::localhost(),
+            socket,
+            Versions::V1_2,
+        )
+        .unwrap();
+        let (handshake, event) = together(client.complete_handshake(), server.next_event()).await;
+        handshake.unwrap();
+        assert!(matches!(event.unwrap(), ServerEvent::Connected(addr) if addr == peer));
+        assert_eq!(
+            client.connection().protocol_version(),
+            Some(ProtocolVersion::DTLSv1_2)
+        );
+        let (sent, received) = together(client.send(b"tokio dtls12"), server.next_event()).await;
+        sent.unwrap();
+        assert!(
+            matches!(received.unwrap(), ServerEvent::Received(addr, data)
+                         if addr == peer && data == b"tokio dtls12")
+        );
+    });
 }
 
 // Use the core API as the client oracle, independently of the other

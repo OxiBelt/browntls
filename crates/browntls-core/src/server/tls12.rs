@@ -3,6 +3,7 @@
 
 mod certificate_url;
 mod client_auth;
+pub(crate) mod resumption;
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -137,18 +138,29 @@ impl CompleteClientHelloHandling {
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
         // RFC 8844 §5: a bound connection neither resumes nor is resumed.
-        let resumable = !cx.common.is_dtls()
-            && !client_revocation_enabled(&self.config)
+        let resumable = resumption::bind(
+            cx,
+            &self.config,
+            self.suite,
+            server_key.get_cert(),
+            &self.cert_types,
+        ) && !client_revocation_enabled(&self.config)
             && self.config.external_binding.is_none();
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
         if resumable
             && let Some(ClientSessionTicket::Offer(ticket)) =
                 &client_hello.extensions.session_ticket
-            && let Some(resume) = self
-                .config
-                .ticketer
+            && (!cx.common.is_dtls() || resumption::ticketer(&self.config, cx.common).enabled())
+            && let Some(resume) = resumption::ticketer(&self.config, cx.common)
                 .decrypt(ticket.bytes())
-                .and_then(|plain| ServerSessionValue::read_bytes(&plain).ok())
+                .and_then(|plain| {
+                    resumption::decode(
+                        cx,
+                        &self.config,
+                        &plain,
+                        Some(resumption::ticketer(&self.config, cx.common).lifetime()),
+                    )
+                })
             && hs::can_resume(self.suite.into(), &cx.data.sni, self.using_ems, &resume)
         {
             return self.start_resumption(
@@ -161,19 +173,27 @@ impl CompleteClientHelloHandling {
         }
 
         if resumable
+            && (!cx.common.is_dtls()
+                || !matches!(
+                    &client_hello.extensions.session_ticket,
+                    Some(ClientSessionTicket::Offer(_))
+                ))
             && !client_hello.session_id.is_empty()
             && let Some(resume) = self
                 .config
                 .session_storage
-                .get(client_hello.session_id.as_ref())
-                .and_then(|plain| ServerSessionValue::read_bytes(&plain).ok())
+                .get(&resumption::key(
+                    cx.common,
+                    client_hello.session_id.as_ref(),
+                ))
+                .and_then(|plain| resumption::decode(cx, &self.config, &plain, None))
             && hs::can_resume(self.suite.into(), &cx.data.sni, self.using_ems, &resume)
         {
             // The entry stays in the cache for later resumptions unless this
             // connection fails (RFC 5246 §7.2.2).
             cx.data.tls12_session = Some((
                 self.config.session_storage.clone(),
-                client_hello.session_id.as_ref().to_vec(),
+                resumption::key(cx.common, client_hello.session_id.as_ref()).into_owned(),
             ));
             return self.start_resumption(
                 cx,
@@ -186,7 +206,9 @@ impl CompleteClientHelloHandling {
 
         // A session created without client authentication would also
         // bypass a verifier that requires fresh authentication later.
-        self.send_ticket = resumable && ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket = resumable
+            && ticket_requested
+            && resumption::ticketer(&self.config, cx.common).enabled();
         self.session_id =
             if resumable && !self.send_ticket && self.config.session_storage.can_cache() {
                 SessionId::random(self.config.provider.secure_random)?
@@ -314,7 +336,8 @@ impl CompleteClientHelloHandling {
             || client_hello.extensions.renegotiation_info.is_some();
 
         self.session_id = *id;
-        self.send_ticket = ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket =
+            ticket_requested && resumption::ticketer(&self.config, cx.common).enabled();
         self.emit_server_hello(
             cx,
             client_hello,
@@ -341,10 +364,13 @@ impl CompleteClientHelloHandling {
         cx.common.peer_certificates = resumedata.client_cert_chain.clone();
         cx.data.received_resumption_data = Some(resumedata.application_data.0.clone());
         cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+        if let Some(dtls) = &mut cx.common.dtls {
+            dtls.set_v12_resuming();
+        }
 
         if self.send_ticket {
             let value = make_session_value(cx, &self.config, &secrets, self.suite, self.using_ems)?;
-            emit_ticket(&mut self.transcript, cx.common, &self.config, value)?;
+            emit_ticket(&mut self.transcript, cx, &self.config, value)?;
         }
         cx.common.send_change_cipher_spec();
         emit_finished(&secrets, &mut self.transcript, cx.common);
@@ -590,7 +616,11 @@ fn make_session_value(
     let now = config.current_time()?;
     let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
-        ProtocolVersion::TLSv1_2,
+        if cx.common.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
+        },
         suite.common.suite,
         secrets.master_secret(),
         cx.common.peer_certificates.clone(),
@@ -608,25 +638,32 @@ fn make_session_value(
 /// Sends a NewSessionTicket (RFC 5077 §3.3) holding `value`.
 fn emit_ticket(
     transcript: &mut HandshakeHash,
-    common: &mut CommonState,
+    cx: &mut ServerContext<'_>,
     config: &ServerConfig,
     value: ServerSessionValue,
 ) -> Result<(), Error> {
-    let Some(ticket) = config.ticketer.encrypt(&value.get_encoding()) else {
+    let ticketer = resumption::ticketer(config, cx.common);
+    let Some(ticket) = ticketer.encrypt(&resumption::encode(cx, &value)?) else {
         // A failed encryption yields an empty ticket, which the client ignores.
-        return emit_empty_ticket(transcript, common);
+        return emit_empty_ticket(transcript, cx.common);
     };
     let m = Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::NewSessionTicket(NewSessionTicketPayload::new(
-                config.ticketer.lifetime(),
+                if cx.common.is_dtls() {
+                    ticketer
+                        .lifetime()
+                        .min(crate::msgs::persist::MAX_TICKET_LIFETIME)
+                } else {
+                    ticketer.lifetime()
+                },
                 ticket,
             )),
         )),
     };
-    common.hash_tls12(transcript, &m);
-    common.send_msg(m, false);
+    cx.common.hash_tls12(transcript, &m);
+    cx.common.send_msg(m, false);
     Ok(())
 }
 
@@ -796,7 +833,7 @@ impl State<ServerConnectionData> for ExpectFinished {
                     st.secrets.suite(),
                     st.using_ems,
                 )?;
-                emit_ticket(&mut st.transcript, cx.common, &st.config, value)?;
+                emit_ticket(&mut st.transcript, cx, &st.config, value)?;
             } else if !st.session_id.is_empty() {
                 let value = make_session_value(
                     cx,
@@ -805,11 +842,11 @@ impl State<ServerConnectionData> for ExpectFinished {
                     st.secrets.suite(),
                     st.using_ems,
                 )?;
-                let id = st.session_id.as_ref().to_vec();
+                let id = resumption::key(cx.common, st.session_id.as_ref()).into_owned();
                 if st
                     .config
                     .session_storage
-                    .put(id.clone(), value.get_encoding())
+                    .put(id.clone(), resumption::encode(cx, &value)?)
                 {
                     cx.data.tls12_session = Some((st.config.session_storage.clone(), id));
                 } else {

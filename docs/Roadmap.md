@@ -58,11 +58,11 @@ intent.
 | QUIC transport (RFC 9000) | out of scope |
 | DTLS 1.3 (RFC 9147): `browntls_core::dtls` sans-I/O `ClientConnection` and `ServerConnection` (whole datagrams in and out, timers on the caller's clock) over the TLS 1.3 handshake; unified headers with encrypted record numbers, a 128-record replay window per epoch, the integrity limit enforced, fragmentation to the datagram size (256 to 65507 bytes, 1200 by default), reassembly, ACKs and retransmission, KeyUpdate held until acknowledged, resumption with tickets kept apart from TLS ones; the cookie exchange on by default with cookies bound to the caller-provided client address, and a stateless `dtls::Acceptor`; application data never fragmented; every TLS 1.3 suite but CCM_8, on both providers. Tests between browntls endpoints over a simulated lossy network (`crates/browntls-core/tests/cases/dtls.rs`) and the `tls_dtls` fuzz target and [wolfSSL Docker interoperability](../tests/e2e/README.md#dtls-13-interoperability) (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
 | DTLS 1.2 (RFC 6347) | full opt-in certificate handshakes with ECDHE AEAD, EMS and address-bound cookies. Tested on both providers and in both roles against OpenSSL. Resumption planned. See [DTLS 1.2](DTLS12.md) |
-| DTLS 1.3 connection ID negotiation (RFC 9146), bounded updates (RFC 9147 §9) and checked receive metadata; low-level API only, paths pinned | implemented; execution and independent review pending |
-| DTLS 1.2 CID record protection and connection migration, including the return routability check (RFC 9853) | planned |
+| DTLS connection ID negotiation and record protection (RFC 9146 and RFC 9147 §9), bounded DTLS 1.3 updates, and checked receive metadata | exercised on both providers, with paths pinned |
+| DTLS connection migration and the return routability check (RFC 9853) | planned |
 | 0-RTT, Encrypted Client Hello and post-handshake client authentication over DTLS 1.3 | planned |
 | Blocking `std` API for DTLS 1.3: `dtls::UdpClient` (one server) and `dtls::UdpServer` (many clients on one socket) over `std::net::UdpSocket`; stateless cookies through the `dtls::Acceptor`, at most 256 handshakes at once with the oldest replaced, a handshake timeout, read timeouts that still take what has arrived, `ServerEvent`s for connected clients only, clients told apart by address only, no live OCSP. Loopback tests (`crates/browntls-core/tests/cases/dtls_udp.rs`) and the `tls_dtls_udp` fuzz target and [wolfSSL Docker interoperability](../tests/e2e/README.md#dtls-13-interoperability) (see [Architecture](Architecture.md#dtls-13-rfc-9147)) | done |
-| Tokio API for DTLS | planned |
+| Tokio API for DTLS | client, event server, and bounded, independently owned session handles |
 | Fuzzing targets for codecs, PKI and handshake state | done: eight cargo-fuzz targets in `fuzz/` (handshake messages, deframer, certificate decompression, X.509 path validation, PEM, CRLs, client and server connections with a genuine in-process peer and identity TLS 1.3 record protection); built and run over generated seeds in CI on the stable toolchain. The first manual campaign ran each target for 60 seconds from the generated seeds when the targets were added (nightly 1.102, libFuzzer with AddressSanitizer, x86-64; between 3.5 thousand executions for the connection targets and 4.5 million for `pki_crl`) and found no crash, which is evidence of little beyond the harnesses working |
 | Fuzzing the public API | done: twenty-three API-sequence targets grouped by topic (hashes, ciphers, ECC, RSA, KEMs, HPKE, crypto utilities, PKI including revocation, configuration, buffered and unbuffered connections, the Tokio streams over either, kernel TLS offload, ECH, PSK, RFC 8844 binding, QUIC-TLS, DTLS 1.3 and its blocking UDP API, delegated credentials and exported authenticators, codec types), checked against RustCrypto oracles, models and every backend; CI requires them to reach every public function of the four library crates other than `browntls-ktls` (four `PlainMessage` methods are not reachable from outside the crate and are exempt). The Fuzz workflow runs all thirty-one targets as a GitHub Actions matrix: on one x86-64 runner, on pull requests for the targets whose sources changed and weekly with cached corpora |
 | Asynchronous Tokio streams (`browntls-tokio`): `TlsConnector`, `TlsAcceptor`, client and server streams with `AsyncRead`/`AsyncBufRead`/`AsyncWrite`, `close_notify` on `shutdown`, `LazyConfigAcceptor` (configuration chosen per ClientHello), read and write halves (`into_split`), client 0-RTT early data with resending when declined, server 0-RTT early data read before the handshake completes (opt-in `TlsAcceptor::early_data`, with 0.5-RTT answers), interoperability with tokio-rustls, `into_kernel_handoff` (a stream readied for kernel TLS offload: nothing in flight, received plaintext set aside); the same connector, acceptor and lazy acceptor over the unbuffered API (`browntls_tokio::unbuffered`), reading records in place with at most one copy (no client 0-RTT there, and no server stream returned before the handshake completes) | done |
@@ -217,12 +217,13 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   both client and server in Docker. Resumption and loss recovery are tested
   between browntls endpoints. The opt-in
   [DTLS 1.2 certificate handshake layer](DTLS12.md) is tested on both
-  providers and against OpenSSL in Docker. DTLS 1.2 resumption is disabled.
-  The low-level DTLS 1.3 API supports opt-in connection IDs. Deferred DTLS
-  features include DTLS 1.2 CID record protection, return routability checks,
+  providers and against OpenSSL in Docker. DTLS 1.2 session ID and RFC 5077
+  ticket resumption are opt-in and exercised between browntls peers.
+  Connection IDs are opt-in in both DTLS versions. Deferred features
+  include return routability checks,
   0-RTT, Encrypted Client Hello or post-handshake client authentication,
-  through the low-level datagram API or the blocking `std` API; there is
-  no Tokio API. A cookie is bound to whatever address bytes the caller
+  through the low-level, blocking or Tokio APIs. A cookie is bound to
+  whatever address bytes the caller
   passes; `UdpServer` passes the client's socket address and tells clients
   apart by it alone, and supports no live OCSP checks. Unprotected hellos
   can be forged by anyone who knows the addresses: a forged one that wins

@@ -244,3 +244,29 @@ fn stateful_and_stateless_retry_preserve_the_extension() {
         }
     }
 }
+
+#[test]
+fn a_client_aborts_retry_if_no_external_psk_can_remain() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_provider = prov::default_provider();
+    client_provider.kx_groups = vec![prov::kx_group::X25519, prov::kx_group::SECP256R1];
+    let mut server_provider = prov::default_provider();
+    server_provider.kx_groups = vec![prov::kx_group::SECP256R1];
+    server_provider.cipher_suites = vec![prov::cipher_suite::TLS13_AES_256_GCM_SHA384];
+    let mut client =
+        ClientConnection::new(Arc::new(client_for(&chain, client_provider)), server_name())
+            .unwrap();
+    let mut server = ServerConnection::new(Arc::new(server_for(&chain, server_provider))).unwrap();
+    give(&mut server, &take_flight(&mut client));
+    server.process_new_packets().unwrap();
+    give(&mut client, &take_flight(&mut server));
+    assert_eq!(
+        client.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(browntls_core::PeerMisbehaved::CertWithExternPskChangedOnRetry)
+    );
+    let flight = take_flight(&mut client);
+    assert_eq!(
+        fatal_alert(&flight),
+        Some(u8::from(AlertDescription::IllegalParameter))
+    );
+}

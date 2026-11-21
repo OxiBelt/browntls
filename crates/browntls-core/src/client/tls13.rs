@@ -297,7 +297,7 @@ pub(super) fn handle_server_hello(
         }
     };
 
-    // RFC 8773: the server authenticates with its certificate on top of an
+    // RFC 9973: the server authenticates with its certificate on top of an
     // external PSK. It may only say so when it selected one.
     let cert_with_extern_psk = server_hello.extensions.cert_with_extern_psk.is_some();
     if cert_with_extern_psk && external_psk.is_none() {
@@ -338,7 +338,7 @@ pub(super) fn handle_server_hello(
     // Refusals of what the server selected, sent once our alert can be
     // protected under the handshake key the server now reads with: no 0-RTT
     // is in flight (none was accepted without a PSK, and none is sent with
-    // RFC 8773).
+    // RFC 9973).
     if config.require_external_psk && cx.common.external_psk.is_none() {
         return Err(cx.common.send_fatal_alert(
             AlertDescription::HandshakeFailure,
@@ -373,7 +373,7 @@ struct ExpectEncryptedExtensions {
     resuming_session: Option<persist::Tls13ClientSessionValue>,
     /// The external PSK the server selected, if it did.
     external_psk: Option<Arc<ExternalPsk>>,
-    /// Whether RFC 8773 certificate authentication was negotiated.
+    /// Whether RFC 9973 certificate authentication was negotiated.
     cert_with_extern_psk: bool,
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
@@ -565,7 +565,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
             }
-            // A full handshake, or RFC 8773 certificate authentication on
+            // A full handshake, or RFC 9973 certificate authentication on
             // top of an external PSK.
             _ => Ok(Box::new(ExpectCertificateOrCertReq {
                 config: self.config,

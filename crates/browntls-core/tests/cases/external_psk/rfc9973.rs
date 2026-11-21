@@ -58,6 +58,16 @@ fn rfc9973_resumption_reports_only_the_inherited_psk() {
     take_tickets(&mut client, &mut server);
 
     config.cert_with_extern_psk = false;
+    let mut strict_config = (*server_config).clone();
+    strict_config.require_cert_with_extern_psk = true;
+    let mut client = ClientConnection::new(Arc::new(config.clone()), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(strict_config)).unwrap();
+    let (_, result) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        result.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::CertWithExternPskRequired)
+    );
+
     let mut client = ClientConnection::new(Arc::new(config), server_name()).unwrap();
     let mut server = ServerConnection::new(server_config).unwrap();
     do_handshake(&mut client, &mut server).unwrap();
@@ -65,6 +75,27 @@ fn rfc9973_resumption_reports_only_the_inherited_psk() {
     assert_eq!(client.external_psk_identity(), Some(key().identity()));
     assert!(!client.negotiated_cert_with_extern_psk());
     assert!(!server.negotiated_cert_with_extern_psk());
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn rfc9973_strict_server_refuses_tls12() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let client_config = ClientConfig::builder_with_provider(tls13_provider(None, None))
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    let mut server_config =
+        cert_and_psk_server(&chain, vec![psk(b"rfc9973", HashAlgorithm::SHA256)]);
+    server_config.require_cert_with_extern_psk = true;
+    let (mut client, mut server) = connect(client_config, server_config);
+    let (_, result) = do_handshake_until_error(&mut client, &mut server);
+    assert_eq!(
+        result.unwrap_err(),
+        Error::PeerIncompatible(PeerIncompatible::CertWithExternPskRequired)
+    );
 }
 
 #[test]

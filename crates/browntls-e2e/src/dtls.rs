@@ -28,6 +28,12 @@ pub(super) fn client(options: &Options) -> Result<()> {
             .map_err(|error| error.to_string())?,
         None => builder.with_no_client_auth(),
     };
+    if let Some(psk) = options.external_psk()? {
+        config.external_psks.push(psk);
+        config.cert_with_extern_psk = true;
+        config.require_cert_with_extern_psk = true;
+        config.require_external_psk = true;
+    }
     if let Some(mechanism) = options.dtls12_resumption.as_deref() {
         config.resumption =
             Resumption::in_memory_sessions(4).tls12_resumption(if mechanism == "session-id" {

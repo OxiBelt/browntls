@@ -4,16 +4,20 @@
 //! Each presented name is compared with every constraint base of the same
 //! form: a presented name must match at least one permitted subtree of its
 //! form (when any exist) and no excluded subtree. Forms this crate does not
-//! implement fail closed: `directoryName` and `uniformResourceIdentifier`
-//! bases match nothing permitted and everything excluded, and any other
-//! form rejects the path when both the name and a base use it.
+//! implement fail closed: `directoryName` bases match nothing permitted and
+//! everything excluded, and any other form rejects the path when both the
+//! name and a base use it.
 
 use super::dns::{self, IdRole};
 use super::{GeneralName, GeneralNames, ip};
 use crate::cert::Cert;
 use crate::der::{self, Reader, tag};
 use crate::error::Error;
+use crate::name::service::srv_name_value;
 use crate::path::Budget;
+
+mod srv;
+mod uri;
 
 /// Which subtree list a base belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,13 +110,30 @@ fn check_name(
                 (GeneralName::IpAddress(n), GeneralName::IpAddress(b)) => {
                     ip::presented_matches_constraint(n, b)?
                 }
+                (
+                    GeneralName::UniformResourceIdentifier(n),
+                    GeneralName::UniformResourceIdentifier(b),
+                ) => uri::presented_matches_constraint(n, b)?,
+                (
+                    GeneralName::Other { tag: 0, value: n },
+                    GeneralName::Other { tag: 0, value: b },
+                ) => {
+                    let Some(base) =
+                        srv_name_value(b).map_err(|_| Error::MalformedNameConstraint)?
+                    else {
+                        return Err(Error::NameConstraintViolation);
+                    };
+                    match srv_name_value(n) {
+                        Ok(Some(presented)) => srv::presented_matches_constraint(presented, base)?,
+                        Ok(None) => continue,
+                        Err(_) => return Err(Error::NameConstraintViolation),
+                    }
+                }
                 // Not implemented: fail closed by matching nothing permitted
                 // and everything excluded.
-                (GeneralName::DirectoryName(_), GeneralName::DirectoryName(_))
-                | (
-                    GeneralName::UniformResourceIdentifier(_),
-                    GeneralName::UniformResourceIdentifier(_),
-                ) => kind == Subtrees::Excluded,
+                (GeneralName::DirectoryName(_), GeneralName::DirectoryName(_)) => {
+                    kind == Subtrees::Excluded
+                }
                 // A constraint on a form this crate cannot process must
                 // reject a certificate presenting that form (RFC 5280 §4.2).
                 (GeneralName::Rfc822Name(_), GeneralName::Rfc822Name(_)) => {
@@ -270,5 +291,104 @@ mod tests {
             check_name(GeneralName::DnsName(b"example.com"), p, e, &mut budget),
             Err(Error::MaximumNameConstraintComparisonsExceeded)
         );
+    }
+
+    #[test]
+    fn uri_constraints_use_authority_dns_hosts() {
+        let uri_base = b"\x86\x0bexample.com";
+        let permitted = list(0xa0, &[uri_base]);
+        assert_eq!(
+            check_single(
+                &permitted,
+                GeneralName::UniformResourceIdentifier(b"https://example.com/path")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_single(
+                &permitted,
+                GeneralName::UniformResourceIdentifier(b"https:///missing-host")
+            ),
+            Err(Error::NameConstraintViolation)
+        );
+        let excluded = list(0xa1, &[uri_base]);
+        assert_eq!(
+            check_single(
+                &excluded,
+                GeneralName::UniformResourceIdentifier(b"sip:another.example.com")
+            ),
+            Err(Error::NameConstraintViolation)
+        );
+        assert_eq!(
+            check_single(
+                &excluded,
+                GeneralName::UniformResourceIdentifier(b"https://example.com/")
+            ),
+            Err(Error::NameConstraintViolation)
+        );
+    }
+
+    #[test]
+    fn srv_name_constraints_ignore_other_other_names_and_reject_malformed_srv_names() {
+        let srv = srv_other_name(b"_https.example.com");
+        let permitted = list(0xa0, &[&srv]);
+        assert_eq!(
+            check_single(
+                &permitted,
+                GeneralName::Other {
+                    tag: 0,
+                    value: &other_name_contents(b"_https.api.example.com")
+                }
+            ),
+            Ok(())
+        );
+        let excluded = list(0xa1, &[&srv]);
+        assert_eq!(
+            check_single(
+                &excluded,
+                GeneralName::Other {
+                    tag: 0,
+                    value: &other_name_contents(b"_https.api.example.com")
+                }
+            ),
+            Err(Error::NameConstraintViolation)
+        );
+        let unrelated = b"\x06\x01\x2a\xa0\x03\x16\x01x";
+        assert_eq!(
+            check_single(
+                &permitted,
+                GeneralName::Other {
+                    tag: 0,
+                    value: unrelated
+                }
+            ),
+            Ok(())
+        );
+        let malformed = other_name_contents(b"_https.");
+        assert_eq!(
+            check_single(
+                &permitted,
+                GeneralName::Other {
+                    tag: 0,
+                    value: &malformed
+                }
+            ),
+            Err(Error::NameConstraintViolation)
+        );
+    }
+
+    fn other_name_contents(value: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut content = alloc::vec![0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x08, 0x07,];
+        let explicit_len = value.len() + 2;
+        content.extend_from_slice(&[0xa0, explicit_len as u8, 0x16, value.len() as u8]);
+        content.extend_from_slice(value);
+        content
+    }
+
+    fn srv_other_name(value: &[u8]) -> alloc::vec::Vec<u8> {
+        let contents = other_name_contents(value);
+        let mut general_name = alloc::vec![0xa0, contents.len() as u8];
+        general_name.extend_from_slice(&contents);
+        general_name
     }
 }

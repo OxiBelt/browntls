@@ -44,6 +44,7 @@ pub(super) fn emit_server_hello(
     cert_with_extern_psk: bool,
 ) {
     let extensions = ServerExtensions {
+        connection_id: common.dtls.as_deref().and_then(|dtls| dtls.cid.response()),
         key_share: Some(key_share),
         pre_shared_key: chosen_psk_index.and_then(|i| u16::try_from(i).ok()),
         supported_versions: Some(ProtocolVersion::TLSv1_3),

@@ -6,6 +6,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use super::cid::AuthenticatedRecord;
 use super::replay::ReplayWindow;
 use super::state::{Dtls, Incoming, WriteEpoch};
 use super::wire::{self, RecordNumber};
@@ -15,7 +16,8 @@ use crate::error::{Error, InvalidMessage};
 use crate::hash_hs::HandshakeHash;
 use crate::msgs::enums::AlertLevel;
 use crate::msgs::message::{
-    InboundOpaqueMessage, Message, MessagePayload, OutboundChunks, OutboundPlainMessage,
+    InboundOpaqueMessage, MAX_PLAINTEXT_LEN, Message, MessagePayload, OutboundChunks,
+    OutboundPlainMessage,
 };
 
 pub(super) struct State {
@@ -86,6 +88,12 @@ impl Dtls {
         dec: Box<dyn MessageDecrypter>,
         limit: u64,
     ) {
+        if (!self.cid.outbound().is_empty() && !enc.supports_dtls12_cid())
+            || (self.cid.receive_len() != 0 && !dec.supports_dtls12_cid())
+        {
+            self.broken = true;
+            return;
+        }
         self.v12.enc = Some(enc);
         self.v12.dec = Some(dec);
         self.v12.limit = limit.min(wire::MAX_SEQ);
@@ -115,7 +123,9 @@ impl Dtls {
         content: &[u8],
     ) -> Result<RecordNumber, Error> {
         let seq = self.write.last().ok_or(Error::EncryptError)?.next_seq;
-        if seq >= self.v12.limit || content.len() > 16_384 {
+        let cid = self.cid.outbound();
+        if seq >= self.v12.limit || content.len() > MAX_PLAINTEXT_LEN - usize::from(!cid.is_empty())
+        {
             return Err(Error::EncryptError);
         }
         // Consume the number even if the provider fails.
@@ -125,15 +135,20 @@ impl Dtls {
             version: ProtocolVersion::DTLSv1_2,
             payload: OutboundChunks::Single(content),
         };
-        let record = self
-            .v12
-            .enc
-            .as_mut()
-            .ok_or(Error::EncryptError)?
-            .encrypt(message, (1u64 << 48) | seq)?;
+        let enc = self.v12.enc.as_mut().ok_or(Error::EncryptError)?;
+        let nonce = (1u64 << 48) | seq;
+        let record = if cid.is_empty() {
+            enc.encrypt(message, nonce)?
+        } else {
+            enc.encrypt_dtls12_cid(message, nonce, cid, 0)?
+        };
         let body = record.payload.as_ref();
         let len = u16::try_from(body.len()).map_err(|_| Error::EncryptError)?;
-        wire::put_plaintext_header(out, typ, ProtocolVersion::DTLSv1_2, 1, seq, len);
+        if cid.is_empty() {
+            wire::put_plaintext_header(out, typ, ProtocolVersion::DTLSv1_2, 1, seq, len);
+        } else {
+            wire::put_v12_cid_header(out, seq, cid, len);
+        }
         out.extend_from_slice(body);
         Ok(RecordNumber { epoch: 1, seq })
     }
@@ -146,6 +161,8 @@ impl Dtls {
         epoch: u16,
         seq: u64,
         datagram: &mut [u8],
+        header: Range<usize>,
+        cid: Option<Range<usize>>,
         body: Range<usize>,
         handshaking: bool,
     ) -> Result<Incoming, Error> {
@@ -180,10 +197,16 @@ impl Dtls {
         };
         let record_end = body.end;
         let base_ptr = datagram.as_ptr() as usize;
-        let plain = match dec.decrypt(
-            InboundOpaqueMessage::new(typ, version, &mut datagram[body.clone()]),
-            (u64::from(epoch) << 48) | seq,
-        ) {
+        let (prefix, ciphertext) = datagram.split_at_mut(body.start);
+        let id = cid.map(|r| &prefix[header.start + r.start..header.start + r.end]);
+        let message = InboundOpaqueMessage::new(typ, version, &mut ciphertext[..body.len()]);
+        let nonce = (u64::from(epoch) << 48) | seq;
+        let opened = if let Some(id) = id {
+            dec.decrypt_dtls12_cid(message, nonce, id)
+        } else {
+            dec.decrypt(message, nonce)
+        };
+        let plain = match opened {
             Ok(plain) => plain,
             Err(_) => {
                 self.v12.failures = self.v12.failures.saturating_add(1);
@@ -200,6 +223,7 @@ impl Dtls {
             .checked_sub(base_ptr)
             .ok_or(InvalidMessage::MessageTooShort)?;
         let len = plain.payload.len();
+        let typ = plain.typ;
         if start < body.start
             || start.checked_add(len).is_none_or(|end| end > record_end)
             || len > 16_384
@@ -208,10 +232,16 @@ impl Dtls {
         }
         self.v12.window.mark(seq);
         self.peer_authenticated = true;
+        let number = RecordNumber { epoch: 1, seq };
+        self.authenticated_record = Some(AuthenticatedRecord::new(
+            header.start..body.end,
+            number,
+            id.unwrap_or_default().to_vec(),
+        ));
         let content = &datagram[start..start + len];
         match typ {
             ContentType::Handshake => {
-                self.read_handshake_fragments(content, RecordNumber { epoch: 1, seq }, true)?;
+                self.read_handshake_fragments(content, number, true)?;
                 Ok(Incoming::Handled)
             }
             ContentType::Alert => match content {

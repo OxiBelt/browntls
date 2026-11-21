@@ -356,6 +356,11 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        crate::dtls::cid::select_server_hello(
+            cx.common,
+            server_hello.extensions.connection_id.as_ref(),
+        )?;
+
         let suite = config
             .find_cipher_suite(server_hello.cipher_suite)
             .ok_or_else(|| {

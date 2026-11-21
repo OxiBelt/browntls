@@ -7,8 +7,9 @@ RUN curl -fsSL https://codeload.github.com/wolfSSL/wolfssl/tar.gz/3c5eead44904df
     && mkdir source \
     && tar -xzf wolfssl.tar.gz -C source --strip-components=1 \
     && cmake -S source -B out -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-        -DWOLFSSL_DTLS=yes -DWOLFSSL_DTLS13=yes -DWOLFSSL_EXAMPLES=no \
-        -DWOLFSSL_CRYPT_TESTS=no \
+        -DWOLFSSL_DTLS=yes -DWOLFSSL_DTLS13=yes -DWOLFSSL_DTLS_CID=yes -DWOLFSSL_EXAMPLES=no \
+        -DWOLFSSL_SECURE_RENEGOTIATION=yes -DCMAKE_C_FLAGS=-DWOLFSSL_COOKIE_LEN=128 \
+        -DWOLFSSL_CRYPT_TESTS=no -DWOLFSSL_OPENSSLEXTRA=yes \
     && cmake --build out --parallel 4
 COPY wolfssl-dtls.c .
 RUN cc -std=c11 -Wall -Wextra -Werror -Iout -Isource wolfssl-dtls.c \

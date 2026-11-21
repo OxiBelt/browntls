@@ -100,16 +100,22 @@ static void send_close(WOLFSSL *ssl)
 
 int main(int argc, char **argv)
 {
-    if (argc != 4 || (strcmp(argv[1], "server") && strcmp(argv[1], "client")))
-        fail("usage: wolfssl-dtls server|client HOST PORT");
+    if ((argc != 4 && argc != 6) ||
+        (strcmp(argv[1], "server") && strcmp(argv[1], "client")) ||
+        (argc == 6 && (strcmp(argv[4], "--cid") ||
+                       (strcmp(argv[5], "1.2") && strcmp(argv[5], "1.3")))))
+        fail("usage: wolfssl-dtls server|client HOST PORT [--cid 1.2|1.3]");
     int server = strcmp(argv[1], "server") == 0;
+    int cid = argc == 6;
+    int v12 = cid && strcmp(argv[5], "1.2") == 0;
     char file[sizeof(path) + 20];
     if (wolfSSL_Init() != WOLFSSL_SUCCESS)
         fail("initialize wolfSSL");
-    WOLFSSL_CTX *ctx = wolfSSL_CTX_new(server ? wolfDTLSv1_3_server_method()
-                                            : wolfDTLSv1_3_client_method());
+    WOLFSSL_CTX *ctx = wolfSSL_CTX_new(v12 ?
+        (server ? wolfDTLSv1_2_server_method() : wolfDTLSv1_2_client_method()) :
+        (server ? wolfDTLSv1_3_server_method() : wolfDTLSv1_3_client_method()));
     if (ctx == NULL)
-        fail("create DTLS 1.3 context");
+        fail("create DTLS context");
     snprintf(file, sizeof(file), "%sca.pem", path);
     if (wolfSSL_CTX_load_verify_locations(ctx, file, NULL) != WOLFSSL_SUCCESS)
         fail("load test CA");
@@ -125,10 +131,30 @@ int main(int argc, char **argv)
     WOLFSSL *ssl = wolfSSL_new(ctx);
     if (ssl == NULL)
         fail("allocate DTLS connection");
+    if (v12)
+        check(ssl, wolfSSL_UseSecureRenegotiation(ssl), "enable RFC 5746 indication");
+    if (cid) {
+        unsigned char local_cid[] = {0x11, 0x23, 0x35, 0x47, 0x59, 0x6b, 0x7d, 0x8f};
+        check(ssl, wolfSSL_dtls_cid_use(ssl), "enable CID");
+        check(ssl, wolfSSL_dtls_cid_set(ssl, local_cid, sizeof(local_cid)), "set CID");
+    }
     int fd = peer_socket(ssl, server, argv[2], argv[3]);
     check(ssl, server ? wolfSSL_accept(ssl) : wolfSSL_connect(ssl), "DTLS handshake");
-    if (strcmp(wolfSSL_get_version(ssl), "DTLSv1.3") != 0)
+    if (strcmp(wolfSSL_get_version(ssl), v12 ? "DTLSv1.2" : "DTLSv1.3") != 0)
         fail("negotiated unexpected version");
+    if (cid) {
+        unsigned int rx = 0, tx = 0;
+        WOLFSSL_X509 *cert = wolfSSL_get_peer_certificate(ssl);
+        if (cert == NULL || wolfSSL_get_verify_result(ssl) != 0 ||
+            wolfSSL_session_reused(ssl))
+            fail("expected verified peer certificate and full handshake");
+        wolfSSL_X509_free(cert);
+        if (!wolfSSL_dtls_cid_is_enabled(ssl) ||
+            wolfSSL_dtls_cid_get_rx_size(ssl, &rx) != WOLFSSL_SUCCESS ||
+            wolfSSL_dtls_cid_get_tx_size(ssl, &tx) != WOLFSSL_SUCCESS ||
+            rx == 0 || tx == 0)
+            fail("expected negotiated nonempty CIDs in both directions");
+    }
     if (server) {
         expect_data(ssl, request);
         send_data(ssl, reply);
@@ -140,7 +166,11 @@ int main(int argc, char **argv)
         expect_close(ssl);
         send_close(ssl);
     }
-    puts("verified DTLSv1.3, payloads and close_notify");
+    if (cid)
+        printf("verified DTLSv1.%s, bidirectional CID, mTLS, full handshake, payloads and close_notify\n",
+               v12 ? "2" : "3");
+    else
+        puts("verified DTLSv1.3, payloads and close_notify");
     wolfSSL_free(ssl);
     wolfSSL_CTX_free(ctx);
     wolfSSL_Cleanup();

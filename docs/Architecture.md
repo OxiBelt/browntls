@@ -2538,8 +2538,7 @@ record and handshake details describe DTLS 1.3.
   timeout.
   When failed decryptions in an epoch exceed the suite's integrity limit
   the connection fails (§4.5.3), and the confidentiality limit triggers a
-  KeyUpdate. Records with a connection ID are refused, since none is
-  negotiated.
+  KeyUpdate. Connection IDs require explicit DTLS settings (below).
 - Handshake messages are fragmented to the datagram size (`set_mtu`: 256 to
   65507 bytes, 1200 by default), reassembled out of order within bounded
   windows, acknowledged per §7 and retransmitted on a timer that starts at
@@ -2575,10 +2574,48 @@ record and handshake details describe DTLS 1.3.
   that spans several datagrams must carry the cookie in its first
   fragment (browntls clients send it first), which is checked before
   anything is kept.
+- Connection IDs: opt-in through `dtls::Settings::with_connection_ids` and
+  the low-level client/server `new_with_settings` constructors.
+  Servers on already verified paths can instead use
+  `new_without_cookie_exchange_with_settings`.
+  `ConnectionIdPolicy::new(receive_len, allow_sending)` selects a fixed
+  local receiving length of 8 to 32 bytes, or zero for the empty receiving
+  direction, independently of permission to send nonempty peer IDs. A server
+  declines an offer that requires forbidden sending; a client fails a
+  selection forbidden by its policy. Local IDs come from the configured
+  provider's random source; peer IDs may have any wire length, including
+  zero. A selected CID that leaves no room for handshake fragments or a
+  one-record ACK at the configured MTU makes output fail explicitly until
+  the MTU is raised.
+  Negotiation uses ClientHello and ServerHello (RFC 9146), never
+  EncryptedExtensions, stream TLS or QUIC. All protected records carry the
+  selected nonempty CID in their authenticated unified header. A missing
+  or wrong receiving CID discards the rest of the datagram (RFC 9147 §4).
+  `Received::authenticated_records` reports only records that passed
+  association, traffic-key authentication and replay checks. It proves no
+  address reachability and grants no migration authority; wrappers must
+  keep the path pinned. `local_connection_ids` supplies wrapper lookup IDs,
+  including those in pending updates, after negotiation.
+  Wrappers must detect collisions when registering IDs across associations;
+  local generation checks uniqueness only within its own association.
+  `issue_connection_ids` and `request_connection_ids` implement RFC 9147 §9
+  only after the handshake. Each message type permits one outstanding
+  transmission until ACK; a request also waits for a response, which may
+  contain no IDs. Requests receive spare IDs, with one coalesced response
+  while an earlier update awaits ACK; excess requests fail with
+  `too_many_cids_requested`. At most 16 local IDs are ever issued per
+  association, including its initial ID, with four generation attempts per
+  ID to avoid reuse. All issued IDs remain valid until the association
+  ends; this stage has no CID retirement or migration timer. Peer spare
+  storage is capped at 16 and duplicates are coalesced. Immediate updates
+  select the first provided ID; spare updates retain the current one.
+  When the local quota is exhausted, spare responses contain no IDs and
+  local immediate issuance fails. New tests have not yet been executed;
+  independent review and interoperability qualification remain pending.
 - Not supported over DTLS: 0-RTT (a server rejects an offer), Encrypted
   Client Hello (configurations with it are refused), post-handshake client
-  authentication (not offered; a request is refused), connection IDs
-  (RFC 9146) and the return routability check (RFC 9853). There is no
+  authentication (not offered; a request is refused), DTLS 1.2 CID record
+  protection and the return routability check (RFC 9853). There is no
   Tokio API for DTLS yet.
 
 With the `std` feature, `dtls::UdpClient` and `dtls::UdpServer` run these

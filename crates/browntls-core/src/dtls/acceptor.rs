@@ -110,6 +110,9 @@ impl Acceptor {
 /// unprotected handshake record holding one.
 fn first_client_hello(datagram: &[u8]) -> Option<(HandshakeHeader, &[u8])> {
     let record = wire::parse_record(datagram, 0)?;
+    if record.body.len() > crate::msgs::message::MAX_PLAINTEXT_LEN {
+        return None;
+    }
     let Header::Plaintext {
         typ: ContentType::Handshake,
         epoch: 0,

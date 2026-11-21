@@ -26,7 +26,11 @@ use crate::error::{Error, InvalidMessage};
 use crate::log::trace;
 use crate::msgs::enums::AlertLevel;
 use crate::msgs::handshake::MAX_HANDSHAKE_SIZE;
+use crate::msgs::message::MAX_PLAINTEXT_LEN;
 use crate::tls13::Tls13CipherSuite;
+
+#[cfg(test)]
+mod tests;
 
 /// The datagram size used unless the caller sets another: small enough
 /// for any IPv6 path (1280 bytes) after the IP and UDP headers.
@@ -205,7 +209,8 @@ impl Dtls {
     /// first ClientHello should fit, so that a server can answer it
     /// without keeping state (RFC 9147 §5.1).
     pub(crate) fn max_unfragmented_handshake(&self) -> usize {
-        self.settings.mtu - wire::PLAINTEXT_HEADER_LEN - wire::HANDSHAKE_HEADER_LEN
+        (self.settings.mtu - wire::PLAINTEXT_HEADER_LEN).min(MAX_PLAINTEXT_LEN)
+            - wire::HANDSHAKE_HEADER_LEN
             + wire::TLS_HANDSHAKE_HEADER_LEN
     }
 
@@ -359,7 +364,7 @@ impl Dtls {
             } => {
                 // Unprotected records exist only in epoch 0; others are
                 // DTLS 1.2 records or noise.
-                if epoch != 0 {
+                if epoch != 0 || body.len() > MAX_PLAINTEXT_LEN {
                     return Ok(Incoming::Handled);
                 }
                 let number = RecordNumber { epoch: 0, seq };
@@ -440,6 +445,9 @@ impl Dtls {
             return Ok(Incoming::Handled);
         };
         let read = &mut self.read[index];
+        if body.len() > read.keys.max_ciphertext_len() {
+            return Ok(Incoming::Handled);
+        }
         let expected = read.window.highest().map_or(0, |h| h.saturating_add(1));
         let Some(opened) = read.keys.open(record, seq, body, expected) else {
             read.failures += 1;
@@ -506,6 +514,7 @@ impl Dtls {
     ) -> Result<(), Error> {
         let mut accepted = false;
         let mut old = false;
+        let mut dropped = false;
         while !body.is_empty() {
             let Some((header, fragment, rest)) = HandshakeHeader::read(body) else {
                 return Err(InvalidMessage::MessageTooShort.into());
@@ -516,6 +525,7 @@ impl Dtls {
                 if self.reassembler.is_old(header.message_seq) {
                     old = true;
                 }
+                dropped = true;
                 continue;
             }
             let client_hello = header.typ == u8::from(HandshakeType::ClientHello);
@@ -527,12 +537,12 @@ impl Dtls {
                     }
                 }
                 Fragment::Old => old = true,
-                Fragment::Dropped => {}
+                Fragment::Dropped => dropped = true,
             }
         }
-        // An unprotected repetition proves nothing, so it is not
-        // acknowledged: forged ones cannot crowd out real acknowledgements.
-        if accepted || (old && authenticated) {
+        // RFC 9147 §7 acknowledges records only when every fragment was
+        // processed or buffered. An unprotected repetition proves nothing.
+        if !dropped && (accepted || (old && authenticated)) {
             self.saw_handshake = true;
             self.note_ack(number);
         }
@@ -702,6 +712,9 @@ impl Dtls {
         typ: ContentType,
         content: &[u8],
     ) -> Result<RecordNumber, Error> {
+        if content.len() > MAX_PLAINTEXT_LEN {
+            return Err(Error::EncryptError);
+        }
         let floor = self.plaintext_seq_floor();
         let Some(write) = self.write_state(epoch) else {
             return Err(Error::EncryptError);
@@ -732,6 +745,9 @@ impl Dtls {
     /// The bytes one record under `epoch` takes to carry `content_len`
     /// bytes, if the epoch is still kept.
     pub(super) fn record_len(&self, epoch: u64, content_len: usize) -> Option<usize> {
+        if content_len > MAX_PLAINTEXT_LEN {
+            return None;
+        }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         Some(match &write.keys {
             None => wire::PLAINTEXT_HEADER_LEN + content_len,
@@ -742,10 +758,11 @@ impl Dtls {
     /// The most content one record under `epoch` carries within `space`.
     pub(super) fn record_room(&self, epoch: u64, space: usize) -> Option<usize> {
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
-        match &write.keys {
+        let room = match &write.keys {
             None => space.checked_sub(wire::PLAINTEXT_HEADER_LEN),
             Some(keys) => keys.content_room(space, 0),
-        }
+        }?;
+        Some(room.min(MAX_PLAINTEXT_LEN))
     }
 
     /// The most application data one record of the current sending epoch

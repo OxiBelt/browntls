@@ -647,6 +647,17 @@ fn application_data_must_fit_one_datagram() {
     out.clear();
     assert!(pair.client.send(&vec![7; max + 1], &mut out).is_err());
     assert!(out.is_empty());
+
+    pair.client.set_mtu(65_507).unwrap();
+    let max = pair.client.max_application_data().unwrap();
+    assert_eq!(max, 16_384);
+    assert!(pair.client.send(&vec![7; max + 1], &mut out).is_err());
+    assert!(out.is_empty());
+    let data = vec![7; max];
+    pair.client.send(&data, &mut out).unwrap();
+    let received = pair.server.read_datagram(&mut out, sim.now).unwrap();
+    assert_eq!(received.app_data().len(), 1);
+    assert_eq!(&out[received.app_data()[0].clone()], &data);
 }
 
 #[test]

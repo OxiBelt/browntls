@@ -593,6 +593,7 @@ pub(super) fn emit_client_hello_for_retry(
                 committed_suite.and_then(|s| s.tls13()),
                 &input.server_name,
                 &input.alpn_protocols,
+                Protocol::of(cx.common),
             )
         } else {
             Vec::new()
@@ -618,10 +619,7 @@ pub(super) fn emit_client_hello_for_retry(
             }),
             None => !config.require_external_psk,
         };
-        // RFC 8773 asks for certificate authentication with an external PSK;
-        // a server that resumed the ticket instead would skip it. Rather
-        // than let the server choose, the ticket is not offered alongside
-        // (a conservative choice; RFC 8773 does not require it).
+        // RFC 9973 §5.1: all PSKs in this offer must be external.
         if !ticket_usable || cert_with_extern_psk {
             input.resuming = None;
         }
@@ -655,7 +653,7 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
     // configuration allow it, but never in the second ClientHello of a
     // retry. An external PSK needs a provisioned suite, and is not used for
-    // 0-RTT when we ask for certificate authentication (RFC 8773). Nor with
+    // 0-RTT when we ask for certificate authentication (RFC 9973). Nor with
     // an RFC 8844 binding: the server would read the data before we check
     // its answer in EncryptedExtensions.
     if let Some(first) = offered_psks.first()

@@ -167,6 +167,13 @@ enum_builder! {
 }
 
 impl NamedGroup {
+    pub(crate) fn is_rfc10024_hybrid(self) -> bool {
+        matches!(
+            self,
+            Self::X25519MLKEM768 | Self::secp256r1MLKEM768 | Self::secp384r1MLKEM1024
+        )
+    }
+
     /// Whether the group belongs to the non-preferred tier: the groups
     /// RFC 9846 defines beyond those §9.1 makes mandatory or recommended,
     /// i.e. X448 and the RFC 7919 finite-field groups. A server ranks them

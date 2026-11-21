@@ -68,6 +68,7 @@ and re-encoding stability.
 | `tls_quic` | tls-extensions | QUIC-TLS (RFC 9001): Initial keys, packet and header protection, key updates, Retry tags and CRYPTO_ERROR codes against their properties; in-process QUIC handshakes on both providers with fuzzed suites, groups, ALPN, transport parameters, resumption, 0-RTT, split and damaged CRYPTO data, and post-handshake bytes |
 | `tls_dtls` | tls-extensions | DTLS 1.3 (RFC 9147): in-process handshakes on both providers with fuzz-chosen versions, suites (CCM_8 refused), key types, groups and datagram sizes, the cookie exchange on or off, the stateless `Acceptor` (also with a cookie from another address), a deferred revocation check and resumption, over a network that drops, duplicates, reorders, damages and forges datagrams with a fuzz-driven clock; then data both ways, key updates, close_notify, exporters, MTU changes, and datagrams shaped like DTLS records (plaintext and unified headers, ACKs, handshake fragments) and replays fed to established connections, and to fresh clients, servers and the `Acceptor`. An undamaged handshake must complete with matching exporters and DTLS 1.3, data must arrive exactly once, datagrams must fit the MTU, and nothing forged or replayed may fail an established connection |
 | `tls_dtls_udp` | tls-extensions | The blocking DTLS 1.3 API, `dtls::UdpClient` and `dtls::UdpServer`, over loopback sockets: a server run with short read timeouts in the harness's thread, clients connected with `connect` (the server then on a scoped thread) or with `from_connection` and handshake rounds (also with small MTUs), then data both ways (short buffers, oversized data), close_notify from either side, key updates through `connection_mut`, `remove`, the handshake limit and timeout, read timeouts down to zero, `into_parts` and `from_connection`, a verifier asking for live OCSP, and datagrams shaped like DTLS records sent to the server from other sockets and from clients' sockets, and to clients from the server's socket. The server must report events only for connected clients and never `Failed`, data must arrive intact and once, `handshakes()` must keep to the limit, blocking calls must keep to their read timeout (also under a flood of junk), and junk must never fail a connection |
+| `tls_dtls_tokio` | tls-extensions | The real `browntls_tokio::dtls::{UdpClient, UdpServer}` public APIs over ephemeral loopback sockets on a bounded current-thread runtime: all client constructors, authenticated cookie handshakes, separate and empty datagrams, short-buffer retention, oversized rejection, operation deadlines, cancellation and resumption, traffic key updates, close from either side, removal, limits and accessors; deterministic seed replay checks meaningful paths |
 | `tls_auth` | tls-extensions | Delegated credentials (decoding, issuing, validity windows, `validate` against an independent validation, handshakes with a server's credential, and client authentication with a client's credential in or after the handshake, against a buffered or unbuffered server that asks for one or not, with fuzz-chosen schemes, sides and clocks, and resumption) and exported authenticators between connected peers, and client certificate URLs (RFC 6066 §5): PkiPath decoding and encoding, URL entries and lists against a model, TLS 1.2 handshakes whose server pauses for the chain (buffered, unbuffered and the six Tokio acceptors with a fetcher) with fuzz-chosen policies, URLs and answers; a query surfaces exactly when the policy allows every URL, a paused server reads nothing and refuses a wrong id |
 | `tls_codec` | tls-codec | The doc-hidden codec re-exports, record payload types, distinguished names and stored session values |
 
@@ -80,6 +81,59 @@ supply stand-in signature algorithms that accept everything, reject
 everything, or decide from a signature byte. Path building therefore runs to
 its full depth on forged chains, which real providers would stop at the first
 signature.
+
+### Tokio DTLS programs
+
+`tls_dtls_tokio` enables the existing `browntls-tokio/dtls` feature and reuses
+`src/tls_dtls/setup.rs` with real providers, generated localhost certificates,
+root verification and cookie sealing. Each input creates one client and one
+event server on `127.0.0.1:0`. Both run in the calling thread with real I/O and
+monotonic timers; there are no endpoint tasks or external destinations.
+The runtime and all sockets are dropped when the input ends or unwinds.
+
+The three-byte header selects the client constructor modulo four (`new`,
+`from_connection`, `connect`, or `new` with handshake cancellation and a
+positive API timeout before resumption), provider bits 0 and 1 and certificate
+key type in bits 2 and 3 of the second byte, and MTU modulo three (256, 512,
+1200, used by `from_connection`). Bit 4 of the second byte first exercises
+rejected unconnected client sockets, connected server sockets and a server
+configuration without cookies. A maximum of 24 actions follow:
+
+| Selector modulo 16 | Arguments and action |
+|---|---|
+| 0, 1, 2 | One-byte-length payload: client send, server send, server send followed by a short client receive buffer and a full retry |
+| 3 | One byte modulo three: idle client/server API deadlines in milliseconds, including zero, then `None`, cancellation and restoration |
+| 4 | Poll and drop pending client receive and server event futures, then exchange data to verify resumption |
+| 5 | Server traffic key refresh, then data both ways |
+| 6 | Addresses, negotiated version, peers, handshake count, connection accessors and matching exporters |
+| 7 | Two bytes: handshake/peer limits modulo four, and handshake lifetime in milliseconds; established traffic must continue |
+| 8, 9, 10 | Oversized sends rejected on both sides, unknown-peer operations rejected locally, or repeated handshake completion |
+| 11, 12, 13, 14 | Client close, server close, removal, or poll client close once and resume it; these end the program |
+| 15 | One-byte-length payload: queue two distinct datagrams each way before receiving them separately |
+
+Client payloads are capped at the negotiated application-data limit, except
+for the explicit oversized action. Receives compare each entire record with
+its expected bytes; empty records must return `Recv::Data(0)`, and a short
+buffer must preserve the record. Unexpected events, duplicate application
+records, missing data and failed authentic associations fail the harness.
+Each wait has a two-second outer bound and an input a ten-second bound;
+these cooperative Tokio timers cannot preempt a synchronous poll that hangs.
+The positive API timeout checks elapsed time and the outer bound detects
+stalls. No paused-time auto-advance races real socket readiness.
+
+Four fixed seeds cover every selector and all 25 public functions in
+`crates/browntls-tokio/src/dtls/{client,server}.rs` by intended call paths.
+`tls_dtls_tokio::tests::seeds_reach_public_api_sequences` asserts the
+constructor, authenticated handshake, data, cancellation, deadline and close
+milestones without depending on mutations. The shared seed smoke test also
+runs their truncations and mutations. Actual public-function coverage is
+established by the LLVM coverage command below, after execution.
+
+Cancellation is deterministic for pending handshake, receive and event
+futures. The close action polls once and resumes, but a writable socket may
+finish the first poll. This target does not force socket backpressure,
+cancel a sealed send, test multiple-peer admission/eviction or inject forged
+traffic. These are coverage limits, not reasons to exempt public functions.
 
 ### Connection targets
 

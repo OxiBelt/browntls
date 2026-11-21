@@ -31,6 +31,8 @@ coop = ["tokio/rt"]
 # stapled response fresh (the `revocation` module). The deadlines need
 # Tokio's `time` feature, which adds no dependency.
 ocsp = ["tokio/time"]
+# Datagram transport and protocol timers; the runtime belongs to the caller.
+dtls = ["tokio/net", "tokio/time"]
 # Feature pass-through to `browntls-core`; see its manifest for what each does.
 native = ["browntls-core/native"]
 rustcrypto = ["browntls-core/rustcrypto"]

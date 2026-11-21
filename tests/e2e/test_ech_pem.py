@@ -5,6 +5,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import ech_pem
 
@@ -16,6 +17,57 @@ def config(kem_id, version=0xFE0D):
 
 
 class EchPemTests(unittest.TestCase):
+    def test_cleanup_attempts_all_removals_and_reports_remaining_credentials(self):
+        resources = {"container": {"id1": "fixture", "id2": "peer"},
+                     "volume": {"key-volume": "key-volume"}, "network": {"id3": "network"}}
+        removals = []
+
+        def docker(kind, action, *args, **kwargs):
+            if action == "ls":
+                self.assertIn("label=owner=token", args)
+                output = "\n".join(f"{identifier} {name}" for identifier, name in resources[kind].items())
+                return subprocess.CompletedProcess([], 0, stdout=output)
+            identifier = args[-1]
+            removals.append((kind, identifier))
+            if identifier == "id1":
+                raise ech_pem.e2e.DockerError("container removal denied")
+            if identifier != "key-volume":
+                del resources[kind][identifier]
+
+        with patch.object(ech_pem.e2e, "docker", side_effect=docker):
+            problems = ech_pem.cleanup_run("run", "owner=token", ("key-volume",))
+        self.assertEqual(removals, [("container", "id1"), ("container", "id2"),
+                                    ("volume", "key-volume"), ("network", "id3")])
+        self.assertEqual(problems, ["Docker container fixture: container removal denied",
+                                    "Docker volume key-volume: still present after removal"])
+
+    def test_cleanup_ignores_remove_race_only_after_confirming_absence(self):
+        def docker(kind, action, *args, **kwargs):
+            if action == "rm":
+                resources.clear()
+                raise ech_pem.e2e.DockerError("no such container")
+            output = "id1 fixture\n" if kind == "container" and resources else ""
+            return subprocess.CompletedProcess([], 0, stdout=output)
+
+        resources = {"id1"}
+        with patch.object(ech_pem.e2e, "docker", side_effect=docker):
+            self.assertEqual(ech_pem.cleanup_run("run", "owner=token", ()), [])
+
+    def test_existing_unowned_volume_is_never_mounted_or_removed(self):
+        def docker(kind, action, *args, **kwargs):
+            if (kind, action) == ("network", "create"):
+                return subprocess.CompletedProcess([], 0, stdout="network-id\n")
+            return subprocess.CompletedProcess([], 0, stdout="")
+
+        with (patch.object(ech_pem.e2e, "docker", side_effect=docker) as command,
+              patch.object(ech_pem.secrets, "token_hex", side_effect=("name", "ownership"))):
+            with self.assertRaisesRegex(RuntimeError, "browntls-ech-name-server lacks"):
+                ech_pem.run_cases("image", "peer")
+        self.assertTrue(any("label=org.oxibelt.browntls-e2e.run=ownership" in call.args
+                            for call in command.call_args_list))
+        self.assertFalse(any(call.args[:2] == ("volume", "rm") or call.args[0] == "run"
+                             for call in command.call_args_list))
+
     def test_public_config_checks_wire_version_and_kem(self):
         for name, number in {"x25519": 0x20, "x448": 0x21, "p256": 0x10,
                              "p384": 0x11, "p521": 0x12}.items():

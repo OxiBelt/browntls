@@ -4,7 +4,6 @@
 import argparse
 import base64
 import binascii
-from contextlib import ExitStack
 import secrets
 import struct
 import sys
@@ -99,23 +98,65 @@ def wait_listening(name, marker):
     raise RuntimeError("server did not report its listening socket")
 
 
-def exchange(image, peer, run, label, fixture, role):
+def owned_resources(kind, label):
+    columns = {"container": "{{.ID}} {{.Names}}", "volume": "{{.Name}} {{.Name}}",
+               "network": "{{.ID}} {{.Name}}"}
+    flags = {"container": ["--all", "--no-trunc"], "volume": [], "network": ["--no-trunc"]}
+    output = e2e.docker(kind, "ls", *flags[kind], "--filter", f"label={label}",
+                        "--format", columns[kind], timeout=20).stdout
+    return dict(line.split(maxsplit=1) for line in output.splitlines() if line.strip())
+
+
+def cleanup_run(run, label, volume_names):
+    problems = []
+    for kind, flags in (("container", ["-f"]), ("volume", []), ("network", [])):
+        try:
+            resources = owned_resources(kind, label)
+        except (OSError, RuntimeError, ValueError) as error:
+            names = ", ".join(volume_names) if kind == "volume" else run
+            problems.append(f"cannot determine custody of Docker {kind} resources for {names}: {error}")
+            continue
+        deletion_errors = {}
+        for identifier, name in resources.items():
+            try:
+                # Volume names are the only Docker handle for a volume. Renew
+                # the label check before using one. Containers and networks
+                # can be removed by their immutable IDs.
+                if kind != "volume" or name in owned_resources(kind, label):
+                    e2e.docker(kind, "rm", *flags, identifier, timeout=20)
+            except (OSError, RuntimeError, ValueError) as error:
+                deletion_errors[identifier] = str(error)
+        try:
+            remaining = owned_resources(kind, label)
+        except (OSError, RuntimeError, ValueError) as error:
+            names = ", ".join(resources.values()) or run
+            problems.append(f"cannot verify removal of Docker {kind} resources for {names}: {error}")
+            continue
+        for identifier, name in remaining.items():
+            detail = deletion_errors.get(identifier, "still present after removal")
+            problems.append(f"Docker {kind} {name}: {detail}")
+    return problems
+
+
+def exchange(image, peer, run, network, label, fixture, role):
     server_cmd, client_cmd = commands(image, peer, fixture, role)
     name = f"{run}-{fixture}-{role}"
-    flags = ["--label", label, "--network", run]
+    flags = ["--label", label, "--network", network]
     server = name + "-server"
     client = name + "-client"
     try:
-        e2e.docker("run", "-d", "--name", server, *flags, "--network-alias", e2e.SERVER_ALIAS,
-                   "--mount", f"type=volume,src={run}-server,dst=/server,readonly",
-                   "--user", DOCKER_USER, *server_cmd, timeout=25)
+        server_id = e2e.docker(
+            "run", "-d", "--name", server, *flags, "--network-alias", e2e.SERVER_ALIAS,
+            "--mount", f"type=volume,src={run}-server,dst=/server,readonly",
+            "--user", DOCKER_USER, *server_cmd, timeout=25,
+        ).stdout.strip()
         marker = '"event":"listening"' if role == "server" else "listening"
-        wait_listening(server, marker)
+        wait_listening(server_id, marker)
         result = e2e.docker("run", "--rm", "--name", client, *flags,
                             "--mount", f"type=volume,src={run}-client,dst=/client,readonly",
                             "--user", DOCKER_USER, *client_cmd, timeout=55)
-        status = e2e.docker("wait", server, timeout=20).stdout.strip()
-        logs = e2e.docker("logs", server, timeout=10)
+        status = e2e.docker("wait", server_id, timeout=20).stdout.strip()
+        logs = e2e.docker("logs", server_id, timeout=10)
         if status != "0":
             raise RuntimeError(f"server exited with status {status}: {logs.stderr.strip()}")
         if role == "server":
@@ -130,13 +171,11 @@ def exchange(image, peer, run, label, fixture, role):
             raise RuntimeError("OpenSSL peer did not confirm ECH acceptance and data")
     except RuntimeError as error:
         raise RuntimeError(f"{fixture}, browntls {role}: {error}") from error
-    finally:
-        e2e.docker("rm", "-f", client, server, timeout=20, check=False)
 
 
 def run_cases(image, peer):
     run = f"browntls-ech-{secrets.token_hex(8)}"
-    label = f"{e2e.LABEL}={run}"
+    label = f"{e2e.LABEL}={secrets.token_hex(16)}"
     server_volume = f"{run}-server"
     client_volume = f"{run}-client"
     fixture_name = f"{run}-fixtures"
@@ -150,13 +189,14 @@ def run_cases(image, peer):
                           *([] if root else user), "--entrypoint", "sh", peer,
                           "-ec", script, "fixtures", *args, timeout=45).stdout
 
-    with ExitStack() as cleanup:
-        e2e.docker("network", "create", "--label", label, run)
-        cleanup.callback(e2e.docker, "network", "rm", run, timeout=25, check=False)
+    run_error = None
+    try:
+        network = e2e.docker("network", "create", "--label", label, run).stdout.strip()
         for volume in (server_volume, client_volume):
             e2e.docker("volume", "create", "--label", label, volume)
-            cleanup.callback(e2e.docker, "volume", "rm", volume, timeout=25, check=False)
-        cleanup.callback(e2e.docker, "rm", "-f", fixture_name, timeout=25, check=False)
+            # Docker can report success when a named volume already exists.
+            if volume not in owned_resources("volume", label):
+                raise RuntimeError(f"Docker volume {volume} lacks this run's ownership label")
         shell("mkdir /server/pki\n"
               f'sh {e2e.SHARE}/gen-ech-pki.sh /server/pki "$1" "$2"\n'
               "cp /server/pki/ca.pem /client/ca.pem\n"
@@ -178,9 +218,19 @@ def run_cases(image, peer):
                 encoded = shell(PUBLISH, f"{directory}/ech-public.pem", f"/client/{fixture}.pem")
                 check_public_config(encoded, kem)
                 for role in ("server", "client"):
-                    exchange(image, peer, run, label, fixture, role)
+                    exchange(image, peer, run, network, label, fixture, role)
                 print(f"{fixture}: accepted and exchanged data with browntls in both roles",
                       flush=True)
+    except BaseException as error:
+        run_error = error
+        raise
+    finally:
+        problems = cleanup_run(run, label, (server_volume, client_volume))
+        if problems:
+            message = "cleanup failed:\n" + "\n".join(problems)
+            if run_error is None:
+                raise RuntimeError(message)
+            print(message, file=sys.stderr)
 
 
 def main():

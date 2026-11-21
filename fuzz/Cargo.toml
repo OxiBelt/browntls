@@ -19,8 +19,9 @@ cargo-fuzz = true
 browntls-core = { path = "../crates/browntls-core", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
 browntls-crypto = { path = "../crates/browntls-crypto" }
 browntls-pki = { path = "../crates/browntls-pki" }
-browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp"] }
-# The revocation harness uses in-memory I/O and a paused timer.
+browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp", "dtls"] }
+# Revocation uses in-memory I/O and a paused timer; DTLS networking and
+# timers are enabled through browntls-tokio/dtls above.
 # The same lower bound as the workspace's (`[workspace.dependencies]`).
 tokio = { version = "1.53", default-features = false, features = ["io-util", "test-util"] }
 libfuzzer-sys = "0.4"
@@ -251,6 +252,13 @@ bench = false
 [[bin]]
 name = "tls_dtls_udp"
 path = "fuzz_targets/tls_dtls_udp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_dtls_tokio"
+path = "fuzz_targets/tls_dtls_tokio.rs"
 test = false
 doc = false
 bench = false

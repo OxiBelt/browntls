@@ -24,7 +24,7 @@ use crate::input::Input;
 
 /// The server certificate's key types (rcgen with ring generates no RSA
 /// keys).
-pub(super) const KEY_TYPES: usize = 3;
+pub(crate) const KEY_TYPES: usize = 3;
 
 /// A CA and a `localhost` certificate of one key type.
 struct Pki {
@@ -69,7 +69,7 @@ fn pki(key_type: usize) -> &'static Pki {
 }
 
 /// One of the two providers, built once per process.
-pub(super) fn provider(rustcrypto: bool) -> &'static CryptoProvider {
+pub(crate) fn provider(rustcrypto: bool) -> &'static CryptoProvider {
     static PROVIDERS: OnceLock<[CryptoProvider; 2]> = OnceLock::new();
     &PROVIDERS.get_or_init(|| {
         [
@@ -107,16 +107,16 @@ const VERSIONS: [&[&SupportedProtocolVersion]; 3] = [
 
 /// One side's configuration choices.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Side {
-    pub(super) rustcrypto: bool,
+pub(crate) struct Side {
+    pub(crate) rustcrypto: bool,
     /// Which TLS 1.3 suites to keep, one bit each (TLS 1.2 suites stay).
-    pub(super) suites: u8,
+    pub(crate) suites: u8,
     /// An index into [`VERSIONS`].
-    pub(super) versions: usize,
+    pub(crate) versions: usize,
 }
 
 impl Side {
-    pub(super) fn read(input: &mut Input) -> Self {
+    pub(crate) fn read(input: &mut Input) -> Self {
         let byte = input.byte();
         Self {
             rustcrypto: byte & 1 != 0,
@@ -147,31 +147,31 @@ impl Side {
 }
 
 /// The configurations of one session and what the harness expects of them.
-pub(super) struct Configs {
-    pub(super) client: Option<Arc<ClientConfig>>,
-    pub(super) server: Option<Arc<ServerConfig>>,
+pub(crate) struct Configs {
+    pub(crate) client: Option<Arc<ClientConfig>>,
+    pub(crate) server: Option<Arc<ServerConfig>>,
     /// Whether `dtls::ClientConnection::new` must succeed.
-    pub(super) client_usable: bool,
+    pub(crate) client_usable: bool,
     /// Whether the server configuration suits DTLS 1.3 (cookies aside).
-    pub(super) server_usable: bool,
+    pub(crate) server_usable: bool,
     /// Whether the server configuration has a cookie sealer.
-    pub(super) cookies: bool,
+    pub(crate) cookies: bool,
     /// Whether a handshake between the two can succeed.
-    pub(super) compatible: bool,
+    pub(crate) compatible: bool,
 }
 
 /// The configuration choices of a session.
-pub(super) struct Choice {
-    pub(super) client: Side,
-    pub(super) server: Side,
-    pub(super) key_type: usize,
+pub(crate) struct Choice {
+    pub(crate) client: Side,
+    pub(crate) server: Side,
+    pub(crate) key_type: usize,
     /// The one group the server keeps, if any.
-    pub(super) server_group: Option<usize>,
-    pub(super) cookies: bool,
-    pub(super) defer: bool,
+    pub(crate) server_group: Option<usize>,
+    pub(crate) cookies: bool,
+    pub(crate) defer: bool,
 }
 
-pub(super) fn configs(choice: &Choice) -> Configs {
+pub(crate) fn configs(choice: &Choice) -> Configs {
     let pki = pki(choice.key_type);
     let (client_provider, client_usable) = choice.client.provider();
     let (mut server_provider, server_usable) = choice.server.provider();
@@ -245,7 +245,7 @@ pub(super) fn configs(choice: &Choice) -> Configs {
     }
 }
 
-pub(super) fn localhost() -> ServerName<'static> {
+pub(crate) fn localhost() -> ServerName<'static> {
     ServerName::try_from("localhost").expect("name")
 }
 

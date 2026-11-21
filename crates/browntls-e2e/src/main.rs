@@ -76,6 +76,7 @@
 
 mod async_io;
 mod client_facing;
+mod dtls;
 mod output;
 
 use std::io::{Read, Write};
@@ -114,6 +115,12 @@ fn main() {
     let result = match args.split_first() {
         Some((cmd, rest)) if cmd == "server" => Options::parse(rest).and_then(|o| server(&o)),
         Some((cmd, rest)) if cmd == "client" => Options::parse(rest).and_then(|o| client(&o)),
+        Some((cmd, rest)) if cmd == "dtls-server" => {
+            Options::parse(rest).and_then(|o| dtls::server(&o))
+        }
+        Some((cmd, rest)) if cmd == "dtls-client" => {
+            Options::parse(rest).and_then(|o| dtls::client(&o))
+        }
         Some((cmd, rest)) if cmd == "client-facing" => {
             Options::parse(rest).and_then(|o| client_facing(&o))
         }
@@ -124,10 +131,11 @@ fn main() {
             info();
             Ok(())
         }
-        _ => Err(
-            "usage: browntls-e2e info | ech-keygen | server | client-facing | client [OPTIONS]"
-                .into(),
-        ),
+        _ => Err(concat!(
+            "usage: browntls-e2e info | ech-keygen | server | client-facing | client",
+            " | dtls-server | dtls-client [OPTIONS]"
+        )
+        .into()),
     };
     if let Err(e) = result {
         emit(&[("event", "error".into()), ("message", e.into())]);

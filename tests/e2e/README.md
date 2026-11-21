@@ -152,3 +152,20 @@ works with a remote Docker daemon.
   Go's server is shared mode only, and it neither sends GREASE ECH nor
   randomizes configuration identifiers, so those scenarios have a browntls
   client.
+
+## DTLS 1.3 interoperability
+
+Run from the repository root with Docker and the musl Rust target for the
+chosen architecture installed. Use a separate image tag for the DTLS peer.
+
+```sh
+python3 tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:dtls-amd64
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64
+```
+
+The runner builds a pinned wolfSSL peer image and generates ephemeral
+credentials on an isolated Docker network. Each peer runs as both client and
+server, verifies certificates, exchanges a request and reply, and observes
+the other peer's `close_notify`. This suite covers certificate-authenticated
+full handshakes using ECDSA P-256. Pass `--skip-peer-build` to reuse the
+previously built wolfSSL image.

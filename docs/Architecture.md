@@ -2609,8 +2609,9 @@ clock origin.
   port, is ignored until that connection is removed. Queued events precede
   further socket or timer work. If Finished, data and close_notify arrive
   together, the connection remains available through `Connected` and
-  `Received`, and is removed when `Closed` is returned. Explicit `close`
-  and `remove` discard that peer's queued events.
+  `Received`, and is removed when `Closed` is returned. Closing a retained
+  connection discards its queued events. `remove` also discards queued
+  events for an address whose connection has already been removed.
 - Cookies: every datagram from an address without a connection goes to a
   `dtls::Acceptor`, so the server configuration needs
   `hello_retry_cookies`, and a client costs nothing but one

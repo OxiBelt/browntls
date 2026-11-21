@@ -87,10 +87,13 @@ mod dtls12_cases {
         else {
             panic!("the retry cookie must allow allocation before the final fragment");
         };
-        let mut pair = Pair {
-            client,
-            server: *server,
-        };
+        let mut server = *server;
+        assert!(
+            !server
+                .write_datagram(&mut Vec::new(), now + Duration::from_millis(500))
+                .unwrap()
+        );
+        let mut pair = Pair { client, server };
         pair.handshake(&mut Sim::perfect()).unwrap();
         assert_v12(&pair);
     }

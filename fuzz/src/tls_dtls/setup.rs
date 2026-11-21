@@ -231,6 +231,9 @@ pub(crate) fn configs(choice: &Choice) -> Configs {
             let (cookies, ticketer) = sealers();
             if choice.cookies {
                 config.hello_retry_cookies = Some(cookies.clone());
+                config
+                    .enable_dtls12_resumption()
+                    .expect("DTLS 1.2 resumption context");
             }
             config.ticketer = ticketer.clone();
             Arc::new(config)

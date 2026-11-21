@@ -545,6 +545,7 @@ impl Dtls {
         else {
             return Ok(Incoming::Handled);
         };
+        let latest_epoch = self.read.len() - 1 == index;
         let read = &mut self.read[index];
         if body.len() > read.keys.max_ciphertext_len() {
             return Ok(Incoming::Handled);
@@ -570,6 +571,7 @@ impl Dtls {
             base..base + record.len(),
             number,
             Vec::new(),
+            latest_epoch && read.window.highest() == Some(opened.seq),
         ));
         let content = opened.content;
         trace!("DTLS read {:?} {:?}", number, opened.typ);

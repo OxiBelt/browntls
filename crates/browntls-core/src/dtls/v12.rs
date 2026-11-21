@@ -231,6 +231,7 @@ impl Dtls {
             header.start..body.end,
             number,
             id.unwrap_or_default().to_vec(),
+            self.v12.window.highest() == Some(seq),
         ));
         let content = &datagram[start..start + len];
         match typ {

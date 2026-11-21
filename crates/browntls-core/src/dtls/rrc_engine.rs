@@ -189,7 +189,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
             APPLICATION_EPOCH
         };
         if record.epoch() < application_epoch
-            || (&path != validation.bound_path() && record.connection_id().is_none())
+            || (&path != validation.bound_path()
+                && (record.connection_id().is_none() || !record.advances_path_sequence()))
         {
             return Ok(Action::None);
         }

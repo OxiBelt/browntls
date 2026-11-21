@@ -75,6 +75,7 @@ pub enum ConnectionIdUsage {
 pub struct AuthenticatedRecord {
     range: Range<usize>,
     number: RecordNumber,
+    newest: bool,
     cid: Vec<u8>,
     rrc_payload: Option<Range<usize>>,
 }
@@ -100,11 +101,17 @@ impl AuthenticatedRecord {
         self.number.seq
     }
 
-    pub(super) fn new(range: Range<usize>, number: RecordNumber, cid: Vec<u8>) -> Self {
+    pub(super) fn new(
+        range: Range<usize>,
+        number: RecordNumber,
+        cid: Vec<u8>,
+        newest: bool,
+    ) -> Self {
         Self {
             range,
             number,
             cid,
+            newest,
             rrc_payload: None,
         }
     }
@@ -117,6 +124,12 @@ impl AuthenticatedRecord {
 
     pub(super) fn set_rrc_payload(&mut self, range: Range<usize>) {
         self.rrc_payload = Some(range);
+    }
+
+    /// Whether this record advanced the authenticated receiving sequence
+    /// in the current epoch. Only such records may validate a new path.
+    pub(super) fn advances_path_sequence(&self) -> bool {
+        self.newest
     }
 
     pub(super) fn set_connection_id(&mut self, cid: &[u8]) {

@@ -93,6 +93,32 @@ fn protected_path_validation(versions: dtls::Versions) {
         .new_path_validation("server", Selection::Basic, DEFAULT_TIMEOUT)
         .unwrap();
 
+    let mut reordered = Vec::new();
+    pair.client
+        .send(b"valid reordered datagram", &mut reordered)
+        .unwrap();
+    let mut latest = Vec::new();
+    pair.client
+        .send(b"most recent datagram", &mut latest)
+        .unwrap();
+    pair.server.read_datagram(&mut latest, sim.now).unwrap();
+    let old = pair.server.read_datagram(&mut reordered, sim.now).unwrap();
+    assert_eq!(old.app_data().len(), 1);
+    assert_eq!(
+        pair.server
+            .handle_path_record(
+                &mut server_validation,
+                &old.authenticated_records()[0],
+                &reordered,
+                "candidate",
+                true,
+                sim.now,
+            )
+            .unwrap(),
+        Action::None
+    );
+    assert_eq!(server_validation.pending_path(), None);
+
     let mut app = Vec::new();
     pair.client
         .send(b"transparent application datagram", &mut app)

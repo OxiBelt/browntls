@@ -45,6 +45,18 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
     /// Fetches the value under `key`, leaving it in place.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
 
+    /// Reads the protocol version without consuming the stored session.
+    ///
+    /// RFC 9973 can call this once per distinct PSK identity. The default
+    /// fetches the value using [`Self::get`]. Stores can override this method
+    /// to read version metadata without fetching the full value.
+    fn session_version(&self, key: &[u8]) -> Option<ProtocolVersion> {
+        let mut value = self.get(key)?;
+        let version = crate::msgs::persist::ServerSessionValue::encoded_version(&value);
+        crate::crypto::zeroize_vec(&mut value);
+        version
+    }
+
     /// Fetches and removes the value under `key`.
     fn take(&self, key: &[u8]) -> Option<Vec<u8>>;
 

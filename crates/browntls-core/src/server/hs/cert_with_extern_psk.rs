@@ -1,5 +1,4 @@
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 
 use crate::common_state::CommonState;
 use crate::enums::{AlertDescription, ProtocolVersion};
@@ -81,8 +80,8 @@ pub(super) fn reject_tickets(
         if !checked.insert(identity) {
             continue;
         }
-        if is_tls13_ticket(config.session_storage.get(identity))
-            || (stateless && is_tls13_ticket(config.ticketer.decrypt(identity)))
+        if is_tls13_version(config.session_storage.session_version(identity))
+            || (stateless && is_tls13_version(stateless_ticket_version(config, identity)))
         {
             return Err(common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
@@ -93,12 +92,14 @@ pub(super) fn reject_tickets(
     Ok(())
 }
 
-fn is_tls13_ticket(plaintext: Option<Vec<u8>>) -> bool {
-    let Some(mut plaintext) = plaintext else {
-        return false;
-    };
+fn stateless_ticket_version(config: &ServerConfig, identity: &[u8]) -> Option<ProtocolVersion> {
+    let mut plaintext = config.ticketer.decrypt(identity)?;
     let version = ServerSessionValue::encoded_version(&plaintext);
     crate::crypto::zeroize_vec(&mut plaintext);
+    version
+}
+
+fn is_tls13_version(version: Option<ProtocolVersion>) -> bool {
     matches!(
         version,
         Some(ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3)

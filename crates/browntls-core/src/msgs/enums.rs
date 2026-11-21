@@ -109,6 +109,7 @@ enum_builder! {
         ExternalSessionId => 0x0038,
         TransportParameters => 0x0039,
         TicketRequest => 0x003a,
+        ReturnRoutabilityCheck => 0x003d,
         NextProtocolNegotiation => 0x3374,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,

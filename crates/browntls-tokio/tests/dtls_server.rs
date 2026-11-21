@@ -483,3 +483,258 @@ fn invalid_configuration_and_connected_sockets_are_rejected() {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     });
 }
+
+async fn event_migration(
+    version: &'static browntls_core::SupportedProtocolVersion,
+    versions: browntls_core::dtls::Versions,
+    selection: browntls_core::dtls::rrc::Selection,
+) {
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+    use browntls_tokio::dtls::{Recv, UdpClient};
+
+    let settings = || {
+        Settings::default()
+            .with_versions(versions)
+            .with_return_routability_checks(ConnectionIdPolicy::new(8, true).unwrap())
+    };
+    let pki = Pki::new();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let remote = socket.local_addr().unwrap();
+    let mut server =
+        UdpServer::new_with_settings(config_for(&pki, version), socket, settings()).unwrap();
+    server.set_path_selection(selection);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(remote).await.unwrap();
+    let admitted = socket.local_addr().unwrap();
+    let mut client = UdpClient::new_with_settings(
+        Arc::new(pki.client_config_with_cert(version)),
+        common::localhost(),
+        socket,
+        settings(),
+    )
+    .unwrap();
+    let (handshake, event) = together(client.complete_handshake(), server.next_event()).await;
+    handshake.unwrap();
+    assert!(matches!(event.unwrap(), ServerEvent::Connected(peer) if peer == admitted));
+    let replacement = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    replacement.connect(remote).await.unwrap();
+    let migrated = replacement.local_addr().unwrap();
+    drop(client.replace_socket(replacement).unwrap());
+    client.send(b"candidate").await.unwrap();
+    together(async {
+        let event = server.next_event().await.unwrap();
+        assert!(matches!(event, ServerEvent::PeerAddressChanged(peer, addr) if peer == admitted && addr == migrated));
+        assert_eq!(server.peer_addr(admitted), Some(migrated));
+        assert!(server.connection(migrated).is_none());
+        server.send_to(b"validated", admitted).await.unwrap();
+    }, async {
+        let mut buf = [0; 32];
+        assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(9));
+        assert_eq!(&buf[..9], b"validated");
+    }).await;
+    let (sent, event) = together(client.send(b"after"), server.next_event()).await;
+    sent.unwrap();
+    assert!(
+        matches!(event.unwrap(), ServerEvent::Received(peer, data) if peer == admitted && data == b"after")
+    );
+}
+
+#[test]
+fn event_server_migrates_dtls13_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    run_with_limit(Duration::from_secs(20), async {
+        for selection in [Selection::Basic, Selection::Enhanced] {
+            event_migration(&browntls_core::version::TLS13, Versions::V1_3, selection).await;
+        }
+    });
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn event_server_migrates_dtls12_in_both_modes() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    run_with_limit(Duration::from_secs(20), async {
+        for selection in [Selection::Basic, Selection::Enhanced] {
+            event_migration(&browntls_core::version::TLS12, Versions::V1_2, selection).await;
+        }
+    });
+}
+
+#[test]
+fn coalesced_path_challenges_each_receive_a_protected_reply() {
+    use browntls_core::dtls::rrc::{Message, MessageType};
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+
+    run(async {
+        let pki = Pki::new();
+        let settings = Settings::default()
+            .with_return_routability_checks(ConnectionIdPolicy::new(8, true).unwrap());
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut server =
+            UdpServer::new_with_settings(config(&pki), socket, settings.clone()).unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(address).await.unwrap();
+        let mut client = Client {
+            conn: ClientConnection::new_with_settings(
+                Arc::new(pki.client_config_with_cert(&browntls_core::version::TLS13)),
+                ServerName::try_from("localhost").unwrap(),
+                settings,
+            )
+            .unwrap(),
+            socket,
+            start: Instant::now(),
+            buf: vec![0; 65_535],
+            received: VecDeque::new(),
+        };
+        connect(&mut server, &mut client).await;
+
+        let cookies = [[0x31; 8], [0x58; 8]];
+        let mut datagram = Vec::new();
+        for cookie in cookies {
+            client
+                .conn
+                .send_rrc(
+                    &Message {
+                        kind: MessageType::Challenge,
+                        cookie,
+                    },
+                    &mut datagram,
+                )
+                .unwrap();
+        }
+        client.socket.send(&datagram).await.unwrap();
+        server.set_read_timeout(Some(Duration::from_millis(100)));
+        let received = async {
+            let mut replies = Vec::new();
+            let mut input = [0; 1200];
+            while replies.len() < cookies.len() {
+                let len = client.socket.recv(&mut input).await.unwrap();
+                let input = &mut input[..len];
+                let records = client
+                    .conn
+                    .read_datagram(input, client.start.elapsed())
+                    .unwrap();
+                for range in records
+                    .authenticated_records()
+                    .iter()
+                    .filter_map(|metadata| metadata.rrc_payload_range())
+                {
+                    let message = Message::decode(&input[range]).unwrap().unwrap();
+                    assert_eq!(message.kind, MessageType::Response);
+                    replies.push(message.cookie);
+                }
+            }
+            replies
+        };
+        let (event, replies) = together(server.next_event(), received).await;
+        assert_eq!(event.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(replies, cookies);
+    });
+}
+
+// This peer uses the core DTLS record boundary, but drives the RFC 9853
+// exchange directly instead of running the library's path validator.
+async fn reference_path_exchange(
+    version: &'static browntls_core::SupportedProtocolVersion,
+    versions: browntls_core::dtls::Versions,
+    selection: browntls_core::dtls::rrc::Selection,
+) {
+    use browntls_core::dtls::rrc::{Message, MessageType, Selection};
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+
+    async fn challenge(socket: &UdpSocket, conn: &mut ClientConnection, start: Instant) -> [u8; 8] {
+        let mut datagram = [0; 1200];
+        loop {
+            let len = socket.recv(&mut datagram).await.unwrap();
+            let input = &mut datagram[..len];
+            let received = conn.read_datagram(input, start.elapsed()).unwrap();
+            for metadata in received.authenticated_records() {
+                if let Some(range) = metadata.rrc_payload_range() {
+                    let payload = &input[range];
+                    assert_eq!(payload.len(), 9);
+                    assert_eq!(payload[0], 0);
+                    return payload[1..].try_into().unwrap();
+                }
+            }
+        }
+    }
+
+    async fn answer(
+        socket: &UdpSocket,
+        conn: &mut ClientConnection,
+        kind: MessageType,
+        cookie: [u8; 8],
+    ) {
+        let mut datagram = Vec::new();
+        conn.send_rrc(&Message { kind, cookie }, &mut datagram)
+            .unwrap();
+        assert_eq!(socket.send(&datagram).await.unwrap(), datagram.len());
+    }
+
+    let pki = Pki::new();
+    let settings = Settings::default()
+        .with_versions(versions)
+        .with_return_routability_checks(ConnectionIdPolicy::new(8, true).unwrap());
+    let listening = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = listening.local_addr().unwrap();
+    let mut server =
+        UdpServer::new_with_settings(config_for(&pki, version), listening, settings.clone())
+            .unwrap();
+    server.set_path_selection(selection);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(address).await.unwrap();
+    let mut client = Client {
+        conn: ClientConnection::new_with_settings(
+            Arc::new(pki.client_config_with_cert(version)),
+            ServerName::try_from("localhost").unwrap(),
+            settings,
+        )
+        .unwrap(),
+        socket,
+        start: Instant::now(),
+        buf: vec![0; 65_535],
+        received: VecDeque::new(),
+    };
+    let admitted = connect(&mut server, &mut client).await;
+    let new = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    new.connect(address).await.unwrap();
+    let changed = new.local_addr().unwrap();
+    let mut datagram = Vec::new();
+    client.conn.send(b"path trigger", &mut datagram).unwrap();
+    assert_eq!(new.send(&datagram).await.unwrap(), datagram.len());
+    let reference = async {
+        if selection == Selection::Enhanced {
+            let old_cookie = challenge(&client.socket, &mut client.conn, client.start).await;
+            answer(
+                &client.socket,
+                &mut client.conn,
+                MessageType::Drop,
+                old_cookie,
+            )
+            .await;
+        }
+        let new_cookie = challenge(&new, &mut client.conn, client.start).await;
+        answer(&new, &mut client.conn, MessageType::Response, new_cookie).await;
+    };
+    let (event, ()) = together(server.next_event(), reference).await;
+    assert!(matches!(
+        event.unwrap(),
+        ServerEvent::PeerAddressChanged(peer, path) if peer == admitted && path == changed
+    ));
+    assert_eq!(server.peer_addr(admitted), Some(changed));
+}
+
+#[test]
+fn reference_peer_controls_basic_and_enhanced_path_selection() {
+    use browntls_core::dtls::{Versions, rrc::Selection};
+    run(async {
+        for selection in [Selection::Basic, Selection::Enhanced] {
+            reference_path_exchange(&browntls_core::version::TLS13, Versions::V1_3, selection)
+                .await;
+            #[cfg(feature = "tls12")]
+            reference_path_exchange(&browntls_core::version::TLS12, Versions::V1_2, selection)
+                .await;
+        }
+    });
+}

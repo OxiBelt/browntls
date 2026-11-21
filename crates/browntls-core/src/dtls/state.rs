@@ -81,8 +81,9 @@ struct ReadEpoch {
 
 /// DTLS settings chosen when a low-level connection is created.
 ///
-/// Use [`Self::with_connection_ids`] to opt into CID negotiation. Existing
-/// constructors use defaults; socket wrappers continue to route by address.
+/// Use [`Self::with_connection_ids`] to opt into CID negotiation, or
+/// [`Self::with_return_routability_checks`] to enable RRC and CID together.
+/// Existing constructors use defaults; socket wrappers route by address.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub(crate) versions: super::Versions,
@@ -91,6 +92,7 @@ pub struct Settings {
     pub(crate) peer_address: Vec<u8>,
     pub(crate) require_cookie: bool,
     pub(crate) connection_ids: Option<ConnectionIdPolicy>,
+    pub(super) return_routability_check: bool,
 }
 
 impl Default for Settings {
@@ -102,6 +104,7 @@ impl Default for Settings {
             peer_address: Vec::new(),
             require_cookie: true,
             connection_ids: None,
+            return_routability_check: false,
         }
     }
 }
@@ -127,6 +130,7 @@ pub(crate) enum Incoming {
 /// [`CommonState`](crate::common_state::CommonState).
 pub(crate) struct Dtls {
     pub(crate) cid: Cids,
+    pub(crate) rrc_negotiated: bool,
     pub(super) authenticated_record: Option<AuthenticatedRecord>,
     pub(super) side: Side,
     pub(super) version: Option<ProtocolVersion>,
@@ -177,6 +181,7 @@ impl Dtls {
     pub(crate) fn new(side: Side, settings: Settings) -> Self {
         Self {
             cid: Cids::default(),
+            rrc_negotiated: false,
             authenticated_record: None,
             side,
             version: None,
@@ -468,6 +473,7 @@ impl Dtls {
                     seq,
                     record.body,
                     base,
+                    handshaking,
                 )?;
                 if let Some(metadata) = &mut self.authenticated_record {
                     let id = cid.map(|range| &datagram[base + range.start..base + range.end]);
@@ -520,6 +526,7 @@ impl Dtls {
         handshaking || self.out.has_flight()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_protected(
         &mut self,
         record: &mut [u8],
@@ -527,6 +534,7 @@ impl Dtls {
         seq: Range<usize>,
         body: Range<usize>,
         base: usize,
+        handshaking: bool,
     ) -> Result<Incoming, Error> {
         // The newest keyed epoch with these low bits; with at most four
         // retained there is at most one.
@@ -537,6 +545,7 @@ impl Dtls {
         else {
             return Ok(Incoming::Handled);
         };
+        let latest_epoch = self.read.len() - 1 == index;
         let read = &mut self.read[index];
         if body.len() > read.keys.max_ciphertext_len() {
             return Ok(Incoming::Handled);
@@ -562,10 +571,19 @@ impl Dtls {
             base..base + record.len(),
             number,
             Vec::new(),
+            latest_epoch && read.window.highest() == Some(opened.seq),
         ));
         let content = opened.content;
         trace!("DTLS read {:?} {:?}", number, opened.typ);
         match opened.typ {
+            ContentType::ReturnRoutabilityCheck
+                if self.rrc_negotiated && !handshaking && number.epoch >= APPLICATION_EPOCH =>
+            {
+                if let Some(metadata) = &mut self.authenticated_record {
+                    metadata.set_rrc_payload(base + content.start..base + content.end);
+                }
+                Ok(Incoming::Handled)
+            }
             ContentType::Handshake => {
                 self.read_handshake_fragments(&record[content], number, true)?;
                 Ok(Incoming::Handled)
@@ -915,67 +933,6 @@ impl Dtls {
             Some(keys) => keys.content_room(space, self.cid.outbound().len()),
         }?;
         Some(room.min(MAX_PLAINTEXT_LEN))
-    }
-
-    /// The most application data one record of the current sending epoch
-    /// carries in one datagram, once application data may be sent.
-    pub(crate) fn max_application_data(&self) -> Option<usize> {
-        let epoch = self.write_epoch();
-        if epoch < APPLICATION_EPOCH && !(self.is_v12() && epoch == 1) {
-            return None;
-        }
-        self.record_room(epoch, self.settings.mtu)
-    }
-
-    /// Seals `data` as one application data record under the current
-    /// sending epoch, appended to `out` as a datagram of its own.
-    ///
-    /// Returns whether the confidentiality limit of the keys is near, so
-    /// that the caller updates them (RFC 9147 §4.5.3).
-    pub(crate) fn seal_application_data(
-        &mut self,
-        out: &mut Vec<u8>,
-        data: &[u8],
-    ) -> Result<bool, Error> {
-        let epoch = self.write_epoch();
-        #[cfg(feature = "tls12")]
-        if self.is_v12() {
-            if epoch != 1 {
-                return Err(Error::HandshakeNotComplete);
-            }
-            if self
-                .record_len(epoch, data.len())
-                .is_none_or(|len| len > self.settings.mtu)
-            {
-                return Err(Error::EncryptError);
-            }
-            self.seal_record(out, epoch, ContentType::ApplicationData, data)?;
-            return Ok(false);
-        }
-        let (limit, next_seq) = match self.write.last() {
-            Some(WriteEpoch {
-                keys: Some(keys),
-                next_seq,
-                ..
-            }) if epoch >= APPLICATION_EPOCH => (keys.confidentiality_limit(), *next_seq),
-            _ => return Err(Error::HandshakeNotComplete),
-        };
-        if next_seq >= limit {
-            return Err(Error::EncryptError);
-        }
-        if self
-            .record_len(epoch, data.len())
-            .is_none_or(|len| len > self.settings.mtu)
-        {
-            return Err(Error::General(alloc::format!(
-                "{} bytes of application data do not fit one DTLS datagram",
-                data.len()
-            )));
-        }
-        self.seal_record(out, epoch, ContentType::ApplicationData, data)?;
-        // Ask for new keys with a margin: the KeyUpdate itself and its
-        // retransmissions use the current keys until it is acknowledged.
-        Ok(next_seq + 1 >= limit.saturating_sub(limit / 8))
     }
 }
 

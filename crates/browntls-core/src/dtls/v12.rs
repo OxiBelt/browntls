@@ -237,9 +237,16 @@ impl Dtls {
             header.start..body.end,
             number,
             id.unwrap_or_default().to_vec(),
+            self.v12.window.highest() == Some(seq),
         ));
         let content = &datagram[start..start + len];
         match typ {
+            ContentType::ReturnRoutabilityCheck if self.rrc_negotiated && !handshaking => {
+                if let Some(metadata) = &mut self.authenticated_record {
+                    metadata.set_rrc_payload(start..start + len);
+                }
+                Ok(Incoming::Handled)
+            }
             ContentType::Handshake => {
                 self.read_handshake_fragments(content, number, true)?;
                 Ok(Incoming::Handled)

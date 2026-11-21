@@ -59,6 +59,7 @@ use crate::tls_dtls::setup;
 
 mod client;
 mod client_ops;
+mod migration;
 mod seeds;
 #[cfg(test)]
 mod tests;
@@ -193,6 +194,10 @@ fn reached(what: &'static str) {
 /// 15. wait: milliseconds (modulo 16) for one `next_event`.
 pub fn run(data: &[u8]) {
     crate::init();
+    if data.first().is_some_and(|header| header & 0x80 != 0) {
+        migration::exercise(data[0]);
+        return;
+    }
     let mut input = Input::new(data);
     let mut state = State::new(&mut input);
     for _ in 0..MAX_OPS {

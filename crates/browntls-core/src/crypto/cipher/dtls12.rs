@@ -58,6 +58,7 @@ fn valid_inner_type(typ: ContentType) -> bool {
             | ContentType::Handshake
             | ContentType::ApplicationData
             | ContentType::Heartbeat
+            | ContentType::ReturnRoutabilityCheck
     )
 }
 

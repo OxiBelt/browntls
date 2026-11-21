@@ -34,6 +34,8 @@
 //! `--dtls-cid` opts into nonempty bidirectional connection IDs.
 //! `--dtls12-resumption session-id|ticket` with `--tls 1.2` performs a full
 //! then a resumed exchange; use `--connections 2` or `--accept 2`.
+//! `--dtls-rebind basic|enhanced` selects the Kubernetes rebind scenario,
+//! with two exchanges on one CID/RRC association.
 //!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values (a client in its
@@ -164,6 +166,7 @@ struct Options {
     cert: Option<String>,
     key: Option<String>,
     message: Option<String>,
+    dtls_rebind: Option<String>,
     expect_reply: Option<String>,
     accept: usize,
     connections: usize,
@@ -243,6 +246,12 @@ impl Options {
                 "--cert" => o.cert = Some(value),
                 "--key" => o.key = Some(value),
                 "--message" => o.message = Some(value),
+                "--dtls-rebind" => {
+                    if !matches!(value.as_str(), "basic" | "enhanced") {
+                        return Err(format!("unknown DTLS rebind mode {value:?}"));
+                    }
+                    o.dtls_rebind = Some(value);
+                }
                 "--expect-reply" => o.expect_reply = Some(value),
                 "--accept" => o.accept = parse_count(flag, &value)?,
                 "--connections" => o.connections = parse_count(flag, &value)?,

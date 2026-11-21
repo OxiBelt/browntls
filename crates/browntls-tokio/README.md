@@ -172,9 +172,19 @@ Sends wait for command capacity. A full receive queue drops newly arriving
 application datagrams while retaining close and error state.
 
 The client, event server, and session listener default to DTLS 1.3.
-Use `new_with_versions` with `browntls::dtls::Versions` to enable DTLS 1.2
-explicitly. The certificates and suites in the shared TLS configuration
-still determine the handshake.
+Use `new_with_versions` with `browntls::dtls::Versions` to enable DTLS 1.2.
+The certificates and suites in the shared TLS configuration determine the
+handshake.
+
+Use the settings-based constructors with
+`Settings::with_return_routability_checks` for RFC 9853 path validation.
+Servers and listeners support basic and enhanced selection. A client can call
+`replace_socket` with another UDP socket connected to the same server and
+drive `recv` to answer path checks. Applications can retry data discarded
+before validation. An event server keeps its original peer handle and reports
+a validated address change through `ServerEvent::PeerAddressChanged`. An
+existing `UdpSession` stays usable and exposes its latest validated address
+through `peer_addr` and `peer_addr_changed`.
 
 ## Choosing the configuration per ClientHello
 

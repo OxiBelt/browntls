@@ -117,9 +117,9 @@ stateless tickets cannot be recalled individually. Existing stream and DTLS
 1.3 persistence formats are unchanged, and neither accepts a DTLS 1.2 value.
 
 Cached-information and CertificateURL extensions are not negotiated over
-DTLS in this layer; certificates and requests are sent in full. Connection
-IDs, renegotiation, 0-RTT, ECH and post-handshake authentication remain outside
-this DTLS layer.
+DTLS in this layer. Certificates and requests are sent in full. It supports
+opt-in connection IDs and RFC 9853 path validation on both providers.
+Renegotiation, 0-RTT, ECH and post-handshake authentication are out of scope.
 
 The deterministic public-path cases are in
 `crates/browntls-core/tests/cases/dtls12.rs`, included by both provider DTLS
@@ -142,7 +142,8 @@ The
 [Docker interoperability tests](../tests/e2e/README.md#dtls-interoperability)
 cover mutual certificate authentication with OpenSSL in both roles, with
 1.2-only and mixed-version browntls endpoints, ECDSA P-256, AES-128-GCM,
-application data and authenticated closure.
+application data and authenticated closure. Additional cases exercise
+OpenSSL session IDs and tickets and bilateral CID negotiation with wolfSSL.
 
 Protocol references: [RFC 6347](https://www.rfc-editor.org/rfc/rfc6347),
 [RFC 5077](https://www.rfc-editor.org/rfc/rfc5077),

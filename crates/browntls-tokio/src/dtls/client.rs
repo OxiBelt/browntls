@@ -44,7 +44,7 @@ pub struct UdpClient {
     // Exactly one sealed datagram, never a stream or a queue of plaintext.
     out: Vec<u8>,
     paths: Option<UdpPathValidation>,
-    probe: Option<(std::net::SocketAddr, Vec<u8>)>,
+    probes: VecDeque<Vec<u8>>,
     closing: bool,
     // Protocol errors are terminal, even if sending their alert blocks.
     failure: Option<Error>,
@@ -134,7 +134,7 @@ impl UdpClient {
             input: vec![0; MAX_DATAGRAM],
             out: Vec::new(),
             paths: None,
-            probe: None,
+            probes: VecDeque::new(),
             closing: false,
             failure: None,
         })
@@ -299,7 +299,7 @@ impl UdpClient {
                 return Poll::Pending;
             }
             *budget -= 1;
-            if let Some((_, probe)) = &mut self.probe {
+            if let Some(probe) = self.probes.front_mut() {
                 match poll_send_datagram(probe, |data| self.socket.poll_send(cx, data)) {
                     Poll::Pending => {
                         wait.poll_wake(cx, self.start, None);
@@ -308,7 +308,7 @@ impl UdpClient {
                     Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
                     Poll::Ready(result) => result?,
                 }
-                self.probe = None;
+                self.probes.pop_front();
                 continue;
             }
             if self.out.is_empty() {
@@ -354,13 +354,11 @@ impl UdpClient {
             wait.check(now)?;
             if let Some(paths) = &mut self.paths {
                 paths
-                    .poll(&mut self.conn, now, &mut |data, destination| {
-                        if self.probe.is_none() {
-                            self.probe = Some((destination, data.to_vec()));
-                        }
+                    .poll(&mut self.conn, now, &mut |data, _| {
+                        self.probes.push_back(data.to_vec())
                     })
                     .map_err(io_error)?;
-                if self.probe.is_some() {
+                if !self.probes.is_empty() {
                     continue;
                 }
             }
@@ -450,11 +448,7 @@ impl UdpClient {
                                 datagram,
                                 source,
                                 now,
-                                &mut |data, destination| {
-                                    if self.probe.is_none() {
-                                        self.probe = Some((destination, data.to_vec()));
-                                    }
-                                },
+                                &mut |data, _| self.probes.push_back(data.to_vec()),
                             )
                         } else {
                             Ok(received.app_data().to_vec())

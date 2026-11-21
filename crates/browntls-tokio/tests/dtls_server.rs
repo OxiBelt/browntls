@@ -521,7 +521,7 @@ async fn event_migration(
     let migrated = replacement.local_addr().unwrap();
     drop(client.replace_socket(replacement).unwrap());
     client.send(b"candidate").await.unwrap();
-    let (event, ()) = together(async {
+    together(async {
         let event = server.next_event().await.unwrap();
         assert!(matches!(event, ServerEvent::PeerAddressChanged(peer, addr) if peer == admitted && addr == migrated));
         assert_eq!(server.peer_addr(admitted), Some(migrated));
@@ -557,5 +557,78 @@ fn event_server_migrates_dtls12_in_both_modes() {
         for selection in [Selection::Basic, Selection::Enhanced] {
             event_migration(&browntls_core::version::TLS12, Versions::V1_2, selection).await;
         }
+    });
+}
+
+#[test]
+fn coalesced_path_challenges_each_receive_a_protected_reply() {
+    use browntls_core::dtls::rrc::{Message, MessageType};
+    use browntls_core::dtls::{ConnectionIdPolicy, Settings};
+
+    run(async {
+        let pki = Pki::new();
+        let settings = Settings::default()
+            .with_return_routability_checks(ConnectionIdPolicy::new(8, true).unwrap());
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut server =
+            UdpServer::new_with_settings(config(&pki), socket, settings.clone()).unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(address).await.unwrap();
+        let mut client = Client {
+            conn: ClientConnection::new_with_settings(
+                Arc::new(pki.client_config_with_cert(&browntls_core::version::TLS13)),
+                ServerName::try_from("localhost").unwrap(),
+                settings,
+            )
+            .unwrap(),
+            socket,
+            start: Instant::now(),
+            buf: vec![0; 65_535],
+            received: VecDeque::new(),
+        };
+        connect(&mut server, &mut client).await;
+
+        let cookies = [[0x31; 8], [0x58; 8]];
+        let mut datagram = Vec::new();
+        for cookie in cookies {
+            client
+                .conn
+                .send_rrc(
+                    &Message {
+                        kind: MessageType::Challenge,
+                        cookie,
+                    },
+                    &mut datagram,
+                )
+                .unwrap();
+        }
+        client.socket.send(&datagram).await.unwrap();
+        server.set_read_timeout(Some(Duration::from_millis(100)));
+        let received = async {
+            let mut replies = Vec::new();
+            let mut input = [0; 1200];
+            while replies.len() < cookies.len() {
+                let len = client.socket.recv(&mut input).await.unwrap();
+                let input = &mut input[..len];
+                let records = client
+                    .conn
+                    .read_datagram(input, client.start.elapsed())
+                    .unwrap();
+                for range in records
+                    .authenticated_records()
+                    .iter()
+                    .filter_map(|metadata| metadata.rrc_payload_range())
+                {
+                    let message = Message::decode(&input[range]).unwrap().unwrap();
+                    assert_eq!(message.kind, MessageType::Response);
+                    replies.push(message.cookie);
+                }
+            }
+            replies
+        };
+        let (event, replies) = together(server.next_event(), received).await;
+        assert_eq!(event.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(replies, cookies);
     });
 }

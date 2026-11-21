@@ -286,8 +286,8 @@ impl<P: Clone + Eq> Validation<P> {
     }
 
     /// Accept one record. Discarded inputs cannot grant credit, echo cookies,
-    /// start validation, or satisfy a probe. Invalid known encodings return an
-    /// error before granting credit. Unknown types are silently ignored.
+    /// start validation, or satisfy a probe. Malformed and unknown controls
+    /// are silently discarded without granting credit.
     ///
     /// `preferred` states whether the incoming path remains locally preferred;
     /// it selects response versus drop only for a challenge. `reply_bytes`
@@ -309,7 +309,13 @@ impl<P: Clone + Eq> Validation<P> {
         if dtls_bytes == 0 || rrc.is_some_and(|payload| payload.len() > dtls_bytes) {
             return Err(Error::InvalidRecordSize);
         }
-        let message = rrc.map(Message::decode).transpose()?.flatten();
+        let message = match rrc {
+            Some(bytes) => match Message::decode(bytes) {
+                Ok(Some(message)) => Some(message),
+                Ok(None) | Err(_) => return Ok(Action::None),
+            },
+            None => None,
+        };
         if message.is_some_and(|message| message.kind == MessageType::Challenge)
             && reply_bytes < WIRE_LEN
         {

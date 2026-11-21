@@ -56,10 +56,10 @@ pub enum ServerEvent {
 /// a new validated handshake evicts the oldest pending handshake, and a
 /// handshake completing at the established-peer limit is rejected.
 ///
-/// Each peer has at most one sealed ordinary output and one protected
-/// path probe in the adapter, plus one stateless cookie reply overall.
-/// A new probe generated while its slot is occupied is dropped like a
-/// lost UDP datagram; its existing destination and ciphertext are retained.
+/// Each peer has at most one sealed ordinary output and one scheduled
+/// path probe. The server also retains replies to one input datagram
+/// and one stateless cookie reply. An outstanding reply batch is sent
+/// before receiving more input.
 /// Core bounds its own protocol queues. Application input is buffered for
 /// one UDP datagram;
 /// its events are consumed before another receive. Events from timers are
@@ -75,6 +75,7 @@ pub struct UdpServer {
     path_selection: Selection,
     events: VecDeque<ServerEvent>,
     retry: Option<(SocketAddr, Vec<u8>)>,
+    replies: VecDeque<(SocketAddr, SocketAddr, Vec<u8>)>,
     send_cursor: Option<SocketAddr>,
     max_handshakes: usize,
     max_peers: usize,
@@ -168,6 +169,7 @@ impl UdpServer {
             path_selection: Selection::Enhanced,
             events: VecDeque::new(),
             retry: None,
+            replies: VecDeque::new(),
             send_cursor: None,
             max_handshakes: DEFAULT_MAX_HANDSHAKES,
             max_peers: DEFAULT_MAX_PEERS,
@@ -280,6 +282,7 @@ impl UdpServer {
         self.physical.remove(&entry.active);
         self.cids.remove(peer);
         self.touched.remove(&peer);
+        self.replies.retain(|(owner, _, _)| *owner != peer);
         Some(entry.conn)
     }
 
@@ -366,6 +369,13 @@ impl UdpServer {
             if budget == 0 {
                 cx.waker().wake_by_ref();
                 self.poll_timer(cx, deadline);
+                return Poll::Pending;
+            }
+            if !self.replies.is_empty() {
+                self.poll_timer(cx, deadline);
+                if expired {
+                    return Poll::Ready(Err(timed_out()));
+                }
                 return Poll::Pending;
             }
             let mut buf = ReadBuf::new(&mut self.buf);
@@ -491,9 +501,7 @@ impl UdpServer {
                             source,
                             now,
                             &mut |data, destination| {
-                                if entry.probe.is_none() {
-                                    entry.probe = Some((destination, data.to_vec()));
-                                }
+                                self.replies.push_back((peer, destination, data.to_vec()));
                             },
                         )
                     } else {
@@ -664,6 +672,21 @@ impl UdpServer {
         budget: &mut usize,
         target: Option<SocketAddr>,
     ) -> io::Result<()> {
+        while *budget > 0 {
+            let Some((_, destination, data)) = self.replies.front_mut() else {
+                break;
+            };
+            if poll_send_datagram(data, |out| self.socket.poll_send_to(cx, out, *destination))
+                .is_pending()
+            {
+                break;
+            }
+            self.replies.pop_front();
+            *budget -= 1;
+        }
+        if *budget == 0 && !self.replies.is_empty() {
+            cx.waker().wake_by_ref();
+        }
         if *budget > 0
             && let Some((peer, out)) = self.retry.as_mut()
             && poll_send_datagram(out, |out| self.socket.poll_send_to(cx, out, *peer)).is_ready()

@@ -420,7 +420,6 @@ fn malformed_records_and_undersized_costs_grant_no_credit() {
     for (dtls_bytes, payload, expected) in [
         (0, None, Error::InvalidRecordSize),
         (1, Some(&[0, 1][..]), Error::InvalidRecordSize),
-        (32, Some(&[0, 1][..]), Error::InvalidEncoding),
         (32, Some(&[0; 9][..]), Error::InvalidRecordSize),
     ] {
         assert_eq!(
@@ -435,6 +434,22 @@ fn malformed_records_and_undersized_costs_grant_no_credit() {
                 8,
             ),
             Err(expected)
+        );
+        assert_eq!(v.pending_path(), None);
+    }
+    for payload in [&[0, 1][..], &[1, 1], &[2; 10], &[255]] {
+        assert_eq!(
+            v.receive(
+                2,
+                at(0),
+                Record::AuthenticatedFresh {
+                    dtls_bytes: 32,
+                    rrc: Some(payload),
+                },
+                true,
+                RECORD_BYTES,
+            ),
+            Ok(Action::None),
         );
         assert_eq!(v.pending_path(), None);
     }

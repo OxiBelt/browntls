@@ -280,3 +280,75 @@ fn cid_on_an_already_verified_pinned_path_and_mtu_accounting() {
     );
     assert!(pair.server.request_connection_ids(1).is_err());
 }
+
+#[cfg(feature = "tls12")]
+#[test]
+fn dtls12_cid_both_directions_and_empty_cid() {
+    use dtls::Versions::{V1_2, V1_2And1_3};
+
+    for (client, server, client_ids, server_ids) in [
+        (cid_settings(8, true), cid_settings(16, true), true, true),
+        (cid_settings(8, false), cid_settings(0, true), true, false),
+        (cid_settings(0, true), cid_settings(16, false), false, true),
+        (
+            cid_settings(8, true),
+            dtls::Settings::default(),
+            false,
+            false,
+        ),
+    ] {
+        let mut pair = cid_pair(client.with_versions(V1_2And1_3), server.with_versions(V1_2));
+        let mut sim = Sim::perfect();
+        pair.handshake(&mut sim).unwrap();
+        assert_eq!(
+            pair.client.protocol_version(),
+            Some(ProtocolVersion::DTLSv1_2)
+        );
+        assert_eq!(
+            pair.client.local_connection_ids().next().is_some(),
+            client_ids
+        );
+        let expected_cid = pair
+            .server
+            .local_connection_ids()
+            .next()
+            .map(<[u8]>::to_vec);
+        assert_eq!(expected_cid.is_some(), server_ids);
+        assert!(pair.client.request_connection_ids(1).is_err());
+        assert!(
+            pair.server
+                .issue_connection_ids(1, dtls::ConnectionIdUsage::Immediate)
+                .is_err()
+        );
+        pair.exchange(&mut sim, "directional CID policy in DTLS 1.2");
+
+        pair.client.set_mtu(65_507).unwrap();
+        let expected_limit = 16_384 - usize::from(server_ids);
+        assert_eq!(pair.client.max_application_data(), Some(expected_limit));
+        assert!(
+            pair.client
+                .send(&vec![0x8e; expected_limit + 1], &mut Vec::new())
+                .is_err()
+        );
+        let mut data = Vec::new();
+        pair.client
+            .send(&vec![0x7e; expected_limit], &mut data)
+            .unwrap();
+        assert_eq!(data[0] == 25, server_ids);
+        let mut duplicate = data.clone();
+        let received = pair.server.read_datagram(&mut data, sim.now).unwrap();
+        let records = received.authenticated_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].epoch(), 1);
+        assert_eq!(records[0].range(), 0..data.len());
+        assert_eq!(records[0].connection_id(), expected_cid.as_deref());
+        assert_eq!(received.app_data()[0].len(), expected_limit);
+        assert!(
+            pair.server
+                .read_datagram(&mut duplicate, sim.now)
+                .unwrap()
+                .authenticated_records()
+                .is_empty()
+        );
+    }
+}

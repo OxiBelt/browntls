@@ -410,14 +410,36 @@ impl Dtls {
                 version,
                 epoch,
                 seq,
+                cid,
             } => {
                 #[cfg(not(feature = "tls12"))]
-                let _ = version;
+                let _ = (version, cid, base);
                 // Unprotected records exist only in epoch 0; others are
                 // DTLS 1.2 records or noise.
                 #[cfg(feature = "tls12")]
                 if self.is_v12() {
-                    return self.read_v12(typ, version, epoch, seq, datagram, body, handshaking);
+                    if epoch != 0
+                        && !self
+                            .cid
+                            .matches(cid.clone().map(|r| &datagram[base + r.start..base + r.end]))
+                    {
+                        if cid.is_some() {
+                            *at = datagram.len();
+                            return Ok(Incoming::End);
+                        }
+                        return Ok(Incoming::Handled);
+                    }
+                    return self.read_v12(
+                        typ,
+                        version,
+                        epoch,
+                        seq,
+                        datagram,
+                        base..body.start,
+                        cid,
+                        body,
+                        handshaking,
+                    );
                 }
                 if epoch != 0 || body.len() > MAX_PLAINTEXT_LEN {
                     return Ok(Incoming::Handled);
@@ -853,11 +875,12 @@ impl Dtls {
         }
         #[cfg(feature = "tls12")]
         if self.is_v12() && epoch == 1 {
-            return self
-                .v12
-                .enc
-                .as_ref()
-                .map(|enc| wire::PLAINTEXT_HEADER_LEN + enc.encrypted_payload_len(content_len));
+            let cid_len = self.cid.outbound().len();
+            let inner_len = content_len + usize::from(cid_len != 0);
+            let enc = self.v12.enc.as_ref()?;
+            return (inner_len <= MAX_PLAINTEXT_LEN).then(|| {
+                wire::PLAINTEXT_HEADER_LEN + cid_len + enc.encrypted_payload_len(inner_len)
+            });
         }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         Some(match &write.keys {
@@ -871,9 +894,9 @@ impl Dtls {
         #[cfg(feature = "tls12")]
         if self.is_v12() && epoch == 1 {
             let overhead = self.record_len(epoch, 0)?;
-            return space
-                .checked_sub(overhead)
-                .map(|room| room.min(MAX_PLAINTEXT_LEN));
+            return space.checked_sub(overhead).map(|room| {
+                room.min(MAX_PLAINTEXT_LEN - usize::from(!self.cid.outbound().is_empty()))
+            });
         }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         let room = match &write.keys {

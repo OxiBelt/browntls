@@ -365,6 +365,11 @@ impl<Data: SideData> ConnectionCommon<Data> {
         if let Err(err) = &self.core.state {
             return Err(err.clone());
         }
+        if self.dtls().is_v12() {
+            return Err(Error::General(
+                "DTLS 1.2 connection IDs do not rotate".into(),
+            ));
+        }
         if self.core.common_state.is_handshaking() {
             return Err(Error::HandshakeNotComplete);
         }

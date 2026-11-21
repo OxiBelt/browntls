@@ -20,7 +20,7 @@ use crate::msgs::codec::{Codec, Reader};
 /// including the handshake identifier. Peer spare storage has the same cap.
 pub const MAX_CONNECTION_IDS: usize = 16;
 
-/// Opt-in policy for DTLS 1.3 connection IDs, independent in each direction.
+/// Opt-in policy for DTLS connection IDs, independent in each direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionIdPolicy {
     receive_len: u8,

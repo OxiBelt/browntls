@@ -106,6 +106,10 @@ impl CompleteClientHelloHandling {
             &client_hello.extensions,
             false,
         )?;
+        if let Some(dtls) = cx.common.dtls.as_deref_mut() {
+            dtls.cid
+                .select(client_hello.extensions.connection_id.as_ref(), true)?;
+        }
         let client_supports_secure_renegotiation = client_hello
             .cipher_suites
             .contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
@@ -369,6 +373,11 @@ impl CompleteClientHelloHandling {
         cached_info: Option<ServerHelloCachedInfo>,
     ) {
         let mut extensions = ServerExtensions {
+            connection_id: cx
+                .common
+                .dtls
+                .as_deref()
+                .and_then(|dtls| dtls.cid.response()),
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
             // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),

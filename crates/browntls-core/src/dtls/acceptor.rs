@@ -7,6 +7,7 @@ use core::fmt;
 use core::time::Duration;
 
 use super::connection::ServerConnection;
+use super::state::Settings;
 use super::wire::{self, HandshakeHeader, Header};
 use crate::enums::{ContentType, HandshakeType};
 use crate::error::Error;
@@ -29,7 +30,7 @@ use crate::sync::Arc;
 /// and drop those that make no progress.
 pub struct Acceptor {
     config: Arc<crate::ServerConfig>,
-    versions: super::Versions,
+    settings: Settings,
 }
 
 /// What [`Acceptor::accept`] made of a datagram.
@@ -58,14 +59,24 @@ impl Acceptor {
         config: Arc<crate::ServerConfig>,
         versions: super::Versions,
     ) -> Result<Self, Error> {
-        ServerConnection::new_with_versions(config.clone(), &[], versions)?;
-        Ok(Self { config, versions })
+        Self::new_with_settings(config, Settings::default().with_versions(versions))
+    }
+
+    /// Validates clients using the selected DTLS version and CID settings.
+    pub fn new_with_settings(
+        config: Arc<crate::ServerConfig>,
+        settings: Settings,
+    ) -> Result<Self, Error> {
+        ServerConnection::new_with_settings(config.clone(), &[], settings.clone())?;
+        Ok(Self { config, settings })
     }
 
     fn valid_v12_cookie(&self, cookie: &[u8], address: &[u8]) -> bool {
         #[cfg(feature = "tls12")]
         {
-            self.versions.allows(crate::ProtocolVersion::TLSv1_2)
+            self.settings
+                .versions
+                .allows(crate::ProtocolVersion::TLSv1_2)
                 && crate::server::cookie::dtls12_cookie_is_valid(&self.config, cookie, address)
         }
         #[cfg(not(feature = "tls12"))]
@@ -105,8 +116,11 @@ impl Acceptor {
             },
             _ => return Ok(Accepted::Ignored),
         };
-        let mut conn =
-            ServerConnection::new_with_versions(self.config.clone(), peer_address, self.versions)?;
+        let mut conn = ServerConnection::new_with_settings(
+            self.config.clone(),
+            peer_address,
+            self.settings.clone(),
+        )?;
         if retried {
             conn.continue_after_stateless_retry();
         }

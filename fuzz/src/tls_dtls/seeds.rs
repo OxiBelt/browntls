@@ -272,5 +272,6 @@ pub fn seeds() -> Vec<Vec<u8>> {
     }
 
     fresh(&mut seeds);
+    seeds.extend(super::cid_api::seeds());
     seeds
 }

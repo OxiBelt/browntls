@@ -563,6 +563,11 @@ mod tests {
             CertificateEntry::read_bytes(&bytes),
             Err(InvalidMessage::DisallowedCertificateExtension)
         );
+        let bytes = [0, 0, 1, 1, 0, 4, 0, 33, 0, 0];
+        assert_eq!(
+            CertificateEntry::read_bytes(&bytes),
+            Err(InvalidMessage::DisallowedCertificateExtension)
+        );
         // An extension type this crate does not know.
         let bytes = [0, 0, 1, 1, 0, 4, 0x12, 0x34, 0, 0];
         assert_eq!(

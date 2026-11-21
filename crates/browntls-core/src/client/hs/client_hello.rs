@@ -597,7 +597,6 @@ pub(super) fn emit_client_hello_for_retry(
         } else {
             Vec::new()
         };
-    // RFC 8773: ask for certificate authentication on top of an external PSK.
     let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
     if cert_with_extern_psk {
         exts.cert_with_extern_psk = Some(());
@@ -750,6 +749,9 @@ pub(super) fn emit_client_hello_for_retry(
         .filter(|cs| !dtls || cs.usable_for_dtls())
         .map(|cs| cs.suite())
         .collect();
+    if retryreq.is_some() {
+        input.check_cert_with_extern_psk_retry(cx.common, cert_with_extern_psk)?;
+    }
     // RFC 5746 §3.3: signal secure renegotiation support (we never
     // renegotiate); a TLS 1.3-only hello has nothing to signal.
     if supports_tls12 || !ech_tls13_only {

@@ -232,7 +232,10 @@ pub(crate) fn receive_compressed_certificate(
     };
     CertificatePayloadTls13::read_bytes(&body)
         .map(CertificatePayloadTls13::into_owned)
-        .map_err(|_| {
+        .map_err(|error| {
+            if error == crate::error::InvalidMessage::DisallowedCertificateExtension {
+                return common.send_fatal_alert(AlertDescription::IllegalParameter, error);
+            }
             common.send_fatal_alert(
                 AlertDescription::BadCertificate,
                 PeerMisbehaved::InvalidCertCompression,

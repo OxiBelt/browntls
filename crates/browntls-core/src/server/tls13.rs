@@ -221,6 +221,10 @@ impl CompleteClientHelloHandling {
                             .as_ref()
                             .map(|name| name.as_ref().as_bytes().to_vec())
                             .unwrap_or_default(),
+                        cert_with_extern_psk: client_hello
+                            .extensions
+                            .cert_with_extern_psk
+                            .is_some(),
                         dtls: dtls_retry,
                     }
                     .seal(&**sealer)
@@ -255,6 +259,7 @@ impl CompleteClientHelloHandling {
                 transcript: HandshakeHashOrBuffer::Hash(self.transcript),
                 session_id: SessionId::empty(),
                 done_retry: true,
+                retry_cert_with_extern_psk: client_hello.extensions.cert_with_extern_psk.is_some(),
                 retry_choice: Some(hs::RetryChoice {
                     suite: self.suite,
                     group: selected_kxg,

@@ -30,6 +30,7 @@ use crate::msgs::persist::ServerSessionValue;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 
+mod cert_with_extern_psk;
 mod retry;
 pub(super) use select::{
     NegotiatedCertTypes, kx_groups_by_preference, record_size_limit_ack, tls13_tickets_to_send,
@@ -91,6 +92,7 @@ pub(super) struct ExpectClientHello {
     pub(super) transcript: HandshakeHashOrBuffer,
     pub(super) session_id: SessionId,
     pub(super) done_retry: bool,
+    pub(super) retry_cert_with_extern_psk: bool,
     /// What our HelloRetryRequest selected, which the second ClientHello
     /// must follow (RFC 9846 §4.2.4).
     pub(super) retry_choice: Option<RetryChoice>,
@@ -121,6 +123,7 @@ impl ExpectClientHello {
             transcript: HandshakeHashOrBuffer::Buffer(transcript_buffer),
             session_id: SessionId::empty(),
             done_retry: false,
+            retry_cert_with_extern_psk: false,
             retry_choice: None,
             sent_cookie: None,
             send_tickets: 0,
@@ -231,6 +234,13 @@ impl ExpectClientHello {
 
         crate::quic::tls::require_tls13(cx.common, version)?;
         crate::tls13::dtls::require_enabled_version(cx.common, version)?;
+        if version == ProtocolVersion::TLSv1_3 {
+            cert_with_extern_psk::check_client_hello(
+                cx.common,
+                &client_hello.extensions,
+                self.done_retry.then_some(self.retry_cert_with_extern_psk),
+            )?;
+        }
         if let Some(dtls) = &mut cx.common.dtls {
             dtls.select_version(version);
         }

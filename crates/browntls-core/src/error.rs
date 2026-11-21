@@ -409,6 +409,12 @@ pub enum PeerMisbehaved {
     /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
+    /// RFC 9973 was offered with early data or without the required mode.
+    InvalidCertWithExternPskOffer,
+    /// A required companion to the RFC 9973 ClientHello offer was absent.
+    MissingCertWithExternPskCompanion,
+    /// The RFC 9973 offer changed between the two effective ClientHellos.
+    CertWithExternPskChangedOnRetry,
     /// A DTLS 1.3 ClientHello whose `legacy_cookie` is not empty (RFC 9147
     /// §5.3).
     IllegalDtlsLegacyCookie,

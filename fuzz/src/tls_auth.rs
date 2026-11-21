@@ -76,6 +76,8 @@ mod credential;
 mod exported;
 mod handshake;
 mod seeds;
+#[cfg(test)]
+mod service_identity;
 mod unbuffered;
 
 pub use self::seeds::seeds;

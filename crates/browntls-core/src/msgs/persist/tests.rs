@@ -188,7 +188,7 @@ impl ServerCertVerifier for DummyVerifier {
         &self,
         _: &CertificateDer<'_>,
         _: &[CertificateDer<'_>],
-        _: &browntls_pki::ServerName<'_>,
+        _: &ServerName<'_>,
         _: &[u8],
         _: UnixTime,
     ) -> Result<crate::verify::ServerCertVerified, crate::Error> {

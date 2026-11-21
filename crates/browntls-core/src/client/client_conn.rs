@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
-use browntls_pki::{ServerName, UnixTime};
+use browntls_pki::{ServerName, ServiceIdentity, UnixTime};
 
 #[cfg(feature = "std")]
 mod buffered;
@@ -13,9 +13,7 @@ mod buffered;
 pub use buffered::{ClientConnection, WriteEarlyData};
 
 use super::handy::NoClientSessionStorage;
-use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
-use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
@@ -35,6 +33,8 @@ use crate::versions::EnabledVersions;
 
 mod session;
 pub use session::ClientSessionStore;
+
+mod construct;
 
 /// Chooses the client certificate to present.
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
@@ -646,6 +646,7 @@ pub struct ClientConnectionData {
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
     pub(crate) server_name: ServerName<'static>,
+    pub(crate) service_identity: Option<Arc<ServiceIdentity>>,
     /// The delegated credential the server authenticated with (RFC 9345).
     pub(super) delegated_credential: Option<DelegatedCredential>,
     /// The absolute expiry of the delegated credential that authenticated
@@ -659,7 +660,11 @@ pub struct ClientConnectionData {
 }
 
 impl ClientConnectionData {
-    fn new(config: Arc<ClientConfig>, server_name: ServerName<'static>) -> Self {
+    fn new(
+        config: Arc<ClientConfig>,
+        server_name: ServerName<'static>,
+        service_identity: Option<ServiceIdentity>,
+    ) -> Self {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
@@ -670,6 +675,7 @@ impl ClientConnectionData {
             ech_retry_configs: None,
             session_store: config.resumption.store.clone(),
             server_name,
+            service_identity: service_identity.map(Arc::new),
             delegated_credential: None,
             delegated_credential_expiry: None,
             transparency: Default::default(),
@@ -722,111 +728,6 @@ impl ClientConnectionData {
     }
 }
 
-impl ConnectionCore<ClientConnectionData> {
-    pub(crate) fn for_client(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-    ) -> Result<Self, Error> {
-        Self::for_client_with(config, name, alpn_protocols, None, None)
-    }
-
-    /// A QUIC client (RFC 9001): TLS 1.3 only, with a QUIC-capable suite.
-    pub(crate) fn for_quic_client(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-        quic: crate::quic::Quic,
-    ) -> Result<Self, Error> {
-        if !config.supports_version(ProtocolVersion::TLSv1_3) {
-            return Err(Error::General(
-                "TLS 1.3 support is required for QUIC".into(),
-            ));
-        }
-        if !config
-            .provider
-            .cipher_suites
-            .iter()
-            .any(|cs| cs.usable_for_quic())
-        {
-            return Err(Error::General(
-                "no cipher suite of the configuration is usable with QUIC".into(),
-            ));
-        }
-        // ECH over QUIC is not supported yet: the outer ClientHello carries
-        // no ALPN, so a QUIC server rejecting ECH could not complete the
-        // handshake that delivers retry configurations (RFC 9001 §8.1).
-        if config.ech_mode.is_some() {
-            return Err(Error::General(
-                "Encrypted Client Hello is not supported over QUIC".into(),
-            ));
-        }
-        Self::for_client_with(config, name, alpn_protocols, Some(quic), None)
-    }
-
-    /// A DTLS client with an explicit endpoint version policy, a matching
-    /// suite, and no Encrypted Client Hello. Queue the first ClientHello.
-    pub(crate) fn for_dtls_client(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        dtls: crate::dtls::Dtls,
-    ) -> Result<Self, Error> {
-        if ![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]
-            .iter()
-            .any(|v| dtls.allows(*v) && config.supports_version(*v))
-        {
-            return Err(Error::General(
-                "no configured version matches the DTLS endpoint policy".into(),
-            ));
-        }
-        if !config.provider.cipher_suites.iter().any(|cs| {
-            cs.usable_for_dtls()
-                && dtls.allows(cs.version().version)
-                && config.supports_version(cs.version().version)
-        }) {
-            return Err(Error::General(
-                "no cipher suite of the configuration is usable with the DTLS endpoint policy"
-                    .into(),
-            ));
-        }
-        if config.ech_mode.is_some() {
-            return Err(Error::General(
-                "Encrypted Client Hello is not supported over DTLS".into(),
-            ));
-        }
-        let alpn_protocols = config.alpn_protocols.clone();
-        Self::for_client_with(config, name, alpn_protocols, None, Some(dtls))
-    }
-
-    fn for_client_with(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-        quic: Option<crate::quic::Quic>,
-        dtls: Option<crate::dtls::Dtls>,
-    ) -> Result<Self, Error> {
-        if config.max_tls13_tickets_per_connection > 255 {
-            return Err(Error::BadTls13TicketLimit);
-        }
-        crate::external_binding::handshake::check_client_config(config.external_binding.as_ref())?;
-        let mut common_state = CommonState::new(Side::Client);
-        common_state.quic = quic.map(alloc::boxed::Box::new);
-        common_state.dtls = dtls.map(alloc::boxed::Box::new);
-        common_state.set_max_fragment_size(config.max_fragment_size)?;
-        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
-        crate::trusted_ca_keys::check_config(config.trusted_ca_keys.as_deref())?;
-        common_state.enable_secret_extraction = config.enable_secret_extraction;
-        common_state.fips = config.fips();
-        let mut data = ClientConnectionData::new(config.clone(), name.clone());
-        let mut cx = crate::conn::Context {
-            common: &mut common_state,
-            data: &mut data,
-        };
-        let state = hs::start_handshake(name, alpn_protocols, config, &mut cx)?;
-        Ok(Self::new(state, data, common_state))
-    }
-}
-
 /// A client-side TLS connection driven by the caller's buffers; see
 /// [`crate::unbuffered`].
 ///
@@ -853,6 +754,33 @@ impl UnbufferedClientConnection {
             inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
                 config,
                 name,
+                None,
+                alpn_protocols,
+            )?),
+        })
+    }
+
+    /// Starts a connection for an explicit service identity.
+    pub fn new_with_identity(
+        config: Arc<ClientConfig>,
+        identity: super::ClientServerIdentity,
+    ) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_identity_and_alpn(config, identity, alpn)
+    }
+
+    /// Starts a connection for an explicit identity and per-connection ALPN.
+    pub fn new_with_identity_and_alpn(
+        config: Arc<ClientConfig>,
+        identity: super::ClientServerIdentity,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let (name, identity) = identity.into_parts();
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
+                config,
+                name,
+                Some(identity),
                 alpn_protocols,
             )?),
         })

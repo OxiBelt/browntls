@@ -533,9 +533,36 @@ impl ClientConnection {
         name: ServerName<'static>,
         settings: Settings,
     ) -> Result<Self, Error> {
+        Self::start(config, name, None, settings)
+    }
+
+    /// Starts a DTLS handshake with an explicit service identity.
+    pub fn new_with_identity(
+        config: Arc<crate::ClientConfig>,
+        identity: crate::ClientServerIdentity,
+    ) -> Result<Self, Error> {
+        Self::new_with_identity_and_settings(config, identity, Settings::default())
+    }
+
+    /// Starts a DTLS handshake with an explicit identity and settings.
+    pub fn new_with_identity_and_settings(
+        config: Arc<crate::ClientConfig>,
+        identity: crate::ClientServerIdentity,
+        settings: Settings,
+    ) -> Result<Self, Error> {
+        let (name, identity) = identity.into_parts();
+        Self::start(config, name, Some(identity), settings)
+    }
+
+    fn start(
+        config: Arc<crate::ClientConfig>,
+        name: ServerName<'static>,
+        identity: Option<crate::ServiceIdentity>,
+        settings: Settings,
+    ) -> Result<Self, Error> {
         let mut dtls = Dtls::new(Side::Client, settings);
         dtls.initialize_cids(config.crypto_provider().secure_random)?;
-        let core = ConnectionCore::for_dtls_client(config, name, dtls)?;
+        let core = ConnectionCore::for_dtls_client(config, name, identity, dtls)?;
         Ok(Self {
             inner: ConnectionCommon::new(core),
         })

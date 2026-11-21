@@ -407,6 +407,11 @@ impl ExpectTraffic {
         )
         .with_delegated_credential_expiry(cx.data.delegated_credential_expiry)
         .with_protocol(Protocol::of(cx.common));
+        value.common.bind_server_identity(
+            &self.server_name,
+            cx.data.service_identity.as_ref(),
+            cx.common.matched_service_identity.as_ref(),
+        );
         if let Some(params) = cx.common.quic.as_ref().and_then(|q| q.peer_params.as_ref()) {
             value.set_quic_params(params);
         }

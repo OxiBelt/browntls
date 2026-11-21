@@ -15,8 +15,9 @@ pub use client_verifier::{ClientCertVerifierBuilder, WebPkiClientVerifier};
 pub use server_verifier::{ServerCertVerifierBuilder, WebPkiServerVerifier};
 pub use verify::{
     ParsedCertificate, WebPkiSupportedAlgorithms, verify_server_cert_signed_by_trust_anchor,
-    verify_server_name, verify_tls12_signature, verify_tls12_signature_with_raw_key,
-    verify_tls13_signature, verify_tls13_signature_with_raw_key,
+    verify_server_identity, verify_server_name, verify_tls12_signature,
+    verify_tls12_signature_with_raw_key, verify_tls13_signature,
+    verify_tls13_signature_with_raw_key,
 };
 
 /// Why a verifier could not be built.

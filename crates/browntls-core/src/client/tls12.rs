@@ -613,6 +613,11 @@ impl ExpectFinished {
             lifetime,
             self.using_ems,
         );
+        value.common.bind_server_identity(
+            &self.server_name,
+            cx.data.service_identity.as_ref(),
+            cx.common.matched_service_identity.as_ref(),
+        );
         if cx.common.is_dtls() {
             value.set_dtls12();
             self.config

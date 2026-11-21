@@ -495,6 +495,11 @@ fn big_payload() -> Vec<u8> {
 // ------------------------------------------------------------------ cases
 
 include!("unbuffered/handshake_and_data.rs");
+mod service_identity {
+    use super::*;
+
+    include!("unbuffered/service_identity.rs");
+}
 include!("unbuffered/early_data.rs");
 include!("unbuffered/key_update.rs");
 include!("unbuffered/rustls_interop.rs");

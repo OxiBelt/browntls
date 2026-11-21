@@ -751,7 +751,11 @@ impl Pre {
         };
         match subject {
             Subject::Buffered(Connection::Client(conn)) => {
-                rest.go(blocker, conn.dangerous_into_kernel_connection(), input, ops);
+                let handoff = conn.dangerous_into_kernel_connection();
+                if let Ok((_, kernel)) = &handoff {
+                    let _ = kernel.matched_service_identity();
+                }
+                rest.go(blocker, handoff, input, ops);
             }
             Subject::Buffered(Connection::Server(conn)) => {
                 rest.go(blocker, conn.dangerous_into_kernel_connection(), input, ops);

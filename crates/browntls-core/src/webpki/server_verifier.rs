@@ -11,7 +11,8 @@ use browntls_pki::{
 
 use super::anchors::RootCertStore;
 use super::verify::{
-    ParsedCertificate, WebPkiSupportedAlgorithms, verify_cert_for_usage, verify_server_name,
+    ParsedCertificate, WebPkiSupportedAlgorithms, verify_cert_for_usage, verify_server_identity,
+    verify_server_name,
 };
 use super::{VerifierBuilderError, crl_error};
 use crate::crypto::CryptoProvider;
@@ -25,7 +26,8 @@ use crate::revocation::{
 use crate::sync::Arc;
 use crate::transparency::{CtV2Requirements, TransparencyStatus};
 use crate::verify::{
-    DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    CertificateIdentity, DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified,
+    ServerCertVerifier, ServerCertificateVerification,
 };
 
 /// Builds a [`WebPkiServerVerifier`].
@@ -235,10 +237,10 @@ impl WebPkiServerVerifier {
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
+        identity: CertificateIdentity<'_>,
         evidence: PeerEvidence<'_>,
         now: UnixTime,
-    ) -> Result<Option<TransparencyStatus>, Error> {
+    ) -> Result<ServerCertificateVerification, Error> {
         let cert = ParsedCertificate::try_from(end_entity)?;
 
         let crl_refs: Vec<&CertRevocationList<'_>> = self.crls.iter().collect();
@@ -272,15 +274,19 @@ impl WebPkiServerVerifier {
             trace!("Unvalidated OCSP response: {:?}", ocsp_response.len());
         }
 
-        verify_server_name(&cert, server_name)?;
-
-        let Some(context) = self.transparency_context() else {
-            return Ok(None);
-        };
-        let issuer = super::transparency::Issuer::of(&path);
-        context
-            .verify_issued(&issuer, end_entity, evidence, now)
-            .map(Some)
+        let matched_reference = verify_identity(&cert, identity)?;
+        let transparency = self
+            .transparency_context()
+            .map(|context| {
+                let issuer = super::transparency::Issuer::of(&path);
+                context.verify_issued(&issuer, end_entity, evidence, now)
+            })
+            .transpose()?;
+        Ok(ServerCertificateVerification {
+            revocation: RevocationCheck::Complete(None),
+            transparency,
+            matched_reference: Some(matched_reference),
+        })
     }
 
     fn transparency_context(&self) -> Option<super::transparency::Context<'_>> {
@@ -317,13 +323,17 @@ impl WebPkiServerVerifier {
         policy: &RevocationPolicy,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
+        identity: CertificateIdentity<'_>,
         evidence: PeerEvidence<'_>,
         now: UnixTime,
         allow_live: bool,
-    ) -> Result<RevocationCheck, Error> {
+    ) -> Result<ServerCertificateVerification, Error> {
         let cert = ParsedCertificate::try_from(end_entity)?;
-        policy.verify_path(&PathRequest {
+        let (server_name, matched_reference) = match identity {
+            CertificateIdentity::Name(name) => (Some(name), 0),
+            CertificateIdentity::Service(_) => (None, verify_identity(&cert, identity)?),
+        };
+        let revocation = policy.verify_path(&PathRequest {
             end_entity: &cert,
             roots: &self.roots.roots,
             intermediates,
@@ -336,10 +346,41 @@ impl WebPkiServerVerifier {
                 unknown_status: self.unknown_revocation_policy,
                 expiration: self.revocation_expiration_policy,
             },
-            server_name: Some(server_name),
+            server_name,
             evidence,
             allow_live,
+        })?;
+        let revocation = if allow_live {
+            revocation
+        } else {
+            RevocationCheck::Complete(require_local(revocation)?)
+        };
+        let transparency = self.verify_transparency(end_entity, intermediates, evidence, now)?;
+        Ok(ServerCertificateVerification {
+            revocation,
+            transparency,
+            matched_reference: Some(matched_reference),
         })
+    }
+}
+
+fn verify_identity(
+    cert: &ParsedCertificate<'_>,
+    identity: CertificateIdentity<'_>,
+) -> Result<usize, Error> {
+    match identity {
+        CertificateIdentity::Name(name) => {
+            verify_server_name(cert, name)?;
+            Ok(0)
+        }
+        CertificateIdentity::Service(policy) => {
+            let matched = verify_server_identity(cert, policy)?;
+            policy
+                .references()
+                .iter()
+                .position(|reference| core::ptr::eq(reference, matched))
+                .ok_or_else(|| Error::General("certificate identity match is missing".into()))
+        }
     }
 }
 
@@ -362,25 +403,14 @@ impl ServerCertVerifier for WebPkiServerVerifier {
             ocsp: Some(ocsp_response),
             ..Default::default()
         }];
-        match &self.revocation_policy {
-            // This entry point cannot wait for a live query: the policy is
-            // decided from local evidence alone.
-            Some(policy) => {
-                require_local(self.verify_with_policy(
-                    policy,
-                    end_entity,
-                    intermediates,
-                    server_name,
-                    &leaf,
-                    now,
-                    false,
-                )?)?;
-                self.verify_transparency(end_entity, intermediates, &leaf, now)?;
-            }
-            None => {
-                self.verify_without_policy(end_entity, intermediates, server_name, &leaf, now)?;
-            }
-        }
+        self.verify_server_cert_with_identity(
+            end_entity,
+            intermediates,
+            CertificateIdentity::Name(server_name),
+            &leaf,
+            now,
+            false,
+        )?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -410,22 +440,38 @@ impl ServerCertVerifier for WebPkiServerVerifier {
         evidence: PeerEvidence<'_>,
         now: UnixTime,
     ) -> Result<(RevocationCheck, Option<TransparencyStatus>), Error> {
-        let Some(policy) = &self.revocation_policy else {
-            let status =
-                self.verify_without_policy(end_entity, intermediates, server_name, evidence, now)?;
-            return Ok((RevocationCheck::Complete(None), status));
-        };
-        let check = self.verify_with_policy(
-            policy,
+        let verification = self.verify_server_cert_with_identity(
             end_entity,
             intermediates,
-            server_name,
+            CertificateIdentity::Name(server_name),
             evidence,
             now,
             true,
         )?;
-        let status = self.verify_transparency(end_entity, intermediates, evidence, now)?;
-        Ok((check, status))
+        Ok((verification.revocation, verification.transparency))
+    }
+
+    fn verify_server_cert_with_identity(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<ServerCertificateVerification, Error> {
+        match &self.revocation_policy {
+            Some(policy) => self.verify_with_policy(
+                policy,
+                end_entity,
+                intermediates,
+                identity,
+                evidence,
+                now,
+                allow_live,
+            ),
+            None => self.verify_without_policy(end_entity, intermediates, identity, evidence, now),
+        }
     }
 
     fn revocation_enabled(&self) -> bool {

@@ -286,6 +286,13 @@ impl CommonState {
     }
 }
 
+impl KernelConnection<crate::client::ClientConnectionData> {
+    /// The reference identity authenticated in the userspace handshake.
+    pub fn matched_service_identity(&self) -> Option<&browntls_pki::ReferenceIdentifier> {
+        self.core.common_state.matched_service_identity()
+    }
+}
+
 impl<Data: SideData> KernelConnection<Data> {
     /// The negotiated protocol version.
     pub fn protocol_version(&self) -> ProtocolVersion {

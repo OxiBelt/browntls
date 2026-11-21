@@ -97,6 +97,37 @@ impl UdpClient {
     ) -> io::Result<Self> {
         socket.set_nonblocking(false)?;
         let conn = ClientConnection::new_with_settings(config, name, settings).map_err(io_error)?;
+        Self::connect_prepared(conn, socket)
+    }
+
+    /// Completes a blocking DTLS handshake for the explicit identity.
+    pub fn connect_with_identity(
+        config: Arc<crate::ClientConfig>,
+        identity: crate::ClientServerIdentity,
+        socket: UdpSocket,
+    ) -> io::Result<Self> {
+        Self::connect_with_identity_and_settings(
+            config,
+            identity,
+            socket,
+            super::Settings::default(),
+        )
+    }
+
+    /// Completes a blocking DTLS handshake with explicit identity and settings.
+    pub fn connect_with_identity_and_settings(
+        config: Arc<crate::ClientConfig>,
+        identity: crate::ClientServerIdentity,
+        socket: UdpSocket,
+        settings: super::Settings,
+    ) -> io::Result<Self> {
+        socket.set_nonblocking(false)?;
+        let conn = ClientConnection::new_with_identity_and_settings(config, identity, settings)
+            .map_err(io_error)?;
+        Self::connect_prepared(conn, socket)
+    }
+
+    fn connect_prepared(conn: ClientConnection, socket: UdpSocket) -> io::Result<Self> {
         let mut client = Self::from_connection(conn, socket);
         client.complete_handshake()?;
         Ok(client)

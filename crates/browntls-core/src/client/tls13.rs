@@ -351,6 +351,12 @@ pub(super) fn handle_server_hello(
             PeerIncompatible::CertWithExternPskRequired,
         ));
     }
+    if external_psk.is_some() && cx.data.service_identity.is_some() && !cert_with_extern_psk {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            Error::NoCertificatesPresented,
+        ));
+    }
     cx.common.cert_with_extern_psk = cert_with_extern_psk;
 
     Ok(Box::new(ExpectEncryptedExtensions {
@@ -533,6 +539,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 // for a session authenticated by an external PSK alone).
                 let chain = resuming.server_cert_chain();
                 cx.common.peer_certificates = (!chain.0.is_empty()).then(|| chain.clone());
+                cx.common.matched_service_identity = resuming.matched_service_identity.clone();
                 cx.data.delegated_credential_expiry = resuming.delegated_credential_expiry();
                 Ok(Box::new(ExpectFinished {
                     config: self.config,

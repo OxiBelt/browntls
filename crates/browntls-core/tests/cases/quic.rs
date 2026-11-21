@@ -463,6 +463,7 @@ fn assert_full_handshake(client: &mut Peer, server: &mut Peer) {
 
 include!("quic/vectors.rs");
 include!("quic/handshakes.rs");
+include!("quic/service_identity.rs");
 include!("quic/rules.rs");
 include!("quic/interop.rs");
 include!("quic/grease.rs");

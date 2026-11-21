@@ -3,7 +3,9 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use browntls_pki::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
+use browntls_pki::{
+    CertificateDer, ServerName, ServiceIdentity, SubjectPublicKeyInfoDer, UnixTime,
+};
 
 use crate::enums::SignatureScheme;
 use crate::error::{Error, InvalidMessage};
@@ -54,6 +56,28 @@ impl ClientCertVerified {
     pub fn assertion() -> Self {
         Self(())
     }
+}
+
+/// The reference identities a server certificate must authenticate.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug)]
+pub enum CertificateIdentity<'a> {
+    /// The implicit DNS-ID or IP-ID of a legacy connection.
+    Name(&'a ServerName<'a>),
+    /// An explicit RFC 9525 reference set independent of the routing name.
+    Service(&'a ServiceIdentity),
+}
+
+/// Evidence and identity reported by a server certificate verifier.
+#[derive(Debug)]
+pub struct ServerCertificateVerification {
+    /// The completed or pending revocation decision.
+    pub revocation: RevocationCheck,
+    /// The verified Certificate Transparency result, when available.
+    pub transparency: Option<TransparencyStatus>,
+    /// The matched reference index, or zero for an implicit DNS-ID or IP-ID.
+    /// A verifier may omit the index only for implicit identities.
+    pub matched_reference: Option<usize>,
 }
 
 /// Decides whether a server's certificate and handshake signatures are
@@ -122,6 +146,50 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
             now,
         )?;
         Ok((check, None))
+    }
+
+    /// Verifies the chain, evidence and certificate identity together.
+    ///
+    /// An explicit reference set requires an override. An override must
+    /// verify the path and identify the reference it matched. When
+    /// `allow_live` is false, only local revocation evidence may be used.
+    fn verify_server_cert_with_identity(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<ServerCertificateVerification, Error> {
+        let CertificateIdentity::Name(name) = identity else {
+            return Err(Error::General(
+                "verifier does not support explicit service identities".into(),
+            ));
+        };
+        let (revocation, transparency) = if allow_live {
+            self.verify_server_cert_with_transparency(
+                end_entity,
+                intermediates,
+                name,
+                evidence,
+                now,
+            )?
+        } else {
+            self.verify_server_cert(
+                end_entity,
+                intermediates,
+                name,
+                leaf_evidence(evidence).ocsp.unwrap_or_default(),
+                now,
+            )?;
+            (RevocationCheck::Complete(None), None)
+        };
+        Ok(ServerCertificateVerification {
+            revocation,
+            transparency,
+            matched_reference: None,
+        })
     }
 
     /// Whether the client should offer the `transparency_info` extension

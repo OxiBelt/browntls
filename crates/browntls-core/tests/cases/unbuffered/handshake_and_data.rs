@@ -43,6 +43,37 @@ fn handshake_and_data_every_pairing() {
 }
 
 #[test]
+fn rfc9973_negotiates_on_the_unbuffered_path() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let version = ProtocolVersion::TLSv1_3;
+    let key = Arc::new(
+        ExternalPsk::new(
+            b"unbuffered-rfc9973".to_vec(),
+            vec![42; 32],
+            HashAlgorithm::SHA256,
+        )
+        .unwrap(),
+    );
+    let mut client = versioned_client(&chain, version);
+    client.cert_with_extern_psk = true;
+    client.external_psks = vec![key.clone()];
+    let mut server = versioned_server(&chain, version);
+    server.require_cert_with_extern_psk = true;
+    server.external_psks = Some(Arc::new(vec![key]));
+
+    let mut client = ub_client(&Arc::new(client), Feed::ByteByByte);
+    let mut server = ub_server(&Arc::new(server), Feed::ByteByByte);
+    handshake(&mut client, &mut server);
+    assert!(client.conn.negotiated_cert_with_extern_psk());
+    assert!(server.conn.negotiated_cert_with_extern_psk());
+    assert_eq!(client.conn.peer_certificates().unwrap(), chain.cert_chain());
+    exchange(&mut client, &mut server, b"certificate and PSK");
+}
+
+#[test]
 fn every_suite_both_unbuffered() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);

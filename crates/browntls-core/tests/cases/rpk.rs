@@ -63,6 +63,48 @@ fn connect(client: ClientConfig, server: ServerConfig) -> (ClientConnection, Ser
 }
 
 #[test]
+fn rfc9973_still_verifies_both_raw_public_keys() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let server_chain = server_chain(KeyType::EcdsaP256);
+    let untrusted_server = gen_chain(
+        KeyType::EcdsaP256,
+        &["localhost"],
+        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let client_chain = client_chain(KeyType::EcdsaP256);
+    let version = ProtocolVersion::TLSv1_3;
+    let key = Arc::new(
+        ExternalPsk::new(b"rpk-rfc9973".to_vec(), vec![42; 32], HashAlgorithm::SHA256).unwrap(),
+    );
+    for (expected_server, trusted) in [(&server_chain, true), (&untrusted_server, false)] {
+        let mut client_config = rpk_client(expected_server, version, Some(&client_chain));
+        client_config.external_psks = vec![key.clone()];
+        client_config.cert_with_extern_psk = true;
+        let mut server_config = rpk_server(&server_chain, version, Some(&client_chain));
+        server_config.external_psks = Some(Arc::new(vec![key.clone()]));
+        server_config.require_cert_with_extern_psk = true;
+        let (mut client, mut server) = connect(client_config, server_config);
+        if trusted {
+            do_handshake(&mut client, &mut server).unwrap();
+            assert!(client.negotiated_cert_with_extern_psk());
+            assert!(server.negotiated_cert_with_extern_psk());
+            assert!(client.peer_certificates().is_some());
+            assert!(server.peer_certificates().is_some());
+        } else {
+            assert!(
+                do_handshake_until_error(&mut client, &mut server)
+                    .0
+                    .is_err()
+            );
+            assert!(!client.negotiated_cert_with_extern_psk());
+            assert!(!server.negotiated_cert_with_extern_psk());
+        }
+    }
+}
+
+#[test]
 fn server_raw_public_key_every_key_type_and_version() {
     init_logging();
     for v in VERSIONS {

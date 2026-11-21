@@ -15,6 +15,40 @@ mod acceptor {
     /// Chooses the configuration for a ClientHello.
     type Chooser = Box<dyn FnMut(&ClientHello<'_>) -> Arc<ServerConfig>>;
 
+    #[test]
+    fn rfc9973_offer_drives_unbuffered_config_selection() {
+        use browntls_core::crypto::hash::HashAlgorithm;
+        use browntls_core::psk::ExternalPsk;
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let version = ProtocolVersion::TLSv1_3;
+        let key = Arc::new(
+            ExternalPsk::new(
+                b"lazy-rfc9973".to_vec(),
+                vec![42; 32],
+                HashAlgorithm::SHA256,
+            )
+            .unwrap(),
+        );
+        let mut client = versioned_client(&chain, version);
+        client.external_psks = vec![key.clone()];
+        client.cert_with_extern_psk = true;
+        let mut server = versioned_server(&chain, version);
+        server.external_psks = Some(Arc::new(vec![key]));
+        server.require_cert_with_extern_psk = true;
+        let config = Arc::new(server);
+        let mut server = Accepting::new(Feed::Whole, move |hello| {
+            assert!(hello.offers_cert_with_extern_psk());
+            config.clone()
+        });
+
+        let mut client = ub_client(&Arc::new(client), Feed::Whole);
+        handshake(&mut client, &mut server);
+        assert!(client.conn.negotiated_cert_with_extern_psk());
+        assert!(server.server().conn.negotiated_cert_with_extern_psk());
+        exchange(&mut client, &mut server, b"lazy RFC 9973");
+    }
+
     /// An unbuffered server that reads the ClientHello with an
     /// `UnbufferedAcceptor`, chooses its configuration from it, then goes on
     /// as an `UnbufferedServerConnection` with the bytes not discarded.

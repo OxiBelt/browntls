@@ -111,6 +111,17 @@ sources = [
   "crates/browntls-core/src/common_state.rs",
 ]
 
+[targets.tls_dtls]
+topic = "tls-extensions"
+sources = [
+  "crates/browntls-core/src/dtls.rs",
+  "crates/browntls-core/src/dtls/**",
+  "crates/browntls-core/src/tls13/**",
+  "crates/browntls-core/src/msgs/handshake/**",
+  "crates/browntls-core/src/server/cookie.rs",
+  "crates/browntls-core/src/server/hs/retry.rs",
+]
+
 [targets.tls_auth]
 topic = "tls-extensions"
 sources = [

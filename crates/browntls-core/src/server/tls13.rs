@@ -25,7 +25,7 @@ use ticket::tls13_ticket_lifetime;
 use traffic::ExpectFinished;
 
 use super::common::{ActiveCertifiedKey, client_revocation_enabled};
-use super::cookie::RetryCookie;
+use super::cookie::{DtlsRetry, RetryCookie};
 use super::hs::{self, HandshakeHashOrBuffer, NextStateOrError, ServerContext};
 use super::server_conn::ServerConfig;
 use crate::common_state::{ConnectionRandoms, HandshakeKind};
@@ -45,7 +45,9 @@ use crate::msgs::persist::ServerSessionValue;
 use crate::psk::{ExternalPskCandidate, MAX_PSK_IDENTITIES_CONSIDERED, PskSecret};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake};
+use crate::tls13::key_schedule::{
+    BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake, Protocol,
+};
 
 pub(super) struct CompleteClientHelloHandling {
     pub(super) config: Arc<ServerConfig>,
@@ -64,6 +66,7 @@ impl CompleteClientHelloHandling {
     /// plus the ClientHello without its binders, in constant time.
     fn check_binder(
         &self,
+        protocol: Protocol,
         suite: &'static Tls13CipherSuite,
         client_hello: &Message<'_>,
         psk: &[u8],
@@ -80,7 +83,7 @@ impl CompleteClientHelloHandling {
             _ => return false,
         };
         let handshake_hash = self.transcript.hash_with(binder_plaintext);
-        let key_schedule = KeyScheduleEarly::new(suite, psk);
+        let key_schedule = KeyScheduleEarly::new(suite, psk, protocol);
         let real_binder = key_schedule.psk_binder(label, handshake_hash.as_ref());
         constant_time_eq(real_binder.as_ref(), binder)
     }
@@ -150,11 +153,22 @@ impl CompleteClientHelloHandling {
             ));
         }
 
-        let Some(chosen_share) = shares_ext
+        // RFC 9147 §5.1: a DTLS server that requires a cookie answers a
+        // first ClientHello without one with a HelloRetryRequest carrying
+        // it, whatever the key shares.
+        let cookie_required = !self.done_retry
+            && cx
+                .common
+                .dtls
+                .as_deref()
+                .is_some_and(|d| d.require_cookie());
+        let share_for_group = shares_ext
             .iter()
-            .find(|share| share.group == selected_kxg.name())
-        else {
-            // RFC 8446 §4.1.4: ask for a share in the group we want.
+            .find(|share| share.group == selected_kxg.name());
+        let Some(chosen_share) = share_for_group.filter(|_| !cookie_required) else {
+            // RFC 8446 §4.1.4: ask for a share in the group we want, unless
+            // the client sent one (and only the cookie is missing).
+            let group_named = share_for_group.is_none();
             if self.done_retry {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::IllegalParameter,
@@ -177,9 +191,17 @@ impl CompleteClientHelloHandling {
             // ClientHello, so that handshake stays with this connection. Nor
             // when the client offered ECH (RFC 9849): the HPKE context and
             // the HelloRetryRequest's ECH extension cannot be rebuilt from a
-            // cookie.
+            // cookie. Over DTLS 0-RTT records are never read (no 0-RTT in
+            // this version), so they do not stand in the way.
+            let dtls_retry = cx.common.dtls.as_deref().map(|d| DtlsRetry {
+                peer_address: d.peer_address().to_vec(),
+                group_named,
+            });
             let cookie = match &self.config.hello_retry_cookies {
-                Some(sealer) if !early_data_requested && matches!(ech, HrrEch::None) => {
+                Some(sealer)
+                    if (!early_data_requested || dtls_retry.is_some())
+                        && matches!(ech, HrrEch::None) =>
+                {
                     RetryCookie {
                         issued_at: match self.config.current_time() {
                             Ok(now) => now.as_secs(),
@@ -199,18 +221,26 @@ impl CompleteClientHelloHandling {
                             .as_ref()
                             .map(|name| name.as_ref().as_bytes().to_vec())
                             .unwrap_or_default(),
+                        dtls: dtls_retry,
                     }
                     .seal(&**sealer)
                 }
                 _ => None,
             };
+            if cookie_required && cookie.is_none() {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::InternalError,
+                    Error::General("could not seal a DTLS HelloRetryRequest cookie".into()),
+                ));
+            }
             emit_hello_retry_request(
                 &mut self.transcript,
                 hello_retry_request(
                     self.suite,
                     client_hello.session_id,
-                    selected_kxg.name(),
+                    group_named.then(|| selected_kxg.name()),
                     cookie.clone(),
+                    cx.common.is_dtls(),
                 ),
                 self.suite,
                 ech,
@@ -228,13 +258,15 @@ impl CompleteClientHelloHandling {
                 retry_choice: Some(hs::RetryChoice {
                     suite: self.suite,
                     group: selected_kxg,
+                    group_named,
                 }),
                 sent_cookie: cookie,
                 send_tickets: self.send_tickets,
             });
             // Early data sent behind that first ClientHello is unreadable
-            // (no PSK was taken); skip it up to the announced limit.
-            return Ok(if early_data_requested {
+            // (no PSK was taken); skip it up to the announced limit. A DTLS
+            // record layer drops such records itself.
+            return Ok(if early_data_requested && !cx.common.is_dtls() {
                 Box::new(ExpectAndSkipRejectedEarlyData {
                     skip_data_left,
                     next,
@@ -281,6 +313,7 @@ impl CompleteClientHelloHandling {
                             continue;
                         };
                         if !self.check_binder(
+                            Protocol::of(cx.common),
                             self.suite,
                             chm,
                             secret.as_ref(),
@@ -300,6 +333,12 @@ impl CompleteClientHelloHandling {
                     else {
                         continue;
                     };
+                    // A ticket issued over the other protocol (TLS or DTLS)
+                    // is not resumed: its binder would take the other label
+                    // prefix (RFC 9147 §5.9).
+                    if resume.version != ticket::ticket_version(cx.common) {
+                        continue;
+                    }
                     // Even a previous connection without a client
                     // certificate could bypass client authentication now.
                     if client_revocation_enabled(&self.config) && !resume.certificate_free {
@@ -377,6 +416,7 @@ impl CompleteClientHelloHandling {
                         continue;
                     }
                     if !self.check_binder(
+                        Protocol::of(cx.common),
                         self.suite,
                         chm,
                         &resume.master_secret.0,
@@ -488,6 +528,15 @@ impl CompleteClientHelloHandling {
                 &self.config,
             ),
         };
+        // No 0-RTT over DTLS in this version: an offer is rejected, and the
+        // DTLS record layer, which never gets an early key, drops its
+        // records (RFC 9147 §5.6 has no EndOfEarlyData to wait for).
+        let early_data = match early_data {
+            EarlyDataDecision::Accepted if cx.common.is_dtls() => {
+                EarlyDataDecision::RequestedButRejected
+            }
+            other => other,
+        };
         // How much 0-RTT data we read, or skip when we reject it.
         let early_data_limit = match &external {
             Some((candidate, _)) => candidate.psk.max_early_data_size(),
@@ -504,15 +553,18 @@ impl CompleteClientHelloHandling {
         };
         let key_schedule_pre = match psk_secret {
             Some(psk) => {
-                let early = KeyScheduleEarly::new(self.suite, psk);
+                let early = KeyScheduleEarly::new(self.suite, psk, Protocol::of(cx.common));
                 // Start reading under the early traffic key: it carries any
                 // 0-RTT data, and is replaced below when we do not accept it.
-                early.client_early_traffic_secret(
-                    client_hello_hash.as_ref(),
-                    &*self.config.key_log,
-                    &self.randoms.client,
-                    cx.common,
-                );
+                // DTLS has no 0-RTT here, so no early key either.
+                if !cx.common.is_dtls() {
+                    early.client_early_traffic_secret(
+                        client_hello_hash.as_ref(),
+                        &*self.config.key_log,
+                        &self.randoms.client,
+                        cx.common,
+                    );
+                }
                 // RFC 9846 §7.5: the early exporter, for use with the 0-RTT
                 // data we accepted.
                 if early_data == EarlyDataDecision::Accepted {
@@ -524,7 +576,7 @@ impl CompleteClientHelloHandling {
                 }
                 early.into_pre_handshake()
             }
-            None => KeySchedulePreHandshake::new(self.suite),
+            None => KeySchedulePreHandshake::new(self.suite, Protocol::of(cx.common)),
         };
         let key_schedule = key_schedule_pre.into_handshake_with_shared_secret(&kx.secret);
 
@@ -601,9 +653,10 @@ impl CompleteClientHelloHandling {
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
         // RFC 9001 §4.4: QUIC has no post-handshake client authentication,
         // so an offer over QUIC is ignored and client auth stays in the
-        // handshake.
-        cx.data.post_handshake_auth_offered =
-            client_hello.extensions.post_handshake_auth.is_some() && !cx.common.is_quic();
+        // handshake. Nor is it supported over DTLS yet.
+        cx.data.post_handshake_auth_offered = client_hello.extensions.post_handshake_auth.is_some()
+            && !cx.common.is_quic()
+            && !cx.common.is_dtls();
         let defer_client_auth =
             self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
 

@@ -44,6 +44,8 @@ enum_builder! {
         CertificateRequired => 0x74,
         /// RFC 9846 §6.2: an error not covered by a more specific alert.
         GeneralError => 0x75,
+        /// RFC 9147 §9: too many connection IDs were requested (DTLS).
+        TooManyCidsRequested => 0x34,
         NoApplicationProtocol => 0x78,
         EncryptedClientHelloRequired => 0x79,
     }
@@ -61,6 +63,10 @@ enum_builder! {
         EndOfEarlyData => 0x05,
         HelloRetryRequest => 0x06,
         EncryptedExtensions => 0x08,
+        /// RFC 9147 §9 (DTLS 1.3).
+        RequestConnectionId => 0x09,
+        /// RFC 9147 §9 (DTLS 1.3).
+        NewConnectionId => 0x0a,
         Certificate => 0x0b,
         ServerKeyExchange => 0x0c,
         CertificateRequest => 0x0d,
@@ -85,6 +91,12 @@ enum_builder! {
         Handshake => 0x16,
         ApplicationData => 0x17,
         Heartbeat => 0x18,
+        /// RFC 9146: a DTLS 1.2 record that carries a connection ID.
+        Tls12Cid => 0x19,
+        /// RFC 9147 §7: the DTLS 1.3 ACK message.
+        Ack => 0x1a,
+        /// RFC 9853: the DTLS return routability check.
+        ReturnRoutabilityCheck => 0x1b,
     }
 }
 
@@ -273,7 +285,10 @@ mod tests {
             AlertDescription::EncryptedClientHelloRequired,
         );
         test_enum8::<HandshakeType>(HandshakeType::HelloRequest, HandshakeType::MessageHash);
-        test_enum8::<ContentType>(ContentType::ChangeCipherSpec, ContentType::Heartbeat);
+        test_enum8::<ContentType>(
+            ContentType::ChangeCipherSpec,
+            ContentType::ReturnRoutabilityCheck,
+        );
         test_enum16::<ProtocolVersion>(ProtocolVersion::SSLv2, ProtocolVersion::TLSv1_3);
         test_enum16::<SignatureScheme>(SignatureScheme::RSA_PKCS1_SHA1, SignatureScheme::ML_DSA_87);
         test_enum8::<SignatureAlgorithm>(SignatureAlgorithm::Anonymous, SignatureAlgorithm::ED448);

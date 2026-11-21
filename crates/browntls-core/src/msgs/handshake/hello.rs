@@ -232,10 +232,18 @@ impl ClientExtensions {
     }
 }
 
-impl Codec<'_> for ClientExtensions {
-    fn encode(&self, bytes: &mut Vec<u8>) {
+impl ClientExtensions {
+    /// Encodes the extension block, the DTLS 1.3 way when `dtls`: the
+    /// `cookie` extension first, so that a stateless server finds it in
+    /// the first fragment (RFC 9147 §5.1), and DTLS versions in
+    /// `supported_versions` (RFC 9147 §5.3).
+    fn encode_with(&self, bytes: &mut Vec<u8>, dtls: bool) {
         let list = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         let out = &mut *list.buf;
+        let cookie_first = dtls && self.cookie.is_some();
+        if cookie_first && let Some(cookie) = &self.cookie {
+            encode_extension(ExtensionType::Cookie, out, |b| cookie.encode(b));
+        }
         if let Some(grease) = self.grease_first {
             encode_extension(ExtensionType::Unknown(grease), out, |_| {});
         }
@@ -301,7 +309,13 @@ impl Codec<'_> for ClientExtensions {
         }
         if let Some(versions) = &self.supported_versions {
             encode_extension(ExtensionType::SupportedVersions, out, |b| {
-                encode_vec_u8(b, versions);
+                if dtls {
+                    let wire: Vec<ProtocolVersion> =
+                        versions.iter().copied().map(dtls::swap_version).collect();
+                    encode_vec_u8(b, &wire);
+                } else {
+                    encode_vec_u8(b, versions);
+                }
             });
         }
         if let Some(shares) = &self.key_shares {
@@ -318,7 +332,9 @@ impl Codec<'_> for ClientExtensions {
         if self.post_handshake_auth.is_some() {
             encode_extension(ExtensionType::PostHandshakeAuth, out, |_| {});
         }
-        if let Some(cookie) = &self.cookie {
+        if let Some(cookie) = &self.cookie
+            && !cookie_first
+        {
             encode_extension(ExtensionType::Cookie, out, |b| cookie.encode(b));
         }
         if let Some(ri) = &self.renegotiation_info {
@@ -395,6 +411,12 @@ impl Codec<'_> for ClientExtensions {
         if let Some(psk) = &self.preshared_key {
             encode_extension(ExtensionType::PreSharedKey, out, |b| psk.encode(b));
         }
+    }
+}
+
+impl Codec<'_> for ClientExtensions {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.encode_with(bytes, false);
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
@@ -540,6 +562,10 @@ pub struct ClientHelloPayload {
     pub(crate) client_version: ProtocolVersion,
     pub(crate) random: Random,
     pub(crate) session_id: SessionId,
+    /// DTLS 1.3 only (RFC 9147 §5.3): `legacy_cookie`, which follows
+    /// `legacy_session_id`. `Some` selects the DTLS encoding, whose
+    /// versions (held here in their TLS form) are DTLS ones on the wire.
+    pub(crate) legacy_cookie: Option<PayloadU8>,
     pub(crate) cipher_suites: Vec<CipherSuite>,
     pub(crate) compression_methods: Vec<Compression>,
     pub(crate) extensions: ClientExtensions,
@@ -547,39 +573,59 @@ pub struct ClientHelloPayload {
 
 impl Codec<'_> for ClientHelloPayload {
     fn encode(&self, bytes: &mut Vec<u8>) {
-        self.client_version.encode(bytes);
+        let dtls = self.legacy_cookie.is_some();
+        dtls::on_wire(self.client_version, dtls).encode(bytes);
         self.random.encode(bytes);
         self.session_id.encode(bytes);
+        if let Some(cookie) = &self.legacy_cookie {
+            cookie.encode(bytes);
+        }
         encode_vec_u16(bytes, &self.cipher_suites);
         encode_vec_u8(bytes, &self.compression_methods);
-        self.extensions.encode(bytes);
+        self.extensions.encode_with(bytes, dtls);
     }
 
     fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
-        let client_version = ProtocolVersion::read(r)?;
+        Self::read_with(r, false)
+    }
+}
+
+impl ClientHelloPayload {
+    /// Reads a ClientHello, in the DTLS 1.3 encoding when `dtls` (see
+    /// `legacy_cookie`).
+    fn read_with(r: &mut Reader<'_>, dtls: bool) -> Result<Self, InvalidMessage> {
+        let client_version = dtls::on_wire(ProtocolVersion::read(r)?, dtls);
         let random = Random::read(r)?;
         let session_id = SessionId::read(r)?;
+        let legacy_cookie = match dtls {
+            true => Some(PayloadU8::read(r)?),
+            false => None,
+        };
         let cipher_suites = read_nonempty_vec_u16(r, "CipherSuites")?;
         let compression_methods = read_nonempty_vec_u8(r, "CompressionMethods")?;
         // RFC 5246 §7.4.1.2: the extensions block is optional for TLS 1.2
         // clients. Accept its absence; every TLS 1.3 client sends it.
-        let extensions = if r.any_left() {
+        let mut extensions = if r.any_left() {
             ClientExtensions::read(r)?
         } else {
             ClientExtensions::default()
         };
+        if dtls && let Some(versions) = &mut extensions.supported_versions {
+            for version in versions.iter_mut() {
+                *version = dtls::swap_version(*version);
+            }
+        }
         Ok(Self {
             client_version,
             random,
             session_id,
+            legacy_cookie,
             cipher_suites,
             compression_methods,
             extensions,
         })
     }
-}
 
-impl ClientHelloPayload {
     /// The ALPN protocols offered, if any.
     pub(crate) fn alpn_protocols(&self) -> Option<&[ProtocolName]> {
         self.extensions.protocols.as_deref()
@@ -652,6 +698,9 @@ pub(crate) struct ServerHelloPayload {
     pub(crate) cipher_suite: CipherSuite,
     pub(crate) compression_method: Compression,
     pub(crate) extensions: ServerExtensions,
+    /// DTLS 1.3 (RFC 9147 §5.4): the versions, held here in their TLS
+    /// form, are DTLS ones on the wire.
+    pub(crate) dtls: bool,
 }
 
 /// The result of parsing a ServerHello-shaped message.
@@ -665,12 +714,18 @@ pub(crate) enum ServerHelloOrRetry {
 
 impl ServerHelloPayload {
     pub(crate) fn encode(&self, bytes: &mut Vec<u8>) {
-        self.legacy_version.encode(bytes);
+        dtls::on_wire(self.legacy_version, self.dtls).encode(bytes);
         self.random.encode(bytes);
         self.session_id.encode(bytes);
         self.cipher_suite.encode(bytes);
         self.compression_method.encode(bytes);
-        self.extensions.encode(bytes);
+        if self.dtls {
+            let mut extensions = self.extensions.clone();
+            extensions.supported_versions = extensions.supported_versions.map(dtls::swap_version);
+            extensions.encode(bytes);
+        } else {
+            self.extensions.encode(bytes);
+        }
     }
 
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<ServerHelloOrRetry, InvalidMessage> {
@@ -687,6 +742,7 @@ impl ServerHelloPayload {
                 cipher_suite,
                 compression_method,
                 extensions,
+                dtls: false,
             }));
         }
         // RFC 5246 §7.4.1.3: the extensions block may be absent.
@@ -702,6 +758,7 @@ impl ServerHelloPayload {
             cipher_suite,
             compression_method,
             extensions,
+            dtls: false,
         }))
     }
 
@@ -788,16 +845,24 @@ pub(crate) struct HelloRetryRequest {
     pub(crate) cipher_suite: CipherSuite,
     pub(crate) compression_method: Compression,
     pub(crate) extensions: HelloRetryRequestExtensions,
+    /// DTLS 1.3, as for [`ServerHelloPayload::dtls`].
+    pub(crate) dtls: bool,
 }
 
 impl HelloRetryRequest {
     pub(crate) fn encode(&self, bytes: &mut Vec<u8>) {
-        self.legacy_version.encode(bytes);
+        dtls::on_wire(self.legacy_version, self.dtls).encode(bytes);
         HELLO_RETRY_REQUEST_RANDOM.encode(bytes);
         self.session_id.encode(bytes);
         self.cipher_suite.encode(bytes);
         self.compression_method.encode(bytes);
-        self.extensions.encode(bytes);
+        if self.dtls {
+            let mut extensions = self.extensions.clone();
+            extensions.supported_versions = extensions.supported_versions.map(dtls::swap_version);
+            extensions.encode(bytes);
+        } else {
+            self.extensions.encode(bytes);
+        }
     }
 }
 
@@ -885,6 +950,8 @@ impl<'a> Codec<'a> for HandshakeMessagePayload<'a> {
         Self::read_version(r, ProtocolVersion::TLSv1_2)
     }
 }
+
+mod dtls;
 
 #[cfg(test)]
 mod tests;

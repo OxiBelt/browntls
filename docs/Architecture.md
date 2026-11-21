@@ -1,8 +1,9 @@
 # Architecture
 
-This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library
-written from scratch in Rust, targeting the feature level of rustls 0.23, with
-its own cryptographic primitives behind a pluggable provider interface.
+This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library,
+with DTLS 1.3 over datagrams, written from scratch in Rust, targeting the
+feature level of rustls 0.23, with its own cryptographic primitives behind a
+pluggable provider interface.
 Implementation status is tracked in [Status](#status); the
 [contributor guide](../CONTRIBUTING.md) and [security policy](../SECURITY.md)
 govern how changes land.
@@ -940,9 +941,10 @@ ECH ignores the extension and keeps the retry stateless. A cookie can be
 replayed during
 its lifetime by anyone who saw it; that gives no more than replaying the
 second ClientHello would, since the handshake still needs the client's key
-share and Finished. Cookies are not bound to the client's address: that
-is fine over TCP, where the handshake itself proves the address, but a
-datagram transport would need that binding to stop amplification.
+share and Finished. TLS cookies are not bound to the client's address:
+that is fine over TCP, where the handshake itself proves the address. DTLS
+1.3 cookies are, and carry a label of their own, so that neither kind opens
+as the other (see [DTLS 1.3](#dtls-13-rfc-9147)).
 
 ### Exporters
 
@@ -2500,6 +2502,88 @@ supported.
   the §5.8 tag with a provider's TLS_AES_128_GCM_SHA256 suite (any other
   suite is refused).
 
+### DTLS 1.3 (RFC 9147)
+
+`browntls_core::dtls` runs the TLS 1.3 handshake over datagrams. It is a
+low-level, sans-I/O API: `dtls::ClientConnection` and
+`dtls::ServerConnection` take each received datagram with `read_datagram`
+(which decrypts application data in place and returns its ranges), produce
+whole datagrams with `write_datagram`, and leave the socket and the clock to
+the caller, who passes a monotonic time to every call and fires
+`handle_timeout` once `next_timeout` has passed. Only DTLS 1.3 is
+implemented; there is no DTLS 1.2.
+
+- Handshake: the TLS 1.3 state machines with the DTLS hello encoding
+  (`legacy_cookie`, DTLS version numbers, an empty session ID that is never
+  echoed), no ChangeCipherSpec and no EndOfEarlyData. A configuration must
+  allow TLS 1.3 and hold a suite with DTLS record protection: every TLS 1.3
+  suite but TLS_AES_128_CCM_8_SHA256 (§4.5.3), which is never offered.
+  Tickets are kept apart from TLS ones, so a DTLS connection never resumes
+  a TLS session or the reverse; resumption with a ticket works as in TLS.
+- Records: unified headers with encrypted record numbers (§4.2.3), a
+  replay window of 128 records per epoch, and at most four keyed receiving
+  epochs kept for reordered records. Records that do not authenticate, are
+  replayed or cannot be delimited are dropped silently (§4.5.2).
+  Unprotected input, which anyone who knows an address can forge, counts
+  for little: unprotected ACKs are ignored; unprotected alerts end the
+  handshake only before the peer has authenticated, and only fatal error
+  alerts (not close_notify or user_canceled); unprotected handshake
+  fragments are buffered only as the peer's hello at the next expected
+  message sequence, while no handshake read keys are installed, and
+  otherwise only signal a retransmission, which they earn at most once per
+  timeout.
+  When failed decryptions in an epoch exceed the suite's integrity limit
+  the connection fails (§4.5.3), and the confidentiality limit triggers a
+  KeyUpdate. Records with a connection ID are refused, since none is
+  negotiated.
+- Handshake messages are fragmented to the datagram size (`set_mtu`: 256 to
+  65507 bytes, 1200 by default), reassembled out of order within bounded
+  windows, acknowledged per §7 and retransmitted on a timer that starts at
+  one second, doubles up to 60 seconds and gives up after nine
+  retransmissions. The keys of a KeyUpdate are used only once it is
+  acknowledged (§8), and no second KeyUpdate is sent meanwhile. Nothing
+  sent after a close_notify is read (RFC 9846 §6.1). A close_notify of
+  ours is sent after everything queued before it, and nothing is
+  retransmitted after it, except a client's last flight: it is
+  retransmitted with close_notify after it until acknowledged, or
+  quietly given up after nine retransmissions, so that the server
+  completes its handshake. Once the peer's close_notify arrives nothing
+  more is retransmitted, but a client whose last flight is not
+  completely sent yet sends it once; an ACK still owed and our own
+  close_notify are sent, and application data can still be, under the
+  current keys. Closing before our Finished is queued cancels the
+  handshake: the peer, which ignores an unprotected close_notify, gives
+  up on its own timer. A server that closes before its handshake
+  completes may never complete it, with no timer left, so nothing should
+  wait for the handshake after `send_close_notify`.
+- Application data is never fragmented: `send` seals one record into one
+  datagram and refuses data longer than `max_application_data`.
+- Cookies: `ServerConnection::new` answers a ClientHello without a valid
+  cookie with a HelloRetryRequest whose cookie is bound to the
+  caller-provided address of the client (opaque bytes, §5.1), so that a
+  spoofed address costs the server one small datagram and one connection
+  object; `dtls::Acceptor` (below) keeps no state at all. It needs
+  `ServerConfig::hello_retry_cookies`; the exchange is on by default and
+  `new_without_cookie_exchange` turns it off for paths whose address is
+  already verified. `dtls::Acceptor` answers first ClientHellos without
+  keeping any state and returns a connection only for a ClientHello that
+  comes back with a valid cookie for its address. A second ClientHello
+  that spans several datagrams must carry the cookie in its first
+  fragment (browntls clients send it first), which is checked before
+  anything is kept.
+- Not supported over DTLS: 0-RTT (a server rejects an offer), Encrypted
+  Client Hello (configurations with it are refused), post-handshake client
+  authentication (not offered; a request is refused), connection IDs
+  (RFC 9146) and the return routability check (RFC 9853). There is no
+  blocking `std` or Tokio API for DTLS yet.
+
+Evidence: in-memory handshakes between browntls endpoints over a simulated
+network with loss, duplication, reordering, corruption and small datagrams
+on both providers (`crates/browntls-core/tests/cases/dtls.rs`), unit tests
+of the record, reassembly, replay and hello codecs, and the `tls_dtls` fuzz
+target ([`fuzz/`](../fuzz/README.md)). No other DTLS implementation has been
+tested against.
+
 ### Cargo features (`browntls-core`)
 
 | Feature | Default | Effect |
@@ -3044,7 +3128,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128 with and without vector crypto, and VLEN 256 and 1024 with vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), DTLS 1.3 handshakes between browntls endpoints over a simulated lossy, reordering and corrupting network (`crates/browntls-core/tests/cases/dtls.rs`; no DTLS interoperability test yet), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
 | Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed; `browntls` defines no function of its own) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
 | Facade | `browntls` adds paths and features, no behaviour: a handshake through each of its three paths (the root, `browntls::tokio`, and `browntls::ktls` against the running kernel), probes that the forwarded features reach the crates behind it, the feature sets an application picks in their own CI job, and a manifest check of the feature tables (`crates/browntls/tests/`, `tests/scripts/check_facade_features.py`; see [Facade crate](#facade-tests)) |

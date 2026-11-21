@@ -298,3 +298,20 @@ certificates and the PSK are discarded with that volume. The peer image is
 kept for reuse; select an unused `--peer-image` tag if you need to avoid
 replacing an existing local image. These opt-in cases are not added to the
 architecture matrix or its CI job.
+
+## RFC 9525 service identity references
+
+Build the browntls image and pinned OpenSSL 3.5 peer, then qualify DNS, IP,
+URI, and SRV-ID SAN matches plus a CA-trusted DNS mismatch:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:identity-amd64
+python3 -B tests/e2e/service_identity.py --image browntls-e2e:identity-amd64 --build-peer
+python3 -B -m unittest discover -s tests/e2e -p 'test_service_identity.py'
+```
+
+The browntls client uses buffered Tokio over TCP. Each positive case checks the
+reported service identity match and request/reply data. The negative case
+trusts the generated certificate and requires an unrelated DNS reference to
+fail authentication. Run-owned containers, network, and volume are cleaned
+up; the shared OpenSSL image is retained.

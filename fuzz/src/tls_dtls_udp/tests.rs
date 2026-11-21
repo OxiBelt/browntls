@@ -57,6 +57,7 @@ fn seeds_reach_every_operation() {
         "junk to a client",
         "live OCSP refused",
         "wait",
+        "migration",
     ] {
         assert!(reached.contains(what), "{what} not reached: {reached:?}");
     }

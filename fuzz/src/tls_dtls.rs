@@ -45,6 +45,7 @@ use browntls_core::{CipherSuite, Error, HandshakeKind, PeerMisbehaved, ProtocolV
 
 use crate::input::Input;
 
+mod migration;
 mod net;
 mod seeds;
 pub(crate) mod setup;
@@ -104,6 +105,7 @@ struct Session<'a> {
     resumption_data: Vec<u8>,
     /// Tickets the client holds.
     tickets: u32,
+    migration: bool,
     net: Net<'a>,
     pair: Option<Pair>,
 }
@@ -122,17 +124,19 @@ struct Session<'a> {
 /// 6. replay: a delivered datagram, its receiver and damage;
 /// 7. fresh: shaped datagrams for a new client, server or `Acceptor`;
 /// 8. misc: MTU, timers and oversized application data;
-/// 9. export: label, context and length, on both sides.
+/// 9. export: label, context and length, on both sides;
+/// 10. protected CID and path validation, immediately after an opt-in
+///     handshake.
 pub fn run(data: &[u8]) {
     crate::init();
     let mut input = Input::new(data);
     let mut session: Option<Session> = None;
     let mut handshakes = 0;
-    for _ in 0..MAX_OPS {
+    for index in 0..MAX_OPS {
         if input.is_empty() {
             break;
         }
-        let op = input.choose(10);
+        let op = input.choose(11);
         if op <= 1 {
             if handshakes == MAX_HANDSHAKES {
                 return;
@@ -151,7 +155,12 @@ pub fn run(data: &[u8]) {
                     5 => garbage(pair, &mut s.net, &mut input),
                     6 => replay(pair, &mut s.net, &mut input),
                     8 => misc(pair, &mut s.net, &mut input),
-                    _ => export(pair, &mut input),
+                    9 => export(pair, &mut input),
+                    _ if index == 1 && s.migration => {
+                        s.net.script(&[], &[], &[]);
+                        migration::exercise(pair, &mut s.net);
+                    }
+                    _ => {}
                 },
                 _ => return,
             },
@@ -197,6 +206,7 @@ fn handshake<'a>(input: &mut Input<'a>) -> Option<Session<'a>> {
         mtu: (flags & 16 != 0).then(|| (mtu(client_mtu), mtu(server_mtu))),
         resumption_data,
         tickets: 0,
+        migration: flags & 32 != 0,
         net: Net::new(START),
         pair: None,
     };
@@ -216,7 +226,16 @@ fn connect<'a>(session: &mut Session<'a>, input: &mut Input<'a>) {
     let (Some(client_config), Some(server_config)) = (&configs.client, &configs.server) else {
         return;
     };
-    let client = dtls::ClientConnection::new(client_config.clone(), localhost());
+    let settings = || {
+        let settings = dtls::Settings::default();
+        if session.migration {
+            settings.with_return_routability_checks(dtls::ConnectionIdPolicy::new(8, true).unwrap())
+        } else {
+            settings
+        }
+    };
+    let client =
+        dtls::ClientConnection::new_with_settings(client_config.clone(), localhost(), settings());
     assert_eq!(
         client.is_ok(),
         configs.client_usable,
@@ -241,16 +260,20 @@ fn connect<'a>(session: &mut Session<'a>, input: &mut Input<'a>) {
     let mut server = match session.mode {
         Mode::Cookie | Mode::NoCookie => {
             let server = if session.mode == Mode::Cookie {
-                dtls::ServerConnection::new(server_config.clone(), PEER)
+                dtls::ServerConnection::new_with_settings(server_config.clone(), PEER, settings())
             } else {
-                dtls::ServerConnection::new_without_cookie_exchange(server_config.clone(), PEER)
+                dtls::ServerConnection::new_without_cookie_exchange_with_settings(
+                    server_config.clone(),
+                    PEER,
+                    settings(),
+                )
             };
             assert_eq!(server.is_ok(), server_ok, "server: {:?}", server.err());
             let Ok(server) = server else { return };
             server
         }
         Mode::Acceptor | Mode::Stolen => {
-            let acceptor = dtls::Acceptor::new(server_config.clone());
+            let acceptor = dtls::Acceptor::new_with_settings(server_config.clone(), settings());
             assert_eq!(
                 acceptor.is_ok(),
                 server_ok,

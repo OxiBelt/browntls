@@ -130,6 +130,15 @@ milestones without depending on mutations. The shared seed smoke test also
 runs their truncations and mutations. Actual public-function coverage is
 established by the LLVM coverage command below, after execution.
 
+Migration seeds in `tls_dtls` run a CID update, lookup, and protected RRC
+challenge and response on the simulated network. `tls_dtls_udp` runs blocking
+loopback rebinding with both path-selection policies and empty or nonempty
+client receiving CIDs. Header bit 7 selects this bounded program.
+`tls_dtls_tokio` header bit 6 selects a separate listener/session rebinding
+program with the same directions; it checks the address-change notification
+and stable original peer address. These programs require replay and LLVM
+coverage measurement to establish which public function bodies were reached.
+
 Bit 5 of the second header byte selects the session program below. Inputs
 with that bit clear retain the existing event-server program and its four
 seeds. In session mode, even constructor selectors use `UdpListener::new`;

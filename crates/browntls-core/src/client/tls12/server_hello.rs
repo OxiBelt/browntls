@@ -25,6 +25,18 @@ impl CompleteServerHelloHandling {
     ) -> NextStateOrError {
         let _ = tls13_supported;
 
+        if let Some(dtls) = cx.common.dtls.as_deref()
+            && !dtls.cid.supports_v12_selection(
+                server_hello.extensions.connection_id.as_ref(),
+                suite.record,
+            )
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                Error::General("selected DTLS 1.2 cipher cannot use the requested CIDs".into()),
+            ));
+        }
+
         // RFC 5746 §3.4: on an initial handshake the server's
         // renegotiation_info is empty.
         if let Some(ri) = &server_hello.extensions.renegotiation_info
@@ -129,8 +141,10 @@ impl CompleteServerHelloHandling {
         // Certificate means a full handshake; NewSessionTicket or CCS
         // means an abbreviated handshake. A dual-version DTLS client
         // cannot invent a compatibility ID (RFC 9147 section 5.3).
+        // The returned session ID is irrelevant to this decision.
         if cx.common.is_dtls()
-            && server_hello.session_id.is_empty()
+            && self.config.resumption.tls12_resumption
+                == super::super::Tls12Resumption::SessionIdOrTickets
             && self
                 .resuming_session
                 .as_ref()

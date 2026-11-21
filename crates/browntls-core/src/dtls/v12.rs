@@ -88,6 +88,12 @@ impl Dtls {
         dec: Box<dyn MessageDecrypter>,
         limit: u64,
     ) {
+        if (!self.cid.outbound().is_empty() && !enc.supports_dtls12_cid())
+            || (self.cid.receive_len() != 0 && !dec.supports_dtls12_cid())
+        {
+            self.broken = true;
+            return;
+        }
         self.v12.enc = Some(enc);
         self.v12.dec = Some(dec);
         self.v12.limit = limit.min(wire::MAX_SEQ);

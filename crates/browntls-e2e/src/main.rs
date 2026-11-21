@@ -29,8 +29,11 @@
 //! `dtls-client` and `dtls-server` use UDP with the same credentials and
 //! `--tls` options: `1.2` selects DTLS 1.2, `1.3` selects DTLS 1.3, and
 //! repeating both permits either. With no `--tls`, DTLS remains 1.3 only.
-//! Each DTLS invocation performs one full certificate handshake and a
+//! By default DTLS performs one full certificate handshake and a
 //! request/reversed reply exchange, then checks both close alerts.
+//! `--dtls-cid` opts into nonempty bidirectional connection IDs.
+//! `--dtls12-resumption session-id|ticket` with `--tls 1.2` performs a full
+//! then a resumed exchange; use `--connections 2` or `--accept 2`.
 //! `--dtls-rebind basic|enhanced` selects the Kubernetes rebind scenario,
 //! with two exchanges on one CID/RRC association.
 //!
@@ -167,6 +170,7 @@ struct Options {
     expect_reply: Option<String>,
     accept: usize,
     connections: usize,
+    dtls12_resumption: Option<String>,
     wait: Duration,
     versions: Vec<&'static SupportedProtocolVersion>,
     suites: Vec<SupportedCipherSuite>,
@@ -196,6 +200,7 @@ struct Options {
     backends: Vec<(String, String)>,
     /// Client and server I/O through `browntls-tokio` (`--async`).
     async_io: bool,
+    dtls_cid: bool,
 }
 
 impl Options {
@@ -221,6 +226,7 @@ impl Options {
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
                 "--async" => Some(&mut o.async_io),
+                "--dtls-cid" => Some(&mut o.dtls_cid),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -249,6 +255,7 @@ impl Options {
                 "--expect-reply" => o.expect_reply = Some(value),
                 "--accept" => o.accept = parse_count(flag, &value)?,
                 "--connections" => o.connections = parse_count(flag, &value)?,
+                "--dtls12-resumption" => o.dtls12_resumption = Some(value),
                 "--wait" => o.wait = Duration::from_secs(parse_count(flag, &value)? as u64),
                 "--tls" => o.versions.push(match value.as_str() {
                     "1.2" => &version::TLS12,

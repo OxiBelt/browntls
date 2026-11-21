@@ -352,3 +352,123 @@ fn dtls12_cid_both_directions_and_empty_cid() {
         );
     }
 }
+
+#[cfg(feature = "tls12")]
+#[test]
+fn dtls12_cid_is_negotiated_only_for_supported_cipher_directions() {
+    use browntls_core::crypto::cipher::{
+        AeadKey, KeyBlockShape, MessageDecrypter, MessageEncrypter, Tls12AeadAlgorithm,
+        Tls12RecordProtection, UnsupportedOperationError,
+    };
+    use browntls_core::{
+        CipherSuite, CipherSuiteCommon, ConnectionTrafficSecrets, SupportedCipherSuite,
+        Tls12CipherSuite,
+    };
+
+    struct CustomAead {
+        base: &'static dyn Tls12AeadAlgorithm,
+        capabilities: (bool, bool),
+    }
+
+    impl Tls12AeadAlgorithm for CustomAead {
+        fn dtls12_cid_support(&self) -> (bool, bool) {
+            self.capabilities
+        }
+
+        fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn MessageEncrypter> {
+            self.base.encrypter(key, iv, extra)
+        }
+
+        fn decrypter(&self, key: AeadKey, iv: &[u8]) -> Box<dyn MessageDecrypter> {
+            self.base.decrypter(key, iv)
+        }
+
+        fn key_block_shape(&self) -> KeyBlockShape {
+            self.base.key_block_shape()
+        }
+
+        fn extract_keys(
+            &self,
+            key: AeadKey,
+            iv: &[u8],
+            explicit: &[u8],
+        ) -> Result<ConnectionTrafficSecrets, UnsupportedOperationError> {
+            self.base.extract_keys(key, iv, explicit)
+        }
+    }
+
+    let base = provider()
+        .cipher_suites
+        .iter()
+        .find_map(|candidate| match candidate {
+            SupportedCipherSuite::Tls12(suite)
+                if suite.common.suite == CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 =>
+            {
+                Some(*suite)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let Tls12RecordProtection::Aead(aead) = base.record else {
+        panic!("expected AEAD");
+    };
+    for (caps, client_len, server_len, negotiated) in [
+        ((false, false), 8, 8, false),
+        ((true, false), 8, 8, false),
+        ((false, true), 8, 8, false),
+        ((true, false), 8, 0, true),
+        ((false, true), 0, 8, true),
+    ] {
+        let custom = Box::leak(Box::new(CustomAead {
+            base: aead,
+            capabilities: caps,
+        }));
+        let suite = Box::leak(Box::new(Tls12CipherSuite {
+            common: CipherSuiteCommon {
+                suite: base.common.suite,
+                hash_provider: base.common.hash_provider,
+                confidentiality_limit: base.common.confidentiality_limit,
+            },
+            prf_provider: base.prf_provider,
+            kx: base.kx,
+            sign: base.sign,
+            record: Tls12RecordProtection::Aead(custom),
+        }));
+        let mut provider = (*provider()).clone();
+        provider.cipher_suites = vec![SupportedCipherSuite::Tls12(suite)];
+        let chain = server_chain(KeyType::EcdsaP256);
+        let mut server = ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&browntls_core::version::TLS12])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(chain.cert_chain(), chain.private_key())
+            .unwrap();
+        server.hello_retry_cookies = Some(prov::Ticketer::new().unwrap());
+        let settings = |len| cid_settings(len, true).with_versions(dtls::Versions::V1_2);
+        let mut pair = Pair {
+            client: dtls::ClientConnection::new_with_settings(
+                Arc::new(client_config(&chain)),
+                server_name(),
+                settings(client_len),
+            )
+            .unwrap(),
+            server: dtls::ServerConnection::new_with_settings(
+                Arc::new(server),
+                PEER,
+                settings(server_len),
+            )
+            .unwrap(),
+        };
+        let mut sim = Sim::perfect();
+        pair.handshake(&mut sim).unwrap();
+        assert_eq!(
+            pair.server.local_connection_ids().count(),
+            usize::from(negotiated && server_len != 0)
+        );
+        assert_eq!(
+            pair.client.local_connection_ids().count(),
+            usize::from(negotiated && client_len != 0)
+        );
+        pair.exchange(&mut sim, "provider capabilities");
+    }
+}

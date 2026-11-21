@@ -175,6 +175,24 @@ impl Cids {
         self.policy.map(|_| PayloadU8::new(self.local[0].clone()))
     }
 
+    #[cfg(feature = "tls12")]
+    pub(crate) fn supports_v12_selection(
+        &self,
+        peer: Option<&PayloadU8>,
+        cipher: crate::crypto::cipher::Tls12RecordProtection,
+    ) -> bool {
+        use crate::crypto::cipher::Tls12RecordProtection;
+
+        let Some((policy, peer)) = self.policy.zip(peer) else {
+            return true;
+        };
+        let (send, receive) = match cipher {
+            Tls12RecordProtection::Aead(algorithm) => algorithm.dtls12_cid_support(),
+            Tls12RecordProtection::BlockCipher(_) => (false, false),
+        };
+        (peer.0.is_empty() || send) && (policy.receive_len == 0 || receive)
+    }
+
     pub(crate) fn select(&mut self, peer: Option<&PayloadU8>, server: bool) -> Result<(), Error> {
         let Some(peer) = peer else { return Ok(()) };
         let permitted = self

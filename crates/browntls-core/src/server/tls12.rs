@@ -108,8 +108,10 @@ impl CompleteClientHelloHandling {
             false,
         )?;
         if let Some(dtls) = cx.common.dtls.as_deref_mut() {
-            dtls.cid
-                .select(client_hello.extensions.connection_id.as_ref(), true)?;
+            let peer = client_hello.extensions.connection_id.as_ref();
+            if dtls.cid.supports_v12_selection(peer, self.suite.record) {
+                dtls.cid.select(peer, true)?;
+            }
             dtls.select_rrc(client_hello.extensions.return_routability_check.is_some());
         }
         let client_supports_secure_renegotiation = client_hello

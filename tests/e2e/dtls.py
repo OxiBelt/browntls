@@ -21,6 +21,7 @@ SUITES = {
     "wolfssl": Suite("dtls13", "wolfSSL DTLS 1.3", "wolfssl", "wolfssl", frozenset()),
     "openssl": Suite("dtls12", "OpenSSL DTLS 1.2", "openssl", "openssl-dtls", frozenset()),
 }
+CID_SUITE = Suite("dtls-cid", "wolfSSL DTLS CID", "wolfssl-cid", "wolfssl", frozenset())
 TLS12_SUITE = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
 PORT = "4433"
 SERVER_NAME = "dtls-server.test"
@@ -32,17 +33,47 @@ REPLY = REQUEST[::-1]
 def version_sets(suite: Suite) -> tuple[tuple[str, ...], ...]:
     # OpenSSL supports DTLS 1.2 only; the second case explicitly offers both
     # versions on browntls and must still select 1.2 in each browntls role.
-    return (("1.2",), ("1.2", "1.3")) if suite.implementation == "openssl" else (("1.3",),)
+    if suite.implementation == "openssl":
+        return (("1.2",), ("1.2", "1.3"))
+    return (("1.2",), ("1.3",)) if suite.implementation == "wolfssl-cid" else (("1.3",),)
 
 
-def exchange(run: Run, browntls_role: str, versions: tuple[str, ...]) -> bool:
+def resumption_records(stdout: str, role: str, mechanism: str, *, oracle: bool) -> bool:
+    records = [record for record in events(stdout) if record.get("event") == "connection"]
+    sent, received = (REPLY, REQUEST) if role == "server" else (REQUEST, REPLY)
+    return len(records) == 2 and all(
+        record.get("role") == role
+        and record.get("index") == index
+        and record.get("mechanism") == mechanism
+        and record.get("version") == "DTLSv1_2"
+        and record.get("suite") == TLS12_SUITE
+        and record.get("handshake") == ("Full" if index == 0 else "Resumed")
+        and record.get("peer_certificates", 0) > 0
+        and record.get("sent") == sent
+        and record.get("received") == received
+        and record.get("closed") is True
+        and (not oracle or record.get("ems") is True)
+        for index, record in enumerate(records)
+    )
+
+
+def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
+             mechanism: str | None = None) -> bool:
+    if mechanism is not None and (
+        run.suite.implementation != "openssl" or versions != ("1.2",)
+        or mechanism not in ("session-id", "ticket")
+    ):
+        raise ValueError("resumption requires OpenSSL, DTLS 1.2 and session-id|ticket")
     browntls_server = browntls_role == "server"
     server_image = run.image if browntls_server else run.peer
     client_image = run.peer if browntls_server else run.image
     openssl = run.suite.implementation == "openssl"
+    cid = run.suite.implementation == "wolfssl-cid"
     peer_command = ["openssl-dtls" if openssl else "wolfssl-dtls"]
     browntls_args = [arg for version in versions for arg in ("--tls", version)]
     browntls_args += ["--group", "secp256r1"]
+    if cid:
+        browntls_args += ["--dtls-cid"]
     if openssl:
         browntls_args += ["--suite", TLS12_SUITE]
         if "1.3" in versions:
@@ -51,15 +82,24 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...]) -> bool:
     server_command = (
         ["dtls-server", "--listen", f"0.0.0.0:{PORT}", "--cert", f"{PKI}/server.pem",
          "--key", f"{PKI}/server.key", "--client-ca", f"{PKI}/ca.pem", *browntls_args]
-        if browntls_server else [*peer_command, "server", SERVER_NAME, PORT]
+        if browntls_server else [*peer_command, "server", SERVER_NAME, PORT,
+                                 *(["--cid", versions[0]] if cid else [])]
     )
     client_command = (
-        [*peer_command, "client", SERVER_NAME, PORT] if browntls_server else
+        [*peer_command, "client", SERVER_NAME, PORT, *(["--cid", versions[0]] if cid else [])]
+        if browntls_server else
         ["dtls-client", "--connect", f"{SERVER_NAME}:{PORT}", "--server-name", SERVER_NAME,
          "--ca", f"{PKI}/ca.pem", "--cert", f"{PKI}/client.pem", "--key", f"{PKI}/client.key",
          *browntls_args]
     )
-    print(f"{run.suite.description}, browntls {browntls_role} permitting {versions}", flush=True)
+    if mechanism:
+        brown_command, oracle_command = ((server_command, client_command) if browntls_server
+                                         else (client_command, server_command))
+        brown_command += ["--dtls12-resumption", mechanism,
+                          "--accept" if browntls_server else "--connections", "2"]
+        oracle_command.append(mechanism)
+    print(f"{run.suite.description}, browntls {browntls_role} permitting {versions}"
+          f"{', resumption ' + mechanism if mechanism else ''}", flush=True)
     server = run.start_server(server_image, server_command, {}, alias=SERVER_NAME)
     if not run.wait_for_log(server, "listening", 10):
         server = run.finish_server(server, 1)
@@ -71,16 +111,17 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...]) -> bool:
     brown, peer = (server, client) if browntls_server else (client, server)
     records = [record for record in events(brown.stdout) if record.get("event") == "connection"]
     sent, received = (REPLY, REQUEST) if browntls_server else (REQUEST, REPLY)
+    marker = (f"verified DTLSv1.{versions[0][-1]}, bidirectional CID, mTLS, "
+              "full handshake, payloads and close_notify") if cid else (
+        "verified DTLSv1.2, ECDHE-ECDSA-AES128-GCM-SHA256, EMS, mTLS, "
+        "full handshake, payloads and close_notify" if openssl else
+        "verified DTLSv1.3, payloads and close_notify")
     passed = (
         brown.exit_code == peer.exit_code == 0
-        and (
-            "verified DTLSv1.2, ECDHE-ECDSA-AES128-GCM-SHA256, EMS, mTLS, "
-            "full handshake, payloads and close_notify"
-            if openssl else "verified DTLSv1.3, payloads and close_notify"
-        ) in peer.stdout.splitlines()
+        and marker in peer.stdout.splitlines()
         and len(records) == 1
         and records[0].get("role") == browntls_role
-        and records[0].get("version") == ("DTLSv1_2" if openssl else "DTLSv1_3")
+        and records[0].get("version") == ("DTLSv1_2" if openssl or (cid and versions == ("1.2",)) else "DTLSv1_3")
         and (not openssl or records[0].get("suite") == TLS12_SUITE)
         and records[0].get("handshake") in ("Full", "FullWithHelloRetryRequest")
         and records[0].get("peer_certificates", 0) > 0
@@ -88,6 +129,13 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...]) -> bool:
         and records[0].get("received") == received
         and records[0].get("closed") is True
     )
+    if mechanism:
+        passed = (
+            brown.exit_code == peer.exit_code == 0
+            and resumption_records(brown.stdout, browntls_role, mechanism, oracle=False)
+            and resumption_records(peer.stdout, "client" if browntls_server else "server",
+                                   mechanism, oracle=True)
+        )
     for role, container in (("server", server), ("client", client)):
         if passed:
             print(f"{role}: {summarize(container, role)}", flush=True)
@@ -101,11 +149,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", required=True, choices=sorted(ARCHES))
     parser.add_argument("--image", help="browntls E2E image for the selected architecture")
-    parser.add_argument("--suite", choices=["all", *SUITES], default="all")
+    parser.add_argument("--suite", choices=["all", *SUITES, "wolfssl-cid"], default="all")
+    parser.add_argument("--resumption", action="store_true",
+                        help="only four DTLS 1.2 ID/ticket resumption cases (requires --suite openssl)")
     parser.add_argument("--skip-peer-build", action="store_true")
     args = parser.parse_args()
+    if args.resumption and args.suite != "openssl":
+        parser.error("--resumption requires --suite openssl")
     image = args.image or image_tag(args.arch)
-    suites = list(SUITES.values()) if args.suite == "all" else [SUITES[args.suite]]
+    suites = (list(SUITES.values()) if args.suite == "all" else
+              [CID_SUITE if args.suite == "wolfssl-cid" else SUITES[args.suite]])
     try:
         if not image_exists(image):
             raise DockerError(f"browntls image {image} is missing; build it with e2e.py")
@@ -118,9 +171,14 @@ def main() -> int:
                 raise DockerError(f"{suite.description} image {run.peer} is missing")
             with run:
                 run.generate_pki(SERVER_NAME)
-                results.extend(exchange(run, role, versions)
-                               for versions in version_sets(suite)
-                               for role in ("client", "server"))
+                if args.resumption:
+                    results.extend(exchange(run, role, ("1.2",), mechanism)
+                                   for mechanism in ("session-id", "ticket")
+                                   for role in ("client", "server"))
+                else:
+                    results.extend(exchange(run, role, versions)
+                                   for versions in version_sets(suite)
+                                   for role in ("client", "server"))
         return 0 if all(results) else 1
     except DockerError as error:
         print(f"error: {error}", file=sys.stderr)

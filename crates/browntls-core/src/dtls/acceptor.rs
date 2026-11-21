@@ -106,8 +106,14 @@ impl Acceptor {
             && header.fragment_length < header.length
             && header.length <= crate::msgs::handshake::MAX_HANDSHAKE_SIZE
             && fragment.len() >= 34
-            && self.versions.allows(crate::ProtocolVersion::TLSv1_2)
-            && !self.versions.allows(crate::ProtocolVersion::TLSv1_3)
+            && self
+                .settings
+                .versions
+                .allows(crate::ProtocolVersion::TLSv1_2)
+            && !self
+                .settings
+                .versions
+                .allows(crate::ProtocolVersion::TLSv1_3)
         {
             // The address-only cookie needs no transcript. Challenge a
             // fragmented first hello without keeping pre-cookie state.

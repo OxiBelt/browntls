@@ -315,7 +315,10 @@ pub(super) struct Lookup {
 }
 
 /// Ends the flight if the fetch panics: the lookups that wait for it are
-/// woken and find it failed.
+/// woken and find it failed. It is declared before the fetch's lock guard,
+/// so that it is dropped after it: the lock is let go of (and poisoned)
+/// before anyone is woken, and a lookup woken on another thread never finds
+/// it still held and waits on with nobody left to wake it.
 struct PanicGuard<'a> {
     lookup: &'a Lookup,
     armed: bool,
@@ -335,16 +338,18 @@ impl Lookup {
         // Registered before the fetch is looked at: whoever holds it wakes
         // every lookup registered by the time it lets go.
         lock(&self.flight.waiters).register(self.id, cx.waker());
+        // Before the lock guard: dropped after it (see `PanicGuard`).
+        let mut guard = PanicGuard {
+            lookup: self,
+            armed: false,
+        };
         let mut task = match self.flight.task.try_lock() {
             Ok(task) => task,
             Err(TryLockError::WouldBlock) => return Poll::Pending,
             // The fetch panicked in another lookup's poll.
             Err(TryLockError::Poisoned(_)) => return Poll::Ready(None),
         };
-        let mut guard = PanicGuard {
-            lookup: self,
-            armed: true,
-        };
+        guard.armed = true;
         if matches!(*task, Task::Idle(_))
             && let Task::Idle(starter) = mem::replace(&mut *task, Task::Abandoned)
         {
@@ -392,6 +397,19 @@ impl Drop for Lookup {
             last
         };
         if !last {
+            // This lookup may have held the fetch's lock when the fetch was
+            // woken, and a lookup polled then found the lock held and went
+            // back to waiting: one of the others drives the fetch now. Not
+            // needed once the fetch has ended (its end woke them), nor while
+            // another lookup holds the lock and drives it.
+            let running = self
+                .flight
+                .task
+                .try_lock()
+                .is_ok_and(|task| matches!(*task, Task::Idle(_) | Task::Running(_)));
+            if running {
+                self.flight.wake_all();
+            }
             return;
         }
         // Nothing waits for the fetch any more: cancel it. No other lookup
@@ -405,3 +423,6 @@ impl Drop for Lookup {
         drop(fetch);
     }
 }
+
+#[cfg(test)]
+mod tests;

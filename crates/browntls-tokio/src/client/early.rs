@@ -85,6 +85,14 @@ impl EarlyData {
         }
     }
 
+    /// The handshake failure, if the early phase ended in one.
+    pub(crate) fn check(&self) -> io::Result<()> {
+        match &self.failure {
+            Some(failure) => Err(failure.error()),
+            None => Ok(()),
+        }
+    }
+
     /// Records the waker of a read that waits for the early phase to end.
     pub(crate) fn park_reader(&mut self, cx: &Context<'_>) {
         match &mut self.read_waker {

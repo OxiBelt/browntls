@@ -133,8 +133,17 @@ async fn close_notify_ends_reads_and_forbids_later_writes() {
         let (mut client, mut server) = pair(&pki, version, c, s).await;
 
         client.write_all(b"last words").await.unwrap();
+        assert_eq!(client.write(&[]).await.unwrap(), 0);
         client.shutdown().await.unwrap();
         let err = client.write_all(b"more").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        // A write of nothing fails the same way, on either side.
+        let err = client.write(&[]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        let err = client.write_vectored(&[]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        let empty = [io::IoSlice::new(b""), io::IoSlice::new(b"")];
+        let err = client.write_vectored(&empty).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
 
         let mut got = Vec::new();
@@ -145,7 +154,15 @@ async fn close_notify_ends_reads_and_forbids_later_writes() {
 
         // The server's direction is still open until it closes too.
         server.write_all(b"reply").await.unwrap();
+        assert_eq!(server.write(&[]).await.unwrap(), 0);
         server.shutdown().await.unwrap();
+        let err = server.write(&[]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        let err = server.write_vectored(&[]).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        let empty = [io::IoSlice::new(b"")];
+        let err = server.write_vectored(&empty).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
         let mut got = Vec::new();
         client.read_to_end(&mut got).await.unwrap();
         assert_eq!(got, b"reply");

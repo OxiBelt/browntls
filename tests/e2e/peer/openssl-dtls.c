@@ -1,4 +1,4 @@
-/* One full mTLS connection on the isolated Docker test network, not a service.
+/* Bounded mTLS exchanges on the isolated Docker test network, not a service.
  * No browntls code is linked here. SSL owns the BIO; main owns its UDP fd.
  * The server selects one sender then connects the socket before BIO I/O.
  */
@@ -33,7 +33,7 @@ static void check(SSL *ssl, int result, const char *stage)
     fail(stage);
 }
 
-static int peer_socket(SSL *ssl, int server, const char *host, const char *port)
+static int peer_socket(int server, const char *host, const char *port)
 {
     struct addrinfo hints = {0};
     struct addrinfo *addresses;
@@ -68,14 +68,19 @@ static int peer_socket(SSL *ssl, int server, const char *host, const char *port)
             fail("unexpected UDP address length");
         memcpy(&peer, addresses->ai_addr, addresses->ai_addrlen);
         peer_len = addresses->ai_addrlen;
-        if (SSL_set_tlsext_host_name(ssl, host) != 1 ||
-            SSL_set1_host(ssl, host) != 1)
-            fail("set certificate DNS name and SNI");
-        SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
     }
     freeaddrinfo(addresses);
     if (connect(fd, (struct sockaddr *)&peer, peer_len) != 0)
         fail("cannot connect UDP socket");
+    return fd;
+}
+
+static void attach_socket(SSL *ssl, int fd)
+{
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0)
+        fail("get connected UDP peer");
     BIO *bio = BIO_new_dgram(fd, BIO_NOCLOSE);
     if (bio == NULL)
         fail("allocate datagram BIO");
@@ -85,7 +90,6 @@ static int peer_socket(SSL *ssl, int server, const char *host, const char *port)
     SSL_set_options(ssl, SSL_OP_NO_QUERY_MTU);
     if (SSL_set_mtu(ssl, 1200) <= 0)
         fail("set DTLS MTU");
-    return fd;
 }
 
 static void send_data(SSL *ssl, const char *data)
@@ -131,10 +135,15 @@ static void shutdown_peer(SSL *ssl, int server)
 
 int main(int argc, char **argv)
 {
-    if (argc != 4 || (strcmp(argv[1], "server") && strcmp(argv[1], "client")))
-        fail("usage: openssl-dtls server|client HOST PORT");
-    /* Bound the whole one-shot test in addition to individual socket I/O. */
-    alarm(60);
+    if ((argc != 4 && argc != 5) ||
+        (strcmp(argv[1], "server") && strcmp(argv[1], "client")))
+        fail("usage: openssl-dtls server|client HOST PORT [session-id|ticket]");
+    const char *mechanism = argc == 5 ? argv[4] : NULL;
+    if (mechanism && strcmp(mechanism, "session-id") && strcmp(mechanism, "ticket"))
+        fail("unknown resumption mechanism");
+    int tickets = mechanism && strcmp(mechanism, "ticket") == 0;
+    /* Bound both exchanges as well as individual socket I/O. */
+    alarm(mechanism ? 120 : 60);
     if (OPENSSL_version_major() != 3 || OPENSSL_version_minor() != 5)
         fail("this oracle requires OpenSSL 3.5.x");
     int server = strcmp(argv[1], "server") == 0;
@@ -147,8 +156,17 @@ int main(int argc, char **argv)
         SSL_CTX_set_cipher_list(ctx, "ECDHE-ECDSA-AES128-GCM-SHA256") != 1 ||
         SSL_CTX_set1_groups_list(ctx, "P-256") != 1)
         fail("configure DTLS 1.2 ECDSA/GCM with P-256");
-    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
-    SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
+    /* Ticket mode has no ID cache; ID mode cannot issue or offer tickets. */
+    SSL_CTX_set_session_cache_mode(ctx, mechanism && !tickets && server
+                                      ? SSL_SESS_CACHE_SERVER : SSL_SESS_CACHE_OFF);
+    if (!tickets)
+        SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
+    if (mechanism && server) {
+        static const unsigned char context[] = "browntls-dtls12-e2e";
+        if (SSL_CTX_set_session_id_context(ctx, context, sizeof(context) - 1) != 1)
+            fail("set mTLS session context");
+        SSL_CTX_sess_set_cache_size(ctx, 4);
+    }
     snprintf(file, sizeof(file), "%sca.pem", path);
     if (SSL_CTX_load_verify_locations(ctx, file, NULL) != 1)
         fail("load test CA");
@@ -162,27 +180,64 @@ int main(int argc, char **argv)
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER |
                        (server ? SSL_VERIFY_FAIL_IF_NO_PEER_CERT : 0), NULL);
 
-    SSL *ssl = SSL_new(ctx);
-    if (ssl == NULL)
-        fail("allocate DTLS connection");
-    int fd = peer_socket(ssl, server, argv[2], argv[3]);
-    check(ssl, server ? SSL_accept(ssl) : SSL_connect(ssl), "DTLS handshake");
-    if (SSL_version(ssl) != DTLS1_2_VERSION ||
-        SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(ssl)) != 0xc02b ||
-        SSL_get_extms_support(ssl) != 1 || SSL_session_reused(ssl) != 0 ||
-        SSL_get_verify_result(ssl) != X509_V_OK || SSL_get0_peer_certificate(ssl) == NULL)
-        fail("expected full verified mTLS DTLS 1.2 ECDSA/GCM handshake with EMS");
-    if (server) {
-        expect_data(ssl, request);
-        send_data(ssl, reply);
-    } else {
-        send_data(ssl, request);
-        expect_data(ssl, reply);
+    SSL_SESSION *saved = NULL;
+    int fd = -1;
+    /* Keep context (ID cache/ticket keys) and UDP tuple, but allocate fresh SSLs. */
+    for (int index = 0; index < (mechanism ? 2 : 1); ++index) {
+        SSL *ssl = SSL_new(ctx);
+        if (ssl == NULL)
+            fail("allocate DTLS connection");
+        if (!server) {
+            if (SSL_set_tlsext_host_name(ssl, argv[2]) != 1 ||
+                SSL_set1_host(ssl, argv[2]) != 1)
+                fail("set certificate DNS name and SNI");
+            SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            if (index == 1 && SSL_set_session(ssl, saved) != 1)
+                fail("offer saved DTLS session");
+        }
+        if (fd < 0)
+            fd = peer_socket(server, argv[2], argv[3]);
+        attach_socket(ssl, fd);
+        check(ssl, server ? SSL_accept(ssl) : SSL_connect(ssl), "DTLS handshake");
+        if (SSL_version(ssl) != DTLS1_2_VERSION ||
+            SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(ssl)) != 0xc02b ||
+            SSL_get_extms_support(ssl) != 1 || SSL_session_reused(ssl) != (index == 1) ||
+            SSL_get_verify_result(ssl) != X509_V_OK || SSL_get0_peer_certificate(ssl) == NULL)
+            fail("expected verified mTLS DTLS 1.2 ECDSA/GCM with EMS and handshake kind");
+        if (server) {
+            expect_data(ssl, request);
+            send_data(ssl, reply);
+        } else {
+            send_data(ssl, request);
+            expect_data(ssl, reply);
+        }
+        shutdown_peer(ssl, server);
+        if (mechanism && !server && index == 0) {
+            saved = SSL_get1_session(ssl);
+            if (saved == NULL || SSL_SESSION_is_resumable(saved) != 1 ||
+                SSL_SESSION_has_ticket(saved) != tickets)
+                fail("missing resumable session for selected mechanism");
+            unsigned int id_len = 0;
+            SSL_SESSION_get_id(saved, &id_len);
+            if (!tickets && id_len == 0)
+                fail("missing resumable session ID");
+        }
+        if (mechanism) {
+            printf("{\"event\":\"connection\",\"role\":\"%s\",\"index\":%d,"
+                   "\"mechanism\":\"%s\",\"version\":\"DTLSv1_2\","
+                   "\"suite\":\"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\","
+                   "\"handshake\":\"%s\",\"ems\":true,\"peer_certificates\":1,"
+                   "\"sent\":\"%s\",\"received\":\"%s\",\"closed\":true}\n",
+                   argv[1], index, mechanism, index == 0 ? "Full" : "Resumed",
+                   server ? reply : request, server ? request : reply);
+        } else {
+            puts("verified DTLSv1.2, ECDHE-ECDSA-AES128-GCM-SHA256, EMS, mTLS, "
+                 "full handshake, payloads and close_notify");
+        }
+        fflush(stdout);
+        SSL_free(ssl);
     }
-    shutdown_peer(ssl, server);
-    puts("verified DTLSv1.2, ECDHE-ECDSA-AES128-GCM-SHA256, EMS, mTLS, "
-         "full handshake, payloads and close_notify");
-    SSL_free(ssl);
+    SSL_SESSION_free(saved);
     SSL_CTX_free(ctx);
     close(fd);
     return 0;

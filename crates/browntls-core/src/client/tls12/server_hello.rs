@@ -25,6 +25,18 @@ impl CompleteServerHelloHandling {
     ) -> NextStateOrError {
         let _ = tls13_supported;
 
+        if let Some(dtls) = cx.common.dtls.as_deref()
+            && !dtls.cid.supports_v12_selection(
+                server_hello.extensions.connection_id.as_ref(),
+                suite.record,
+            )
+        {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                Error::General("selected DTLS 1.2 cipher cannot use the requested CIDs".into()),
+            ));
+        }
+
         // RFC 5746 §3.4: on an initial handshake the server's
         // renegotiation_info is empty.
         if let Some(ri) = &server_hello.extensions.renegotiation_info

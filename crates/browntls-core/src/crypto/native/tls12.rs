@@ -142,6 +142,10 @@ pub(crate) static AES_256_GCM: Gcm<Aes256Gcm> = Gcm {
 };
 
 impl<A: Aead + 'static> Tls12AeadAlgorithm for Gcm<A> {
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (true, true)
+    }
+
     fn encrypter(&self, key: AeadKey, iv: &[u8], extra: &[u8]) -> Box<dyn MessageEncrypter> {
         // The explicit nonce of record `seq` is `extra + seq` (see
         // `Nonce::tls12_explicit`): unique per record under one key, not a
@@ -371,6 +375,10 @@ pub(crate) struct ChaCha;
 pub(crate) static CHACHA20_POLY1305: ChaCha = ChaCha;
 
 impl Tls12AeadAlgorithm for ChaCha {
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (true, true)
+    }
+
     fn encrypter(&self, key: AeadKey, iv: &[u8], _extra: &[u8]) -> Box<dyn MessageEncrypter> {
         match ChaCha20Poly1305::new(key.as_ref()) {
             Ok(cipher) => Box::new(ChaChaEncrypter {

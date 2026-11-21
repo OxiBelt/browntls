@@ -44,6 +44,13 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 
 /// An AEAD usable with TLS 1.2 (RFC 5246 §6.2.3.3).
 pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
+    /// CID capability as `(sending, receiving)`, for handshake selection.
+    /// The cipher instances for an opted-in direction must also report
+    /// support for its RFC 9146 operation.
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (false, false)
+    }
+
     /// Creates a record encrypter from the write key, the fixed IV and the
     /// `extra` bytes that seed the explicit nonce.
     ///

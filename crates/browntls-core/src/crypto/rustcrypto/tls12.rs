@@ -130,6 +130,10 @@ pub(crate) static AES_256_GCM: Gcm<aes_gcm::Aes256Gcm> = Gcm {
 };
 
 impl<A: TlsAead> Tls12AeadAlgorithm for Gcm<A> {
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (true, true)
+    }
+
     fn encrypter(
         &self,
         key: AeadKey,
@@ -373,6 +377,10 @@ pub(crate) static CHACHA20_POLY1305: ChaCha = ChaCha {
 };
 
 impl Tls12AeadAlgorithm for ChaCha {
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (true, true)
+    }
+
     fn encrypter(&self, key: AeadKey, iv: &[u8], _extra: &[u8]) -> Box<dyn MessageEncrypter> {
         match chacha20poly1305::ChaCha20Poly1305::new_from_slice(key.as_ref()) {
             Ok(cipher) => Box::new(ChaChaEncrypter {

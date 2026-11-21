@@ -1,14 +1,15 @@
 #!/bin/sh
 # Generate a throwaway CA with server and client certificates for each key
-# type into the directory given as the only argument (a per-run Docker
-# volume). The server certificate names the network alias `tls-server`; the
+# type into the directory given as the first argument (a per-run Docker
+# volume). The optional second argument names the server (`tls-server`); the
 # `public` certificate names `ech-public.test`, the public name of the
 # Encrypted Client Hello scenarios, which a server rejecting ECH presents.
 # Keys are world-readable because the browntls image runs as an unprivileged
 # user; they live only as long as the test run's volume.
 set -eu
 
-out="${1:?usage: gen-pki.sh <directory>}"
+out="${1:?usage: gen-pki.sh <directory> [server-name]}"
+server_name="${2:-tls-server}"
 
 gen_key() {
   case "$1" in
@@ -30,7 +31,7 @@ for kt in ecdsa-p256 rsa-2048 ed25519; do
   serial=2
   for who in server client public; do
     case "${who}" in
-      server) eku=serverAuth; san="subjectAltName=DNS:tls-server" ;;
+      server) eku=serverAuth; san="subjectAltName=DNS:${server_name}" ;;
       client) eku=clientAuth; san="subjectAltName=DNS:tls-client" ;;
       public) eku=serverAuth; san="subjectAltName=DNS:ech-public.test" ;;
     esac

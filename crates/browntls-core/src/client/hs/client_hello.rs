@@ -50,6 +50,14 @@ fn find_session(
     if config.external_binding.is_some() {
         return None;
     }
+    if cx
+        .common
+        .dtls
+        .as_ref()
+        .is_some_and(|d| !d.allows(ProtocolVersion::TLSv1_3))
+    {
+        return None;
+    }
     let now = config.current_time().ok()?;
     // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume;
     // so does DTLS 1.3, with its own tickets.
@@ -229,7 +237,12 @@ pub(in crate::client) fn start_handshake(
         transcript_buffer.set_client_auth_enabled();
     }
 
-    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
     #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
     let mut resuming = find_session(&server_name, &config, cx);
 
@@ -349,20 +362,33 @@ pub(super) fn emit_client_hello_for_retry(
     let config = &input.config;
     // RFC 9001 §4.2: a QUIC client MUST NOT offer TLS versions older than 1.3.
     let quic = cx.common.is_quic();
-    // DTLS 1.3 (RFC 9147) is the only DTLS version we implement; no
-    // middlebox compatibility, 0-RTT, record size limit or post-handshake
-    // authentication over DTLS either.
+    // Endpoint version policy is independent of the shared TLS config.
+    // No middlebox compatibility, 0-RTT, record size limit extension or
+    // post-handshake authentication over DTLS.
     let dtls = cx.common.is_dtls();
-    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
     // RFC 9849 §6.1: with ECH, both ClientHellos offer TLS 1.3 only.
     let ech_tls13_only = input
         .ech
         .as_ref()
         .is_some_and(ClientEch::restricts_to_tls13);
-    let supports_tls12 =
-        !quic && !dtls && config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
+    let supports_tls12 = !quic
+        && config.supports_version(ProtocolVersion::TLSv1_2)
+        && !ech_tls13_only
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_2));
     let offers_version = |v: ProtocolVersion| {
-        config.supports_version(v) && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+        config.supports_version(v)
+            && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+            && cx.common.dtls.as_ref().is_none_or(|d| d.allows(v))
     };
 
     let supported_versions: Vec<ProtocolVersion> =
@@ -501,6 +527,7 @@ pub(super) fn emit_client_hello_for_retry(
     // or in an ECH inner hello, which offer TLS 1.3 alone).
     #[cfg(feature = "tls12")]
     if supports_tls12
+        && !dtls
         && config.enable_client_certificate_url
         && config.client_auth_cert_resolver.has_certs()
     {
@@ -509,6 +536,7 @@ pub(super) fn emit_client_hello_for_retry(
 
     #[cfg(feature = "tls12")]
     if supports_tls12
+        && !dtls
         && !config.revocation_enabled()
         && config.external_binding.is_none()
         && config.resumption.tls12_resumption == super::super::Tls12Resumption::SessionIdOrTickets
@@ -720,7 +748,7 @@ pub(super) fn emit_client_hello_for_retry(
             input.hello.cached_info = crate::cached_info::client::ClientCachedInfo::offer(
                 config,
                 &input.server_name,
-                supports_tls12,
+                supports_tls12 && !dtls,
             );
         }
         exts.cached_info = input.hello.cached_info.as_ref().and_then(|c| c.extension());

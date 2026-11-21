@@ -1,5 +1,8 @@
 //! State shared by client and server connections.
 
+#[cfg(feature = "tls12")]
+mod tls12;
+
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -345,6 +348,7 @@ impl CommonState {
     pub fn protocol_version(&self) -> Option<ProtocolVersion> {
         match self.negotiated_version {
             // The state machines run DTLS 1.3 as TLS 1.3.
+            Some(ProtocolVersion::TLSv1_2) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_2),
             Some(ProtocolVersion::TLSv1_3) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_3),
             version => version,
         }
@@ -790,32 +794,6 @@ impl CommonState {
             return;
         }
         self.received_plaintext.append(bytes.into_vec());
-    }
-
-    /// TLS 1.2: installs the record ciphers derived from `secrets`. Encryption
-    /// starts when we send ChangeCipherSpec; decryption when we receive it.
-    #[cfg(feature = "tls12")]
-    pub(crate) fn start_encryption_tls12(
-        &mut self,
-        secrets: &crate::tls12::ConnectionSecrets,
-        side: Side,
-        order: crate::crypto::cipher::Tls12MacOrder,
-    ) {
-        let pair = secrets.make_cipher_pair(side, order);
-        self.record_layer
-            .prepare_message_encrypter(pair.enc, secrets.suite().common.confidentiality_limit);
-        self.record_layer.prepare_message_decrypter(pair.dec);
-    }
-
-    /// Sends ChangeCipherSpec and starts encrypting (TLS 1.2).
-    #[cfg(feature = "tls12")]
-    pub(crate) fn send_change_cipher_spec(&mut self) {
-        let m = Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::ChangeCipherSpec(crate::msgs::ccs::ChangeCipherSpecPayload),
-        };
-        self.send_msg(m, false);
-        self.record_layer.start_encrypting();
     }
 
     /// We may now send application data; flushes anything the application

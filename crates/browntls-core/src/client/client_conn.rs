@@ -786,27 +786,29 @@ impl ConnectionCore<ClientConnectionData> {
         Self::for_client_with(config, name, alpn_protocols, Some(quic), None)
     }
 
-    /// A DTLS 1.3 client (RFC 9147): TLS 1.3 only, with a DTLS-capable
-    /// suite, and without Encrypted Client Hello. The first ClientHello is
-    /// queued with `dtls` here.
+    /// A DTLS client with an explicit endpoint version policy, a matching
+    /// suite, and no Encrypted Client Hello. Queue the first ClientHello.
     pub(crate) fn for_dtls_client(
         config: Arc<ClientConfig>,
         name: ServerName<'static>,
         dtls: crate::dtls::Dtls,
     ) -> Result<Self, Error> {
-        if !config.supports_version(ProtocolVersion::TLSv1_3) {
-            return Err(Error::General(
-                "TLS 1.3 support is required for DTLS 1.3".into(),
-            ));
-        }
-        if !config
-            .provider
-            .cipher_suites
+        if ![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]
             .iter()
-            .any(|cs| cs.usable_for_dtls())
+            .any(|v| dtls.allows(*v) && config.supports_version(*v))
         {
             return Err(Error::General(
-                "no cipher suite of the configuration is usable with DTLS 1.3".into(),
+                "no configured version matches the DTLS endpoint policy".into(),
+            ));
+        }
+        if !config.provider.cipher_suites.iter().any(|cs| {
+            cs.usable_for_dtls()
+                && dtls.allows(cs.version().version)
+                && config.supports_version(cs.version().version)
+        }) {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with the DTLS endpoint policy"
+                    .into(),
             ));
         }
         if config.ech_mode.is_some() {

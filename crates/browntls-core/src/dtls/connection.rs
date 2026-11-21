@@ -1,4 +1,4 @@
-//! The low-level DTLS 1.3 connection API: datagrams in, datagrams out,
+//! The low-level DTLS connection API: datagrams in, datagrams out,
 //! and timers, with no I/O of its own.
 
 use alloc::boxed::Box;
@@ -44,7 +44,7 @@ impl Received {
     }
 }
 
-/// A DTLS 1.3 connection (RFC 9147), client or server, without I/O.
+/// A DTLS connection, client or server, without I/O.
 ///
 /// Feed it each datagram received from the peer with
 /// [`Self::read_datagram`], send what [`Self::write_datagram`] produces
@@ -55,7 +55,7 @@ impl Received {
 ///
 /// It dereferences to [`CommonState`] for the negotiated parameters and
 /// handshake progress; [`CommonState::protocol_version`] reports
-/// [`ProtocolVersion::DTLSv1_3`].
+/// [`ProtocolVersion::DTLSv1_3`] or [`ProtocolVersion::DTLSv1_2`].
 pub struct ConnectionCommon<Data> {
     core: ConnectionCore<Data>,
 }
@@ -115,6 +115,8 @@ impl<Data: SideData> ConnectionCommon<Data> {
             let message = match incoming {
                 Incoming::End => break,
                 Incoming::Handled => None,
+                #[cfg(feature = "tls12")]
+                Incoming::ChangeCipherSpec => None,
                 Incoming::Alert(level, description) => Some(Message {
                     version: ProtocolVersion::TLSv1_3,
                     payload: MessagePayload::Alert(AlertMessagePayload { level, description }),
@@ -179,8 +181,29 @@ impl<Data: SideData> ConnectionCommon<Data> {
     ) -> Result<Box<dyn crate::conn::State<Data>>, Error> {
         loop {
             let common = &mut self.core.common_state;
-            if common.pending_revocation.is_some() || common.has_received_close_notify {
+            if common.pending_revocation.is_some()
+                || common.pending_certificate_url.is_some()
+                || common.has_received_close_notify
+            {
                 return Ok(state);
+            }
+            #[cfg(feature = "tls12")]
+            if state.expects_dtls12_ccs() && dtls_of(common).take_v12_ccs() {
+                state = match ConnectionCore::process_msg(
+                    common,
+                    &mut self.core.data,
+                    state,
+                    Message {
+                        version: ProtocolVersion::TLSv1_2,
+                        payload: MessagePayload::ChangeCipherSpec(
+                            crate::msgs::ccs::ChangeCipherSpecPayload,
+                        ),
+                    },
+                ) {
+                    Ok(next) => next,
+                    Err(err) => return Err(self.fail(err)),
+                };
+                continue;
             }
             let Some((epoch, bytes)) = dtls_of(common).next_message() else {
                 return Ok(state);
@@ -199,18 +222,33 @@ impl<Data: SideData> ConnectionCommon<Data> {
                 .unwrap_or(ProtocolVersion::TLSv1_2);
             let result =
                 match HandshakeMessagePayload::read_dtls(&mut Reader::init(&bytes), version) {
-                    Ok(parsed) => ConnectionCore::process_msg(
-                        common,
-                        &mut self.core.data,
-                        state,
-                        Message {
-                            version,
-                            payload: MessagePayload::Handshake {
-                                parsed,
-                                encoded: Payload::Borrowed(&bytes),
+                    Ok(parsed) => {
+                        #[cfg(feature = "tls12")]
+                        let canonical;
+                        let encoded = &bytes;
+                        #[cfg(feature = "tls12")]
+                        let encoded = if dtls_of(common).is_v12()
+                            && bytes.first()
+                                != Some(&u8::from(crate::enums::HandshakeType::ClientHello))
+                        {
+                            canonical = super::v12::canonical(&bytes, dtls_of(common).received_seq);
+                            &canonical
+                        } else {
+                            encoded
+                        };
+                        ConnectionCore::process_msg(
+                            common,
+                            &mut self.core.data,
+                            state,
+                            Message {
+                                version,
+                                payload: MessagePayload::Handshake {
+                                    parsed,
+                                    encoded: Payload::Borrowed(encoded),
+                                },
                             },
-                        },
-                    ),
+                        )
+                    }
                     Err(err) => {
                         Err(common.send_fatal_alert(AlertDescription::from(err), Error::from(err)))
                     }
@@ -441,7 +479,7 @@ impl<Data> fmt::Debug for ConnectionCommon<Data> {
     }
 }
 
-/// A DTLS 1.3 client connection.
+/// A DTLS client connection, using DTLS 1.3 by default.
 pub struct ClientConnection {
     inner: ConnectionCommon<crate::client::ClientConnectionData>,
 }
@@ -459,7 +497,16 @@ impl ClientConnection {
         Self::new_with_settings(config, name, Settings::default())
     }
 
-    /// Starts a DTLS 1.3 client with explicit DTLS-only settings.
+    /// Starts a handshake under an explicit endpoint version policy.
+    pub fn new_with_versions(
+        config: Arc<crate::ClientConfig>,
+        name: ServerName<'static>,
+        versions: super::Versions,
+    ) -> Result<Self, Error> {
+        Self::new_with_settings(config, name, Settings::default().with_versions(versions))
+    }
+
+    /// Starts a DTLS client with explicit DTLS-only settings.
     pub fn new_with_settings(
         config: Arc<crate::ClientConfig>,
         name: ServerName<'static>,
@@ -500,7 +547,7 @@ impl fmt::Debug for ClientConnection {
     }
 }
 
-/// A DTLS 1.3 server connection.
+/// A DTLS server connection, using DTLS 1.3 by default.
 pub struct ServerConnection {
     inner: ConnectionCommon<crate::server::ServerConnectionData>,
 }
@@ -516,6 +563,19 @@ impl ServerConnection {
     /// TLS 1.3 and contain a cipher suite usable with DTLS 1.3.
     pub fn new(config: Arc<crate::ServerConfig>, peer_address: &[u8]) -> Result<Self, Error> {
         Self::new_with_settings(config, peer_address, Settings::default())
+    }
+
+    /// Accepts certificate handshakes under an explicit version policy.
+    pub fn new_with_versions(
+        config: Arc<crate::ServerConfig>,
+        peer_address: &[u8],
+        versions: super::Versions,
+    ) -> Result<Self, Error> {
+        Self::new_with_settings(
+            config,
+            peer_address,
+            Settings::default().with_versions(versions),
+        )
     }
 
     /// Prepares a server with DTLS-only settings and cookie exchange.

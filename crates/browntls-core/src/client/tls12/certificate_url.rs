@@ -31,7 +31,7 @@ pub(super) fn emit_client_certificate(
                 HandshakePayload::CertificateUrl(CertificateUrlPayload::from(urls)),
             )),
         };
-        transcript.add_message(&m);
+        common.hash_tls12(transcript, &m);
         common.send_msg(m, false);
         return client_auth;
     }

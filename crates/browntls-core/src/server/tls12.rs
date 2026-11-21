@@ -119,13 +119,23 @@ impl CompleteClientHelloHandling {
             ));
         }
 
-        self.transcript.add_message(chm);
+        if let Some(dtls) = &cx.common.dtls {
+            if let MessagePayload::Handshake { encoded, .. } = &chm.payload {
+                self.transcript.add(&crate::dtls::canonical12(
+                    encoded.bytes(),
+                    dtls.received_seq,
+                ));
+            }
+        } else {
+            self.transcript.add_message(chm);
+        }
 
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
         // RFC 8844 §5: a bound connection neither resumes nor is resumed.
-        let resumable =
-            !client_revocation_enabled(&self.config) && self.config.external_binding.is_none();
+        let resumable = !cx.common.is_dtls()
+            && !client_revocation_enabled(&self.config)
+            && self.config.external_binding.is_none();
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
         if resumable
             && let Some(ClientSessionTicket::Offer(ticket)) =
@@ -205,7 +215,11 @@ impl CompleteClientHelloHandling {
         let cached = ServerCachedInfo::new(
             &self.config.cached_info,
             &self.config.provider,
-            client_hello.extensions.cached_info.as_ref(),
+            if cx.common.is_dtls() {
+                None
+            } else {
+                client_hello.extensions.cached_info.as_ref()
+            },
             certificate_message(server_key.get_cert()),
             certificate_request(&self.config)?.map(|request| {
                 HandshakeMessagePayload(HandshakePayload::CertificateRequest(request))
@@ -375,6 +389,7 @@ impl CompleteClientHelloHandling {
             server_certificate_type: self.cert_types.server,
             // RFC 6066 §5: never on resumption, which sends no certificate.
             client_certificate_url: (!resuming
+                && !cx.common.is_dtls()
                 && certificate_url::acknowledged(&self.config, client_hello, &self.cert_types))
             .then_some(()),
             alpn: cx
@@ -393,11 +408,11 @@ impl CompleteClientHelloHandling {
                 && client_hello.extensions.trusted_ca_keys.is_some())
             .then_some(()),
             // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
-            record_size_limit: hs::record_size_limit_ack(
-                &self.config,
-                client_hello,
-                ProtocolVersion::TLSv1_2,
-            ),
+            record_size_limit: if cx.common.is_dtls() {
+                None
+            } else {
+                hs::record_size_limit_ack(&self.config, client_hello, ProtocolVersion::TLSv1_2)
+            },
             // RFC 7924 §4: the types replaced by their fingerprint.
             cached_info,
             ..Default::default()
@@ -418,12 +433,12 @@ impl CompleteClientHelloHandling {
                     cipher_suite: self.suite.common.suite,
                     compression_method: Compression::Null,
                     extensions,
-                    dtls: false,
+                    dtls: cx.common.is_dtls(),
                 }),
             )),
         };
         trace!("sending server hello {:?}", sh);
-        self.transcript.add_message(&sh);
+        cx.common.hash_tls12(&mut self.transcript, &sh);
         cx.common.send_msg(sh, false);
     }
 }
@@ -451,7 +466,7 @@ fn emit_handshake(
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(payload),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -462,7 +477,7 @@ fn emit_cert_status(transcript: &mut HandshakeHash, common: &mut CommonState, oc
             HandshakePayload::CertificateStatus(CertificateStatus::new(ocsp)),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -500,7 +515,7 @@ fn emit_server_kx(
             HandshakePayload::ServerKeyExchange(ServerKeyExchangePayload::Known(skx)),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(kx)
 }
@@ -535,7 +550,7 @@ fn emit_server_hello_done(transcript: &mut HandshakeHash, common: &mut CommonSta
             HandshakePayload::ServerHelloDone,
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -552,7 +567,7 @@ fn emit_finished(
             Payload::new(verify_data),
         ))),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, true);
 }
 
@@ -601,7 +616,7 @@ fn emit_ticket(
             )),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(())
 }
@@ -616,7 +631,7 @@ fn emit_empty_ticket(
             HandshakePayload::NewSessionTicket(NewSessionTicketPayload::new(0, Vec::new())),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(())
 }
@@ -709,6 +724,10 @@ struct ExpectCcs {
 }
 
 impl State<ServerConnectionData> for ExpectCcs {
+    fn expects_dtls12_ccs(&self) -> bool {
+        true
+    }
+
     fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
         match m.payload {
             MessagePayload::ChangeCipherSpec(..) => {}
@@ -719,7 +738,7 @@ impl State<ServerConnectionData> for ExpectCcs {
                 ));
             }
         }
-        cx.common.record_layer.start_decrypting();
+        cx.common.start_decrypting_tls12();
         Ok(Box::new(ExpectFinished {
             config: self.config,
             secrets: self.secrets,

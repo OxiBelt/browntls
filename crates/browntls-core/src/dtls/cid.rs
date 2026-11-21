@@ -44,6 +44,12 @@ impl ConnectionIdPolicy {
 }
 
 impl Settings {
+    /// Chooses which DTLS versions this endpoint can negotiate.
+    pub fn with_versions(mut self, versions: super::Versions) -> Self {
+        self.versions = versions;
+        self
+    }
+
     /// Enables connection IDs for this DTLS connection. The default
     /// settings do not offer or select the extension. Stream TLS and QUIC
     /// configuration are unaffected.

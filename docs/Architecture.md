@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library,
-with DTLS 1.3 over datagrams, written from scratch in Rust, targeting the
+with DTLS over datagrams, written from scratch in Rust, targeting the
 feature level of rustls 0.23, with its own cryptographic primitives behind a
 pluggable provider interface.
 Implementation status is tracked in [Status](#status); the
@@ -2510,8 +2510,11 @@ low-level, sans-I/O API: `dtls::ClientConnection` and
 (which decrypts application data in place and returns its ranges), produce
 whole datagrams with `write_datagram`, and leave the socket and the clock to
 the caller, who passes a monotonic time to every call and fires
-`handle_timeout` once `next_timeout` has passed. Only DTLS 1.3 is
-implemented; there is no DTLS 1.2.
+`handle_timeout` once `next_timeout` has passed. DTLS 1.3 is the default.
+Explicit endpoint policy can enable DTLS 1.2 full certificate handshakes
+with the `tls12` feature; see [DTLS 1.2](DTLS12.md) for the API, protocol
+boundaries, disabled resumption and outstanding qualification. The following
+record and handshake details describe DTLS 1.3.
 
 - Handshake: the TLS 1.3 state machines with the DTLS hello encoding
   (`legacy_cookie`, DTLS version numbers, an empty session ID that is never

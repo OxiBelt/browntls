@@ -6,17 +6,21 @@ use crate::enums::{AlertDescription, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::msgs::handshake::ClientHelloPayload;
 
-/// A DTLS connection uses DTLS 1.3, which the handshake knows as TLS 1.3;
-/// DTLS 1.2 is not implemented.
-pub(crate) fn require_tls13(
+/// Check the endpoint policy separately from the shared TLS configuration.
+/// Internally DTLS versions use their corresponding TLS version numbers.
+pub(crate) fn require_enabled_version(
     common: &mut CommonState,
     version: ProtocolVersion,
 ) -> Result<(), Error> {
-    if common.is_dtls() && version != ProtocolVersion::TLSv1_3 {
-        return Err(common.send_fatal_alert(
-            AlertDescription::ProtocolVersion,
-            PeerIncompatible::Tls13RequiredForDtls,
-        ));
+    if common.dtls.as_ref().is_some_and(|d| !d.allows(version)) {
+        let reason = if common.dtls.as_ref().is_some_and(|d| {
+            d.allows(ProtocolVersion::TLSv1_3) && !d.allows(ProtocolVersion::TLSv1_2)
+        }) {
+            PeerIncompatible::Tls13RequiredForDtls
+        } else {
+            PeerIncompatible::DtlsVersionDisabledByEndpoint
+        };
+        return Err(common.send_fatal_alert(AlertDescription::ProtocolVersion, reason));
     }
     Ok(())
 }
@@ -98,17 +102,17 @@ mod tests {
     #[test]
     fn only_tls13_over_dtls() {
         assert_eq!(
-            require_tls13(&mut common(true), ProtocolVersion::TLSv1_3),
+            require_enabled_version(&mut common(true), ProtocolVersion::TLSv1_3),
             Ok(())
         );
         assert_eq!(
-            require_tls13(&mut common(true), ProtocolVersion::TLSv1_2),
+            require_enabled_version(&mut common(true), ProtocolVersion::TLSv1_2),
             Err(Error::PeerIncompatible(
                 PeerIncompatible::Tls13RequiredForDtls
             ))
         );
         assert_eq!(
-            require_tls13(&mut common(false), ProtocolVersion::TLSv1_2),
+            require_enabled_version(&mut common(false), ProtocolVersion::TLSv1_2),
             Ok(())
         );
     }

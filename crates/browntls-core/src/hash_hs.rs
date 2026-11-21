@@ -32,6 +32,12 @@ impl HandshakeHashBuffer {
         }
     }
 
+    #[cfg(feature = "tls12")]
+    pub(crate) fn for_dtls12(mut self, seq: u16) -> Self {
+        self.buffer = crate::dtls::canonical12(&self.buffer, seq);
+        self
+    }
+
     /// Hashes the buffer followed by `extra` with `provider`.
     pub(crate) fn hash_given(
         &self,

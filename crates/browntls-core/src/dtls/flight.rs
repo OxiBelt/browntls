@@ -103,6 +103,11 @@ impl Outgoing {
         }
     }
 
+    #[cfg(feature = "tls12")]
+    pub(super) fn next_send_seq(&self) -> u16 {
+        self.next_send_seq
+    }
+
     pub(super) fn set_next_send_seq(&mut self, seq: u16) {
         self.next_send_seq = seq;
     }
@@ -177,9 +182,17 @@ impl Outgoing {
 }
 
 impl Dtls {
+    #[cfg(feature = "tls12")]
+    pub(crate) fn outgoing_hello_seq(&self) -> u16 {
+        self.out.next_send_seq.saturating_sub(1)
+    }
+
     /// Queues a handshake message (in its TLS encoding: type, 24-bit
     /// length, body) under the current sending epoch.
     pub(crate) fn queue_handshake(&mut self, encoded: &[u8]) {
+        if encoded.first() == Some(&u8::from(HandshakeType::ClientHello)) {
+            self.client_hello = encoded.to_vec();
+        }
         let out = &mut self.out;
         let Some((&typ, rest)) = encoded.split_first() else {
             return;
@@ -218,6 +231,19 @@ impl Dtls {
             post_handshake,
             unacked: alloc::vec![0..span],
             pending: alloc::vec![0..span],
+        });
+    }
+
+    #[cfg(feature = "tls12")]
+    pub(crate) fn queue_v12_ccs(&mut self) {
+        self.out.messages.push(OutMessage {
+            message_seq: u16::MAX,
+            epoch: 0,
+            typ: 0,
+            body: alloc::vec![1],
+            post_handshake: false,
+            unacked: alloc::vec![0..1],
+            pending: alloc::vec![0..1],
         });
     }
 
@@ -319,7 +345,12 @@ impl Dtls {
     /// Finished: the last flight of the handshake.
     fn holds_last_flight(&self) -> bool {
         let finished = u8::from(HandshakeType::Finished);
-        self.side == Side::Client
+        self.side
+            == if self.is_v12() {
+                Side::Server
+            } else {
+                Side::Client
+            }
             && self
                 .out
                 .messages
@@ -372,6 +403,20 @@ impl Dtls {
                 continue;
             };
             let epoch = message.epoch;
+            #[cfg(feature = "tls12")]
+            if self.is_v12() && message.typ == 0 {
+                if self
+                    .record_len(0, 1)
+                    .is_none_or(|len| len > mtu.saturating_sub(out.len() - start))
+                {
+                    break;
+                }
+                self.seal_record(out, 0, ContentType::ChangeCipherSpec, &[1])?;
+                self.out.messages[index].pending.clear();
+                index += 1;
+                wrote = true;
+                continue;
+            }
             let space = mtu.saturating_sub(out.len() - start);
             let room = self
                 .record_room(epoch, space)
@@ -417,12 +462,13 @@ impl Dtls {
     /// client's retransmitted ClientHello asks for it again.
     pub(crate) fn is_hrr_only(&self) -> bool {
         self.side == Side::Server
-            && !self.out.messages.is_empty()
-            && self
-                .out
-                .messages
-                .iter()
-                .all(|m| m.epoch == 0 && !m.post_handshake)
+            && self.out.messages.len() == 1
+            && self.out.messages.iter().all(|m| {
+                m.epoch == 0
+                    && !m.post_handshake
+                    && (m.typ == u8::from(HandshakeType::ServerHello)
+                        || m.typ == u8::from(HandshakeType::HelloVerifyRequest))
+            })
     }
 
     /// Processes the record numbers of a protected ACK. Unprotected ACKs,
@@ -498,7 +544,9 @@ impl Dtls {
         }
         self.out.deadline = None;
         self.out.retransmissions += 1;
-        if self.out.retransmissions > MAX_RETRANSMISSIONS && self.out.closing {
+        if self.out.retransmissions > MAX_RETRANSMISSIONS
+            && (self.out.closing || (self.is_v12() && self.holds_last_flight()))
+        {
             // We closed: the server may have finished and read our
             // close_notify, after which it acknowledges nothing.
             self.abandon_flights();

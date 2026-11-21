@@ -43,3 +43,19 @@ test certificates are mounted from a temporary Kubernetes Secret; the
 namespace and uniquely tagged image are removed after the run. The
 [wolfSSL Docker suite](../e2e/README.md#certificate-with-external-psk-rfc-9973)
 qualifies the feature with a second TLS implementation.
+
+## RFC 9525 service identity references
+
+On an already running minikube profile, build the browntls image and run URI
+identity validation over a TCP Service and SRV-ID validation over a UDP
+Service, each with a positive and CA-trusted mismatched-reference case:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:identity-amd64
+python3 -B tests/kubernetes/service_identity.py --image browntls-e2e:identity-amd64 \
+  --profile PROFILE
+```
+
+The runner reuses the profile, creates a per-run namespace and uniquely tagged
+image, and deletes only those resources. Test keys and certificates are
+generated in a temporary directory and mounted from per-case Secrets.

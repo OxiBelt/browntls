@@ -7,7 +7,7 @@ use browntls::crypto::native::ticketer::AeadTicketProducer;
 use browntls::dtls::{self, ServerEvent, UdpClient, UdpServer};
 use browntls::server::{NoServerSessionStorage, ServerSessionMemoryCache};
 use browntls::ticketer::TicketRotator;
-use browntls::{ClientConfig, CommonState, HandshakeKind};
+use browntls::{ClientConfig, ClientServerIdentity, CommonState, HandshakeKind, ServiceIdentity};
 
 use super::{IO_TIMEOUT, Options, Result, ServerName, emit, negotiated, required, roots};
 
@@ -53,16 +53,29 @@ pub(super) fn client(options: &Options) -> Result<()> {
     } else {
         "[::]:0"
     };
+    let name = ServerName::try_from(name.to_owned()).map_err(|error| error.to_string())?;
+    let identity = super::service_identity(&options.reference_ids)?;
+    if options.dtls_rebind.is_none()
+        && let Some(identity) = &identity
+    {
+        return tokio_client(options, config, name, identity.clone(), peer, bind, count);
+    }
     let socket = UdpSocket::bind(bind).map_err(|error| error.to_string())?;
     socket.connect(peer).map_err(|error| error.to_string())?;
-    let name = ServerName::try_from(name.to_owned()).map_err(|error| error.to_string())?;
+
     // Retain the UDP endpoint and authentication objects across connections.
     for index in 0..count {
-        let conn = dtls::ClientConnection::new_with_settings(
-            config.clone(),
-            name.clone(),
-            settings(options)?,
-        )
+        let settings = settings(options)?;
+        let conn = match &identity {
+            Some(policy) => dtls::ClientConnection::new_with_identity_and_settings(
+                config.clone(),
+                ClientServerIdentity::new(name.clone(), policy.clone()),
+                settings,
+            ),
+            None => {
+                dtls::ClientConnection::new_with_settings(config.clone(), name.clone(), settings)
+            }
+        }
         .map_err(|error| error.to_string())?;
         let mut client = UdpClient::from_connection(
             conn,
@@ -111,6 +124,74 @@ pub(super) fn client(options: &Options) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn tokio_client(
+    options: &Options,
+    config: Arc<ClientConfig>,
+    name: ServerName<'static>,
+    identity: ServiceIdentity,
+    peer: std::net::SocketAddr,
+    bind: &str,
+    count: usize,
+) -> Result<()> {
+    use browntls::tokio::dtls::{Recv, UdpClient as TokioUdpClient};
+
+    use super::async_io::bounded;
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("runtime: {error}"))?
+        .block_on(async {
+            for index in 0..count {
+                let socket = tokio::net::UdpSocket::bind(bind)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                socket
+                    .connect(peer)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let client_identity = ClientServerIdentity::new(name.clone(), identity.clone());
+                let mut client = TokioUdpClient::new_with_identity_and_settings(
+                    config.clone(),
+                    client_identity,
+                    socket,
+                    settings(options)?,
+                )
+                .map_err(|error| error.to_string())?;
+                bounded("handshake", client.complete_handshake()).await?;
+                let message = options.message.as_deref().unwrap_or(MESSAGE);
+                let expected = options
+                    .expect_reply
+                    .clone()
+                    .unwrap_or_else(|| reverse(message));
+                bounded("send", client.send(message.as_bytes())).await?;
+                let mut reply = [0u8; 1200];
+                let len = match bounded("reply", client.recv(&mut reply)).await? {
+                    Recv::Data(len) => len,
+                    Recv::Closed => return Err("peer closed before replying".into()),
+                };
+                if &reply[..len] != expected.as_bytes() {
+                    return Err("unexpected DTLS reply".into());
+                }
+                let closed = bounded("close", client.recv(&mut reply)).await?;
+                if closed != Recv::Closed {
+                    return Err("expected the server's close_notify".into());
+                }
+                let common = client.connection();
+                check_handshake(common, index, options)?;
+                let mut fields = connection_fields(common, "client", &expected, message);
+                fields.extend([
+                    ("index", super::Value::Num(index)),
+                    ("io", "tokio-dtls".into()),
+                ]);
+                emit(&fields);
+                bounded("close", client.close()).await?;
+            }
+            Ok(())
+        })
 }
 
 pub(super) fn server(options: &Options) -> Result<()> {
@@ -263,6 +344,10 @@ fn connection_fields(
         ("received", received.into()),
         ("sent", sent.into()),
         ("closed", super::Value::Bool(true)),
+        (
+            "service_identity_matched",
+            super::Value::Bool(common.matched_service_identity().is_some()),
+        ),
     ]);
     fields
 }

@@ -12,6 +12,7 @@
 //!                     --backend NAME=HOST:PORT... [--accept N]
 //!                     [ECH-SERVER...] [COMMON...]
 //! browntls-e2e client --connect HOST:PORT --server-name NAME --ca FILE
+//!                     [--reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID]...
 //!                     [--cert FILE --key FILE] [--message TEXT]
 //!                     [--expect-reply TEXT] [--connections N] [--wait SECS]
 //!                     [ECH-CLIENT...] [COMMON...]
@@ -20,6 +21,7 @@
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
 //!         --record-size-limit N|none, --grease, --async
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
+//!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
 //!         --ech-trial-decryption, --ech-public-name-check
 //! ECH-CLIENT: --ech-config-list FILE, --ech-grease, --ech-random-config-id,
@@ -163,6 +165,7 @@ struct Options {
     listen: Option<String>,
     connect: Option<String>,
     server_name: Option<String>,
+    reference_ids: Vec<String>,
     ca: Option<String>,
     client_ca: Option<String>,
     cert: Option<String>,
@@ -245,6 +248,7 @@ impl Options {
                 "--listen" => o.listen = Some(value),
                 "--connect" => o.connect = Some(value),
                 "--server-name" => o.server_name = Some(value),
+                "--reference-id" => o.reference_ids.push(value),
                 "--ca" => o.ca = Some(value),
                 "--client-ca" => o.client_ca = Some(value),
                 "--cert" => o.cert = Some(value),
@@ -745,8 +749,9 @@ fn client(o: &Options) -> Result<()> {
     config.ech_mode = o.ech_client(None)?;
     let mut config = Arc::new(config);
     let server_name = ServerName::try_from(name.to_owned()).map_err(|e| e.to_string())?;
+    let identity = service_identity(&o.reference_ids)?;
     if o.async_io {
-        return async_io::client(o, config, server_name, message);
+        return async_io::client(o, config, server_name, identity, message);
     }
 
     let mut retried = false;
@@ -754,8 +759,14 @@ fn client(o: &Options) -> Result<()> {
     while index < o.connections {
         let sock = connect_with_retry(connect, o.wait)?;
         set_timeouts(&sock)?;
-        let conn = ClientConnection::new(config.clone(), server_name.clone())
-            .map_err(|e| e.to_string())?;
+        let conn = match &identity {
+            Some(identity) => ClientConnection::new_with_identity(
+                config.clone(),
+                browntls::ClientServerIdentity::new(server_name.clone(), identity.clone()),
+            ),
+            None => ClientConnection::new(config.clone(), server_name.clone()),
+        }
+        .map_err(|e| e.to_string())?;
         let mut tls = StreamOwned::new(conn, sock);
         let reply = tls
             .write_all(format!("{message}\n").as_bytes())
@@ -797,6 +808,10 @@ fn client(o: &Options) -> Result<()> {
         fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
         fields.push(("sent", message.into()));
         fields.push(("received", reply.clone().into()));
+        fields.push((
+            "service_identity_matched",
+            Value::Bool(tls.conn.matched_service_identity().is_some()),
+        ));
         emit(&fields);
         close(&mut tls);
         if let Some(expected) = o.expect_reply.as_ref().filter(|e| **e != reply) {
@@ -807,6 +822,41 @@ fn client(o: &Options) -> Result<()> {
         index += 1;
     }
     Ok(())
+}
+
+fn service_identity(references: &[String]) -> Result<Option<browntls::ServiceIdentity>> {
+    use browntls::{ReferenceIdentifier as RefId, SrvId, UriId};
+    if references.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed = Vec::with_capacity(references.len());
+    for reference in references {
+        let (kind, value) = reference
+            .split_once(':')
+            .ok_or_else(|| format!("invalid --reference-id {reference:?}; expected TYPE:VALUE"))?;
+        parsed.push(match kind {
+            "dns" => RefId::Dns(
+                browntls::pki_types::DnsName::try_from(value.to_owned())
+                    .map_err(|e| format!("invalid DNS reference {value:?}: {e}"))?,
+            ),
+            "ip" => RefId::Ip(
+                browntls::pki_types::IpAddr::try_from(value)
+                    .map_err(|e| format!("invalid IP reference {value:?}: {e:?}"))?,
+            ),
+            "uri" => RefId::Uri(
+                UriId::try_from(value)
+                    .map_err(|e| format!("invalid URI reference {value:?}: {e}"))?,
+            ),
+            "srv" => RefId::Srv(
+                SrvId::try_from(value)
+                    .map_err(|e| format!("invalid SRV reference {value:?}: {e}"))?,
+            ),
+            _ => return Err(format!("unknown --reference-id type {kind:?}")),
+        });
+    }
+    browntls::ServiceIdentity::new(parsed)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// Connects to `addr`, retrying while the server is starting up.

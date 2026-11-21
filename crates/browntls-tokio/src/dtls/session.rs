@@ -381,8 +381,10 @@ impl SessionDriver {
 
     async fn next_work(&mut self) -> Work {
         let mut changed = pin!(self.wake.notified());
+        // Deliver already-observed events before commands can retire a
+        // session. Alternate only when selecting new work from the socket.
+        let event_first = self.event_first || self.server.has_queued_events();
         let mut event = pin!(self.server.next_event());
-        let event_first = self.event_first;
         self.event_first = !self.event_first;
         poll_fn(|cx| {
             if changed.as_mut().poll(cx).is_ready() {
@@ -760,6 +762,46 @@ mod tests {
         assert_eq!(
             listener.accept().await.unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_close_preserves_earlier_data_and_peer_failure() {
+        let (mut listener, mut driver) = fixture(SessionLimits::default()).await;
+        let peer = address(1);
+        driver.event(ServerEvent::Connected(peer));
+        let mut session = listener.accept().await.unwrap();
+        {
+            let mut closing = pin!(session.close());
+            pending(closing.as_mut());
+
+            driver.event_first = false;
+            driver
+                .server
+                .queue_event_for_test(ServerEvent::Received(peer, vec![1]));
+            driver.server.queue_event_for_test(ServerEvent::Failed(
+                peer,
+                browntls_core::Error::General("test peer failure".into()),
+            ));
+            for _ in 0..2 {
+                let Work::Event(event) = driver.next_work().await else {
+                    panic!("already queued events precede close");
+                };
+                driver.event(event.unwrap());
+            }
+            let Work::Command(command) = driver.next_work().await else {
+                panic!("close follows queued events");
+            };
+            driver.command(command).await;
+            assert_eq!(
+                closing.await.unwrap_err().kind(),
+                io::ErrorKind::NotConnected
+            );
+        }
+        assert_eq!(session.recv().await.unwrap(), Some(vec![1]));
+        assert_eq!(
+            session.recv().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
     }
 

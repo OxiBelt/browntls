@@ -113,7 +113,16 @@ impl UdpServer {
     ///
     /// The socket is put in blocking mode.
     pub fn new(config: Arc<crate::ServerConfig>, socket: UdpSocket) -> io::Result<Self> {
-        let acceptor = Acceptor::new(config)
+        Self::new_with_versions(config, socket, super::super::Versions::default())
+    }
+
+    /// Serves clients under an explicit DTLS endpoint version policy.
+    pub fn new_with_versions(
+        config: Arc<crate::ServerConfig>,
+        socket: UdpSocket,
+        versions: super::super::Versions,
+    ) -> io::Result<Self> {
+        let acceptor = Acceptor::new_with_versions(config, versions)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         socket.set_nonblocking(false)?;
         Ok(Self {

@@ -214,8 +214,10 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   validates server authenticators against the connection's SNI only.
 - DTLS 1.3 has no interoperability evidence: it is tested between browntls
   endpoints only, over a simulated network and, for the blocking
-  `UdpClient` and `UdpServer`, over loopback sockets. Only DTLS 1.3 exists
-  (no DTLS 1.2), without connection IDs, the return routability check,
+  `UdpClient` and `UdpServer`, over loopback sockets. The explicit
+  [DTLS 1.2 certificate handshake layer](DTLS12.md) awaits compilation,
+  execution and independent review; its resumption is disabled. DTLS has
+  no connection IDs or return routability check,
   0-RTT, Encrypted Client Hello or post-handshake client authentication,
   through the low-level datagram API or the blocking `std` API; there is
   no Tokio API. A cookie is bound to whatever address bytes the caller

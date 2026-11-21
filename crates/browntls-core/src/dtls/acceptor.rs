@@ -29,6 +29,7 @@ use crate::sync::Arc;
 /// and drop those that make no progress.
 pub struct Acceptor {
     config: Arc<crate::ServerConfig>,
+    versions: super::Versions,
 }
 
 /// What [`Acceptor::accept`] made of a datagram.
@@ -49,9 +50,29 @@ impl Acceptor {
     /// `hello_retry_cookies`, allow TLS 1.3 and contain a cipher suite
     /// usable with DTLS 1.3.
     pub fn new(config: Arc<crate::ServerConfig>) -> Result<Self, Error> {
-        // Validates the configuration once, up front.
-        ServerConnection::new(config.clone(), &[])?;
-        Ok(Self { config })
+        Self::new_with_versions(config, super::Versions::default())
+    }
+
+    /// Validates clients under an explicit DTLS version policy.
+    pub fn new_with_versions(
+        config: Arc<crate::ServerConfig>,
+        versions: super::Versions,
+    ) -> Result<Self, Error> {
+        ServerConnection::new_with_versions(config.clone(), &[], versions)?;
+        Ok(Self { config, versions })
+    }
+
+    fn valid_v12_cookie(&self, cookie: &[u8], address: &[u8]) -> bool {
+        #[cfg(feature = "tls12")]
+        {
+            self.versions.allows(crate::ProtocolVersion::TLSv1_2)
+                && crate::server::cookie::dtls12_cookie_is_valid(&self.config, cookie, address)
+        }
+        #[cfg(not(feature = "tls12"))]
+        {
+            let _ = (cookie, address);
+            false
+        }
     }
 
     /// Handles `datagram` from `peer_address`, for which the server has no
@@ -72,11 +93,11 @@ impl Acceptor {
             // with a valid cookie for this address.
             1 => match cookie_of(&header, fragment) {
                 Some(cookie)
-                    if crate::server::cookie::dtls_cookie_is_valid(
+                    if (crate::server::cookie::dtls_cookie_is_valid(
                         &self.config,
                         cookie,
                         peer_address,
-                    ) =>
+                    ) || self.valid_v12_cookie(cookie, peer_address)) =>
                 {
                     true
                 }
@@ -84,7 +105,8 @@ impl Acceptor {
             },
             _ => return Ok(Accepted::Ignored),
         };
-        let mut conn = ServerConnection::new(self.config.clone(), peer_address)?;
+        let mut conn =
+            ServerConnection::new_with_versions(self.config.clone(), peer_address, self.versions)?;
         if retried {
             conn.continue_after_stateless_retry();
         }
@@ -135,7 +157,14 @@ fn cookie_of<'a>(header: &HandshakeHeader, fragment: &'a [u8]) -> Option<&'a [u8
     r.take(2 + 32)?;
     // legacy_session_id, legacy_cookie, cipher_suites,
     // legacy_compression_methods
-    for len_bytes in [1, 1, 2, 1] {
+    let id_len = usize::from(*r.take(1)?.first()?);
+    r.take(id_len)?;
+    let cookie_len = usize::from(*r.take(1)?.first()?);
+    let legacy_cookie = r.take(cookie_len)?;
+    if !legacy_cookie.is_empty() {
+        return Some(legacy_cookie);
+    }
+    for len_bytes in [2, 1] {
         let len = r.take(len_bytes)?;
         let len = len.iter().fold(0usize, |acc, b| acc << 8 | usize::from(*b));
         r.take(len)?;

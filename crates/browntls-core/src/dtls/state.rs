@@ -77,6 +77,7 @@ struct ReadEpoch {
 /// Settings chosen when the connection is created.
 #[derive(Debug, Clone)]
 pub(crate) struct Settings {
+    pub(crate) versions: super::Versions,
     pub(crate) mtu: usize,
     pub(crate) initial_timeout: Duration,
     pub(crate) peer_address: Vec<u8>,
@@ -86,6 +87,7 @@ pub(crate) struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            versions: super::Versions::default(),
             mtu: DEFAULT_MTU,
             initial_timeout: super::flight::INITIAL_TIMEOUT,
             peer_address: Vec::new(),
@@ -107,12 +109,19 @@ pub(crate) enum Incoming {
     /// Application data: its plaintext, decrypted in place, within the
     /// datagram.
     ApplicationData(Range<usize>),
+    #[cfg(feature = "tls12")]
+    ChangeCipherSpec,
 }
 
 /// The DTLS side of a connection's
 /// [`CommonState`](crate::common_state::CommonState).
 pub(crate) struct Dtls {
     pub(super) side: Side,
+    pub(super) version: Option<ProtocolVersion>,
+    pub(crate) received_seq: u16,
+    pub(crate) client_hello: Vec<u8>,
+    #[cfg(feature = "tls12")]
+    pub(super) v12: super::v12::State,
     pub(super) settings: Settings,
     /// Sending epochs still needed: the current one (last) and any that
     /// unacknowledged handshake messages were queued under.
@@ -124,7 +133,7 @@ pub(crate) struct Dtls {
     read: Vec<ReadEpoch>,
     /// Whether a record from the peer authenticated: from then on,
     /// unprotected alerts and acknowledgements are ignored.
-    peer_authenticated: bool,
+    pub(super) peer_authenticated: bool,
     /// The highest record sequence number of an unprotected ClientHello
     /// received: a server's unprotected records continue from it, so that
     /// a server answering after a stateless HelloRetryRequest does not
@@ -156,6 +165,11 @@ impl Dtls {
     pub(crate) fn new(side: Side, settings: Settings) -> Self {
         Self {
             side,
+            version: None,
+            received_seq: 0,
+            client_hello: Vec::new(),
+            #[cfg(feature = "tls12")]
+            v12: super::v12::State::default(),
             out: Outgoing::new(settings.initial_timeout),
             settings,
             write: alloc::vec![WriteEpoch {
@@ -207,6 +221,22 @@ impl Dtls {
     pub(crate) fn max_unfragmented_handshake(&self) -> usize {
         self.settings.mtu - wire::PLAINTEXT_HEADER_LEN - wire::HANDSHAKE_HEADER_LEN
             + wire::TLS_HANDSHAKE_HEADER_LEN
+    }
+
+    pub(crate) fn allows(&self, version: ProtocolVersion) -> bool {
+        self.settings.versions.allows(version)
+    }
+
+    pub(crate) fn is_v12(&self) -> bool {
+        self.version == Some(ProtocolVersion::TLSv1_2)
+    }
+
+    pub(crate) fn select_version(&mut self, version: ProtocolVersion) {
+        self.version = Some(version);
+        if self.is_v12() {
+            self.acks.clear();
+            self.ack_due = None;
+        }
     }
 
     pub(crate) fn mtu(&self) -> usize {
@@ -314,6 +344,10 @@ impl Dtls {
 
     /// The epoch the peer's handshake messages must arrive under now.
     pub(crate) fn read_epoch(&self) -> u64 {
+        #[cfg(feature = "tls12")]
+        if self.is_v12() {
+            return u64::from(self.v12.read_active);
+        }
         self.read.last().map_or(0, |r| r.epoch)
     }
 
@@ -355,10 +389,19 @@ impl Dtls {
         let body = base + record.body.start..base + record.body.end;
         match record.header {
             Header::Plaintext {
-                typ, epoch, seq, ..
+                typ,
+                version,
+                epoch,
+                seq,
             } => {
+                #[cfg(not(feature = "tls12"))]
+                let _ = version;
                 // Unprotected records exist only in epoch 0; others are
                 // DTLS 1.2 records or noise.
+                #[cfg(feature = "tls12")]
+                if self.is_v12() {
+                    return self.read_v12(typ, version, epoch, seq, datagram, body, handshaking);
+                }
                 if epoch != 0 {
                     return Ok(Incoming::Handled);
                 }
@@ -380,7 +423,7 @@ impl Dtls {
         }
     }
 
-    fn read_plaintext(
+    pub(super) fn read_plaintext(
         &mut self,
         typ: ContentType,
         number: RecordNumber,
@@ -498,7 +541,7 @@ impl Dtls {
     /// notes what the record calls for: an acknowledgement, or (for a
     /// retransmission of something already delivered) a retransmission
     /// of ours.
-    fn read_handshake_fragments(
+    pub(super) fn read_handshake_fragments(
         &mut self,
         mut body: &[u8],
         number: RecordNumber,
@@ -549,6 +592,16 @@ impl Dtls {
     /// hello that wins the race against the real one can still stall the
     /// handshake until it times out, as with any unprotected hello.
     fn buffers_plaintext(&self, header: &HandshakeHeader) -> bool {
+        if self.is_v12() {
+            return self.read_epoch() == 0 && header.typ != u8::from(HandshakeType::Finished);
+        }
+        if self.side == Side::Client
+            && self.allows(ProtocolVersion::TLSv1_2)
+            && self.read_epoch() == 0
+            && header.typ == u8::from(HandshakeType::HelloVerifyRequest)
+        {
+            return header.message_seq == self.reassembler.next_receive_seq();
+        }
         let hello = match self.side {
             Side::Client => HandshakeType::ServerHello,
             Side::Server => HandshakeType::ClientHello,
@@ -606,10 +659,22 @@ impl Dtls {
             return None;
         }
         let message = bytes.to_vec();
+        self.received_seq = self.reassembler.next_receive_seq();
         self.reassembler.pop();
-        if epoch < APPLICATION_EPOCH {
+        let boundary = matches!(
+            message.first().copied().map(HandshakeType::from),
+            Some(
+                HandshakeType::ServerHelloDone
+                    | HandshakeType::Finished
+                    | HandshakeType::HelloVerifyRequest
+                    | HandshakeType::ClientHello
+            )
+        );
+        if epoch < APPLICATION_EPOCH && (!self.is_v12() || boundary) {
             self.out.flight_acknowledged_implicitly();
-            self.prune_write_epochs();
+            if !self.is_v12() {
+                self.prune_write_epochs();
+            }
         }
         Some((epoch, message))
     }
@@ -637,7 +702,12 @@ impl Dtls {
                 }
                 return;
             }
-            self.ack_due = Some(now);
+            if !self.is_v12() {
+                self.ack_due = Some(now);
+            }
+            return;
+        }
+        if self.is_v12() {
             return;
         }
         if !self.saw_handshake {
@@ -702,6 +772,13 @@ impl Dtls {
         typ: ContentType,
         content: &[u8],
     ) -> Result<RecordNumber, Error> {
+        #[cfg(feature = "tls12")]
+        if self.is_v12() && epoch == 1 {
+            return self.seal_v12(out, typ, content);
+        }
+        if self.is_v12() && content.len() > 16_384 {
+            return Err(Error::EncryptError);
+        }
         let floor = self.plaintext_seq_floor();
         let Some(write) = self.write_state(epoch) else {
             return Err(Error::EncryptError);
@@ -732,6 +809,14 @@ impl Dtls {
     /// The bytes one record under `epoch` takes to carry `content_len`
     /// bytes, if the epoch is still kept.
     pub(super) fn record_len(&self, epoch: u64, content_len: usize) -> Option<usize> {
+        #[cfg(feature = "tls12")]
+        if self.is_v12() && epoch == 1 {
+            return self
+                .v12
+                .enc
+                .as_ref()
+                .map(|enc| wire::PLAINTEXT_HEADER_LEN + enc.encrypted_payload_len(content_len));
+        }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         Some(match &write.keys {
             None => wire::PLAINTEXT_HEADER_LEN + content_len,
@@ -741,9 +826,20 @@ impl Dtls {
 
     /// The most content one record under `epoch` carries within `space`.
     pub(super) fn record_room(&self, epoch: u64, space: usize) -> Option<usize> {
+        #[cfg(feature = "tls12")]
+        if self.is_v12() && epoch == 1 {
+            let overhead = self.record_len(epoch, 0)?;
+            return space.checked_sub(overhead).map(|room| room.min(16_384));
+        }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         match &write.keys {
-            None => space.checked_sub(wire::PLAINTEXT_HEADER_LEN),
+            None => space.checked_sub(wire::PLAINTEXT_HEADER_LEN).map(|room| {
+                if self.is_v12() {
+                    room.min(16_384)
+                } else {
+                    room
+                }
+            }),
             Some(keys) => keys.content_room(space, 0),
         }
     }
@@ -752,7 +848,7 @@ impl Dtls {
     /// carries in one datagram, once application data may be sent.
     pub(crate) fn max_application_data(&self) -> Option<usize> {
         let epoch = self.write_epoch();
-        if epoch < APPLICATION_EPOCH {
+        if epoch < APPLICATION_EPOCH && !(self.is_v12() && epoch == 1) {
             return None;
         }
         self.record_room(epoch, self.settings.mtu)
@@ -769,6 +865,20 @@ impl Dtls {
         data: &[u8],
     ) -> Result<bool, Error> {
         let epoch = self.write_epoch();
+        #[cfg(feature = "tls12")]
+        if self.is_v12() {
+            if epoch != 1 {
+                return Err(Error::HandshakeNotComplete);
+            }
+            if self
+                .record_len(epoch, data.len())
+                .is_none_or(|len| len > self.settings.mtu)
+            {
+                return Err(Error::EncryptError);
+            }
+            self.seal_record(out, epoch, ContentType::ApplicationData, data)?;
+            return Ok(false);
+        }
         let (limit, next_seq) = match self.write.last() {
             Some(WriteEpoch {
                 keys: Some(keys),

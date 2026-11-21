@@ -10,6 +10,7 @@ use super::hash;
 use super::hmac;
 use super::tls13::{Kind, TlsAead};
 use crate::crypto::KeyExchangeAlgorithm;
+use crate::crypto::cipher::dtls12::{open_cid_aad, seal_cid, unpad_cid};
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, InboundPlainMessage, Iv, KeyBlockShape, MessageDecrypter,
     MessageEncrypter, NONCE_LEN, Nonce, OutboundOpaqueMessage, OutboundPlainMessage,
@@ -223,6 +224,39 @@ impl<A: TlsAead> GcmEncrypter<A> {
 }
 
 impl<A: TlsAead> MessageEncrypter for GcmEncrypter<A> {
+    fn supports_dtls12_cid(&self) -> bool {
+        true
+    }
+
+    fn encrypt_dtls12_cid(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        cid: &[u8],
+        padding_len: usize,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        seal_cid(
+            msg,
+            seq,
+            cid,
+            padding_len,
+            GCM_EXPLICIT_NONCE_LEN,
+            |aad, body| {
+                let nonce = Nonce::tls12_explicit(&self.iv, seq);
+                let (explicit, rest) = body.split_at_mut(GCM_EXPLICIT_NONCE_LEN);
+                explicit.copy_from_slice(&nonce.0[GCM_FIXED_IV_LEN..]);
+                let text_len = rest.len() - TAG_LEN;
+                let (text, tag_out) = rest.split_at_mut(text_len);
+                let tag = self
+                    .cipher
+                    .encrypt_inout_detached(&nonce.0.into(), aad, InOutBuf::from(text))
+                    .map_err(|_| Error::EncryptError)?;
+                tag_out.copy_from_slice(&tag);
+                Ok(())
+            },
+        )
+    }
+
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
@@ -268,6 +302,35 @@ struct GcmDecrypter<A> {
 }
 
 impl<A: TlsAead> MessageDecrypter for GcmDecrypter<A> {
+    fn supports_dtls12_cid(&self) -> bool {
+        true
+    }
+
+    fn decrypt_dtls12_cid<'a>(
+        &mut self,
+        mut msg: InboundOpaqueMessage<'a>,
+        seq: u64,
+        cid: &[u8],
+    ) -> Result<InboundPlainMessage<'a>, Error> {
+        let (inner_len, aad) = open_cid_aad(&msg, seq, cid, GCM_EXPLICIT_NONCE_LEN)?;
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce[..GCM_FIXED_IV_LEN].copy_from_slice(&self.fixed);
+        nonce[GCM_FIXED_IV_LEN..].copy_from_slice(&msg.payload[..GCM_EXPLICIT_NONCE_LEN]);
+        let (text, tag) = msg.payload[GCM_EXPLICIT_NONCE_LEN..].split_at_mut(inner_len);
+        let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::DecryptError)?;
+        self.cipher
+            .decrypt_inout_detached(
+                &nonce.into(),
+                aad.as_ref(),
+                InOutBuf::from(text),
+                &tag.into(),
+            )
+            .map_err(|_| Error::DecryptError)?;
+        msg.payload.consume_prefix(GCM_EXPLICIT_NONCE_LEN);
+        msg.payload.truncate(inner_len);
+        unpad_cid(msg)
+    }
+
     fn decrypt<'a>(
         &mut self,
         mut msg: InboundOpaqueMessage<'a>,
@@ -379,6 +442,30 @@ impl ChaChaEncrypter {
 }
 
 impl MessageEncrypter for ChaChaEncrypter {
+    fn supports_dtls12_cid(&self) -> bool {
+        true
+    }
+
+    fn encrypt_dtls12_cid(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        cid: &[u8],
+        padding_len: usize,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        seal_cid(msg, seq, cid, padding_len, 0, |aad, body| {
+            let nonce = Nonce::new(&self.iv, seq);
+            let text_len = body.len() - TAG_LEN;
+            let (text, tag_out) = body.split_at_mut(text_len);
+            let tag = self
+                .cipher
+                .encrypt_inout_detached(&nonce.0.into(), aad, InOutBuf::from(text))
+                .map_err(|_| Error::EncryptError)?;
+            tag_out.copy_from_slice(&tag);
+            Ok(())
+        })
+    }
+
     fn encrypt(
         &mut self,
         msg: OutboundPlainMessage<'_>,
@@ -419,6 +506,32 @@ struct ChaChaDecrypter {
 }
 
 impl MessageDecrypter for ChaChaDecrypter {
+    fn supports_dtls12_cid(&self) -> bool {
+        true
+    }
+
+    fn decrypt_dtls12_cid<'a>(
+        &mut self,
+        mut msg: InboundOpaqueMessage<'a>,
+        seq: u64,
+        cid: &[u8],
+    ) -> Result<InboundPlainMessage<'a>, Error> {
+        let (inner_len, aad) = open_cid_aad(&msg, seq, cid, 0)?;
+        let nonce = Nonce::new(&self.iv, seq).0;
+        let (text, tag) = msg.payload.split_at_mut(inner_len);
+        let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::DecryptError)?;
+        self.cipher
+            .decrypt_inout_detached(
+                &nonce.into(),
+                aad.as_ref(),
+                InOutBuf::from(text),
+                &tag.into(),
+            )
+            .map_err(|_| Error::DecryptError)?;
+        msg.payload.truncate(inner_len);
+        unpad_cid(msg)
+    }
+
     fn decrypt<'a>(
         &mut self,
         mut msg: InboundOpaqueMessage<'a>,
@@ -448,6 +561,10 @@ impl MessageDecrypter for ChaChaDecrypter {
         Ok(msg.into_plain_message())
     }
 }
+
+#[cfg(test)]
+#[path = "tls12/cid_tests.rs"]
+mod cid_tests;
 
 #[cfg(test)]
 mod tests {

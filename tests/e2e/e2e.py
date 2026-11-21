@@ -146,7 +146,8 @@ class Suite:
     description: str
     implementation: str  # "openssl", "gnutls", "go" or "browntls"
     peer_image: str  # Dockerfile under tests/e2e/peer/ (also used for PKI)
-    # "mlkem": X25519MLKEM768; "etm-toggle": a peer without Encrypt-then-MAC;
+    # "mlkem": X25519MLKEM768; "openssl-35": OpenSSL 3.5 hybrid groups;
+    # "etm-toggle": a peer without Encrypt-then-MAC;
     # "ech": Encrypted Client Hello; "ech-only": nothing but ECH scenarios;
     # "browntls-ech-client": the scenarios whose client must be browntls
     # (GREASE and random configuration identifiers in split mode).
@@ -166,7 +167,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5+ (Alpine 3.24)",
             "openssl",
             "alpine",
-            frozenset({"mlkem", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
         ),
         Suite(
             "openssl-3.0",
@@ -182,7 +183,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5 (Ubuntu 26.04)",
             "openssl",
             "ubuntu-26.04",
-            frozenset({"mlkem", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
             skip_arches=frozenset({"riscv64"}),
         ),
         Suite(
@@ -268,6 +269,8 @@ GROUP_NAMES: dict[str, tuple[str, str | None]] = {
     # GnuTLS builds without a post-quantum backend lack the hybrid group;
     # scenarios that use it require the "mlkem" suite feature.
     "X25519MLKEM768": ("X25519MLKEM768", None),
+    "secp256r1MLKEM768": ("SecP256r1MLKEM768", None),
+    "secp384r1MLKEM1024": ("SecP384r1MLKEM1024", None),
 }
 
 ROLES = ("client", "server")
@@ -327,6 +330,8 @@ class Scenario:
     suite: str | None = None
     groups: tuple[str, ...] = ()
     server_only_groups: bool = False
+    # An explicit client list can offer a different first share to force HRR.
+    client_groups: tuple[str, ...] = ()
     client_auth: bool = False
     connections: int = 1
     # "default", "peer-disabled" (refused) or "peer-disabled-allowed"
@@ -453,6 +458,39 @@ SCENARIOS: tuple[Scenario, ...] = (
         "X25519MLKEM768",
         "ecdsa-p256",
         requires=frozenset({"mlkem"}),
+    ),
+    *(
+        _tls13(
+            f"tls13-{group.lower()}",
+            "TLS13_AES_128_GCM_SHA256",
+            group,
+            "ecdsa-p256",
+            requires=frozenset({"mlkem", "openssl-35"}),
+        )
+        for group in ("secp256r1MLKEM768", "secp384r1MLKEM1024")
+    ),
+    # In both roles, the client offers an X25519 share first while the
+    # server accepts only the target hybrid group. OpenSSL's configured
+    # group order predicts the first share for its client role.
+    *(
+        Scenario(
+            f"tls13-{group.lower()}-hello-retry-request",
+            "ecdsa-p256",
+            tls="1.3",
+            suite="TLS13_AES_128_GCM_SHA256",
+            groups=(group,),
+            client_groups=("X25519", group),
+            requires=frozenset({"mlkem", "openssl-35"}),
+            expect_version="TLSv1_3",
+            expect_suite="TLS13_AES_128_GCM_SHA256",
+            expect_group=group,
+            expect_handshake="FullWithHelloRetryRequest",
+        )
+        for group in (
+            "X25519MLKEM768",
+            "secp256r1MLKEM768",
+            "secp384r1MLKEM1024",
+        )
     ),
     # The browntls client's default key shares do not include P-256.
     Scenario(
@@ -683,9 +721,11 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
         args += ["--tls", sc.tls]
     if sc.suite:
         args += ["--suite", sc.suite]
-    if role == "server" or not sc.server_only_groups:
-        for group in sc.groups:
-            args += ["--group", group]
+    groups = sc.groups
+    if role == "client":
+        groups = sc.client_groups or (() if sc.server_only_groups else sc.groups)
+    for group in groups:
+        args += ["--group", group]
     if sc.etm == "peer-disabled-allowed":
         args.append("--allow-mac-then-encrypt")
     if sc.optional_extensions:
@@ -697,7 +737,9 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
     return args
 
 
-def openssl_protocol_args(sc: Scenario) -> list[str]:
+def openssl_protocol_args(
+    sc: Scenario, predict_client_share: bool = False
+) -> list[str]:
     args: list[str] = []
     if sc.tls == "1.3":
         args.append("-tls1_3")
@@ -707,7 +749,10 @@ def openssl_protocol_args(sc: Scenario) -> list[str]:
         args.append("-tls1_2")
         if sc.suite:
             args += ["-cipher", SUITE_NAMES[sc.suite][0]]
-    if sc.groups:
+    if predict_client_share and sc.client_groups:
+        first, *rest = (GROUP_NAMES[g][0] for g in sc.client_groups)
+        args += ["-groups", ":".join((f"*{first}", *rest))]
+    elif sc.groups:
         args += ["-groups", ":".join(GROUP_NAMES[g][0] for g in sc.groups)]
     return args
 
@@ -765,7 +810,7 @@ def peer_client_command(sc: Scenario, implementation: str) -> list[str]:
         cmd = ["openssl", "s_client", "-connect", f"{SERVER_ALIAS}:{PORT}"]
         cmd += ["-servername", SERVER_ALIAS, "-verify_hostname", SERVER_ALIAS]
         cmd += ["-CAfile", ca, "-verify_return_error", "-quiet"]
-        cmd += openssl_protocol_args(sc)
+        cmd += openssl_protocol_args(sc, predict_client_share=True)
         if sc.client_auth:
             cmd += ["-cert", cert, "-key", key]
         script = f"printf '%s\\n' {line} | {shlex.join(cmd)}"

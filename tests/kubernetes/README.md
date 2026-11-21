@@ -59,3 +59,21 @@ python3 -B tests/kubernetes/service_identity.py --image browntls-e2e:identity-am
 The runner reuses the profile, creates a per-run namespace and uniquely tagged
 image, and deletes only those resources. Test keys and certificates are
 generated in a temporary directory and mounted from per-case Secrets.
+
+
+## RFC 10024 hybrid key agreement
+
+On an already running minikube profile, build the browntls image and run
+the six Service exchanges:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:hybrid-amd64
+python3 -B tests/kubernetes/rfc10024.py --image browntls-e2e:hybrid-amd64 \
+  --profile PROFILE
+```
+
+Each group runs over a TCP TLS 1.3 Service and a UDP DTLS 1.3 Service. Both
+endpoints use the Tokio adapters. The client verifies the Service DNS
+identity, and the runner checks negotiated group, retry behavior and data
+in both directions. Only the server pod mounts the private key. The run
+uses its own namespace and image tag.

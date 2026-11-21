@@ -13,6 +13,14 @@
 static const char request[] = "hello from browntls";
 static const char reply[] = "sltnworb morf olleh";
 static const char path[] = "/pki/ecdsa-p256/";
+static const unsigned short pqc_groups[] = {
+    WOLFSSL_X25519MLKEM768,
+    WOLFSSL_SECP256R1MLKEM768,
+    WOLFSSL_SECP384R1MLKEM1024,
+};
+static const char *const pqc_names[] = {
+    "X25519MLKEM768", "secp256r1MLKEM768", "secp384r1MLKEM1024",
+};
 
 static void fail(const char *stage)
 {
@@ -100,14 +108,35 @@ static void send_close(WOLFSSL *ssl)
 
 int main(int argc, char **argv)
 {
-    if ((argc != 4 && argc != 6) ||
-        (strcmp(argv[1], "server") && strcmp(argv[1], "client")) ||
-        (argc == 6 && (strcmp(argv[4], "--cid") ||
-                       (strcmp(argv[5], "1.2") && strcmp(argv[5], "1.3")))))
-        fail("usage: wolfssl-dtls server|client HOST PORT [--cid 1.2|1.3]");
+    const char *cid_version = NULL;
+    const char *pqc_group = NULL;
+    if (argc < 4 || (strcmp(argv[1], "server") && strcmp(argv[1], "client")))
+        fail("usage: wolfssl-dtls server|client HOST PORT [--cid 1.2|1.3] [--group NAME]");
+    for (int i = 4; i < argc; i += 2) {
+        if (i + 1 >= argc)
+            fail("missing option value");
+        if (strcmp(argv[i], "--cid") == 0 && cid_version == NULL &&
+            (strcmp(argv[i + 1], "1.2") == 0 || strcmp(argv[i + 1], "1.3") == 0))
+            cid_version = argv[i + 1];
+        else if (strcmp(argv[i], "--group") == 0 && pqc_group == NULL)
+            pqc_group = argv[i + 1];
+        else
+            fail("usage: wolfssl-dtls server|client HOST PORT [--cid 1.2|1.3] [--group NAME]");
+    }
+    if (cid_version != NULL && pqc_group != NULL)
+        fail("CID and RFC 10024 groups are separate DTLS cases");
     int server = strcmp(argv[1], "server") == 0;
-    int cid = argc == 6;
-    int v12 = cid && strcmp(argv[5], "1.2") == 0;
+    int cid = cid_version != NULL;
+    int v12 = cid && strcmp(cid_version, "1.2") == 0;
+    unsigned short group = 0;
+    if (pqc_group != NULL) {
+        for (size_t i = 0; i < sizeof(pqc_names) / sizeof(pqc_names[0]); ++i) {
+            if (strcmp(pqc_group, pqc_names[i]) == 0)
+                group = pqc_groups[i];
+        }
+        if (group == 0)
+            fail("unsupported RFC 10024 group");
+    }
     char file[sizeof(path) + 20];
     if (wolfSSL_Init() != WOLFSSL_SUCCESS)
         fail("initialize wolfSSL");
@@ -138,10 +167,25 @@ int main(int argc, char **argv)
         check(ssl, wolfSSL_dtls_cid_use(ssl), "enable CID");
         check(ssl, wolfSSL_dtls_cid_set(ssl, local_cid, sizeof(local_cid)), "set CID");
     }
+    if (pqc_group != NULL) {
+        check(ssl, wolfSSL_UseSupportedCurve(ssl, group), "restrict RFC 10024 group");
+        if (!server)
+            check(ssl, wolfSSL_NoKeyShares(ssl), "send a small initial ClientHello");
+    }
     int fd = peer_socket(ssl, server, argv[2], argv[3]);
+    /* Match browntls's DTLS datagram budget in both directions. */
+    if (pqc_group != NULL)
+        check(ssl, wolfSSL_dtls_set_mtu(ssl, 1200), "set DTLS MTU");
     check(ssl, server ? wolfSSL_accept(ssl) : wolfSSL_connect(ssl), "DTLS handshake");
     if (strcmp(wolfSSL_get_version(ssl), v12 ? "DTLSv1.2" : "DTLSv1.3") != 0)
         fail("negotiated unexpected version");
+    if (pqc_group != NULL) {
+        WOLFSSL_X509 *cert = wolfSSL_get_peer_certificate(ssl);
+        if (cert == NULL || wolfSSL_get_verify_result(ssl) != 0 ||
+            wolfSSL_session_reused(ssl))
+            fail("expected verified peer certificate and full RFC 10024 handshake");
+        wolfSSL_X509_free(cert);
+    }
     if (cid) {
         unsigned int rx = 0, tx = 0;
         WOLFSSL_X509 *cert = wolfSSL_get_peer_certificate(ssl);
@@ -166,7 +210,10 @@ int main(int argc, char **argv)
         expect_close(ssl);
         send_close(ssl);
     }
-    if (cid)
+    if (pqc_group != NULL)
+        printf("verified DTLSv1.3, %s, mTLS, full handshake, payloads and close_notify\n",
+               pqc_group);
+    else if (cid)
         printf("verified DTLSv1.%s, bidirectional CID, mTLS, full handshake, payloads and close_notify\n",
                v12 ? "2" : "3");
     else

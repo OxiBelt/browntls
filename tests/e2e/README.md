@@ -28,9 +28,9 @@ Each CI job pairs one architecture with one peer suite.
 
 | Suite | Peer |
 |---|---|
-| `openssl` | OpenSSL 3.5 or later from Alpine 3.24 ([`peer/alpine.Dockerfile`](peer/alpine.Dockerfile)), with X25519MLKEM768 |
+| `openssl` | OpenSSL 3.5 or later from Alpine 3.24 ([`peer/alpine.Dockerfile`](peer/alpine.Dockerfile)), with the three RFC 10024 hybrids |
 | `openssl-3.0` | OpenSSL 3.0 from Ubuntu 24.04 LTS ([`peer/ubuntu.Dockerfile`](peer/ubuntu.Dockerfile)), without post-quantum groups |
-| `openssl-ubuntu-26.04` | OpenSSL 3.5 from Ubuntu 26.04 LTS ([`peer/ubuntu-26.04.Dockerfile`](peer/ubuntu-26.04.Dockerfile)), with X25519MLKEM768; not on `riscv64`, whose runner lacks the RVA23 profile Ubuntu 26.04's riscv64 image requires |
+| `openssl-ubuntu-26.04` | OpenSSL 3.5 from Ubuntu 26.04 LTS ([`peer/ubuntu-26.04.Dockerfile`](peer/ubuntu-26.04.Dockerfile)), with the three RFC 10024 hybrids; not on `riscv64`, whose runner lacks the RVA23 profile Ubuntu 26.04's riscv64 image requires |
 | `gnutls` | GnuTLS 3.8 from Alpine 3.24 |
 | `browntls` | browntls client and server in separate containers |
 | `go` | Go 1.27 `crypto/tls` ([`peer/go.Dockerfile`](peer/go.Dockerfile), the program in [`peer/go/`](peer/go/main.go)): Encrypted Client Hello scenarios only |
@@ -48,6 +48,19 @@ architecture's expected accelerated families (AES-NI, PCLMULQDQ, AVX2 and
 BMI2/ADX on x86-64-v3; AES, PMULL and SHA2 on the Arm runners; Zvkned, Zvkg,
 Zvknh and RVV in the emulated RISC-V job) fell back to portable code.
 
+## RFC 10024 hybrid key agreement
+
+The OpenSSL 3.5 suites exercise all three hybrid groups with browntls in
+each role. A direct case restricts both peers to the target group. A retry
+case offers X25519 as the first client share and restricts the server to
+the target hybrid. The harness verifies the negotiated group and
+handshake kind and checks data in both directions.
+
+The pinned wolfSSL DTLS 1.3 suite uses the same three groups over UDP in
+both roles. These exchanges verify both certificates, retry, negotiated
+group, data and clean shutdown.
+
+
 ## Scenarios
 
 `python3 tests/e2e/e2e.py list` prints the scenarios of each suite. Each one
@@ -57,7 +70,7 @@ allows it, with browntls as server against the peer's client:
 - both sides on their defaults (X25519MLKEM768 with a post-quantum peer,
   X25519 otherwise);
 - TLS 1.3 with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 over X25519,
-  P-256, P-384 and X25519MLKEM768, with ECDSA P-256, RSA 2048 and Ed25519
+  P-256, P-384 and the RFC 10024 hybrids, with ECDSA P-256, RSA 2048 and Ed25519
   certificates;
 - a HelloRetryRequest (the server accepts only P-256, which the browntls
   client does not send a key share for by default);

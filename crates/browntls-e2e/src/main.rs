@@ -44,10 +44,12 @@
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
 //! NewSessionTicket messages); `--ticket-request` sends the RFC 9149
 //! extension; `--padding` pads the ClientHello to at least N bytes (RFC
-//! 7685). `--async` runs the client's or server's connections through
-//! `browntls-tokio` on a single-threaded Tokio runtime instead of the
-//! blocking `StreamOwned` (same exchange and output, with `"io":"async"`; a
-//! client then does not retry after an ECH rejection).
+//! 7685). `--async` runs TLS connections through `browntls-tokio` on a
+//! single-threaded Tokio runtime instead of the blocking `StreamOwned` (same
+//! exchange and output, with `"io":"async"`; a client then does not retry
+//! after an ECH rejection). For DTLS it selects the Tokio UDP client and
+//! server, reported as `"io":"tokio-dtls"`; `--async` cannot be combined
+//! with `--dtls-rebind`.
 //!
 //! Encrypted Client Hello (RFC 9849): `ech-keygen` writes an X25519 key for
 //! every native HPKE suite with that KEM to `DIR/ech-config` (one

@@ -117,6 +117,26 @@ class ScenarioTest(unittest.TestCase):
         self.assertNotIn("tls13-x25519mlkem768", names("gnutls"))
         self.assertNotIn("tls12-cbc-without-etm-refused", names("browntls"))
 
+    def test_rfc10024_groups_are_limited_to_openssl_35_and_browntls(self):
+        direct = {
+            "tls13-secp256r1mlkem768",
+            "tls13-secp384r1mlkem1024",
+        }
+        retry = {
+            "tls13-x25519mlkem768-hello-retry-request",
+            "tls13-secp256r1mlkem768-hello-retry-request",
+            "tls13-secp384r1mlkem1024-hello-retry-request",
+        }
+        for suite in ("openssl", "openssl-ubuntu-26.04"):
+            names = {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+            self.assertTrue(direct | retry <= names, suite)
+        for suite in ("openssl-3.0", "gnutls", "browntls", "go"):
+            names = {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+            self.assertTrue((direct | retry).isdisjoint(names), suite)
+        for name in direct | retry:
+            scenario = next(s for s in e2e.SCENARIOS if s.name == name)
+            self.assertEqual(scenario.roles_for(e2e.SUITES["openssl"]), e2e.ROLES)
+
     def test_browntls_suite_runs_each_scenario_once(self):
         suite = e2e.SUITES["browntls"]
         for sc in e2e.scenarios_for(suite):
@@ -133,6 +153,43 @@ class CommandTest(unittest.TestCase):
         server = e2e.browntls_args(sc, "server")
         self.assertEqual(server[server.index("--group") + 1], "secp256r1")
         self.assertIn("-groups", e2e.peer_server_command(sc, "openssl"))
+
+    def test_hybrid_groups_direct_and_forced_retry_commands(self):
+        for group, openssl_name in (
+            ("X25519MLKEM768", "X25519MLKEM768"),
+            ("secp256r1MLKEM768", "SecP256r1MLKEM768"),
+            ("secp384r1MLKEM1024", "SecP384r1MLKEM1024"),
+        ):
+            retry = next(
+                s for s in e2e.SCENARIOS
+                if s.name == f"tls13-{group.lower()}-hello-retry-request"
+            )
+            self.assertEqual(retry.expect_handshake, "FullWithHelloRetryRequest")
+            self.assertEqual(retry.groups, (group,))
+            self.assertEqual(retry.client_groups, ("X25519", group))
+
+            # Both orientations configure the client to send X25519 first.
+            brown_client = e2e.browntls_args(retry, "client")
+            self.assertEqual(
+                [brown_client[i + 1] for i, arg in enumerate(brown_client) if arg == "--group"],
+                ["X25519", group],
+            )
+            peer_server = e2e.peer_server_command(retry, "openssl")
+            self.assertEqual(peer_server[peer_server.index("-groups") + 1], openssl_name)
+
+            # As a server, browntls accepts only the target while OpenSSL's
+            # client offers X25519 first and can retry with the target.
+            brown_server = e2e.browntls_args(retry, "server")
+            self.assertEqual(brown_server[brown_server.index("--group") + 1], group)
+            peer_client = e2e.peer_client_command(retry, "openssl")[2]
+            self.assertIn(f"-groups '*X25519:{openssl_name}'", peer_client)
+
+            direct = next(
+                s for s in e2e.SCENARIOS
+                if s.name == f"tls13-{group.lower()}" and s.groups == (group,)
+            )
+            self.assertEqual(direct.expect_handshake, "Full")
+            self.assertEqual(direct.expect_group, group)
 
     def test_openssl_tls12_cbc_without_etm(self):
         sc = self.scenario("tls12-cbc-without-etm-refused")

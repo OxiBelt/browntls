@@ -14,6 +14,9 @@ use super::{IO_TIMEOUT, Options, Result, ServerName, emit, negotiated, required,
 const MESSAGE: &str = "hello from browntls";
 
 pub(super) fn client(options: &Options) -> Result<()> {
+    if options.async_io && options.dtls_rebind.is_some() {
+        return Err("--async does not support --dtls-rebind".into());
+    }
     let count = exchange_count(options, options.connections)?;
     let address = required(options.connect.as_ref(), "--connect")?;
     let name = required(options.server_name.as_ref(), "--server-name")?;
@@ -55,10 +58,8 @@ pub(super) fn client(options: &Options) -> Result<()> {
     };
     let name = ServerName::try_from(name.to_owned()).map_err(|error| error.to_string())?;
     let identity = super::service_identity(&options.reference_ids)?;
-    if options.dtls_rebind.is_none()
-        && let Some(identity) = &identity
-    {
-        return tokio_client(options, config, name, identity.clone(), peer, bind, count);
+    if options.dtls_rebind.is_none() && (options.async_io || identity.is_some()) {
+        return tokio_client(options, config, name, identity, peer, bind, count);
     }
     let socket = UdpSocket::bind(bind).map_err(|error| error.to_string())?;
     socket.connect(peer).map_err(|error| error.to_string())?;
@@ -130,7 +131,7 @@ fn tokio_client(
     options: &Options,
     config: Arc<ClientConfig>,
     name: ServerName<'static>,
-    identity: ServiceIdentity,
+    identity: Option<ServiceIdentity>,
     peer: std::net::SocketAddr,
     bind: &str,
     count: usize,
@@ -153,13 +154,20 @@ fn tokio_client(
                     .connect(peer)
                     .await
                     .map_err(|error| error.to_string())?;
-                let client_identity = ClientServerIdentity::new(name.clone(), identity.clone());
-                let mut client = TokioUdpClient::new_with_identity_and_settings(
-                    config.clone(),
-                    client_identity,
-                    socket,
-                    settings(options)?,
-                )
+                let mut client = match &identity {
+                    Some(identity) => TokioUdpClient::new_with_identity_and_settings(
+                        config.clone(),
+                        ClientServerIdentity::new(name.clone(), identity.clone()),
+                        socket,
+                        settings(options)?,
+                    ),
+                    None => TokioUdpClient::new_with_settings(
+                        config.clone(),
+                        name.clone(),
+                        socket,
+                        settings(options)?,
+                    ),
+                }
                 .map_err(|error| error.to_string())?;
                 bounded("handshake", client.complete_handshake()).await?;
                 let message = options.message.as_deref().unwrap_or(MESSAGE);
@@ -195,6 +203,9 @@ fn tokio_client(
 }
 
 pub(super) fn server(options: &Options) -> Result<()> {
+    if options.async_io && options.dtls_rebind.is_some() {
+        return Err("--async does not support --dtls-rebind".into());
+    }
     let count = exchange_count(options, options.accept)?;
     let mut config = super::server_config(options, None)?;
     let cookies = TicketRotator::new(6 * 60 * 60, || Ok(Box::new(AeadTicketProducer::new()?)))
@@ -217,6 +228,9 @@ pub(super) fn server(options: &Options) -> Result<()> {
         owned
             .enable_dtls12_resumption()
             .map_err(|error| error.to_string())?;
+    }
+    if options.async_io {
+        return tokio_server(options, config);
     }
     let listen = required(options.listen.as_ref(), "--listen")?;
     let socket = UdpSocket::bind(listen).map_err(|error| format!("bind {listen}: {error}"))?;
@@ -273,6 +287,62 @@ pub(super) fn server(options: &Options) -> Result<()> {
             _ => {}
         }
     }
+}
+
+fn tokio_server(options: &Options, config: Arc<browntls::ServerConfig>) -> Result<()> {
+    use browntls::tokio::dtls::{ServerEvent as TokioServerEvent, UdpServer as TokioUdpServer};
+
+    let count = exchange_count(options, options.accept)?;
+    let listen = required(options.listen.as_ref(), "--listen")?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("runtime: {error}"))?
+        .block_on(async {
+            let socket = tokio::net::UdpSocket::bind(listen)
+                .await
+                .map_err(|error| format!("bind {listen}: {error}"))?;
+            let mut server = TokioUdpServer::new_with_settings(config, socket, settings(options)?)
+                .map_err(|error| error.to_string())?;
+            server.set_read_timeout(Some(IO_TIMEOUT));
+            emit(&[("event", "listening".into()), ("io", "tokio-dtls".into())]);
+
+            let mut index = 0;
+            while index < count {
+                match server
+                    .next_event()
+                    .await
+                    .map_err(|error| format!("DTLS event: {error}"))?
+                {
+                    TokioServerEvent::Received(peer, data) => {
+                        let message =
+                            std::str::from_utf8(&data).map_err(|error| error.to_string())?;
+                        let reply = reverse(message);
+                        server
+                            .send_to(reply.as_bytes(), peer)
+                            .await
+                            .map_err(|error| format!("send: {error}"))?;
+                        let connection =
+                            server.connection(peer).ok_or("missing DTLS connection")?;
+                        check_handshake(connection, index, options)?;
+                        let mut fields =
+                            exchange_fields(connection, "server", message, &reply, index, options);
+                        fields.push(("io", "tokio-dtls".into()));
+                        server
+                            .close(peer)
+                            .await
+                            .map_err(|error| format!("close: {error}"))?;
+                        emit(&fields);
+                        index += 1;
+                    }
+                    TokioServerEvent::Closed(_) => {}
+                    TokioServerEvent::Failed(_, error) => return Err(error.to_string()),
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
 }
 
 fn reverse(message: &str) -> String {

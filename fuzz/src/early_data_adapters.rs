@@ -7,13 +7,15 @@ use std::time::Duration;
 use browntls_core::crypto::hash::HashAlgorithm;
 use browntls_core::psk::ExternalPsk;
 use browntls_core::{CipherSuite, ClientConfig, RootCertStore, ServerConfig, version};
-use browntls_tokio::{EarlyDataOutcome, RejectedEarlyDataPolicy, TlsAcceptor, TlsConnector};
+use browntls_tokio::{
+    EarlyDataOutcome, RejectedEarlyDataPolicy, TlsAcceptor, TlsConnector, unbuffered,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
 use crate::tls_conn::setup::server_name;
 
 #[test]
-fn early_data_reporting_for_tokio_adapters() {
+fn early_data_reporting_for_both_tokio_adapters() {
     crate::init();
     let psk = Arc::new(
         ExternalPsk::new(b"seed".to_vec(), vec![0x87; 32], HashAlgorithm::SHA256)
@@ -103,7 +105,8 @@ fn early_data_reporting_for_tokio_adapters() {
                     peer.await.expect("peer");
                 }};
             }
-            exercise!(TlsConnector::from(client));
+            exercise!(TlsConnector::from(client.clone()));
+            exercise!(unbuffered::TlsConnector::from(client));
         })
         .await
         .expect("early-data checks made progress");

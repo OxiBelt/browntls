@@ -346,11 +346,11 @@ impl<Data: SideData> KernelConnection<Data> {
         let state = match typ {
             ContentType::Handshake => self.handle_handshake(state, payload)?,
             _ => {
-                let result = match Message::try_from(InboundPlainMessage {
+                let result = match Message::try_from(InboundPlainMessage::new(
                     typ,
-                    version: ProtocolVersion::TLSv1_2,
+                    ProtocolVersion::TLSv1_2,
                     payload,
-                }) {
+                )) {
                     Ok(msg) => ConnectionCore::process_msg(
                         &mut self.core.common_state,
                         &mut self.core.data,

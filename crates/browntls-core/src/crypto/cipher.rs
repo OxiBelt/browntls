@@ -222,6 +222,11 @@ impl fmt::Debug for Tls12RecordProtection {
 /// Decrypts records.
 pub trait MessageDecrypter: Send + Sync {
     /// Decrypts `msg` in place; `seq` is the record sequence number.
+    ///
+    /// For TLS 1.3, the result records the length of the entire
+    /// authenticated inner plaintext. Use
+    /// [`InboundOpaqueMessage::into_tls13_unpadded_message`] after
+    /// decryption to preserve the length while removing padding and type.
     fn decrypt<'a>(
         &mut self,
         msg: InboundOpaqueMessage<'a>,
@@ -244,7 +249,9 @@ pub trait MessageDecrypter: Send + Sync {
     /// `msg` holds only the encrypted body, including any explicit nonce and
     /// the full tag. Its type must be `Tls12Cid`, its version `DTLSv1_2`.
     /// The encoded inner plaintext, including type and padding, is limited to
-    /// 16384 bytes. The supported inner types are 20 through 24 and
+    /// 16384 bytes. Return that length with the decrypted content using
+    /// [`InboundPlainMessage::with_record_plaintext_len`]. The supported
+    /// inner types are 20 through 24 and
     /// RFC 9853 RRC.
     /// only application data may be empty. No other AAD/tag format is tried.
     /// On error the body is unspecified and must not be used as plaintext.

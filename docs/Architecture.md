@@ -1207,15 +1207,16 @@ RFC 9257 guidance and what browntls enforces:
   TLS 1.3, whose limit counts the content type) or `max_fragment_size` less
   the header, whichever is smaller (`MessageFragmenter`); protected records
   the peer sends that exceed our limit (TLS 1.3: the whole
-  `TLSInnerPlaintext`, padding included, derived from the ciphertext length
-  less the suite's expansion) end the connection with `record_overflow`
-  (`RecordLayer::set_inbound_record_size_limit`). A peer value below 64 is
-  `illegal_parameter`; a value above the protocol maximum is lowered, not
-  refused; a configured value below 64 fails connection creation
-  (`Error::BadRecordSizeLimit`). 0-RTT data, sent before the client could
-  see the server's limit, is exempt, and a TLS 1.3 client applies its own
-  limit from the record after EncryptedExtensions (the server's handshake
-  records already respect it).
+  `TLSInnerPlaintext`, including padding) end the connection with
+  `record_overflow`. If the server acknowledges the extension, the TLS 1.3
+  client checks all authenticated records carrying EncryptedExtensions.
+  If the server omits it, the protocol limit applies. A peer value below
+  64 is `illegal_parameter`, including when the server declines the
+  extension. Higher peer values are capped at the protocol maximum.
+  A configured value below 64 fails connection creation
+  (`Error::BadRecordSizeLimit`). The new handshake's cap applies to its
+  handshake and application keys. The 0-RTT record-size check is tracked
+  separately in the Roadmap.
 - `ticket_request` (RFC 9149), TLS 1.3 only: the client sends
   `ClientConfig::tls13_ticket_request` (default none) when it offers TLS
   1.3; the server sends at most `resumption_count` tickets for a resumed

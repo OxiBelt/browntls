@@ -62,21 +62,13 @@ pub(crate) struct RecordLayer {
     /// skipped record costs at least one byte.
     trial_decryption_len: Option<usize>,
     /// The record size limit we announced (RFC 8449), once negotiated.
-    inbound_size_limit: Option<InboundSizeLimit>,
+    inbound_size_limit: Option<u16>,
+    /// Largest authenticated record before the client learns whether the
+    /// server negotiated the extension in EncryptedExtensions.
+    pending_inbound_record_size: Option<usize>,
     /// The current decrypter reads 0-RTT data, which the client sent before
     /// it could learn our record size limit; the limit does not apply.
     reading_early_data: bool,
-}
-
-/// The largest protected record we accept, from the record size limit we
-/// announced (RFC 8449 §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InboundSizeLimit {
-    /// The announced value, clamped to the protocol maximum: for TLS 1.3
-    /// the whole `TLSInnerPlaintext` (content, type and padding), for TLS
-    /// 1.2 the plaintext.
-    limit: usize,
-    tls13: bool,
 }
 
 impl RecordLayer {
@@ -92,6 +84,7 @@ impl RecordLayer {
             confidentiality_limit: u64::MAX,
             trial_decryption_len: None,
             inbound_size_limit: None,
+            pending_inbound_record_size: None,
             reading_early_data: false,
         }
     }
@@ -99,40 +92,28 @@ impl RecordLayer {
     /// Enforces the record size limit we announced (RFC 8449 §4) on every
     /// protected record from now on, except 0-RTT data. `limit` must
     /// already be clamped to the protocol maximum.
-    pub(crate) fn set_inbound_record_size_limit(&mut self, limit: u16, tls13: bool) {
-        self.inbound_size_limit = Some(InboundSizeLimit {
-            limit: usize::from(limit),
-            tls13,
-        });
+    pub(crate) fn set_inbound_record_size_limit(&mut self, limit: u16) -> Result<(), Error> {
+        if self
+            .pending_inbound_record_size
+            .take()
+            .is_some_and(|seen| seen > usize::from(limit))
+        {
+            return Err(Error::PeerSentOversizedRecord);
+        }
+        self.inbound_size_limit = Some(limit);
+        Ok(())
     }
 
-    /// Whether a decrypted record breaks the record size limit we announced:
-    /// "A TLS endpoint that receives a record larger than its advertised
-    /// limit MUST generate a fatal record_overflow alert" (RFC 8449 §4).
-    fn exceeds_inbound_size_limit(&self, encrypted_len: usize, content_len: usize) -> bool {
-        let Some(InboundSizeLimit { limit, tls13 }) = self.inbound_size_limit else {
-            return false;
-        };
-        if self.reading_early_data {
-            return false;
-        }
-        if !tls13 {
-            return content_len > limit;
-        }
-        // TLS 1.3 counts the content type and the padding too. The
-        // decrypter strips both, so the length of the TLSInnerPlaintext
-        // comes from the ciphertext: it is the ciphertext less the AEAD
-        // expansion, which the (same suite's) encrypter reports as
-        // `encrypted_payload_len(0) - 1`. Without an encrypter, the largest
-        // expansion RFC 9846 §5.2 allows (255) bounds it.
-        let expansion = match self.encrypt_state {
-            DirectionState::Invalid => 255,
-            _ => self
-                .message_encrypter
-                .encrypted_payload_len(0)
-                .saturating_sub(1),
-        };
-        content_len >= limit || encrypted_len.saturating_sub(expansion) > limit
+    pub(crate) fn inbound_record_size_limit(&self) -> Option<u16> {
+        self.inbound_size_limit
+    }
+
+    pub(crate) fn start_record_size_limit_observation(&mut self) {
+        self.pending_inbound_record_size = Some(0);
+    }
+
+    pub(crate) fn clear_record_size_limit_observation(&mut self) {
+        self.pending_inbound_record_size = None;
     }
 
     /// Decrypts `encr` in place. Returns `Ok(None)` when a record was dropped
@@ -157,7 +138,15 @@ impl RecordLayer {
         let encrypted_len = encr.payload.len();
         match self.message_decrypter.decrypt(encr, self.read_seq) {
             Ok(plaintext) => {
-                if self.exceeds_inbound_size_limit(encrypted_len, plaintext.payload.len()) {
+                let len = plaintext.record_plaintext_len();
+                if let Some(seen) = &mut self.pending_inbound_record_size {
+                    *seen = (*seen).max(len);
+                }
+                if !self.reading_early_data
+                    && self
+                        .inbound_record_size_limit()
+                        .is_some_and(|limit| len > usize::from(limit))
+                {
                     return Err(Error::PeerSentOversizedRecord);
                 }
                 self.read_seq += 1;
@@ -556,7 +545,7 @@ mod tests {
         // Not negotiated: anything up to the protocol limit.
         assert_eq!(decrypt(&mut rl, inner(1000, 0)), Ok(1000));
 
-        rl.set_inbound_record_size_limit(64, true);
+        rl.set_inbound_record_size_limit(64).unwrap();
         assert_eq!(decrypt(&mut rl, inner(63, 0)), Ok(63));
         assert_eq!(decrypt(&mut rl, inner(10, 53)), Ok(10));
         assert_eq!(
@@ -576,6 +565,31 @@ mod tests {
             decrypt(&mut rl, inner(64, 0)),
             Err(Error::PeerSentOversizedRecord)
         );
+    }
+
+    #[test]
+    fn observed_lengths_apply_only_if_the_extension_is_negotiated() {
+        let mut rl = RecordLayer::new();
+        rl.set_message_decrypter(Box::new(Identity { tls13: true }));
+
+        rl.start_record_size_limit_observation();
+        assert_eq!(decrypt(&mut rl, inner(16, 47)), Ok(16));
+        rl.set_inbound_record_size_limit(64).unwrap();
+
+        let mut rl = RecordLayer::new();
+        rl.set_message_decrypter(Box::new(Identity { tls13: true }));
+        rl.start_record_size_limit_observation();
+        assert_eq!(decrypt(&mut rl, inner(16, 48)), Ok(16));
+        assert_eq!(decrypt(&mut rl, inner(32, 0)), Ok(32));
+        assert_eq!(
+            rl.set_inbound_record_size_limit(64),
+            Err(Error::PeerSentOversizedRecord)
+        );
+
+        rl.start_record_size_limit_observation();
+        assert_eq!(decrypt(&mut rl, inner(16, 48)), Ok(16));
+        rl.clear_record_size_limit_observation();
+        assert_eq!(decrypt(&mut rl, inner(128, 0)), Ok(128));
     }
 
     /// Fails every record, as undecryptable 0-RTT data does.
@@ -622,7 +636,7 @@ mod tests {
     fn tls12_inbound_record_size_limit_counts_plaintext() {
         let mut rl = RecordLayer::new();
         rl.set_message_decrypter(Box::new(Identity { tls13: false }));
-        rl.set_inbound_record_size_limit(64, false);
+        rl.set_inbound_record_size_limit(64).unwrap();
         assert_eq!(decrypt(&mut rl, alloc::vec![0; 64]), Ok(64));
         assert_eq!(
             decrypt(&mut rl, alloc::vec![0; 65]),
@@ -630,7 +644,7 @@ mod tests {
         );
         // Unprotected records are not subject to the limit (RFC 8449 §4).
         let mut rl = RecordLayer::new();
-        rl.set_inbound_record_size_limit(64, false);
+        rl.set_inbound_record_size_limit(64).unwrap();
         assert_eq!(decrypt(&mut rl, alloc::vec![0; 1000]), Ok(1000));
     }
 }

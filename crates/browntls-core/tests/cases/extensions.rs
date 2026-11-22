@@ -17,6 +17,9 @@ use browntls_core::{
 };
 use common::*;
 
+#[path = "extensions/record_size_limit.rs"]
+mod record_size_limit;
+
 // ------------------------------------------------------------- wire helpers
 
 const EXT_PADDING: u16 = 0x0015;
@@ -441,24 +444,28 @@ fn record_size_limit_below_64_is_refused() {
     );
 
     // From the client: the server answers illegal_parameter (RFC 8449 §4).
-    let mut config = client_config(&chain);
-    config.record_size_limit = Some(64);
-    let (mut client, mut server) = connect(config, server_config(&chain));
-    let mut hello = flight(&mut client);
-    let at = Hello::parse(&hello, true)
-        .ext(EXT_RECORD_SIZE_LIMIT)
-        .unwrap()
-        .at;
-    hello[at..at + 2].copy_from_slice(&63u16.to_be_bytes());
-    feed(&mut server, &hello);
-    assert_eq!(
-        server.process_new_packets().err(),
-        Some(Error::PeerMisbehaved(
-            PeerMisbehaved::IllegalRecordSizeLimit
-        ))
-    );
-    let alert = records(&flight(&mut server));
-    assert_eq!(alert, [(21, vec![2, 47])]);
+    for configured in [Some(64), None] {
+        let mut config = client_config(&chain);
+        config.record_size_limit = Some(64);
+        let mut server_config = server_config(&chain);
+        server_config.record_size_limit = configured;
+        let (mut client, mut server) = connect(config, server_config);
+        let mut hello = flight(&mut client);
+        let at = Hello::parse(&hello, true)
+            .ext(EXT_RECORD_SIZE_LIMIT)
+            .unwrap()
+            .at;
+        hello[at..at + 2].copy_from_slice(&63u16.to_be_bytes());
+        feed(&mut server, &hello);
+        assert_eq!(
+            server.process_new_packets().err(),
+            Some(Error::PeerMisbehaved(
+                PeerMisbehaved::IllegalRecordSizeLimit
+            ))
+        );
+        let alert = records(&flight(&mut server));
+        assert_eq!(alert, [(21, vec![2, 47])]);
+    }
 }
 
 #[cfg(feature = "tls12")]

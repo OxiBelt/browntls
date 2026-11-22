@@ -477,37 +477,32 @@ impl CommonState {
         self.message_fragmenter.max_fragment_len()
     }
 
-    /// Puts a negotiated `record_size_limit` (RFC 8449) into effect: `ours`
-    /// is the value we announced, `peers` the value the peer announced.
-    ///
-    /// A peer value below 64 is `illegal_parameter` (RFC 8449 §4). A value
-    /// above the protocol maximum is not an error (a server MUST NOT
-    /// enforce that, and a client MAY abort but we do not): records never
-    /// exceed the protocol maximum anyway. Our records then carry at most
-    /// `peers` bytes of plaintext in TLS 1.2 and `peers - 1` in TLS 1.3,
-    /// whose limit counts the content type (and any padding, of which we
-    /// send none); the local `max_fragment_size` still applies when
-    /// smaller. Protected records the peer sends from now on (except 0-RTT
-    /// data) must respect `ours`, or the connection fails with
-    /// `record_overflow`.
+    /// A value below 64 is illegal even when we decline negotiation.
+    pub(crate) fn validate_peer_record_size_limit(&mut self, limit: u16) -> Result<(), Error> {
+        if limit < MIN_RECORD_SIZE_LIMIT {
+            return Err(self.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::IllegalRecordSizeLimit,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Applies the advertised bounds in their respective directions.
+    /// RFC 8449 §4 allows us to accept values above the version maximum.
     pub(crate) fn apply_record_size_limits(
         &mut self,
         ours: u16,
         peers: u16,
         tls13: bool,
     ) -> Result<(), Error> {
-        if peers < MIN_RECORD_SIZE_LIMIT {
-            return Err(self.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::IllegalRecordSizeLimit,
-            ));
-        }
+        self.validate_peer_record_size_limit(peers)?;
         let max = max_record_size_limit(tls13);
         let peers = usize::from(peers.min(max)) - usize::from(tls13);
         self.message_fragmenter.set_peer_record_size_limit(peers);
         self.record_layer
-            .set_inbound_record_size_limit(ours.min(max), tls13);
-        Ok(())
+            .set_inbound_record_size_limit(ours.min(max))
+            .map_err(|err| self.send_fatal_alert(AlertDescription::RecordOverflow, err))
     }
 
     pub(crate) fn current_io_state(&self) -> IoState {

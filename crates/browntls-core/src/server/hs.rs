@@ -299,16 +299,18 @@ impl ExpectClientHello {
         // again for a second ClientHello. Not on DTLS, whose records do
         // not honour it yet.
         if !cx.common.is_dtls()
-            && let (Some(ours), Some(theirs)) = (
-                record_size_limit_ack(&self.config, client_hello, version),
-                client_hello.extensions.record_size_limit,
-            )
+            && !cx.common.is_quic()
+            && let Some(theirs) = client_hello.extensions.record_size_limit
         {
-            cx.common.apply_record_size_limits(
-                ours,
-                theirs,
-                version == ProtocolVersion::TLSv1_3,
-            )?;
+            if let Some(ours) = record_size_limit_ack(&self.config, client_hello, version) {
+                cx.common.apply_record_size_limits(
+                    ours,
+                    theirs,
+                    version == ProtocolVersion::TLSv1_3,
+                )?;
+            } else {
+                cx.common.validate_peer_record_size_limit(theirs)?;
+            }
         }
 
         // On a server configured with external PSKs, a TLS 1.3 ClientHello

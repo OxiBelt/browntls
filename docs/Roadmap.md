@@ -187,9 +187,8 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   which needs a misbehaving client. The server side is also tested against
   `openssl s_client -enable_pha`.
 - RFC 8449 `record_size_limit`: a peer value above the protocol maximum is
-  lowered rather than refused (RFC 8449 §4 lets a client abort); 0-RTT
-  records are not checked against the server's limit, and a TLS 1.3 client
-  checks its own limit only from the record after EncryptedExtensions. The
+  lowered to the protocol maximum (RFC 8449 §4 lets a client abort).
+  0-RTT records are not checked against a remembered server limit. The
   client's GREASE (RFC 8701) is off by default until the Docker E2E GnuTLS
   scenarios have passed with it. Server-side GREASE (RFC 8701 §4.1,
   `ServerConfig::enable_grease`) is off by default as well; with it on, the

@@ -125,6 +125,7 @@ pub(crate) fn open_cid_aad(
 pub(crate) fn unpad_cid(
     mut msg: InboundOpaqueMessage<'_>,
 ) -> Result<InboundPlainMessage<'_>, Error> {
+    let inner_len = msg.payload.len();
     let type_pos = msg
         .payload
         .iter()
@@ -134,9 +135,13 @@ pub(crate) fn unpad_cid(
     if !valid_inner_type(typ) || (type_pos == 0 && typ != ContentType::ApplicationData) {
         return Err(Error::DecryptError);
     }
-    msg.typ = typ;
     msg.payload.truncate(type_pos);
-    Ok(msg.into_plain_message())
+    Ok(InboundPlainMessage::with_record_plaintext_len(
+        typ,
+        msg.version,
+        msg.payload.into_inner(),
+        inner_len,
+    ))
 }
 
 #[cfg(test)]

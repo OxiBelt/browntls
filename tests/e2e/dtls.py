@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Run full mutual DTLS exchanges with wolfSSL and OpenSSL in containers."""
+"""Run full mutual DTLS exchanges with wolfSSL, OpenSSL and Pion in containers."""
 
 import argparse
+import ipaddress
 import sys
+from urllib.parse import urlsplit
 
 from e2e import (
     ARCHES,
@@ -23,6 +25,11 @@ SUITES = {
 }
 PQC_SUITE = Suite("dtls13-pqc", "wolfSSL DTLS 1.3 RFC 10024", "wolfssl-pqc", "wolfssl", frozenset())
 CID_SUITE = Suite("dtls-cid", "wolfSSL DTLS CID", "wolfssl-cid", "wolfssl", frozenset())
+PION_SUITE = Suite("dtls-migration", "Pion DTLS migration", "pion", "pion", frozenset())
+# Pion v4.0.2 can validate a remote move with both versions. AddPath is DTLS 1.3.
+PION_CASES = (("client", "1.2", "basic"), ("client", "1.3", "basic"),
+              ("server", "1.3", "basic"), ("server", "1.3", "enhanced"))
+REBIND = "hello after rebind"
 PQC_GROUPS = ("X25519MLKEM768", "secp256r1MLKEM768", "secp384r1MLKEM1024")
 TLS12_SUITE = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
 PORT = "4433"
@@ -59,13 +66,57 @@ def resumption_records(stdout: str, role: str, mechanism: str, *, oracle: bool) 
     )
 
 
+def migration_records(brown: dict, stdout: str, role: str, version: str, mode: str) -> bool:
+    records = [event for event in events(stdout) if event.get("event") == "migration"]
+    if len(records) != 1:
+        return False
+    peer = records[0]
+    server = role == "server"
+    side = "peer" if server else "local"
+    if not (
+        peer.get("role") == ("client" if server else "server")
+        and peer.get("version") == version
+        and brown.get("bidirectional_cid") is True
+        and brown.get("rrc") is True
+        and brown.get("mode") == mode
+        and brown.get("rebind_received") == (REBIND if server else REBIND[::-1])
+        and brown.get("rebind_sent") == (REBIND[::-1] if server else REBIND)
+        and (bool(brown.get("handle")) if server else brown.get("old_socket_dropped") is True)
+    ):
+        return False
+    # A local socket may report its wildcard IP. Its UDP port must agree
+    # with the remote endpoint's independent observation on the Docker bridge.
+    def endpoint(value):
+        parsed = urlsplit("//" + value)
+        return ipaddress.ip_address(parsed.hostname), parsed.port
+
+    try:
+        ports = set()
+        for stage, key in (("initial", "before"), ("rebound", "after")):
+            brown_ip, brown_port = endpoint(brown[f"{stage}_{side}"])
+            peer_ip, peer_port = endpoint(peer[key])
+            if not brown_port or brown_port != peer_port:
+                return False
+            if brown_ip != peer_ip and not (brown_ip.is_unspecified or peer_ip.is_unspecified):
+                return False
+            ports.add(brown_port)
+        return len(ports) == 2
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
-             mechanism: str | None = None, group: str | None = None) -> bool:
+             mechanism: str | None = None, group: str | None = None, mode: str | None = None) -> bool:
     if mechanism is not None and (
         run.suite.implementation != "openssl" or versions != ("1.2",)
         or mechanism not in ("session-id", "ticket")
     ):
         raise ValueError("resumption requires OpenSSL, DTLS 1.2 and session-id|ticket")
+    pion = run.suite == PION_SUITE
+    if pion != (mode is not None) or (pion and (
+        len(versions) != 1 or (browntls_role, versions[0], mode) not in PION_CASES
+    )):
+        raise ValueError("unsupported Pion migration case")
     browntls_server = browntls_role == "server"
     pqc = run.suite.implementation == "wolfssl-pqc"
     if pqc != (group is not None) or (group is not None and group not in PQC_GROUPS):
@@ -77,6 +128,9 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
     peer_command = ["openssl-dtls" if openssl else "wolfssl-dtls"]
     browntls_args = [arg for version in versions for arg in ("--tls", version)]
     browntls_args += ["--group", group or "secp256r1"]
+    if pion:
+        peer_command = ["pion-dtls"]
+        browntls_args += ["--dtls-rebind", mode]
     if cid:
         browntls_args += ["--dtls-cid"]
     if openssl:
@@ -85,6 +139,8 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
             # Keep both protocol versions usable in the mixed configuration.
             browntls_args += ["--suite", "TLS13_AES_128_GCM_SHA256"]
     peer_args = ["--group", group] if pqc else []
+    if pion:
+        peer_args = [versions[0]]
     server_command = (
         ["dtls-server", "--listen", f"0.0.0.0:{PORT}", "--cert", f"{PKI}/server.pem",
          "--key", f"{PKI}/server.key", "--client-ca", f"{PKI}/ca.pem", *browntls_args]
@@ -106,6 +162,7 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
         oracle_command.append(mechanism)
     print(f"{run.suite.description}, browntls {browntls_role} permitting {versions}"
           f"{', ' + group if group else ''}"
+          f"{', ' + mode if mode else ''}"
           f"{', resumption ' + mechanism if mechanism else ''}", flush=True)
     server = run.start_server(server_image, server_command, {}, alias=SERVER_NAME)
     if not run.wait_for_log(server, "listening", 10):
@@ -132,10 +189,10 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
         marker = "verified DTLSv1.3, payloads and close_notify"
     passed = (
         brown.exit_code == peer.exit_code == 0
-        and marker in peer.stdout.splitlines()
+        and (pion or marker in peer.stdout.splitlines())
         and len(records) == 1
         and records[0].get("role") == browntls_role
-        and records[0].get("version") == ("DTLSv1_2" if openssl or (cid and versions == ("1.2",)) else "DTLSv1_3")
+        and records[0].get("version") == ("DTLSv1_2" if openssl or versions == ("1.2",) else "DTLSv1_3")
         and (not openssl or records[0].get("suite") == TLS12_SUITE)
         and records[0].get("handshake") in handshakes
         and records[0].get("peer_certificates", 0) > 0
@@ -144,6 +201,8 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
         and records[0].get("received") == received
         and records[0].get("closed") is True
     )
+    if pion and passed:
+        passed = migration_records(records[0], peer.stdout, browntls_role, versions[0], mode)
     if mechanism:
         passed = (
             brown.exit_code == peer.exit_code == 0
@@ -153,7 +212,12 @@ def exchange(run: Run, browntls_role: str, versions: tuple[str, ...],
         )
     for role, container in (("server", server), ("client", client)):
         if passed:
-            print(f"{role}: {summarize(container, role)}", flush=True)
+            if pion and container is peer:
+                migration = next(e for e in events(peer.stdout) if e.get("event") == "migration")
+                print(f"{role}: Pion DTLS {migration['version']}, "
+                      f"{migration['before']} -> {migration['after']}", flush=True)
+            else:
+                print(f"{role}: {summarize(container, role)}", flush=True)
         else:
             print(f"{role} (exit {container.exit_code})", file=sys.stderr)
             print(output_tail(container.stdout, container.stderr), file=sys.stderr)
@@ -164,7 +228,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", required=True, choices=sorted(ARCHES))
     parser.add_argument("--image", help="browntls E2E image for the selected architecture")
-    parser.add_argument("--suite", choices=["all", *SUITES, "wolfssl-cid", "wolfssl-pqc"], default="all")
+    parser.add_argument("--suite", choices=["all", *SUITES, "wolfssl-cid", "wolfssl-pqc", "pion"], default="all")
     parser.add_argument("--resumption", action="store_true",
                         help="only four DTLS 1.2 ID/ticket resumption cases (requires --suite openssl)")
     parser.add_argument("--skip-peer-build", action="store_true")
@@ -176,7 +240,8 @@ def main() -> int:
         parser.error("--resumption requires --suite openssl")
     image = args.image or image_tag(args.arch)
     suites = (list(SUITES.values()) if args.suite == "all" else
-              [CID_SUITE if args.suite == "wolfssl-cid" else
+              [PION_SUITE if args.suite == "pion" else
+               CID_SUITE if args.suite == "wolfssl-cid" else
                PQC_SUITE if args.suite == "wolfssl-pqc" else SUITES[args.suite]])
     try:
         if not image_exists(image):
@@ -196,6 +261,9 @@ def main() -> int:
                     results.extend(exchange(run, role, ("1.2",), mechanism)
                                    for mechanism in ("session-id", "ticket")
                                    for role in ("client", "server"))
+                elif suite == PION_SUITE:
+                    results.extend(exchange(run, role, (version,), mode=mode)
+                                   for role, version, mode in PION_CASES)
                 elif suite == PQC_SUITE:
                     results.extend(exchange(run, role, ("1.3",), group=group)
                                    for group in PQC_GROUPS

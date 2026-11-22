@@ -263,6 +263,26 @@ The suite does not exercise CID rotation, migration, or packet loss. It is
 not included in `--suite all`. The browntls `--dtls-cid` switch selects an
 eight-byte receiving ID and allows sending the peer's ID.
 
+The opt-in `pion` suite uses the pinned Pion DTLS v4.0.2 implementation
+with its RFC 9853 path validation enabled. It checks the following
+mutually authenticated exchanges over one association per case.
+
+| Rebinding endpoint | DTLS versions | Validating endpoint |
+| --- | --- | --- |
+| browntls client | 1.2 and 1.3 | Pion server |
+| Pion client | 1.3 | browntls server in basic and enhanced modes |
+
+The runner checks CID and RRC negotiation, pre- and post-rebind
+request/reply, and the source-port change from both endpoints. Pion's
+local path-switch API applies to DTLS 1.3. The [peer](peer/pion/main.go)
+uses its own [Go module](peer/pion/go.mod) and [checksums](peer/pion/go.sum).
+The Docker build verifies the module cache, builds with CGO disabled,
+and copies the linked modules' licenses into the test image.
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite pion
+```
+
 The runner builds the selected peer images and reuses the full mutual
 authentication runner and ephemeral PKI generator. Each suite gets its own
 run-specific Docker network and PKI volume, cleaned up by the existing

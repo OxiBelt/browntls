@@ -497,17 +497,25 @@ fn settings(options: &Options) -> Result<dtls::Settings> {
     }
 }
 
+fn check_migration_negotiation<D: browntls::SideData>(
+    conn: &dtls::ConnectionCommon<D>,
+) -> Result<()> {
+    if !conn.return_routability_checks_negotiated()
+        || conn.outbound_connection_id().is_none()
+        || conn.local_connection_ids().next().is_none()
+    {
+        return Err("RRC and bidirectional DTLS CIDs are required for migration".into());
+    }
+    Ok(())
+}
+
 fn rebind_client(
     mut client: UdpClient,
     bind: &str,
     peer: std::net::SocketAddr,
     mode: &str,
 ) -> Result<()> {
-    if !client.connection().return_routability_checks_negotiated()
-        || client.connection().outbound_connection_id().is_none()
-    {
-        return Err("DTLS CID/RRC was not negotiated".into());
-    }
+    check_migration_negotiation(client.connection())?;
     client.send(MESSAGE.as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = [0; 1200];
     let len = client.recv(&mut buf).map_err(|e| e.to_string())?;
@@ -568,6 +576,7 @@ fn rebind_client(
         ("rebind_sent", REBIND_MESSAGE.into()),
         ("rebind_received", reverse(REBIND_MESSAGE).into()),
         ("rrc", super::Value::Bool(true)),
+        ("bidirectional_cid", super::Value::Bool(true)),
     ]);
     emit(&fields);
     Ok(())
@@ -591,11 +600,7 @@ fn rebind_server(mut server: UdpServer, mode: &str) -> Result<()> {
                     return Err("more than one association".into());
                 }
                 let conn = server.connection(peer).ok_or("missing connection")?;
-                if !conn.return_routability_checks_negotiated()
-                    || conn.outbound_connection_id().is_none()
-                {
-                    return Err("DTLS CID/RRC was not negotiated".into());
-                }
+                check_migration_negotiation(conn)?;
                 original = Some(server.peer_addr(peer).ok_or("missing original path")?);
             }
             Ok(ServerEvent::Received(peer, data)) => {
@@ -633,6 +638,7 @@ fn rebind_server(mut server: UdpServer, mode: &str) -> Result<()> {
                         ("rebind_received", REBIND_MESSAGE.into()),
                         ("rebind_sent", reverse(REBIND_MESSAGE).into()),
                         ("rrc", super::Value::Bool(true)),
+                        ("bidirectional_cid", super::Value::Bool(true)),
                     ]);
                     server
                         .send_to(reverse(REBIND_MESSAGE).as_bytes(), peer)

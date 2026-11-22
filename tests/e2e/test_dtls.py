@@ -19,8 +19,9 @@ OPENSSL_SUCCESS = (
 class DtlsTest(unittest.TestCase):
     def run_exchange(self, role="client", versions=("1.2",), peer="openssl",
                      fields=None, brown_exit=0, peer_exit=0, marker=None, ready=True,
-                     copies=1, group=None):
-        suite = (dtls.CID_SUITE if peer == "wolfssl-cid" else
+                     copies=1, group=None, mode=None):
+        suite = (dtls.PION_SUITE if peer == "pion" else
+                 dtls.CID_SUITE if peer == "wolfssl-cid" else
                  dtls.PQC_SUITE if peer == "wolfssl-pqc" else dtls.SUITES[peer])
         runner = Run(ARCHES["amd64"], suite, "brown:test")
         runner.start_server = mock.Mock()
@@ -52,7 +53,7 @@ class DtlsTest(unittest.TestCase):
         runner.run_client.return_value = oracle if server else brown
         runner.finish_server.return_value = brown if server else oracle
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            passed = dtls.exchange(runner, role, versions, group=group)
+            passed = dtls.exchange(runner, role, versions, group=group, mode=mode)
         return passed, runner
 
     def test_both_openssl_roles_and_explicit_mixed_versions(self):
@@ -131,6 +132,55 @@ class DtlsTest(unittest.TestCase):
                                    {"peer_exit": 1}):
                         self.assertFalse(self.run_exchange(role, versions, "wolfssl-cid",
                                                            **kwargs)[0])
+
+    def test_pion_migration_requires_evidence_from_both_sides(self):
+        for role, version, mode in dtls.PION_CASES:
+            server = role == "server"
+            side = "peer" if server else "local"
+            peer = {"event": "migration", "role": "client" if server else "server",
+                    "version": version, "before": "0.0.0.0:5555", "after": "0.0.0.0:5556"}
+            brown = {"rrc": True, "bidirectional_cid": True, "mode": mode,
+                     f"initial_{side}": "10.0.0.1:5555", f"rebound_{side}": "10.0.0.1:5556",
+                     "rebind_received": dtls.REBIND if server else dtls.REBIND[::-1],
+                     "rebind_sent": dtls.REBIND[::-1] if server else dtls.REBIND}
+            brown.update({"handle": "1"} if server else {"old_socket_dropped": True})
+            with self.subTest(role=role, version=version, mode=mode):
+                args = (role, (version,), "pion")
+                passed, runner = self.run_exchange(*args, fields=brown, marker=json.dumps(peer),
+                                                   mode=mode)
+                self.assertTrue(passed)
+                listener = runner.start_server.call_args.args[1]
+                client = runner.run_client.call_args.args[1]
+                cmd, oracle = (listener, client) if server else (client, listener)
+                self.assertEqual(cmd[cmd.index("--dtls-rebind") + 1], mode)
+                self.assertEqual(oracle, ["pion-dtls", peer["role"], dtls.SERVER_NAME,
+                                          dtls.PORT, version])
+                for change in ({"rrc": False}, {"bidirectional_cid": False}, {"mode": "unknown"},
+                               {"rebind_sent": ""},
+                               {f"rebound_{side}": "10.0.0.1:5555"}, {"peer_certificates": 0}):
+                    self.assertFalse(self.run_exchange(*args, fields=brown | change,
+                                                       marker=json.dumps(peer), mode=mode)[0])
+                for change in ({"event": "listening"}, {"role": role}, {"version": "TLS"},
+                               {"before": peer["after"]}, {"after": "invalid:65539"},
+                               {"after": "10.0.0.2:5556"}):
+                    self.assertFalse(self.run_exchange(*args, fields=brown,
+                                                       marker=json.dumps(peer | change),
+                                                       mode=mode)[0])
+
+    def test_pion_suite_runs_only_supported_cases(self):
+        with mock.patch.object(dtls, "Run") as factory, \
+             mock.patch.object(dtls, "image_exists", return_value=True), \
+             mock.patch.object(dtls, "build_peer_image") as build, \
+             mock.patch.object(dtls, "exchange", return_value=True) as exchange, \
+             mock.patch("sys.argv", ["dtls.py", "--arch", "amd64", "--suite", "pion"]):
+            self.assertEqual(dtls.main(), 0)
+            build.assert_called_once_with("pion")
+            self.assertEqual(exchange.call_args_list, [
+                mock.call(factory.return_value, "client", ("1.2",), mode="basic"),
+                mock.call(factory.return_value, "client", ("1.3",), mode="basic"),
+                mock.call(factory.return_value, "server", ("1.3",), mode="basic"),
+                mock.call(factory.return_value, "server", ("1.3",), mode="enhanced"),
+            ])
 
     def test_cid_is_explicitly_selected(self):
         with mock.patch.object(dtls, "Run") as factory, \

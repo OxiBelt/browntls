@@ -643,26 +643,39 @@ async fn reference_path_exchange(
     use browntls_core::dtls::rrc::{DEFAULT_TIMEOUT, Message, MessageType, Selection};
     use browntls_core::dtls::{ConnectionIdPolicy, Settings};
 
+    async fn advance_path_timeout() {
+        // Waiting for UDP with time paused can auto-advance the watchdog.
+        tokio::time::pause();
+        tokio::time::advance(DEFAULT_TIMEOUT).await;
+        tokio::time::resume();
+    }
+
     async fn control_cookie(
         socket: &UdpSocket,
         conn: &mut ClientConnection,
         start: Instant,
         kind: MessageType,
+        scenario: &str,
+        phase: &str,
     ) -> [u8; 8] {
-        let mut datagram = [0; 1200];
-        loop {
-            let len = socket.recv(&mut datagram).await.unwrap();
-            let input = &mut datagram[..len];
-            let received = conn.read_datagram(input, start.elapsed()).unwrap();
-            for metadata in received.authenticated_records() {
-                if let Some(range) = metadata.rrc_payload_range() {
-                    let payload = &input[range];
-                    assert_eq!(payload.len(), 9);
-                    assert_eq!(payload[0], kind as u8);
-                    return payload[1..].try_into().unwrap();
+        timeout(LIMIT, async {
+            let mut datagram = [0; 1200];
+            loop {
+                let len = socket.recv(&mut datagram).await.unwrap();
+                let input = &mut datagram[..len];
+                let received = conn.read_datagram(input, start.elapsed()).unwrap();
+                for metadata in received.authenticated_records() {
+                    if let Some(range) = metadata.rrc_payload_range() {
+                        let payload = &input[range];
+                        assert_eq!(payload.len(), 9);
+                        assert_eq!(payload[0], kind as u8);
+                        return payload[1..].try_into().unwrap();
+                    }
                 }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}, {phase}: timed out waiting for {kind:?}"))
     }
 
     async fn answer(
@@ -677,6 +690,7 @@ async fn reference_path_exchange(
         assert_eq!(socket.send(&datagram).await.unwrap(), datagram.len());
     }
 
+    let scenario = format!("DTLS {versions:?} {selection:?}");
     let pki = Pki::new();
     let settings = Settings::default()
         .with_versions(versions)
@@ -722,6 +736,8 @@ async fn reference_path_exchange(
             &mut client.conn,
             client.start,
             MessageType::Challenge,
+            &scenario,
+            "initial probe",
         ),
     )
     .await;
@@ -760,6 +776,8 @@ async fn reference_path_exchange(
                 &mut client.conn,
                 client.start,
                 MessageType::Challenge,
+                &scenario,
+                "unanswered old-path probe",
             ),
         )
         .await;
@@ -767,17 +785,31 @@ async fn reference_path_exchange(
 
     // Keep the peer silent through expiry, then start a separate
     // validation from the same candidate address.
-    tokio::time::pause();
-    server.set_read_timeout(Some(Duration::ZERO));
     if selection == Selection::Enhanced {
-        tokio::time::advance(DEFAULT_TIMEOUT).await;
-        no_event(&mut server).await;
-        control_cookie(&new, &mut client.conn, client.start, MessageType::Challenge).await;
+        advance_path_timeout().await;
+        server.set_read_timeout(None);
+        let phase = "candidate probe after old-path timeout";
+        let mut challenge = pin!(control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Challenge,
+            &scenario,
+            phase,
+        ));
+        let mut event = pin!(server.next_event());
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = event.as_mut().poll(cx) {
+                panic!("{scenario}, {phase}: unexpected server result {result:?}");
+            }
+            challenge.as_mut().poll(cx)
+        })
+        .await;
     }
-    tokio::time::advance(DEFAULT_TIMEOUT).await;
+    advance_path_timeout().await;
+    server.set_read_timeout(Some(Duration::ZERO));
     no_event(&mut server).await;
     assert_eq!(server.peer_addr(admitted), Some(admitted));
-    tokio::time::resume();
 
     // The peer probes its new socket before choosing it. An unchanged
     // listener acknowledges that probe and starts its own validation.
@@ -786,7 +818,14 @@ async fn reference_path_exchange(
     server.set_read_timeout(Some(Duration::from_millis(25)));
     let ((), echoed) = together(
         no_event(&mut server),
-        control_cookie(&new, &mut client.conn, client.start, MessageType::Response),
+        control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Response,
+            &scenario,
+            "peer probe reply",
+        ),
     )
     .await;
     assert_eq!(echoed, peer_cookie);
@@ -806,6 +845,8 @@ async fn reference_path_exchange(
                 &mut client.conn,
                 client.start,
                 MessageType::Challenge,
+                &scenario,
+                "final old-path probe",
             )
             .await;
             answer(
@@ -816,8 +857,15 @@ async fn reference_path_exchange(
             )
             .await;
         }
-        let new_cookie =
-            control_cookie(&new, &mut client.conn, client.start, MessageType::Challenge).await;
+        let new_cookie = control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Challenge,
+            &scenario,
+            "final candidate probe",
+        )
+        .await;
         answer(&new, &mut client.conn, MessageType::Response, new_cookie).await;
     };
     let (event, ()) = together(server.next_event(), reference).await;

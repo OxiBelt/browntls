@@ -44,9 +44,7 @@ impl<'a> CertList<'a> {
                 _ => return Err(Error::UnsupportedCrlVersion),
             }
             let signature = tbs.expect(tag::SEQUENCE)?;
-            if signature != signed.algorithm {
-                return Err(Error::SignatureAlgorithmMismatch);
-            }
+            crate::rsassa_pss::check_signature_identifiers(signature, signed.algorithm)?;
             let issuer = tbs.expect(tag::SEQUENCE)?;
             let this_update = read_time(tbs)?;
             // RFC 5280 §5.1.2.5: conforming issuers MUST include nextUpdate.

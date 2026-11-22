@@ -163,7 +163,7 @@ fn read_hash<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Error> {
 fn read_mask_gen<'a>(r: &mut Reader<'a>) -> Result<MaskGen<'a>, Error> {
     r.nested(tag::SEQUENCE, |r| {
         if r.oid()? != OID_MGF1 {
-            while !r.at_end() {
+            if !r.at_end() {
                 r.tlv()?;
             }
             return Ok(MaskGen::Other);
@@ -208,6 +208,10 @@ fn fields(contents: &[u8]) -> Result<Fields<'_>, Error> {
 /// Parses and checks `RSASSA-PSS-params` contents.
 fn parse_params(contents: &[u8]) -> Result<Params, Rejected> {
     let fields = fields(contents).map_err(|_| Rejected::Malformed)?;
+    supported_params(fields)
+}
+
+fn supported_params(fields: Fields<'_>) -> Result<Params, Rejected> {
     // hashAlgorithm DEFAULT sha1Identifier.
     let hash = fields
         .hash
@@ -239,6 +243,66 @@ fn rsassa_pss_parameters(contents: &[u8]) -> Result<Option<&[u8]>, Rejected> {
     }
     // RFC 4055 §1.2: absent, or RSASSA-PSS-params (not NULL).
     read_all(&contents[oid.len()..], |r| r.optional(tag::SEQUENCE)).map_err(|_| Rejected::Malformed)
+}
+
+/// Enforces agreement of the inner and outer signature identifiers in a
+/// certificate or CRL (RFC 5280 §§4.1.1.2 and 5.1.1.2).
+pub(crate) fn check_signature_identifiers(inner: &[u8], outer: &[u8]) -> Result<(), Error> {
+    let signature_fields = |identifier| match rsassa_pss_parameters(identifier) {
+        Ok(Some(params)) => fields(params).map(Some),
+        Err(Rejected::NotRsassaPss) => Ok(None),
+        _ => Err(Error::BadDer),
+    };
+    let inner_fields = signature_fields(inner)?;
+    if inner == outer {
+        // Matching unsupported identifiers can still be used by a custom
+        // verifier. This check does not choose a verification algorithm.
+        return Ok(());
+    }
+    let outer_fields = signature_fields(outer)?;
+    if let (Some(inner), Some(outer)) = (inner_fields, outer_fields)
+        // Introducing a new match requires strict DER. The existing
+        // explicit trailerField compatibility applies to exact matches.
+        && inner.trailer.is_none()
+        && outer.trailer.is_none()
+        && let (Ok(inner), Ok(outer)) = (supported_params(inner), supported_params(outer))
+        && inner == outer
+        && inner.salt_len == Some(inner.hash.len())
+    {
+        return Ok(());
+    }
+    Err(Error::SignatureAlgorithmMismatch)
+}
+
+#[cfg(test)]
+#[test]
+fn signature_identifier_agreement_requires_valid_supported_der_for_new_matches() {
+    use testing::*;
+
+    let canonical = restricted(S256, true, true, Some(32), false);
+    let absent = restricted(S256, false, false, Some(32), false);
+    assert_eq!(check_signature_identifiers(&canonical, &absent), Ok(()));
+    assert_eq!(check_signature_identifiers(&absent, &canonical), Ok(()));
+    for distinct in [
+        restricted(S384, false, false, Some(48), false),
+        restricted(S256, false, false, Some(31), false),
+        restricted(S256, false, false, Some(32), true),
+    ] {
+        assert_eq!(
+            check_signature_identifiers(&canonical, &distinct),
+            Err(Error::SignatureAlgorithmMismatch)
+        );
+        assert_eq!(check_signature_identifiers(&distinct, &distinct), Ok(()));
+    }
+    let non_der = restricted(S256, false, false, Some(20), false);
+    assert_eq!(
+        check_signature_identifiers(&non_der, &non_der),
+        Err(Error::BadDer)
+    );
+    assert_eq!(
+        check_signature_identifiers(alg_id::RSASSA_PSS.as_bytes(), &canonical),
+        Err(Error::BadDer)
+    );
 }
 
 /// The canonical form of a `SubjectPublicKeyInfo` algorithm.

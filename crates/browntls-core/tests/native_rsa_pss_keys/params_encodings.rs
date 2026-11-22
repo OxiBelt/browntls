@@ -181,6 +181,25 @@ fn equivalent_identifiers_in_certificate_chains_validate() {
     }
 }
 
+#[test]
+fn certificate_signature_identifiers_can_use_distinct_der_encodings() {
+    let root = TestKey::root(RSAE_KEY);
+    let key = TestKey::server(UNRESTRICTED);
+    let pss = PssParams::canonical(Sha256);
+    let mut server = direct_chain(&root, &key, Role::Server, pss);
+    server.chain[0] = issue_with_identifiers(
+        "end entity",
+        &key,
+        Role::Server,
+        "PSS root",
+        &root,
+        (pss.absent_hash_params(), pss),
+    );
+    for v in VERSIONS {
+        webpki_client_result(v, &server).unwrap();
+    }
+}
+
 /// The client's result of a handshake against `server`, validated with
 /// web-PKI verifiers.
 fn webpki_client_result(v: ProtocolVersion, server: &PssChain) -> Result<(), Error> {

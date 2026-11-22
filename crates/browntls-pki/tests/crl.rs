@@ -3,18 +3,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
+#[path = "common/ocsp_wire.rs"]
+mod wire;
 
 use browntls_pki::crl::CrlsRequired;
 use browntls_pki::{
     BorrowedCertRevocationList, CertRevocationList, CertificateDer, EndEntityCert, Error,
     ExpirationPolicy, KeyUsage, OwnedCertRevocationList, RevocationCheckDepth, RevocationOptions,
-    RevocationOptionsBuilder, RevocationReason, UnknownStatusPolicy, anchor_from_trusted_cert,
+    RevocationOptionsBuilder, RevocationReason, UnknownStatusPolicy, alg_id,
+    anchor_from_trusted_cert,
 };
 use common::*;
 use rcgen::{
     CertificateParams, CertificateRevocationListParams, CertifiedIssuer, CrlDistributionPoint,
     CrlIssuingDistributionPoint, CrlScope, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
-    RevokedCertParams, SerialNumber, SigningKey,
+    PublicKeyData, RevokedCertParams, SerialNumber, SigningKey,
 };
 
 const EE_SERIAL: &[u8] = &[0x7a, 0x01, 0x02, 0x03];
@@ -399,6 +402,43 @@ fn crl_signature_and_issuer_key_usage() {
             ),
             expected
         );
+    }
+}
+
+#[test]
+fn pss_crl_accepts_equivalent_signature_identifiers() {
+    use wire::{extension, generalized_time, seq, tlv};
+
+    let sha256 = seq(&[&tlv(0x06, &[0x60, 0x86, 0x48, 1, 0x65, 3, 4, 2, 1])]);
+    let mgf = seq(&[
+        &tlv(0x06, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 8]),
+        &sha256,
+    ]);
+    let params = seq(&[
+        &tlv(0xa0, &sha256),
+        &tlv(0xa1, &mgf),
+        &tlv(0xa2, &[2, 1, 32]),
+    ]);
+    let inner = seq(&[alg_id::RSASSA_PSS.as_bytes(), &params]);
+    let outer = seq(&[alg_id::RSA_PSS_SHA256.as_bytes()]);
+    assert_ne!(inner, outer);
+    let tbs = seq(&[
+        &[2, 1, 1],
+        &inner,
+        &[0x30, 0],
+        &generalized_time(THIS_UPDATE),
+        &generalized_time(NEXT_UPDATE),
+        &tlv(
+            0xa0,
+            &seq(&[&extension(&[0x55, 0x1d, 20], false, &[2, 1, 42])]),
+        ),
+    ]);
+    let signature = tlv(3, &[&[0][..], &rsa_pss_sign(&tbs)].concat());
+    let der = seq(&[&tbs, &outer, &signature]);
+    let key = key_for(&rcgen::PKCS_RSA_SHA256);
+    let spki = key.subject_public_key_info();
+    for crl in [borrowed(&der), owned(&der)] {
+        assert_eq!(crl.verify_signature(ALGS, &spki), Ok(()));
     }
 }
 

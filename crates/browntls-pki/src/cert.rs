@@ -29,7 +29,7 @@ pub(crate) const KU_CRL_SIGN: usize = 6;
 /// [`Cert::try_from`] applies the same strict parsing as
 /// [`EndEntityCert`](crate::EndEntityCert), which dereferences to a `Cert`,
 /// and as path validation applies to intermediates: strict DER, version 3
-/// only, `tbsCertificate.signature` equal to `signatureAlgorithm`, a
+/// only, agreement of `tbsCertificate.signature` and `signatureAlgorithm`, a
 /// well-formed `SubjectPublicKeyInfo`, no duplicate extension the crate
 /// decodes, no unknown critical extension, and every decoded extension
 /// valid (see [`extensions`](crate::extensions)). Parsing a certificate
@@ -124,9 +124,7 @@ impl<'a> Cert<'a> {
             // relying parties to cope; only the DER encoding is checked.
             let serial = tbs.integer()?;
             let signature = tbs.expect(tag::SEQUENCE)?;
-            if signature != signed.algorithm {
-                return Err(Error::SignatureAlgorithmMismatch);
-            }
+            crate::rsassa_pss::check_signature_identifiers(signature, signed.algorithm)?;
             let issuer = tbs.expect(tag::SEQUENCE)?;
             let (not_before, not_after) =
                 tbs.nested(tag::SEQUENCE, |v| Ok((read_time(v)?, read_time(v)?)))?;

@@ -119,3 +119,21 @@ handshake and exchanges ordinary application data. Refusal uses a policy that
 reports unavailable and an explicit client acknowledgement. The runner
 verifies cleanup of its namespace and run-owned images. Both TLS peers use
 browntls.
+
+## Phase 2 record size limits and delegated credentials
+
+With a built `browntls-e2e` image and a running minikube profile, run:
+
+```sh
+python3 -B tests/kubernetes/record_limits.py --profile PROFILE \
+  --image browntls-e2e:amd64
+```
+
+The TCP cases use TLS 1.3 mutual delegated credentials and distinct local
+record size limits through both the buffered Tokio connector/acceptor and the
+unbuffered Tokio connector/acceptor. The UDP cases use DTLS 1.2 and 1.3 with
+different limits at each endpoint and a 480-byte application payload that
+fits both limits. Every case checks the negotiated protocol, certificate
+authentication, delegated credential use where applicable, configured
+limits, application data, and closure. The runner uses an isolated namespace
+and image and verifies ownership-scoped cleanup.

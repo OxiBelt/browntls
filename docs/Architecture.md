@@ -1093,8 +1093,12 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
 - 0-RTT: off by default for external PSKs (RFC 9257). `with_early_data`
   enables it per key; the key needs a provisioned suite and must be the first
   offered, and the server checks suite and ALPN protocol against the
-  provisioned ones (RFC 9846 §4.3.10). There is no anti-replay protection
-  for external PSKs: such early data can be replayed.
+  provisioned ones (RFC 9846 §4.3.10). The server also requires a live
+  per-credential cutoff and an application-supplied atomic replay policy.
+  Missing or uncertain policy declines early data. Deployments sharing a
+  credential share the policy's authoritative state and retain its marks
+  through the last possible acceptance time. Applications still need
+  replay-safe request semantics.
 - Importer (RFC 9258): a key configured with `imported(context)` is used
   only through the importer. The client offers one `ImportedIdentity` per
   hash of its TLS 1.3 suites (target protocol TLS 1.3, target KDF

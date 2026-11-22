@@ -30,7 +30,10 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{DnsName, ServerName};
+use browntls_pki::{DnsName, ServerName, UnixTime};
+
+mod replay;
+pub use replay::{ExternalPskReplayDecision, ExternalPskReplayKey, ExternalPskReplayPolicy};
 
 use crate::crypto::hash::HashAlgorithm;
 use crate::ct::constant_time_eq;
@@ -56,6 +59,7 @@ pub struct ExternalPsk {
     server_name: Option<DnsName<'static>>,
     alpn_protocol: Option<Vec<u8>>,
     max_early_data_size: u32,
+    early_data_expiry: Option<UnixTime>,
     import_context: Option<Vec<u8>>,
     key_generation: Option<Vec<u8>>,
 }
@@ -102,6 +106,7 @@ impl ExternalPsk {
             server_name: None,
             alpn_protocol: None,
             max_early_data_size: 0,
+            early_data_expiry: None,
             import_context: None,
             key_generation: None,
         })
@@ -137,16 +142,29 @@ impl ExternalPsk {
     /// Allows 0-RTT data of up to `max_early_data_size` bytes under this
     /// key. Off (zero) by default.
     ///
-    /// Early data under an external PSK can be replayed by an attacker:
-    /// browntls keeps no anti-replay state for external PSKs (RFC 9846 §8,
-    /// RFC 9257), so enable this only for idempotent requests. 0-RTT also
-    /// needs a provisioned cipher suite ([`Self::with_cipher_suite`]), the key
-    /// must be the first one the client offers, and both peers must enable it
-    /// (the client with `ClientConfig::enable_early_data` too). The server
-    /// reads at most its own limit; provision the same value on both sides.
+    /// Enable this only for replay-safe application traffic. Both peers need
+    /// the same provisioned cipher suite and a nonzero allowance, and the key
+    /// must be the first offered. Clients also need
+    /// [`ClientConfig::enable_early_data`](crate::ClientConfig::enable_early_data).
+    /// Servers require [`Self::with_early_data_expiry`] and
+    /// [`ServerConfig::external_psk_replay_policy`](crate::ServerConfig::external_psk_replay_policy).
     pub fn with_early_data(mut self, max_early_data_size: u32) -> Self {
         self.max_early_data_size = max_early_data_size;
         self
+    }
+
+    /// Sets the exclusive server-side cutoff for 0-RTT under this key.
+    ///
+    /// Set the same cutoff on servers sharing the credential, and rotate to
+    /// fresh key material to extend its early-data lifetime. Ordinary 1-RTT
+    /// authentication with this key is independent of the cutoff.
+    pub fn with_early_data_expiry(mut self, expiry: UnixTime) -> Self {
+        self.early_data_expiry = Some(expiry);
+        self
+    }
+
+    pub(crate) fn early_data_expiry(&self) -> Option<UnixTime> {
+        self.early_data_expiry
     }
 
     /// Uses this key only through the external PSK importer (RFC 9258) with

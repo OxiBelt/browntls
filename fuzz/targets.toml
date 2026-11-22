@@ -92,7 +92,7 @@ sources = ["crates/browntls-core/src/ech/**", "crates/browntls-core/src/crypto/h
 
 [targets.tls_psk]
 topic = "tls-extensions"
-sources = ["crates/browntls-core/src/psk.rs", "crates/browntls-core/src/tls13/**", "crates/browntls-core/src/client/**", "crates/browntls-core/src/server/**"]
+sources = ["crates/browntls-core/src/psk.rs", "crates/browntls-core/src/psk/**", "crates/browntls-core/src/tls13/**", "crates/browntls-core/src/client/**", "crates/browntls-core/src/server/**"]
 
 [targets.tls_binding]
 topic = "tls-extensions"

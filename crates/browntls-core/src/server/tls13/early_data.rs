@@ -11,7 +11,7 @@ use crate::hash_hs::HandshakeHash;
 use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 use crate::msgs::message::{Message, MessagePayload};
 use crate::msgs::persist::ServerSessionValue;
-use crate::psk::ExternalPskCandidate;
+use crate::psk::{ExternalPskCandidate, ExternalPskReplayDecision, ExternalPskReplayKey};
 use crate::server::hs::{self, NextStateOrError, ServerContext};
 use crate::server::server_conn::{ServerConfig, ServerConnectionData};
 use crate::sync::Arc;
@@ -78,13 +78,15 @@ pub(super) fn decide_if_early_data_allowed(
 /// RFC 9846 §4.3.10 for an external PSK: early data is accepted only when
 /// the key allows it (it is off by default, RFC 9257), was the client's
 /// first PSK, and was provisioned with the suite and ALPN protocol now
-/// negotiated. There is no anti-replay protection for external PSKs.
+/// negotiated. The authenticated offer also needs a committed replay mark.
 pub(super) fn decide_if_external_early_data_allowed(
-    cx: &mut ServerContext<'_>,
+    cx: &ServerContext<'_>,
     early_data_requested: bool,
     candidate: &ExternalPskCandidate,
     suite: &'static Tls13CipherSuite,
     cert_with_extern_psk: bool,
+    config: &ServerConfig,
+    verified_binder: Option<&[u8]>,
 ) -> EarlyDataDecision {
     if !early_data_requested {
         return EarlyDataDecision::Disabled;
@@ -97,11 +99,27 @@ pub(super) fn decide_if_external_early_data_allowed(
         && !cert_with_extern_psk
         // RFC 9000 §7.4.1: QUIC 0-RTT runs under transport parameters
         // remembered from a ticket, which an external PSK does not have.
-        && !cx.common.is_quic();
-    if possible && !cx.data.early_data.was_rejected() {
-        EarlyDataDecision::Accepted
-    } else {
-        EarlyDataDecision::RequestedButRejected
+        && !cx.common.is_quic()
+        && !cx.common.is_dtls();
+    if !possible || cx.data.early_data.was_rejected() {
+        return EarlyDataDecision::RequestedButRejected;
+    }
+    let (Some(policy), Some(expiry), Some(binder)) = (
+        config.external_psk_replay_policy.as_deref(),
+        psk.early_data_expiry(),
+        verified_binder,
+    ) else {
+        return EarlyDataDecision::RequestedButRejected;
+    };
+    if !config.current_time().is_ok_and(|now| now < expiry) {
+        return EarlyDataDecision::RequestedButRejected;
+    }
+    let key = ExternalPskReplayKey::new(suite.common.hash_provider, binder);
+    match policy.check_and_mark(&key, expiry) {
+        ExternalPskReplayDecision::FirstUse => EarlyDataDecision::Accepted,
+        ExternalPskReplayDecision::Duplicate | ExternalPskReplayDecision::Unavailable => {
+            EarlyDataDecision::RequestedButRejected
+        }
     }
 }
 

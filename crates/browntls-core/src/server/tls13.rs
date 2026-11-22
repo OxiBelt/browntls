@@ -538,6 +538,13 @@ impl CompleteClientHelloHandling {
                 candidate,
                 self.suite,
                 cert_with_extern_psk,
+                &self.config,
+                client_hello
+                    .extensions
+                    .preshared_key
+                    .as_ref()
+                    .and_then(|offer| offer.binders.get(candidate.index))
+                    .map(|binder| binder.as_ref()),
             ),
             None => decide_if_early_data_allowed(
                 cx,

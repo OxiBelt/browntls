@@ -49,3 +49,32 @@ pub fn cert_decompress(mut data: &[u8]) {
     };
     fuzzing::compressed_certificate(limit, data);
 }
+
+#[cfg(test)]
+mod tests {
+    use browntls_core::compress::{DecompressionFailed, ZSTD, ZstdDecompressionLimits};
+
+    #[test]
+    fn zstd_explicit_decompression_limits() {
+        let frame = include_bytes!(
+            "../../crates/browntls-core/tests/fixtures/cert_compression/zstd/streaming-checksum.zst"
+        );
+        let expected = b"libzstd certificate fixture: ".repeat(1024);
+        let mut output = vec![0; expected.len()];
+        let history_window = 128 * 1024;
+
+        let limits = ZstdDecompressionLimits::new(512 * 1024, history_window).unwrap();
+        ZSTD.decompress_with_limits(frame, &mut output, limits)
+            .unwrap();
+        assert_eq!(output, expected);
+
+        let limits = ZstdDecompressionLimits::new(256 * 1024, history_window).unwrap();
+        assert_eq!(
+            ZSTD.decompress_with_limits(frame, &mut output, limits),
+            Err(DecompressionFailed)
+        );
+
+        assert!(ZstdDecompressionLimits::new(0, history_window).is_none());
+        assert!(ZstdDecompressionLimits::new(512 * 1024, 0).is_none());
+    }
+}

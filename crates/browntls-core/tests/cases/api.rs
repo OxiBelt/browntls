@@ -259,11 +259,7 @@ fn key_log_callbacks_are_compiled_out() {
     }
 
     let chain = server_chain(KeyType::Ed25519);
-    for v in [
-        &version::TLS13,
-        #[cfg(feature = "tls12")]
-        &version::TLS12,
-    ] {
+    let check_handshake = |v| {
         let mut client_config = ClientConfig::builder_with_provider(provider())
             .with_protocol_versions(&[v])
             .unwrap()
@@ -276,7 +272,10 @@ fn key_log_callbacks_are_compiled_out() {
         let mut client = ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
         let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
         do_handshake(&mut client, &mut server).unwrap();
-    }
+    };
+    check_handshake(&version::TLS13);
+    #[cfg(feature = "tls12")]
+    check_handshake(&version::TLS12);
 }
 
 /// `(label, client_random, secret)` as handed to the key log.

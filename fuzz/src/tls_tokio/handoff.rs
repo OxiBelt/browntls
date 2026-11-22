@@ -61,7 +61,7 @@ impl World {
         /// Evaluates to the stream to go on with, if any, the plaintext
         /// taken out of it, and how much of that is 0-RTT data.
         macro_rules! drive {
-            ($stream:expr) => {{
+            ($stream:expr, $inspect:expr) => {{
                 let mut future = $stream.into_kernel_handoff();
                 let mut outcome = None;
                 for _ in 0..flags >> 4 {
@@ -80,6 +80,7 @@ impl World {
                         (Some(stream), received, early)
                     }
                     Some(Ok(handoff)) => {
+                        ($inspect)(&handoff);
                         let _ = format!("{handoff:?}");
                         assert_eq!(
                             handoff.get_ref().1.kernel_handoff_blocker(),
@@ -123,12 +124,20 @@ impl World {
         }
         let (stream, received, early) = match stream {
             TlsStream::Client(stream) => {
-                let (stream, received, early) = drive!(stream);
+                let (stream, received, early) =
+                    drive!(stream, |handoff: &browntls_tokio::kernel::KernelHandoff<
+                        browntls_tokio::client::TlsStream<_>,
+                    >| {
+                        assert_ne!(
+                            handoff.early_data_outcome(),
+                            browntls_tokio::EarlyDataOutcome::Pending
+                        );
+                    });
                 assert_eq!(early, 0, "0-RTT data received by a client");
                 (stream.map(TlsStream::Client), received, early)
             }
             TlsStream::Server(stream) => {
-                let (stream, received, early) = drive!(stream);
+                let (stream, received, early) = drive!(stream, |_| {});
                 (stream.map(TlsStream::Server), received, early)
             }
         };

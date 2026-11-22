@@ -487,15 +487,24 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
     let Some(suite) = offloadable_suites().into_iter().find(|s| tls13(*s)) else {
         return;
     };
-    for accept_early in [true, false] {
+    for (accept_early, resend) in [(true, false), (false, true), (false, false)] {
         let mut client_config = pki.client_config(suite);
         client_config.enable_early_data = true;
-        let connector = TlsConnector::from(Arc::new(client_config)).early_data(true);
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let mut connector = TlsConnector::from(Arc::new(client_config)).early_data(true);
+        if resend {
+            connector = connector.rejected_early_data_policy(
+                browntls_tokio::RejectedEarlyDataPolicy::ResendIfSameAlpn {
+                    max_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+                },
+            );
+        }
         let cache = ServerSessionMemoryCache::new(8);
         let acceptor = |max_early_data_size| {
             let mut config = pki.server_config(suite);
             config.max_early_data_size = max_early_data_size;
             config.session_storage = cache.clone();
+            config.alpn_protocols = vec![b"h2".to_vec()];
             TlsAcceptor::from(Arc::new(config))
         };
 
@@ -528,11 +537,12 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
                 assert_eq!(tls.early_data_len(), 0);
                 tls
             };
-            assert_eq!(
-                read_n_async(&mut tls, 22).await,
-                b"early request and more",
-                "accepted: {accept_early}"
-            );
+            let expected: &[u8] = if accept_early || resend {
+                b"early request and more"
+            } else {
+                b" and more"
+            };
+            assert_eq!(read_n_async(&mut tls, expected.len()).await, expected);
             write_all_async(&mut tls, b"reply").await;
             timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
             assert!(read_to_end_async(&mut tls).await.unwrap().is_empty());
@@ -541,6 +551,25 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
             let mut client = connector.connect(localhost(), client_tcp).await.unwrap();
             assert!(client.get_ref().1.is_handshaking());
             write_all_async(&mut client, b"early request").await;
+            if !accept_early && !resend {
+                let error = timeout(LIMIT, AsyncKtlsStream::from_client(client))
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                let StreamHandoffError::Refused { stream, error, .. } = error else {
+                    panic!("expected recoverable early-data refusal");
+                };
+                assert_eq!(
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<browntls_tokio::EarlyDataNotResent>())
+                        .unwrap()
+                        .len,
+                    13
+                );
+                client = stream;
+                assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
+            }
             let mut tls = client_kernel(client).await;
             write_all_async(&mut tls, b" and more").await;
             assert_eq!(read_to_end_async(&mut tls).await.unwrap(), b"reply");

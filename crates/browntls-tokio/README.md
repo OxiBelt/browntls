@@ -226,15 +226,27 @@ async fn accept(
 
 ## 0-RTT early data
 
-With `ClientConfig::enable_early_data` set and `TlsConnector::early_data(true)`,
-`connect` returns before the handshake when a resumed TLS 1.3 session allows
-early data. Writes then go out as early data with the ClientHello, up to the
-server's allowance; the first read, flush or shutdown (or a write beyond the
-allowance) completes the handshake. Early data the server declined is sent again
-as ordinary data only when the same application protocol is certain (no ALPN
-offered, or exactly one offered and selected, as RFC 9846 §4.2.10 requires);
-otherwise that operation fails with `client::EarlyDataNotResent` and the
-application decides what to send.
+With `ClientConfig::enable_early_data` and `TlsConnector::early_data(true)`,
+`connect` can return before the handshake when a TLS 1.3 ticket or an
+external PSK permits early writes. A read, flush, shutdown, explicit
+`finish_early_data()`, or write past the allowance finishes the handshake.
+
+By default the client reports declined 0-RTT without sending it again.
+Retain the original payload and use `finish_early_data()` or
+`early_data_outcome()` to see how many bytes remain unresent. Ordinary
+writes, flush, shutdown and kernel handoff return `EarlyDataNotResent`
+until `acknowledge_rejected_early_data()` is called. The native client
+split exposes the shared outcome on either half and acknowledgement on the
+write half. Settle the early phase before a generic Tokio split when
+application retry is required, or reunite the halves to acknowledge it.
+
+Opt in separately by passing `RejectedEarlyDataPolicy::ResendIfSameAlpn`
+with a nonzero `max_bytes` to `rejected_early_data_policy`.
+The cap limits early writes and the plaintext retained for resend. The
+retry requires the same concrete ALPN as the ticket-issuing connection or
+provisioned PSK (RFC 9846 §4.3.10 and Appendix F.5). Absent, unknown or
+different ALPN leaves the decision to the application. Counts describe
+local TLS progress. The peer application may not have processed the bytes.
 
 A server that set `max_early_data_size` (with stateful session storage) reads
 accepted early data through `server::TlsStream::early_data`, an `AsyncRead`
@@ -279,9 +291,10 @@ after the handshake comes from a client that took part in it. Read before, it
 may be a recorded ClientHello and early data sent again. For a resumed
 session, browntls takes the session out of the server's session storage, which
 makes a ticket good for one attempt as long as every server honouring it shares
-that storage; early data under an external PSK that allows it has no such
-protection, and the library keeps no other anti-replay store. Act before the
-handshake completes only on requests that are safe to repeat (RFC 9846 §8, RFC
+that storage. For an external PSK, acceptance requires a per-key cutoff
+and a committed decision from an application-supplied replay policy. Act
+before the handshake completes only on requests that are safe to repeat
+(RFC 9846 §8, RFC
 8470 for HTTP), and bound the operations that complete the handshake with
 timeouts of their own: the one around `accept` no longer covers them.
 

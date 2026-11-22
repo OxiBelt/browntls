@@ -1605,17 +1605,15 @@ the transport for its duration (`common::Stream`) and drives `read_tls` and
   `ServerConfig`). A refusal, from the acceptor or from
   `Accepted::into_connection`, writes and flushes the `AcceptedAlert` before
   the future fails; `take_io` returns the transport afterwards.
-- With `TlsConnector::early_data(true)` and a resumable session that
-  allows 0-RTT, `Connect` resolves before the handshake
-  (`IoSession::skip_handshake`). Writes go to `ClientConnection::early_data`
-  and are kept; the first read, flush or shutdown, or a write the allowance
-  cannot take, completes the handshake and flushes our last flight
-  (EndOfEarlyData, Finished). Declined early data is resent as 1-RTT data
-  only when the same ALPN protocol is certain (none offered, or one offered
-  and selected; RFC 9846 §4.2.10); otherwise that operation fails once with
-  `EarlyDataNotResent`. A handshake failure in this phase is kept and fails
-  every later operation. Whichever operation ends the phase wakes a read
-  waiting in it, whose transport registration it may have replaced.
+- With `TlsConnector::early_data(true)` and an eligible TLS 1.3 PSK,
+  `Connect` can resolve before the handshake (`IoSession::skip_handshake`).
+  The first read, flush, shutdown, or write beyond the allowance completes
+  the handshake and flushes the last flight. Automatic resend requires a
+  separate policy, a caller-supplied byte cap, and the same concrete ALPN
+  as the ticket-issuing connection or provisioned external PSK. The adapter
+  retains the outcome through reads and split polls. Write-side operations
+  and handoff report unresent bytes until the application acknowledges them.
+  A terminal failure remains visible to every later operation.
 - Servers read accepted early data through `server::TlsStream::early_data`
   (`EarlyDataReader`, an `AsyncRead` over `ServerConnection::early_data`);
   ordinary reads never return it. By default `Accept` resolves after the

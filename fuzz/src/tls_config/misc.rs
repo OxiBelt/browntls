@@ -398,6 +398,7 @@ pub(super) fn compress_op(input: &mut Input<'_>) {
 /// helpers.
 pub(super) fn keylog_enum_op(input: &mut Input<'_>) {
     let log = KeyLogFile::new();
+    assert!(KeyLogFile::try_from_path("").is_err());
     let label = core::str::from_utf8(input.short_field()).unwrap_or("CLIENT_RANDOM");
     let _ = log.will_log(label);
     log.log(label, input.short_field(), input.short_field());

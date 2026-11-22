@@ -12,7 +12,7 @@ publish.workspace = true
 
 [dev-dependencies]
 browntls-crypto = { workspace = true, features = ["std"] }
-browntls-core = { path = "../browntls-core", default-features = false, features = ["std", "native", "rustcrypto", "tls12", "prefer-post-quantum"] }
+browntls-core = { path = "../browntls-core", default-features = false, features = ["std", "native", "rustcrypto", "tls12", "prefer-post-quantum", "key-log"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [lints]

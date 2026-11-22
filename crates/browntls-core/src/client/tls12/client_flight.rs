@@ -145,7 +145,9 @@ impl ExpectServerDone {
         })?;
         cx.common.kx_state.complete();
 
-        st.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*st.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),

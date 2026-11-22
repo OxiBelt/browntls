@@ -222,6 +222,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
     for name in [
         &b"localhost"[..],
         b"Example.COM.",
+        b"ab-cd.example",
+        b"ab--cd.example",
         b"a_b.example",
         b"-bad.example",
         b"1.2.3.4",

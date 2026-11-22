@@ -10,7 +10,8 @@ use crate::input::Input;
 
 /// `DnsName`'s documented syntax: an optional trailing dot, 1 to 253 bytes
 /// otherwise, labels of 1 to 63 bytes of `[A-Za-z0-9-]` not starting or
-/// ending with `-`, and a final label that is not all digits.
+/// ending with `-` or using `--` in positions three and four, and a final
+/// label that is not all digits. A-labels are checked by the IDNA validator.
 fn dns_model(s: &str) -> bool {
     let name = s.strip_suffix('.').unwrap_or(s);
     if name.is_empty() || name.len() > 253 {
@@ -22,6 +23,7 @@ fn dns_model(s: &str) -> bool {
             || label.len() > 63
             || label.starts_with('-')
             || label.ends_with('-')
+            || label.as_bytes().get(2..4) == Some(b"--")
             || !label
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')

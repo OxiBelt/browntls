@@ -10,8 +10,8 @@ use browntls_core::crypto::{
 };
 use browntls_core::delegated_credential::{Credential, DelegatedCredential};
 use browntls_core::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
-    RawPublicKeyEntity, SubjectPublicKeyInfoDer, alg_id,
+    CertificateDer, EndEntityCert, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer,
+    PrivateSec1KeyDer, RawPublicKeyEntity, SubjectPublicKeyInfoDer, alg_id,
 };
 use browntls_core::sign::{CertifiedKey, SigningKey, public_key_to_spki};
 use browntls_core::{
@@ -422,11 +422,24 @@ pub(super) fn certified_op(input: &mut Input<'_>) {
             return;
         }
     };
-    match ck.with_delegated_credential(dc, dc_key) {
+    let usable_expiry = EndEntityCert::try_from(&cert).is_ok_and(|parent| {
+        dc.credential.valid_time != 0
+            && dc
+                .expiry(&cert)
+                .is_ok_and(|expiry| expiry < parent.not_after())
+    });
+    let installed = match side {
+        Side::Client => ck.with_client_delegated_credential(dc, dc_key, &provider(p)),
+        Side::Server => ck.with_delegated_credential(dc, dc_key, &provider(p)),
+    };
+    match installed {
         Ok(ck) => {
             assert!(delegation);
             assert_eq!(ck.delegated_credentials().len(), 1);
         }
-        Err(e) => assert!(!(genuine && delegation), "{ctx}: {e:?}"),
+        Err(e) => assert!(
+            !(genuine && delegation && matches && usable_expiry),
+            "{ctx}: {e:?}"
+        ),
     }
 }

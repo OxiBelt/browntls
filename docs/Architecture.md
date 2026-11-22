@@ -2277,12 +2277,21 @@ ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
 certificate's key sign the credential. A credential is issued for the side
 that authenticates with it (the signed context string differs, §4) and
 attached to a `CertifiedKey` for that side: `with_delegated_credential` for a
-server, `with_client_delegated_credential` for a client. Both check that the
-certificate carries the `DelegationUsage` extension
-(1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
-`digitalSignature` key usage, and, when the key exposes its public key, that
-it matches the credential's public key. A side only presents credentials
-attached for it, so one `CertifiedKey` can serve both roles. Credential keys
+server, `with_client_delegated_credential` for a client. Pass the configured
+`CryptoProvider` to either attachment method or a
+`DelegatedCredentialKey` constructor. The provider verifies the issuer
+signature against the exact leaf and role; the leaf must carry
+`DelegationUsage` and the `digitalSignature` key usage. Key association
+uses the delegated signer's SPKI or a one-time signature when the signer
+cannot export it. Attachment checks that the credential expires strictly
+inside its parent's validity period and accepts staged credentials.
+`check_usable_at` checks activation at a caller-supplied time, and
+presentation uses the connection clock. `DelegatedCredential::to_bytes`
+returns a `Result` and checks the enclosing extension length. Use the
+fixed-identity config builders `with_single_certified_key` and
+`with_client_auth_certified_key` to install a prepared key, or return it
+from a certificate resolver. A side only presents credentials attached for
+it, so one `CertifiedKey` can serve both roles. Credential keys
 may not be `rsaEncryption` keys (§4): the
 `rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
 (`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a

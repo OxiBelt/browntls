@@ -143,7 +143,7 @@ fn credential(
     variant: Variant,
     valid_time: u32,
     dc_key: &super::DcKey,
-) -> (DelegatedCredential, CertifiedKey) {
+) -> Option<(DelegatedCredential, CertifiedKey)> {
     let fixture = fixture();
     let end_entity = &fixture.client_delegation;
     let issue = |side| {
@@ -175,13 +175,25 @@ fn credential(
         _ => {}
     }
 
-    // The pairing checks do not look at the signature, nor at the side.
+    // Attachment checks the signature and the role named by the caller.
     let side = match variant {
         Variant::ServerSlot => Side::Server,
         _ => Side::Client,
     };
-    let paired = DelegatedCredentialKey::new_for(side, end_entity, dc.clone(), dc_key.key.clone())
-        .expect("the credential pairs with its key");
+    let paired = DelegatedCredentialKey::new_for(
+        side,
+        end_entity,
+        dc.clone(),
+        dc_key.key.clone(),
+        &fixture.provider,
+    );
+    if !matches!(variant, Variant::Sound | Variant::AfterServerCredential)
+        || fixture.not_before + u64::from(valid_time) >= fixture.not_after
+    {
+        assert!(paired.is_err());
+        return None;
+    }
+    let paired = paired.expect("the credential pairs with its key");
     assert_eq!(paired.side(), side);
     assert_eq!(paired.credential(), &dc);
 
@@ -196,13 +208,19 @@ fn credential(
     let mut sides = Vec::new();
     if variant == Variant::AfterServerCredential {
         certified = certified
-            .with_delegated_credential(issue(Side::Server), dc_key.key.clone())
+            .with_delegated_credential(issue(Side::Server), dc_key.key.clone(), &fixture.provider)
             .expect("credential attaches");
         sides.push(Side::Server);
     }
     certified = match side {
-        Side::Client => certified.with_client_delegated_credential(dc.clone(), dc_key.key.clone()),
-        Side::Server => certified.with_delegated_credential(dc.clone(), dc_key.key.clone()),
+        Side::Client => certified.with_client_delegated_credential(
+            dc.clone(),
+            dc_key.key.clone(),
+            &fixture.provider,
+        ),
+        Side::Server => {
+            certified.with_delegated_credential(dc.clone(), dc_key.key.clone(), &fixture.provider)
+        }
     }
     .expect("credential attaches");
     sides.push(side);
@@ -212,7 +230,7 @@ fn credential(
         .map(|dc| dc.side())
         .collect();
     assert_eq!(attached, sides);
-    (dc, certified)
+    Some((dc, certified))
 }
 
 /// Exchanges what both ends have to send until neither has anything.
@@ -275,7 +293,9 @@ pub(super) fn client_auth(input: &mut Input) {
     };
     let dc_key = &fixture.dc_keys[input.choose(fixture.dc_keys.len())];
     let variant = Variant::pick(input);
-    let (dc, certified) = credential(input, variant, valid_time, dc_key);
+    let Some((dc, certified)) = credential(input, variant, valid_time, dc_key) else {
+        return;
+    };
     let mask = (input.choose(4) == 0).then(|| input.byte());
 
     let webpki = WebPkiClientVerifier::builder_with_provider(
@@ -325,7 +345,7 @@ pub(super) fn client_auth(input: &mut Input) {
     .with_protocol_versions(&[&version::TLS13])
     .expect("versions")
     .with_root_certificates(fixture.roots.clone())
-    .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
+    .with_client_auth_certified_key(certified);
     client_config.enable_post_handshake_auth = after_handshake;
     let (client_config, server_config) = (Arc::new(client_config), Arc::new(server_config));
     let pair = || {

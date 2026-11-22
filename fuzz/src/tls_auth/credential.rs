@@ -26,7 +26,11 @@ pub(super) fn decode(input: &mut Input) {
             assert_eq!(dc.credential.public_key.as_ref(), &spki[..]);
             assert_eq!(u16::from(dc.algorithm), algorithm);
             assert_eq!(dc.signature, signature);
-            assert_eq!(dc.to_bytes(), bytes, "re-encoding differs");
+            assert_eq!(
+                dc.to_bytes().expect("decoded credential"),
+                bytes,
+                "re-encoding differs"
+            );
         }
         (None, Err(_)) => {}
         (expected, got) => panic!("decoding {bytes:?}: {expected:?} vs {got:?}"),
@@ -61,18 +65,20 @@ pub(super) fn encode(input: &mut Input) {
         algorithm,
         signature: signature.clone(),
     };
-    let bytes = dc.to_bytes();
     let mut expected = credential_bytes(&dc.credential);
     expected.extend_from_slice(&u16::from(algorithm).to_be_bytes());
     put_field(&mut expected, &signature);
-    assert_eq!(bytes, expected);
-    let decodable = !spki.is_empty() && spki.len() <= MAX_SPKI_LEN && !signature.is_empty();
-    match DelegatedCredential::from_bytes(&bytes) {
-        Ok(again) => {
-            assert!(decodable);
-            assert_eq!(again, dc);
+    let encodable = !spki.is_empty()
+        && spki.len() <= MAX_SPKI_LEN
+        && !signature.is_empty()
+        && expected.len() <= usize::from(u16::MAX) - 4;
+    match dc.to_bytes() {
+        Ok(bytes) => {
+            assert!(encodable);
+            assert_eq!(bytes, expected);
+            assert_eq!(DelegatedCredential::from_bytes(&bytes), Ok(dc));
         }
-        Err(_) => assert!(!decodable),
+        Err(_) => assert!(!encodable),
     }
 }
 
@@ -137,20 +143,32 @@ pub(super) fn issue(input: &mut Input) {
         "issued signature"
     );
     assert_eq!(
-        DelegatedCredential::from_bytes(&dc.to_bytes()),
+        DelegatedCredential::from_bytes(&dc.to_bytes().expect("issued credential")),
         Ok(dc.clone())
     );
     let expiry = dc.expiry(&end_entity).expect("expiry");
     assert_eq!(expiry.as_secs(), fixture.not_before + u64::from(valid_time));
 
     // A credential key matching the credential.
-    let matching = scheme == dc_key.scheme && spki == dc_key.spki.as_ref();
+    let matching = scheme == dc_key.scheme
+        && spki == dc_key.spki.as_ref()
+        && valid_time > 0
+        && expiry.as_secs() < fixture.not_after;
     // A server's credential through `new`, a client's through `new_for`.
     let paired = match side {
-        Side::Server => DelegatedCredentialKey::new(&end_entity, dc.clone(), dc_key.key.clone()),
-        Side::Client => {
-            DelegatedCredentialKey::new_for(side, &end_entity, dc.clone(), dc_key.key.clone())
-        }
+        Side::Server => DelegatedCredentialKey::new(
+            &end_entity,
+            dc.clone(),
+            dc_key.key.clone(),
+            &fixture.provider,
+        ),
+        Side::Client => DelegatedCredentialKey::new_for(
+            side,
+            &end_entity,
+            dc.clone(),
+            dc_key.key.clone(),
+            &fixture.provider,
+        ),
     };
     match paired {
         Ok(key) => {
@@ -158,6 +176,9 @@ pub(super) fn issue(input: &mut Input) {
             assert_eq!(key.side(), side);
             assert_eq!(key.credential(), &dc);
             assert_eq!(key.expiry(), expiry);
+            let activation = expiry.as_secs() - 1;
+            assert!(key.check_usable_at(unix(activation)).is_ok());
+            assert!(key.check_usable_at(expiry).is_err());
             assert_eq!(
                 key.key().public_key().map(|k| k.as_ref().to_vec()),
                 Some(dc_key.spki.as_ref().to_vec())
@@ -251,12 +272,22 @@ pub(super) fn native_generate(input: &mut Input) {
     );
     assert!(reloaded.choose_scheme(&[scheme]).is_some());
     assert!(signature_verifies(side, &end_entity, dc));
-    let key = DelegatedCredentialKey::new(&end_entity, dc.clone(), issued.signing_key.clone())
-        .expect("a generated credential pairs with its key");
-    assert_eq!(
-        key.expiry().as_secs(),
-        fixture.not_before + u64::from(valid_time)
+    let expiry = fixture.not_before + u64::from(valid_time);
+    let key = DelegatedCredentialKey::new_for(
+        side,
+        &end_entity,
+        dc.clone(),
+        issued.signing_key.clone(),
+        &fixture.provider,
     );
+    if valid_time > 0 && expiry < fixture.not_after {
+        assert_eq!(
+            key.expect("valid generated credential").expiry().as_secs(),
+            expiry
+        );
+    } else {
+        assert!(key.is_err());
+    }
     let _ = format!("{issued:?}");
 }
 

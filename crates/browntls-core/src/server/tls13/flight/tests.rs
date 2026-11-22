@@ -67,7 +67,8 @@ fn sent_evidence(
     status_request: bool,
     sct_request: bool,
 ) -> (PerEntry, PerEntry) {
-    let body = certificate_body(key, &client_hello(status_request, sct_request), None, None);
+    let body =
+        certificate_body(key, &client_hello(status_request, sct_request), None, None).unwrap();
     let encoded = body.get_encoding();
     let parsed = CertificatePayloadTls13::read_bytes(&encoded).unwrap();
     assert_eq!(parsed, body);
@@ -89,7 +90,9 @@ fn nothing_is_sent_unasked() {
     assert_eq!(scts, [None, None, None]);
     // Exactly the bare chain.
     assert_eq!(
-        certificate_body(&key, &client_hello(false, false), None, None).get_encoding(),
+        certificate_body(&key, &client_hello(false, false), None, None)
+            .unwrap()
+            .get_encoding(),
         CertificatePayloadTls13::new(key.cert.iter(), None).get_encoding()
     );
 }
@@ -147,7 +150,7 @@ fn transparency_info_only_when_offered_and_for_x509() {
 
     let mut offered = client_hello(false, false);
     offered.extensions.transparency_info = Some(());
-    let body = certificate_body(&key, &offered, None, None);
+    let body = certificate_body(&key, &offered, None, None).unwrap();
     let encoded = body.get_encoding();
     let parsed = CertificatePayloadTls13::read_bytes(&encoded).unwrap();
     assert_eq!(parsed.end_entity_transparency_info(), Some(&list[..]));
@@ -158,10 +161,14 @@ fn transparency_info_only_when_offered_and_for_x509() {
     );
 
     // Not offered, or a raw public key negotiated: nothing.
-    let body = certificate_body(&key, &client_hello(false, false), None, None);
+    let body = certificate_body(&key, &client_hello(false, false), None, None).unwrap();
     assert!(!body.has_transparency_info());
     let rpk = Some(CertificateType::RawPublicKey);
-    assert!(!certificate_body(&key, &offered, None, rpk).has_transparency_info());
+    assert!(
+        !certificate_body(&key, &offered, None, rpk)
+            .unwrap()
+            .has_transparency_info()
+    );
 }
 
 #[cfg(feature = "native")]

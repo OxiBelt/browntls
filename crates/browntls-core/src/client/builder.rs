@@ -108,7 +108,12 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
         key_der: PrivateKeyDer<'static>,
     ) -> Result<ClientConfig, Error> {
         let certified_key = CertifiedKey::from_der(cert_chain, key_der, &self.provider)?;
-        Ok(self.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+        Ok(self.with_client_auth_certified_key(certified_key))
+    }
+
+    /// Uses a fixed certified key, including any attached credentials.
+    pub fn with_client_auth_certified_key(self, certified_key: CertifiedKey) -> ClientConfig {
+        self.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
     }
 
     /// Never authenticates to servers.

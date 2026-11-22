@@ -89,6 +89,9 @@ pub enum Error {
     /// The configured TLS 1.3 ticket limit exceeds 255.
     BadTls13TicketLimit,
 
+    /// A local delegated credential is malformed or unusable.
+    InvalidDelegatedCredential(crate::delegated_credential::AttachmentError),
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -776,6 +779,7 @@ impl fmt::Display for Error {
             Self::BadTls13TicketLimit => {
                 f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
             }
+            Self::InvalidDelegatedCredential(why) => write!(f, "delegated credential: {why}"),
             Self::BadExternalSessionIdLength => {
                 f.write_str("the supplied external_session_id is not 20 to 255 bytes long")
             }

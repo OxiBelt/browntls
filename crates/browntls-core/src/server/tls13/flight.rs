@@ -390,7 +390,7 @@ fn certificate_body<'a>(
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
     server_cert_type: Option<CertificateType>,
-) -> CertificatePayloadTls13<'a> {
+) -> Result<CertificatePayloadTls13<'a>, Error> {
     let mut cert_body = CertificatePayloadTls13::from_certified_key(
         certified_key,
         client_hello.extensions.certificate_status_request.is_some(),
@@ -402,9 +402,9 @@ fn certificate_body<'a>(
     }
     // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
     if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
-        first.delegated_credential = Some(dc.credential().clone());
+        first.set_delegated_credential(dc.credential())?;
     }
-    cert_body
+    Ok(cert_body)
 }
 
 /// Sends the Certificate (or CompressedCertificate) message for
@@ -417,8 +417,9 @@ pub(super) fn emit_certificate_tls13(
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
     server_cert_type: Option<CertificateType>,
-) {
-    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type);
+) -> Result<(), Error> {
+    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type)
+        .map_err(|err| common.send_fatal_alert(AlertDescription::InternalError, err))?;
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression
@@ -437,7 +438,7 @@ pub(super) fn emit_certificate_tls13(
         };
         transcript.add_message(&m);
         common.send_msg(m, true);
-        return;
+        return Ok(());
     }
 
     let m = Message {
@@ -449,6 +450,7 @@ pub(super) fn emit_certificate_tls13(
     trace!("sending certificate {:?}", m);
     transcript.add_message(&m);
     common.send_msg(m, true);
+    Ok(())
 }
 
 pub(super) fn emit_certificate_verify_tls13(

@@ -9,7 +9,7 @@ use browntls_core::delegated_credential::{
     Credential, DelegatedCredential, MAX_VALIDITY, valid_time_until,
 };
 use browntls_core::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
+use browntls_core::sign::CertifiedKey;
 use browntls_core::{
     ClientConfig, ClientConnection, Error, PeerMisbehaved, ServerConfig, ServerConnection, Side,
     SignatureScheme, version,
@@ -140,8 +140,12 @@ pub(super) fn handshake(input: &mut Input) {
         &fixture.provider,
     )
     .expect("certified key")
-    .with_delegated_credential(dc.clone(), dc_key.key.clone())
-    .expect("credential attaches");
+    .with_delegated_credential(dc.clone(), dc_key.key.clone(), &fixture.provider);
+    if tampered || expiry >= na {
+        assert!(certified.is_err());
+        return;
+    }
+    let certified = certified.expect("credential attaches");
     assert_eq!(certified.delegated_credentials().len(), 1);
 
     let server_config = ServerConfig::builder_with_details(
@@ -151,7 +155,7 @@ pub(super) fn handshake(input: &mut Input) {
     .with_protocol_versions(&[&version::TLS13])
     .expect("versions")
     .with_no_client_auth()
-    .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified)));
+    .with_single_certified_key(certified);
     let mut client_config = ClientConfig::builder_with_details(
         fixture.provider.clone(),
         Arc::new(FixedTime(unix(now))),
@@ -169,7 +173,8 @@ pub(super) fn handshake(input: &mut Input) {
     // The server sends the credential only inside its own window, and
     // within the certificate's validity.
     let expiry = nb + u64::from(dc.credential.valid_time);
-    let sent = server_now < expiry && expiry <= server_now + week && expiry <= na;
+    let sent =
+        server_now >= nb && server_now < expiry && expiry <= server_now + week && expiry < na;
     if !sent {
         assert!(
             client_res.is_ok() && server_res.is_ok(),
@@ -178,14 +183,9 @@ pub(super) fn handshake(input: &mut Input) {
         assert!(client.delegated_credential().is_none());
         return;
     }
-    if tampered {
-        assert!(client_res.is_err(), "a tampered credential was accepted");
-        assert!(server_res.is_err());
-        return;
-    }
     let expected = if now >= expiry {
         Some(PeerMisbehaved::DelegatedCredentialExpired)
-    } else if expiry > now + week || expiry > na {
+    } else if expiry > now + week || expiry >= na {
         Some(PeerMisbehaved::DelegatedCredentialValidityTooLong)
     } else {
         None

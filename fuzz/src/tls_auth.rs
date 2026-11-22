@@ -330,6 +330,9 @@ fn credential_scheme_ok(scheme: SignatureScheme) -> bool {
 type Parsed = (u32, u16, Vec<u8>, u16, Vec<u8>);
 
 fn parse_dc(bytes: &[u8]) -> Option<Parsed> {
+    if bytes.len() > usize::from(u16::MAX) - 4 {
+        return None;
+    }
     let mut input = Input::new(bytes);
     let mut take = |n: usize| {
         let b = input.bytes(n);
@@ -439,7 +442,7 @@ fn expected_validation(dc: &DelegatedCredential, offer: &Offer<'_>) -> Option<u6
         && offer.sig_schemes.contains(&dc.algorithm)
         && offer.now < expiry
         && expiry <= offer.now.saturating_add(MAX_VALIDITY.as_secs())
-        && expiry <= fixture.not_after
+        && expiry < fixture.not_after
         && offer.cert_verify_scheme == scheme
         && signed;
     valid.then_some(expiry)

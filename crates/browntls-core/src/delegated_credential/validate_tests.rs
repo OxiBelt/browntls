@@ -189,6 +189,7 @@ fn no_rsa_encryption_keys() {
     }
 
     let now = UnixTime::now().as_secs();
+    let provider = crate::crypto::native::default_provider();
     let (ee, key) = cert(true, true);
     let mut dc = credential(&ee, &*key, now + 3600);
     // Rejected by a validator even when it offered the scheme
@@ -201,7 +202,11 @@ fn no_rsa_encryption_keys() {
         ))
     );
     // Neither issued nor attached.
-    let refused = |r: Result<(), Error>| matches!(r, Err(Error::General(msg)) if msg.contains("rsaEncryption"));
+    let refused = |r: Result<(), Error>| {
+        r == Err(Error::InvalidDelegatedCredential(
+            AttachmentError::UnsupportedScheme,
+        ))
+    };
     assert!(refused(
         DelegatedCredential::issue(
             Side::Server,
@@ -213,7 +218,7 @@ fn no_rsa_encryption_keys() {
         .map(|_| ())
     ));
     assert!(refused(
-        DelegatedCredentialKey::new(&ee, dc, key).map(|_| ())
+        DelegatedCredentialKey::new(&ee, dc, key, &provider).map(|_| ())
     ));
 }
 
@@ -241,6 +246,7 @@ fn not_beyond_the_certificate() {
 fn a_credential_is_only_usable_by_its_side() {
     const P256: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
     let now = UnixTime::now();
+    let provider = crate::crypto::native::default_provider();
     let (ee, cert_key) = cert(true, true);
     let dc_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
     let dc_key = any_supported_type(&browntls_pki::PrivateKeyDer::Pkcs8(
@@ -272,13 +278,15 @@ fn a_credential_is_only_usable_by_its_side() {
     };
 
     // `new` is a server's credential.
-    let server = DelegatedCredentialKey::new(&ee, issue(Side::Server), dc_key.clone()).unwrap();
+    let server =
+        DelegatedCredentialKey::new(&ee, issue(Side::Server), dc_key.clone(), &provider).unwrap();
     assert_eq!(server.side(), Side::Server);
     assert!(usable(&server, Side::Server));
     assert!(!usable(&server, Side::Client));
 
     let client =
-        DelegatedCredentialKey::new_for(Side::Client, &ee, issue(Side::Client), dc_key).unwrap();
+        DelegatedCredentialKey::new_for(Side::Client, &ee, issue(Side::Client), dc_key, &provider)
+            .unwrap();
     assert_eq!(client.side(), Side::Client);
     assert!(usable(&client, Side::Client));
     assert!(!usable(&client, Side::Server));
@@ -320,4 +328,76 @@ fn a_credential_is_only_usable_by_its_side() {
             PeerMisbehaved::DelegatedCredentialBadSignature
         ))
     );
+}
+
+#[test]
+fn attachment_checks_issuer_role_and_staged_expiry() {
+    const P256: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
+    let provider = crate::crypto::native::default_provider();
+    let now = UnixTime::now();
+    let (ee, cert_key) = cert(true, true);
+    let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let dc_key = any_supported_type(&browntls_pki::PrivateKeyDer::Pkcs8(
+        browntls_pki::PrivatePkcs8KeyDer::from(pair.serialize_der()),
+    ))
+    .unwrap();
+    let until = |time| valid_time_until(&ee, time).unwrap();
+    let credential = |side, expiry| {
+        DelegatedCredential::issue(
+            side,
+            &ee,
+            &*cert_key,
+            &[SignatureScheme::ED25519],
+            Credential {
+                valid_time: until(expiry),
+                dc_cert_verify_algorithm: P256,
+                public_key: SubjectPublicKeyInfoDer::from(
+                    rcgen::PublicKeyData::subject_public_key_info(&pair),
+                ),
+            },
+        )
+        .unwrap()
+    };
+
+    let staged = DelegatedCredentialKey::new(
+        &ee,
+        credential(
+            Side::Server,
+            UnixTime::since_unix_epoch(Duration::from_secs(now.as_secs() + 3600)),
+        ),
+        dc_key.clone(),
+        &provider,
+    )
+    .unwrap();
+    assert!(staged.check_usable_at(now).is_ok());
+    assert!(
+        staged
+            .check_usable_at(UnixTime::since_unix_epoch(Duration::from_secs(
+                staged.expiry().as_secs()
+            )))
+            .is_err()
+    );
+
+    // A valid signature for the other role cannot be attached as a server
+    // credential because the role is part of the signed message.
+    assert!(
+        DelegatedCredentialKey::new(
+            &ee,
+            credential(
+                Side::Client,
+                UnixTime::since_unix_epoch(Duration::from_secs(now.as_secs() + 3600))
+            ),
+            dc_key.clone(),
+            &provider,
+        )
+        .is_err()
+    );
+
+    let not_after = EndEntityCert::try_from(&ee).unwrap().not_after();
+    assert!(matches!(
+        DelegatedCredentialKey::new(&ee, credential(Side::Server, not_after), dc_key, &provider,),
+        Err(Error::InvalidDelegatedCredential(
+            AttachmentError::InvalidExpiry
+        ))
+    ));
 }

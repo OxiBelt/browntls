@@ -24,8 +24,10 @@ fn post_handshake_pair(
     server_chain: &Chain,
     chain: &Chain,
     resolver: Arc<SwitchingResolver>,
+    client_skew: i64,
 ) -> (ClientConnection, ServerConnection) {
     let mut client_config = client_switching(server_chain, resolver);
+    client_config.time_provider = Arc::new(FixedTime(shifted(client_skew)));
     client_config.enable_post_handshake_auth = true;
     let mut server_config = dc_server(server_chain, PinnedClientVerifier::new(chain, false));
     server_config.request_client_auth_after_handshake = true;
@@ -52,7 +54,7 @@ fn client_answers_post_handshake_auth_with_a_credential() {
         shifted(7200),
     );
     let resolver = SwitchingResolver::new(with_client_credentials(&chain, vec![(dc.clone(), key)]));
-    let (mut client, mut server) = post_handshake_pair(&server_chain, &chain, resolver.clone());
+    let (mut client, mut server) = post_handshake_pair(&server_chain, &chain, resolver.clone(), 0);
     do_handshake(&mut client, &mut server).unwrap();
     assert!(server.peer_certificates().is_none(), "deferred");
     assert!(server.client_delegated_credential().is_none());
@@ -98,26 +100,20 @@ fn client_answers_post_handshake_auth_with_a_credential() {
     );
 }
 
-/// An invalid credential in a post-handshake answer is refused like one
-/// in the handshake.
+/// A credential valid on the client's clock can be expired on the
+/// server's clock when post-handshake authentication is requested.
 #[test]
-fn server_rejects_invalid_credential_after_the_handshake() {
+fn server_rejects_expired_credential_after_the_handshake() {
     let server_chain = server_chain(KeyType::EcdsaP256);
     let chain = delegation_client_chain(KeyType::EcdsaP256);
-    let (mut dc, key) = issue_for(
-        Side::Client,
-        &chain,
-        SignatureScheme::ED25519,
-        shifted(3600),
-    );
-    dc.credential.valid_time -= 1;
+    let (dc, key) = issue_for(Side::Client, &chain, SignatureScheme::ED25519, shifted(-60));
     let resolver = SwitchingResolver::new(with_client_credentials(&chain, vec![(dc, key)]));
-    let (mut client, mut server) = post_handshake_pair(&server_chain, &chain, resolver);
+    let (mut client, mut server) = post_handshake_pair(&server_chain, &chain, resolver, -120);
     do_handshake(&mut client, &mut server).unwrap();
     assert_eq!(
         post_handshake_auth(&mut client, &mut server),
         Err(Error::PeerMisbehaved(
-            PeerMisbehaved::DelegatedCredentialBadSignature
+            PeerMisbehaved::DelegatedCredentialExpired
         ))
     );
     transfer(&mut server, &mut client);

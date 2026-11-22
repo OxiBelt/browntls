@@ -61,7 +61,12 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
         key_der: PrivateKeyDer<'static>,
     ) -> Result<ServerConfig, Error> {
         let certified_key = CertifiedKey::from_der(cert_chain, key_der, self.crypto_provider())?;
-        Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+        Ok(self.with_single_certified_key(certified_key))
+    }
+
+    /// Uses a fixed certified key, including any attached credentials.
+    pub fn with_single_certified_key(self, certified_key: CertifiedKey) -> ServerConfig {
+        self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
     }
 
     /// Like [`Self::with_single_cert`], stapling `ocsp` when clients ask.
@@ -76,7 +81,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
         if !ocsp.is_empty() {
             certified_key.ocsp = Some(ocsp);
         }
-        Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+        Ok(self.with_single_certified_key(certified_key))
     }
 
     /// Picks the certificate per connection with `cert_resolver`.

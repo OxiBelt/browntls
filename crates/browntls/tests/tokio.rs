@@ -280,7 +280,11 @@ async fn client_delegated_credential_through_the_tokio_module() {
     )
     .unwrap();
     let certified = CertifiedKey::new(pki.client_chain.clone(), cert_key)
-        .with_client_delegated_credential(issued.credential.clone(), issued.signing_key)
+        .with_client_delegated_credential(
+            issued.credential.clone(),
+            issued.signing_key,
+            &provider(),
+        )
         .unwrap();
     let client = ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()

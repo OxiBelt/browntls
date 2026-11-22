@@ -565,6 +565,7 @@ pub(super) struct EarlyData {
     state: EarlyDataState,
     /// How many more bytes the server's `max_early_data_size` allows.
     left: usize,
+    alpn: Option<Vec<u8>>,
 }
 
 impl EarlyData {
@@ -572,6 +573,7 @@ impl EarlyData {
         Self {
             state: EarlyDataState::Disabled,
             left: 0,
+            alpn: None,
         }
     }
 
@@ -587,10 +589,11 @@ impl EarlyData {
         )
     }
 
-    pub(super) fn enable(&mut self, max_data: usize) {
+    pub(super) fn enable(&mut self, max_data: usize, alpn: Option<&[u8]>) {
         debug_assert_eq!(self.state, EarlyDataState::Disabled);
         self.state = EarlyDataState::Ready;
         self.left = max_data;
+        self.alpn = alpn.map(<[u8]>::to_vec);
     }
 
     pub(super) fn rejected(&mut self) {
@@ -830,6 +833,22 @@ impl UnbufferedClientConnection {
     /// Meaningful once the handshake has finished.
     pub fn is_early_data_accepted(&self) -> bool {
         self.inner.core.data.early_data.is_accepted()
+    }
+
+    /// The ALPN protocol from the ticket-issuing handshake or provisioned
+    /// external PSK, if known. Available even after early data is declined.
+    pub fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.inner.core.data.early_data.alpn.as_deref()
+    }
+
+    /// How much 0-RTT plaintext the connection can still encrypt.
+    pub fn early_data_bytes_left(&self) -> usize {
+        let data = &self.inner.core.data;
+        if data.early_data_writable() {
+            data.early_data_left()
+        } else {
+            0
+        }
     }
 
     /// Whether the connection only uses FIPS-validated components.

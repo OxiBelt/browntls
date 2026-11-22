@@ -116,6 +116,12 @@ impl ClientConnection {
         self.inner.core.data.early_data.is_accepted()
     }
 
+    /// The ALPN protocol from the ticket-issuing handshake or provisioned
+    /// external PSK, if known. Available even after early data is declined.
+    pub fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.inner.core.data.early_data.alpn.as_deref()
+    }
+
     fn write_early_data(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let Some(take) = self.inner.core.data.early_data.check_write(data.len()) else {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));

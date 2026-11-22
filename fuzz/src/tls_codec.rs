@@ -26,8 +26,8 @@ use std::sync::{Arc, OnceLock};
 use browntls_core::client::{ClientSessionMemoryCache, ClientSessionStore, Resumption};
 use browntls_core::crypto::KeyExchangeAlgorithm;
 use browntls_core::crypto::cipher::{
-    InboundOpaqueMessage, OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage,
-    PrefixedPayload,
+    InboundOpaqueMessage, InboundPlainMessage, OutboundChunks, OutboundOpaqueMessage,
+    OutboundPlainMessage, PrefixedPayload,
 };
 use browntls_core::crypto::hash::HashAlgorithm;
 use browntls_core::fuzzing;
@@ -493,11 +493,22 @@ fn inbound_opaque(input: &mut Input) {
             assert_eq!(plain.typ, typ);
             assert_eq!(plain.version, vers);
             assert_eq!(plain.payload, &model[..]);
+            let direct = InboundPlainMessage::new(typ, vers, &model);
+            assert_eq!(plain.record_plaintext_len(), direct.record_plaintext_len());
+            assert_eq!(direct.record_plaintext_len(), model.len());
         }
         1 => match (unpadded(&model), message.into_tls13_unpadded_message()) {
             (Some((typ, body)), Ok(plain)) => {
                 assert_eq!(plain.typ, typ);
                 assert_eq!(plain.version, ProtocolVersion::TLSv1_3);
+                assert_eq!(plain.record_plaintext_len(), model.len());
+                let direct = InboundPlainMessage::with_record_plaintext_len(
+                    plain.typ,
+                    plain.version,
+                    body,
+                    model.len(),
+                );
+                assert_eq!(direct.record_plaintext_len(), plain.record_plaintext_len());
                 assert_eq!(plain.payload, body);
             }
             (None, Err(_)) => {}

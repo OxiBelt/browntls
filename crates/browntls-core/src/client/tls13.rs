@@ -332,6 +332,9 @@ pub(super) fn handle_server_hello(
     // While early data may still be in flight our encrypter stays on the
     // early key; the handshake key is installed once that question settles.
     let hash_at_server_hello = transcript.current_hash();
+    if hello.sent_record_size_limit.is_some() {
+        cx.common.record_layer.start_record_size_limit_observation();
+    }
     let key_schedule = key_schedule.derive_client_handshake_secrets(
         cx.data.early_data.is_enabled(),
         hash_at_server_hello.as_ref(),
@@ -469,9 +472,6 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             exts.client_certificate_type,
             exts.server_certificate_type,
         )?;
-        // RFC 8449 §4: in TLS 1.3 the server's limit comes here. RFC 9149's
-        // `expected_count` is a hint only and needs no action.
-        hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
         crate::external_binding::handshake::client_check(
             cx.common,
             self.config.external_binding.as_ref(),
@@ -536,6 +536,11 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 }
             }
         }
+
+        // On rejection the handshake key is now available for the alert.
+        // RFC 8449 §4 covers the authenticated records that carried this
+        // message when the server acknowledges the extension.
+        hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
 
         match (self.resuming_session, self.external_psk) {
             (Some(resuming), _) => {

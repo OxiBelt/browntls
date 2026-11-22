@@ -169,7 +169,10 @@ pub(super) fn process_record_size_limit(
 ) -> Result<(), Error> {
     match (hello.sent_record_size_limit, servers) {
         (Some(ours), Some(servers)) => common.apply_record_size_limits(ours, servers, tls13),
-        _ => Ok(()),
+        _ => {
+            common.record_layer.clear_record_size_limit_observation();
+            Ok(())
+        }
     }
 }
 

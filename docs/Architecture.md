@@ -1215,8 +1215,11 @@ RFC 9257 guidance and what browntls enforces:
   extension. Higher peer values are capped at the protocol maximum.
   A configured value below 64 fails connection creation
   (`Error::BadRecordSizeLimit`). The new handshake's cap applies to its
-  handshake and application keys. The 0-RTT record-size check is tracked
-  separately in the Roadmap.
+  handshake and application keys. Stream TLS 1.3 ticket 0-RTT uses the
+  server receive cap from the ticket-issuing connection. Older server
+  sessions without the cap can resume without early data. External PSKs
+  use the cap provisioned on both peers with
+  `ExternalPsk::with_early_data_record_size_limit` (default 16385).
 - `ticket_request` (RFC 9149), TLS 1.3 only: the client sends
   `ClientConfig::tls13_ticket_request` (default none) when it offers TLS
   1.3; the server sends at most `resumption_count` tickets for a resumed

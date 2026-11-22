@@ -42,6 +42,26 @@ fn server_value_roundtrip() {
     assert!(alloc::format!("{back:?}").contains("example.com"));
     assert_eq!(back.external_psk, None);
     assert_eq!(back.delegated_credential_expiry, None);
+    assert_eq!(back.early_data_record_size_limit, None);
+}
+
+#[test]
+fn server_value_stream_early_data_record_size_limit_roundtrip() {
+    let mut value = sample();
+    for limit in [64, 16_385] {
+        value.early_data_record_size_limit = Some(limit);
+        let encoded = value.get_encoding();
+        let decoded = ServerSessionValue::read_bytes(&encoded).unwrap();
+        assert_eq!(decoded.early_data_record_size_limit, Some(limit));
+        assert!(ServerSessionValue::read_bytes(&encoded[..encoded.len() - 1]).is_err());
+    }
+    for limit in [63, 16_386] {
+        value.early_data_record_size_limit = Some(limit);
+        assert!(ServerSessionValue::read_bytes(&value.get_encoding()).is_err());
+    }
+    value.early_data_record_size_limit = Some(64);
+    value.version = ProtocolVersion::DTLSv1_3;
+    assert!(ServerSessionValue::read_bytes(&value.get_encoding()).is_err());
 }
 
 #[test]

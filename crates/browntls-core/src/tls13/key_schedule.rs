@@ -244,6 +244,7 @@ impl KeySchedule {
         }
         let expander = self.suite.hkdf_provider.expander_for_okm(secret);
         let (key, iv) = derive_traffic_key_iv(&*expander, self.suite.aead_alg.key_len());
+        common.set_early_data_record_size_limit(None);
         common.record_layer.set_message_encrypter(
             self.suite.aead_alg.encrypter(key, iv),
             self.suite.common.confidentiality_limit,
@@ -384,6 +385,7 @@ impl KeyScheduleEarly {
         key_log: &dyn KeyLog,
         client_random: &[u8; 32],
         common: &mut CommonState,
+        record_size_limit: u16,
     ) {
         let secret = self.ks.derive_logged_secret(
             SecretKind::ClientEarlyTrafficSecret,
@@ -397,10 +399,13 @@ impl KeyScheduleEarly {
             return;
         }
         match common.side {
-            Side::Client => self.ks.set_encrypter(&secret, common),
+            Side::Client => {
+                self.ks.set_encrypter(&secret, common);
+                common.set_early_data_record_size_limit(Some(record_size_limit));
+            }
             Side::Server => common
                 .record_layer
-                .set_early_data_decrypter(self.ks.derive_decrypter(&secret)),
+                .set_early_data_decrypter(self.ks.derive_decrypter(&secret), record_size_limit),
         }
     }
 

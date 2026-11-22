@@ -407,6 +407,7 @@ impl ExpectTraffic {
         )
         .with_delegated_credential_expiry(cx.data.delegated_credential_expiry)
         .with_early_data_alpn(cx.common.alpn_protocol.as_deref())
+        .with_early_data_record_size_limit(cx.common.peer_tls13_record_size_limit())
         .with_protocol(Protocol::of(cx.common));
         value.common.bind_server_identity(
             &self.server_name,

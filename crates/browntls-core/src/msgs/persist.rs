@@ -78,6 +78,7 @@ pub struct Tls13ClientSessionValue {
     age_add: u32,
     max_early_data_size: u32,
     early_data_alpn: Option<Vec<u8>>,
+    early_data_record_size_limit: u16,
     /// QUIC: the server's transport parameters, remembered for 0-RTT
     /// (RFC 9000 §7.4.1); empty otherwise.
     quic_params: PayloadU16,
@@ -111,6 +112,7 @@ impl Tls13ClientSessionValue {
             age_add,
             max_early_data_size,
             early_data_alpn: None,
+            early_data_record_size_limit: crate::common_state::max_record_size_limit(true),
             quic_params: PayloadU16::empty(),
             common: ClientSessionCommon::new(
                 ticket,
@@ -183,6 +185,15 @@ impl Tls13ClientSessionValue {
 
     pub(crate) fn early_data_alpn(&self) -> Option<&[u8]> {
         self.early_data_alpn.as_deref()
+    }
+
+    pub(crate) fn with_early_data_record_size_limit(mut self, limit: u16) -> Self {
+        self.early_data_record_size_limit = limit;
+        self
+    }
+
+    pub(crate) fn early_data_record_size_limit(&self) -> u16 {
+        self.early_data_record_size_limit
     }
 
     /// QUIC: the server's transport parameters when the ticket was issued.
@@ -473,6 +484,9 @@ pub(crate) struct ServerSessionValue {
     pub(crate) client_delegated_credential_expiry: Option<UnixTime>,
     /// The original handshake authenticated with only an external PSK.
     pub(crate) certificate_free: bool,
+    /// The effective server receive limit under stream TLS 1.3 0-RTT
+    /// keys. Absent for older sessions and tickets without stream 0-RTT.
+    pub(crate) early_data_record_size_limit: Option<u16>,
 }
 
 impl ServerSessionValue {
@@ -519,6 +533,7 @@ impl ServerSessionValue {
             delegated_credential_expiry: None,
             client_delegated_credential_expiry: None,
             certificate_free: false,
+            early_data_record_size_limit: None,
         }
     }
 
@@ -645,7 +660,10 @@ impl Codec<'_> for ServerSessionValue {
         for expiry in deadlines.into_iter().flatten() {
             expiry.as_secs().encode(bytes);
         }
-        if self.certificate_free {
+        if let Some(limit) = self.early_data_record_size_limit {
+            (2 | u8::from(self.certificate_free)).encode(bytes);
+            limit.encode(bytes);
+        } else if self.certificate_free {
             1u8.encode(bytes);
         }
     }
@@ -732,20 +750,38 @@ impl Codec<'_> for ServerSessionValue {
         {
             return Err(InvalidMessage::IllegalEmptyValue);
         }
-        let certificate_free = if r.any_left() {
-            if u8::read(r)? != 1
-                || !tls13
+        // The optional tail used to encode only the certificate-free
+        // marker (1). Bit 1 introduces the stream 0-RTT cap.
+        let flags = if r.any_left() {
+            let flags = u8::read(r)?;
+            if !(1..=3).contains(&flags) {
+                return Err(InvalidMessage::IllegalEmptyValue);
+            }
+            flags
+        } else {
+            0
+        };
+        let certificate_free = flags & 1 != 0;
+        if certificate_free
+            && (!tls13
                 || external_psk.is_none()
                 || client_cert_chain.is_some()
-                || delegated_credential_expiry.is_some()
+                || delegated_credential_expiry.is_some())
+        {
+            return Err(InvalidMessage::IllegalEmptyValue);
+        }
+        let early_data_record_size_limit = if flags & 2 != 0 {
+            let limit = u16::read(r)?;
+            if version != ProtocolVersion::TLSv1_3
+                || !(crate::common_state::MIN_RECORD_SIZE_LIMIT
+                    ..=crate::common_state::max_record_size_limit(true))
+                    .contains(&limit)
             {
                 return Err(InvalidMessage::IllegalEmptyValue);
             }
-            true
+            Some(limit)
         } else {
-            // Tickets issued before the marker existed cannot establish
-            // that the original handshake was certificate-free.
-            false
+            None
         };
         Ok(Self {
             sni,
@@ -763,6 +799,7 @@ impl Codec<'_> for ServerSessionValue {
             delegated_credential_expiry,
             client_delegated_credential_expiry,
             certificate_free,
+            early_data_record_size_limit,
         })
     }
 }

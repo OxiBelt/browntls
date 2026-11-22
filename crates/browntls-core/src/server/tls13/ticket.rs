@@ -120,6 +120,17 @@ pub(super) fn emit_ticket(
     value.set_delegated_credential_expiry(cx.data.delegated_credential_expiry);
     value.client_delegated_credential_expiry = cx.data.client_delegated_credential_expiry;
     value.certificate_free = cx.data.certificate_free;
+    if config.max_early_data_size > 0
+        && !config.ticketer.enabled()
+        && !cx.common.is_quic()
+        && !cx.common.is_dtls()
+    {
+        value.early_data_record_size_limit = Some(
+            cx.common
+                .negotiated_receive_record_size_limit()
+                .unwrap_or(crate::common_state::max_record_size_limit(true)),
+        );
+    }
     let plain = value.get_encoding();
 
     let ticket = if config.ticketer.enabled() {

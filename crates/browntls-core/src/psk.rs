@@ -59,6 +59,7 @@ pub struct ExternalPsk {
     server_name: Option<DnsName<'static>>,
     alpn_protocol: Option<Vec<u8>>,
     max_early_data_size: u32,
+    early_data_record_size_limit: u16,
     early_data_expiry: Option<UnixTime>,
     import_context: Option<Vec<u8>>,
     key_generation: Option<Vec<u8>>,
@@ -106,6 +107,7 @@ impl ExternalPsk {
             server_name: None,
             alpn_protocol: None,
             max_early_data_size: 0,
+            early_data_record_size_limit: crate::common_state::max_record_size_limit(true),
             early_data_expiry: None,
             import_context: None,
             key_generation: None,
@@ -151,6 +153,29 @@ impl ExternalPsk {
     pub fn with_early_data(mut self, max_early_data_size: u32) -> Self {
         self.max_early_data_size = max_early_data_size;
         self
+    }
+
+    /// Sets the largest TLS 1.3 inner plaintext allowed in one 0-RTT
+    /// record under this PSK, including its type byte and padding.
+    ///
+    /// Provision the same value on both peers. The range is 64 through
+    /// 16385, with 16385 used by default. This is independent of the
+    /// total early-data allowance and the new handshake's record limit.
+    pub fn with_early_data_record_size_limit(mut self, limit: u16) -> Result<Self, Error> {
+        if !(crate::common_state::MIN_RECORD_SIZE_LIMIT
+            ..=crate::common_state::max_record_size_limit(true))
+            .contains(&limit)
+        {
+            return Err(Error::general(
+                "invalid external PSK early-data record size limit",
+            ));
+        }
+        self.early_data_record_size_limit = limit;
+        Ok(self)
+    }
+
+    pub(crate) fn early_data_record_size_limit(&self) -> u16 {
+        self.early_data_record_size_limit
     }
 
     /// Sets the exclusive server-side cutoff for 0-RTT under this key.
@@ -318,6 +343,10 @@ impl fmt::Debug for ExternalPsk {
             .field("cipher_suite", &self.cipher_suite)
             .field("server_name", &self.server_name)
             .field("max_early_data_size", &self.max_early_data_size)
+            .field(
+                "early_data_record_size_limit",
+                &self.early_data_record_size_limit,
+            )
             .field("imported", &self.import_context.is_some())
             .field("has_key_generation", &self.key_generation.is_some())
             .finish_non_exhaustive()

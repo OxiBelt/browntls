@@ -66,9 +66,8 @@ pub(crate) struct RecordLayer {
     /// Largest authenticated record before the client learns whether the
     /// server negotiated the extension in EncryptedExtensions.
     pending_inbound_record_size: Option<usize>,
-    /// The current decrypter reads 0-RTT data, which the client sent before
-    /// it could learn our record size limit; the limit does not apply.
-    reading_early_data: bool,
+    /// The limit associated with the current 0-RTT read key.
+    early_data_inbound_size_limit: Option<u16>,
 }
 
 impl RecordLayer {
@@ -85,7 +84,7 @@ impl RecordLayer {
             trial_decryption_len: None,
             inbound_size_limit: None,
             pending_inbound_record_size: None,
-            reading_early_data: false,
+            early_data_inbound_size_limit: None,
         }
     }
 
@@ -142,10 +141,10 @@ impl RecordLayer {
                 if let Some(seen) = &mut self.pending_inbound_record_size {
                     *seen = (*seen).max(len);
                 }
-                if !self.reading_early_data
-                    && self
-                        .inbound_record_size_limit()
-                        .is_some_and(|limit| len > usize::from(limit))
+                if self
+                    .early_data_inbound_size_limit
+                    .or(self.inbound_record_size_limit())
+                    .is_some_and(|limit| len > usize::from(limit))
                 {
                     return Err(Error::PeerSentOversizedRecord);
                 }
@@ -227,9 +226,13 @@ impl RecordLayer {
     /// Like `set_message_decrypter`, for the server's 0-RTT key: the
     /// record size limit (RFC 8449) does not apply to early data, which
     /// the client sent before it saw the limit.
-    pub(crate) fn set_early_data_decrypter(&mut self, cipher: Box<dyn MessageDecrypter>) {
+    pub(crate) fn set_early_data_decrypter(
+        &mut self,
+        cipher: Box<dyn MessageDecrypter>,
+        record_size_limit: u16,
+    ) {
         self.set_message_decrypter(cipher);
-        self.reading_early_data = true;
+        self.early_data_inbound_size_limit = Some(record_size_limit);
     }
 
     /// Like `set_message_decrypter`, but records that fail to decrypt are
@@ -266,7 +269,7 @@ impl RecordLayer {
         self.message_decrypter = cipher;
         self.read_seq = 0;
         self.decrypt_state = DirectionState::Prepared;
-        self.reading_early_data = false;
+        self.early_data_inbound_size_limit = None;
     }
 
     pub(crate) fn start_encrypting(&mut self) {
@@ -557,9 +560,14 @@ mod tests {
             Err(Error::PeerSentOversizedRecord)
         );
 
-        // 0-RTT data is exempt; the next key is not.
-        rl.set_early_data_decrypter(Box::new(Identity { tls13: true }));
-        assert_eq!(decrypt(&mut rl, inner(1000, 0)), Ok(1000));
+        // The early key has the prior session's cap; the next key has
+        // the current handshake's cap.
+        rl.set_early_data_decrypter(Box::new(Identity { tls13: true }), 1000);
+        assert_eq!(decrypt(&mut rl, inner(999, 0)), Ok(999));
+        assert_eq!(
+            decrypt(&mut rl, inner(999, 1)),
+            Err(Error::PeerSentOversizedRecord)
+        );
         rl.set_message_decrypter(Box::new(Identity { tls13: true }));
         assert_eq!(
             decrypt(&mut rl, inner(64, 0)),

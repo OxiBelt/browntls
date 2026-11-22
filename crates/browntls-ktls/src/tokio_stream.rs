@@ -620,7 +620,8 @@ pub(crate) fn permanent(blocker: KernelHandoffBlocker, handshaking: bool) -> boo
         | KernelHandoffBlocker::Quic
         | KernelHandoffBlocker::UnsupportedCipherSuite
         | KernelHandoffBlocker::Closed
-        | KernelHandoffBlocker::FragmentTooSmall => true,
+        | KernelHandoffBlocker::FragmentTooSmall
+        | KernelHandoffBlocker::ReceiveRecordSizeLimit => true,
         _ => false,
     }
 }

@@ -51,6 +51,16 @@ impl End {
 /// `writes` records of data in each direction and an orderly close, and
 /// returns what became of the client's and the server's end.
 fn connection(pki: &Pki, suite: SupportedCipherSuite, writes: usize, extraction: bool) -> [End; 2] {
+    connection_with_client_limit(pki, suite, writes, extraction, None)
+}
+
+fn connection_with_client_limit(
+    pki: &Pki,
+    suite: SupportedCipherSuite,
+    writes: usize,
+    extraction: bool,
+    client_limit: Option<u16>,
+) -> [End; 2] {
     let (client_tcp, server_tcp) = tcp_pair();
     let up = pattern(writes * WRITE, 1);
     let down = pattern(writes * WRITE, 2);
@@ -74,6 +84,9 @@ fn connection(pki: &Pki, suite: SupportedCipherSuite, writes: usize, extraction:
         });
         let mut config = pki.client_config(suite);
         config.enable_secret_extraction = extraction;
+        if let Some(limit) = client_limit {
+            config.record_size_limit = Some(limit);
+        }
         let conn = ClientConnection::new(Arc::new(config), localhost()).unwrap();
         let mut tls = RoutedStream::new(conn, client_tcp).unwrap();
         let end = End::of(&tls);
@@ -151,6 +164,11 @@ fn connections_go_where_the_routing_places_them() {
         }
     };
     assert!(routing::is_active());
+    let [client, _] = connection_with_client_limit(&pki, suites[0], 1, true, Some(1000));
+    assert_eq!(
+        (client.place, client.refusal),
+        (Place::Userspace, Some(io::ErrorKind::Unsupported)),
+    );
 
     // In the order: every connection goes to the kernel, or stays in
     // userspace with the kernel's refusal when it cannot go.

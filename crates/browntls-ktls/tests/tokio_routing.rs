@@ -112,10 +112,23 @@ async fn connection(
     writes: usize,
     extraction: bool,
 ) -> [End; 2] {
+    connection_with_server_limit(pki, suite, writes, extraction, None).await
+}
+
+async fn connection_with_server_limit(
+    pki: &Pki,
+    suite: SupportedCipherSuite,
+    writes: usize,
+    extraction: bool,
+    server_limit: Option<u16>,
+) -> [End; 2] {
     let mut client_config = pki.client_config(suite);
     client_config.enable_secret_extraction = extraction;
     let mut server_config = pki.server_config(suite);
     server_config.enable_secret_extraction = extraction;
+    if let Some(limit) = server_limit {
+        server_config.record_size_limit = Some(limit);
+    }
     let (client_tcp, server_tcp) = tokio_pair();
     let (client, server) = tokio::join!(
         TlsConnector::from(Arc::new(client_config)).connect(localhost(), client_tcp),
@@ -303,6 +316,11 @@ async fn streams_go_where_the_routing_places_them() {
         }
     };
     assert!(routing::is_active());
+    let [_, server] = connection_with_server_limit(&pki, tls13, 1, true, Some(1000)).await;
+    assert_eq!(
+        (server.place, server.refusal),
+        (Place::Userspace, Some(io::ErrorKind::Unsupported)),
+    );
 
     // In the order: every stream goes to the kernel, or stays in userspace
     // with the kernel's refusal when it cannot go.

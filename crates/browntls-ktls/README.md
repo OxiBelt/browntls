@@ -27,7 +27,7 @@ The items are the same ones: `browntls::ktls::KtlsStream` is
 |---|---|
 | Protocols | TLS 1.2, TLS 1.3 |
 | Ciphers | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, TLS 1.3 AES-128-CCM |
-| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for records below 16384 bytes (a peer `record_size_limit` or a local `max_fragment_size`); 7.2 for `set_rx_expect_no_pad` |
+| Kernel | Linux with the `tls` module; 6.14 for TLS 1.3 key updates; 6.19 for transmitting records below 16384 bytes (a peer `record_size_limit` or a local `max_fragment_size`); 7.2 for `set_rx_expect_no_pad` |
 
 The configuration must set `enable_secret_extraction`. When the kernel or
 the connection cannot be offloaded, the connection and the socket come back
@@ -37,6 +37,12 @@ established connection only (`ENOTCONN`). One case is found too late for
 that: a kernel that lacks the suite's cipher (built without it, or
 restricted to approved algorithms) refuses the keys only after they were
 taken out of the connection, which is then lost (`HandoffError::Failed`).
+
+Linux kernel TLS can be told to limit transmitted records (Linux 6.19), but
+it cannot enforce a negotiated receive `record_size_limit` below the
+protocol maximum. Such a connection is refused before the socket is attached
+to kernel TLS; continue it in userspace. A smaller transmit limit alone does
+not trigger this receive-side blocker.
 The load-aware routing below asks the kernel about each cipher on a
 loopback socket before it hands a connection over.
 

@@ -2031,7 +2031,9 @@ counts for itself. TCP closing without `close_notify` is
 `UnexpectedEof`, as is every later call. A refused handover can be retried on
 the same socket (an attached `tls` ULP is accepted), and a peer
 `record_size_limit` the kernel cannot honour (before Linux 6.19) is refused
-before any key is installed. Linux pauses reception whenever a handshake record
+before any key is installed. A reduced negotiated receive limit keeps the
+connection in userspace because Linux kTLS cannot enforce that limit.
+Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
 hanging. A close_notify followed by more data before the handover, a whole

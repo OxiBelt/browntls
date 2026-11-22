@@ -314,6 +314,56 @@ fn a_smaller_record_size_limit_reaches_the_kernel() {
     }
 }
 
+/// kTLS cannot enforce a smaller receive limit, so the blocking handoff
+/// returns the usable userspace connection before attaching the socket.
+#[test]
+fn a_smaller_receive_record_size_limit_refuses_blocking_handoff() {
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+    let (client_tcp, server_tcp) = tcp_pair();
+    thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let mut config = pki.server_config(suite);
+            config.record_size_limit = Some(1000);
+            let conn = ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = StreamOwned::new(conn, server_tcp);
+            let mut request = [0; 7];
+            tls.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"request");
+            let (conn, socket) = tls.into_parts();
+
+            let Err(HandoffError::Refused {
+                conn,
+                socket,
+                error,
+                ..
+            }) = KtlsStream::new(conn, socket)
+            else {
+                panic!("handed over with a smaller receive record size limit");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+            assert_eq!(
+                conn.kernel_handoff_blocker(),
+                Some(KernelHandoffBlocker::ReceiveRecordSizeLimit)
+            );
+
+            let mut conn = conn;
+            let mut remaining = [0; 6];
+            conn.reader().read_exact(&mut remaining).unwrap();
+            assert_eq!(&remaining, b"-extra");
+            let mut tls = StreamOwned::new(conn, socket);
+            tls.write_all(b"userspace").unwrap();
+        });
+        let conn = ClientConnection::new(Arc::new(pki.client_config(suite)), localhost()).unwrap();
+        let mut tls = StreamOwned::new(conn, client_tcp);
+        tls.write_all(b"request-extra").unwrap();
+        let mut response = [0; 9];
+        tls.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"userspace");
+        server.join().unwrap();
+    });
+}
+
 /// A peer that closes TCP without `close_notify` is reported as truncation.
 #[test]
 fn truncation_is_reported() {

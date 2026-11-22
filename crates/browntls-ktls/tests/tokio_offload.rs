@@ -842,6 +842,47 @@ async fn a_refused_handover_returns_the_stream() {
     assert_eq!(read_n_async(&mut client, 5).await, b"world");
 }
 
+/// A negotiated receive limit below the protocol maximum is permanent for
+/// direct and stream-based Tokio handoffs, before kTLS is installed.
+#[tokio::test]
+async fn a_smaller_receive_record_size_limit_refuses_tokio_handoff() {
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+
+    let mut client_config = pki.client_config(suite);
+    client_config.record_size_limit = Some(1000);
+    let (client, _server) = userspace_pair(client_config, pki.server_config(suite)).await;
+    let (tcp, conn) = client.into_inner();
+    let Err(HandoffError::Refused { conn, error, .. }) =
+        AsyncKtlsStream::new(conn, tcp, Vec::new())
+    else {
+        panic!("handed over with a smaller client receive record size limit");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert_eq!(
+        conn.kernel_handoff_blocker(),
+        Some(browntls_core::kernel::KernelHandoffBlocker::ReceiveRecordSizeLimit)
+    );
+
+    let mut server_config = pki.server_config(suite);
+    server_config.record_size_limit = Some(1000);
+    let (mut client, server) = userspace_pair(pki.client_config(suite), server_config).await;
+    write_all_async(&mut client, b"queued").await;
+    timeout(LIMIT, client.flush()).await.unwrap().unwrap();
+    let Err(StreamHandoffError::Refused {
+        stream: mut server,
+        error,
+        ..
+    }) = AsyncKtlsStream::from_server(server).await
+    else {
+        panic!("handed over a server with a smaller receive record size limit");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert_eq!(read_n_async(&mut server, 6).await, b"queued");
+    write_all_async(&mut server, b"userspace").await;
+    assert_eq!(read_n_async(&mut client, 9).await, b"userspace");
+}
+
 /// Without the `tls` module the stream comes back untouched (the refusal
 /// is the kernel's), and goes on in userspace. Runs only where kernel TLS
 /// is missing.

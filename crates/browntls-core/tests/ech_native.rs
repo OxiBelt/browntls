@@ -9,6 +9,8 @@ mod prov;
 
 mod common;
 
+#[path = "ech_native/pem_config.rs"]
+mod pem_config;
 #[path = "ech_native/shared_mode.rs"]
 mod shared_mode;
 #[path = "ech_native/split_backend.rs"]

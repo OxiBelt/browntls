@@ -17,6 +17,9 @@ use crate::msgs::handshake::{
 };
 use crate::msgs::message::MessagePayload;
 
+#[cfg(feature = "native")]
+mod pem_config;
+
 fn name(n: &str) -> ServerNamePayload<'static> {
     ServerNamePayload::SingleDnsName(browntls_pki::DnsName::try_from(n).unwrap().to_owned())
 }

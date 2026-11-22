@@ -18,7 +18,8 @@ use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
     ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
-    HelloRetryRequestExtensions, KeyShareEntry, ServerExtensions, ServerHelloPayload, SessionId,
+    HelloRetryRequestExtensions, KeyShareEntry, MAX_HANDSHAKE_SIZE, ServerExtensions,
+    ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::server::common::{ActiveCertifiedKey, transparency_info_for};
@@ -224,7 +225,7 @@ pub(super) fn emit_encrypted_extensions(
     supported_groups: Option<Vec<NamedGroup>>,
     retry_configs: Option<Vec<u8>>,
     expected_tickets: Option<u8>,
-) {
+) -> Result<(), Error> {
     let mut exts = ServerExtensions {
         supported_groups,
         encrypted_client_hello: retry_configs,
@@ -262,15 +263,29 @@ pub(super) fn emit_encrypted_extensions(
         &client_hello.extensions,
         &mut exts,
     );
+    let parsed = HandshakeMessagePayload(HandshakePayload::EncryptedExtensions(exts));
+    let encoded = parsed.get_encoding();
+    // Check the complete body before hashing or sending it. The two-byte
+    // vector length counts every extension header and body. Our handshake
+    // size limit also counts that vector's length prefix.
+    let body_len = encoded.len() - 4;
+    if body_len > MAX_HANDSHAKE_SIZE as usize || body_len - 2 > usize::from(u16::MAX) {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::InternalError,
+            Error::general("EncryptedExtensions too long"),
+        ));
+    }
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::EncryptedExtensions(exts),
-        )),
+        payload: MessagePayload::Handshake {
+            parsed,
+            encoded: Payload::new(encoded),
+        },
     };
     trace!("sending encrypted extensions {:?}", m);
     transcript.add_message(&m);
     cx.common.send_msg(m, true);
+    Ok(())
 }
 
 /// Sends a CertificateRequest if the configuration wants client authentication.

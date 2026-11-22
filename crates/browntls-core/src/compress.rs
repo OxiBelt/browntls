@@ -31,9 +31,17 @@
 //! work in the output buffer alone; each documents the memory it can use
 //! besides it, which never depends on what the peer declares beyond these
 //! bounds: a fixed decoder state (about 11 KiB) for zlib, a window no larger
-//! than the expected length
-//! rounded up to a power of two for Brotli, and at most 256 KiB for
-//! Zstandard, plus entropy tables whose size the formats fix.
+//! than the expected length rounded up to a power of two for Brotli, and a
+//! bounded Zstandard workspace. With ruzstd 0.9.1, at most 128 KiB of history
+//! is retained between blocks. The ring can grow beyond that during a block,
+//! including when ruzstd appends a sequence before checking its decoded size.
+//! The format bounds that transient growth by the maximum literal and match
+//! lengths. The block input and literal vectors each hold at most 128 KiB of
+//! data, and the sequence vector holds at most 43,690 three-word entries.
+//! With the pinned decoder and toolchain, the variable buffers request less
+//! than 4 MiB including capacity growth and temporary reallocations, plus
+//! bounded Huffman/FSE tables and allocator overhead. These allocations are
+//! independent of the size of the advertised window.
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -58,7 +66,7 @@ pub use self::brotli::{BROTLI, Brotli};
 #[cfg(feature = "zlib")]
 pub use self::zlib::{ZLIB, Zlib};
 #[cfg(feature = "zstd")]
-pub use self::zstd::{ZSTD, Zstd};
+pub use self::zstd::{ZSTD, Zstd, ZstdDecompressionLimits};
 
 /// The largest `uncompressed_length` ever accepted, whatever a configuration
 /// allows: the size limit of an uncompressed Certificate message (64 KiB).

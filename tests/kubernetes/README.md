@@ -100,3 +100,22 @@ The server Secret holds the current private key and the retry configuration.
 Each client mounts only the CA and its starting public configuration. The run
 removes its temporary namespace, uniquely labelled image, and fixture files.
 The caller manages the minikube profile lifecycle.
+
+## External-PSK early data over TCP
+
+Run the Phase 1 scenarios with a local `browntls-e2e` image and a running
+minikube profile:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:early-amd64
+python3 -B tests/kubernetes/early_data.py --profile PROFILE \
+  --image browntls-e2e:early-amd64
+```
+
+The runner uses fresh PSKs and one TCP Service per case. It checks acceptance
+and policy refusal for both buffered and unbuffered Tokio, with exact
+early-byte and unresent-byte counts. Each pair completes the authenticated
+handshake and exchanges ordinary application data. Refusal uses a policy that
+reports unavailable and an explicit client acknowledgement. The runner
+verifies cleanup of its namespace and run-owned images. Both TLS peers use
+browntls.

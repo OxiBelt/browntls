@@ -492,6 +492,70 @@ mod acceptor {
         }
     }
 
+    #[test]
+    fn external_psk_early_data_policy_applies_to_deferred_accept() {
+        use browntls_core::CipherSuite;
+        use browntls_core::crypto::hash::HashAlgorithm;
+        use browntls_core::pki_types::UnixTime;
+        use browntls_core::psk::{
+            ExternalPsk, ExternalPskReplayDecision, ExternalPskReplayKey, ExternalPskReplayPolicy,
+        };
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        #[derive(Debug, Default)]
+        struct OneMark(Mutex<Option<Vec<u8>>>);
+
+        impl ExternalPskReplayPolicy for OneMark {
+            fn check_and_mark(
+                &self,
+                key: &ExternalPskReplayKey,
+                _expires_at: UnixTime,
+            ) -> ExternalPskReplayDecision {
+                let mut mark = self.0.lock().unwrap();
+                if mark.is_some() {
+                    return ExternalPskReplayDecision::Unavailable;
+                }
+                *mark = Some(key.as_ref().to_vec());
+                ExternalPskReplayDecision::FirstUse
+            }
+        }
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let psk = Arc::new(
+            ExternalPsk::new(b"external".to_vec(), vec![0x73; 32], HashAlgorithm::SHA256)
+                .unwrap()
+                .with_cipher_suite(CipherSuite::TLS13_AES_128_GCM_SHA256)
+                .with_early_data(1024)
+                .with_early_data_expiry(UnixTime::since_unix_epoch(Duration::from_secs(u64::MAX)))
+                .imported(b"unit-test".to_vec())
+                .unwrap(),
+        );
+        let mut cc = versioned_client(&chain, ProtocolVersion::TLSv1_3);
+        cc.external_psks.push(psk.clone());
+        cc.enable_early_data = true;
+        let cc = Arc::new(cc);
+        for (accept, feed) in [(true, Feed::Whole), (false, Feed::ByteByByte)] {
+            let mut sc = versioned_server(&chain, ProtocolVersion::TLSv1_3);
+            sc.external_psks = Some(Arc::new(vec![psk.clone()]));
+            sc.send_tls13_tickets = 0;
+            let policy = Arc::new(OneMark::default());
+            if accept {
+                sc.external_psk_replay_policy = Some(policy.clone());
+            }
+            let sc = Arc::new(sc);
+            let mut client = ub_client(&cc, feed);
+            let mut server = Accepting::with(feed, &sc);
+            client.early_to_send = b"early".to_vec();
+            handshake(&mut client, &mut server);
+            assert_eq!(client.conn.is_early_data_accepted(), accept);
+            assert_eq!(policy.0.lock().unwrap().is_some(), accept);
+            let expected: &[u8] = if accept { b"early" } else { &[] };
+            assert_eq!(server.server().received_early, expected);
+            exchange(&mut client, &mut server, b"ordinary");
+        }
+    }
+
     /// A server that only speaks P-256, so that a client offering X25519
     /// first is sent a HelloRetryRequest, with stateless cookies.
     fn retrying_server(chain: &Chain) -> Arc<ServerConfig> {

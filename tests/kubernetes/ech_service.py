@@ -366,11 +366,12 @@ def remove_minikube_image(minikube, nodes, image, owner, loaded_id):
         raise RuntimeError("\n".join(problems))
 
 
-def run_service(profile, source_image):
+@contextmanager
+def service_environment(profile, source_image, purpose):
     run_id = secrets.token_hex(8)
     owner = secrets.token_hex(16)
-    namespace = f"browntls-ech-{run_id}"
-    image = f"browntls-e2e:ech-{run_id}"
+    namespace = f"browntls-{purpose}-{run_id}"
+    image = f"browntls-e2e:{purpose}-{run_id}"
 
     def minikube(*args, **kwargs):
         return revocation.run("minikube", "--profile", profile, *args, **kwargs)
@@ -378,14 +379,9 @@ def run_service(profile, source_image):
     def kubectl(*args, **kwargs):
         return minikube("kubectl", "--", "--context", profile, "-n", namespace, *args, **kwargs)
 
-    with tempfile.TemporaryDirectory(prefix="browntls-ech-") as temporary, checked_cleanup() as register:
+    with tempfile.TemporaryDirectory(prefix=f"browntls-{purpose}-") as temporary, checked_cleanup() as register:
         directory = Path(temporary)
         archive = str(directory / "image.tar")
-        revocation.run("sh", str(PKI_SCRIPT), temporary, INNER, PUBLIC, capture=True, seconds=30)
-        for name, config_id, private in (("current", 7, True), ("stale", 6, False)):
-            keygen(source_image, f"{namespace}-{name}", owner, directory / name, config_id, private)
-        current = public_config(directory / "current/ech-public.pem")
-        stale = public_config(directory / "stale/ech-public.pem")
         # Some CRI runtimes remove all tags for an image ID. Give this run a
         # distinct image config so removing it cannot remove the source image.
         revocation.run("docker", "image", "inspect", source_image, capture=True, seconds=30)
@@ -418,6 +414,17 @@ def run_service(profile, source_image):
         if loaded_id is None:
             raise RuntimeError(f"minikube did not confirm the loaded image for {image}")
         create_namespace(kubectl, register, namespace, owner)
+        yield kubectl, image, directory, namespace, owner
+
+
+def run_service(profile, source_image):
+    with service_environment(profile, source_image, "ech") as environment:
+        kubectl, image, directory, namespace, owner = environment
+        revocation.run("sh", str(PKI_SCRIPT), str(directory), INNER, PUBLIC, capture=True, seconds=30)
+        for name, config_id, private in (("current", 7, True), ("stale", 6, False)):
+            keygen(source_image, f"{namespace}-{name}", owner, directory / name, config_id, private)
+        current = public_config(directory / "current/ech-public.pem")
+        stale = public_config(directory / "stale/ech-public.pem")
         create_secret(kubectl, "server-fixture", {
             "inner.pem": directory / "inner.pem", "inner.key": directory / "inner.key",
             "public.pem": directory / "public.pem", "public.key": directory / "public.key",

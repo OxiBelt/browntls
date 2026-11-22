@@ -68,8 +68,12 @@ class PlanTests(unittest.TestCase):
         include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None)["include"]
         self.assertEqual(
             {e["targets"] for e in include},
-            {"pki_cert", "pki_pem", "pki_crl", "pki_api", "pki_revocation"},
+            {"pki_cert", "pki_pem", "pki_crl", "pki_api", "pki_revocation", "tls_ech"},
         )
+
+    def test_pem_codec_selects_ech_harness(self):
+        include = PLAN.matrix("target", ["crates/browntls-pki/src/pem.rs"], None)["include"]
+        self.assertIn("tls_ech", {e["targets"] for e in include})
 
     def test_shared_infrastructure_selects_everything(self):
         for path in ("fuzz/Cargo.lock", "fuzz/src/input.rs", ".github/workflows/fuzz.yml"):

@@ -367,7 +367,7 @@ def remove_minikube_image(minikube, nodes, image, owner, loaded_id):
 
 
 @contextmanager
-def service_environment(profile, source_image, purpose):
+def service_environment(profile, source_image, purpose, kubectl_binary=None):
     run_id = secrets.token_hex(8)
     owner = secrets.token_hex(16)
     namespace = f"browntls-{purpose}-{run_id}"
@@ -377,7 +377,10 @@ def service_environment(profile, source_image, purpose):
         return revocation.run("minikube", "--profile", profile, *args, **kwargs)
 
     def kubectl(*args, **kwargs):
-        return minikube("kubectl", "--", "--context", profile, "-n", namespace, *args, **kwargs)
+        command = ("--context", profile, "-n", namespace, *args)
+        if kubectl_binary is not None:
+            return revocation.run(kubectl_binary, *command, **kwargs)
+        return minikube("kubectl", "--", *command, **kwargs)
 
     with tempfile.TemporaryDirectory(prefix=f"browntls-{purpose}-") as temporary, checked_cleanup() as register:
         directory = Path(temporary)

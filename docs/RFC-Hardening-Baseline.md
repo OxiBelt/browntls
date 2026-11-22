@@ -265,3 +265,87 @@ fixture and peer exchange remain future evidence.
 [ct-pki]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/transparency.rs
 [ct-core]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/webpki/transparency.rs
 [ct-quic]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/docs/Architecture.md#ct-20-in-tls
+
+## DTLS recovery and key logging
+
+Review owner for these rows is
+**Codex DTLS and key-log review (requested GPT-6.2 Sol)**.
+Apply RFC 9147 verified erratum 8100 to §4.1 ACK demultiplexing.
+Its reported flight and epoch errata remain open, including 8107
+(§7), 8108 (§7.2), 8047 (§8), and 8050 (§8). RFCs 9146, 9850 and
+9853 had no entries in the checked index.
+
+| Claim and requirement | Entry points and transition | Existing coverage | Gap, constraints, and smallest follow-up |
+| --- | --- | --- | --- |
+| **4B. DTLS 1.3 recovery.** RFC 9147 [§§5 and 7–9][dtls-flight-rfc] covers loss, ACKs, retransmission, and epoch updates. New write keys wait for acknowledgement. The RFC requires the prior receive keys through the first successful new-key decryption. | Caller-timed [datagram connections][dtls-core] use the [flight driver][dtls-flight], [epoch state][dtls-state], replay window, and bounded reassembly. The stateless acceptor verifies address-bound cookies. The receive state retains up to four epochs and evicts on installation. | Both providers share `every_single_datagram_loss_is_recovered`, `heavy_loss_duplication_reordering_and_corruption`, `key_update_survives_loss`, and close with a missing ACK. Unit tests cover reassembly and ACK bounds. | The named simulations passed under both providers. The isolated smaller ClientHello configuration hit the [fixture setup failure](#qualification-commands-and-results) before testing reassembly. Add evidence for timeout and ACK ordering across high-level drivers where it is missing. `dtls_key_update_waits_for_ack_across_driver_deadline` should protect the transition. Bound per-peer work, receive windows and reassembly during retries. |
+| **4B. Migration.** RFC 9853 [§§3–5][rrc-rfc] couples negotiation to CID and requires authenticated and encrypted control messages. Basic validation checks the candidate. Enhanced validation keeps the old path on a valid response and checks the candidate on an old-path drop or timeout. Candidate sends obey the amplification limit. | [RRC engine][rrc-engine] and [shared UDP migration policy][rrc-udp] gate path selection. The blocking and Tokio event adapters retain the association and apply the shared policy of discarding the candidate’s application input before that path is validated. Tokio sessions inherit this policy from the event server and add bounded queues and stable session identity. | Low-level `rrc_negotiates_only_with_mutual_opt_in_and_cid`, blocking loopback rebind, Tokio event and session rebind, and the minikube UDP Service harness. | Independent peers cover handshake and initial CID negotiation. Migration and loss evidence use browntls record handling. `rrc_candidate_never_delivers_application_data_before_validation` should verify the project’s delivery policy in both modes while preserving the existing validated path and queue limits. |
+| **5. Secret log format and exposure.** RFC 9850 [§§1.1–3][keylog-rfc] prohibits this mechanism in production and defines line fields and TLS labels. For accepted ECH, ordinary TLS 1.3 labels use the inner ClientHello random. RFC 9850 §2.3 uses the outer random for the ECH-specific labels, which are outside this workstream. File access affects confidentiality and integrity. | [`KeyLog` and `NoKeyLog`][keylog-core] are available in core without std and default to no output. The [file sink][keylog-file] is std-gated and reads `SSLKEYLOGFILE` when constructed. It requests Unix mode `0600` on creation and uses best-effort append. TLS 1.2 and the shared [TLS 1.3 key schedule][keylog-ks] supply callbacks. Ordinary diagnostic logging is configured separately. | `unset_variable_logs_nothing`, `writes_nss_format`, `unopenable_path_is_tolerated`, `key_log_receives_every_tls13_secret`, and `key_log_receives_the_tls12_master_secret`. The stock file fixture checks the resulting Unix mode. | Creation-mode evidence does not cover all existing-file, symlink, file-type, ownership, or concurrent-writer cases. Evaluate a portable fail-closed sink policy as a project decision and preserve usable diagnostics. `key_log_file_policy_rejects_unapproved_destination` should assert a secret-free result. Evaluate buffer lifetime separately from format correctness. |
+
+### API reach and boundaries
+
+- Core DTLS lets callers drive datagrams, timeouts and RRC events.
+  Blocking UDP, Tokio event APIs, and Tokio sessions add socket driving
+  and admission, with a different ownership boundary at each layer.
+  DTLS 1.2 shares CID and RRC policy and has separate record and
+  handshake machinery. The facade re-exports core DTLS and gates Tokio
+  UDP behind its `dtls` feature.
+- Core buffered, unbuffered TLS and DTLS, blocking I/O, Tokio TLS and
+  UDP, and facade callers select their sink through the shared client
+  and server configuration. QUIC-TLS also invokes the shared key
+  schedule and leaves packet protection use to its transport caller.
+  Dedicated DTLS, QUIC, kTLS, and accepted-ECH label coverage remains
+  open. kTLS handoff inherits userspace configuration and
+  does not create another `SSLKEYLOGFILE` sink.
+- On the filesystem boundary, assess Unix and non-Unix behavior
+  independently. A single sink's mutex establishes only per-instance
+  serialization. Diagnostics and retained evidence should carry label,
+  field length, and outcome only.
+
+### Representative datagram and key-log evidence
+
+- Both `every_single_datagram_loss_is_recovered` targets passed.
+  The existing simulated network varies the lost flight datagram across
+  directions, and both endpoints still complete the handshake and
+  exchange application traffic. These are simulator assertions.
+- The existing Tokio loopback `event_server_migrates_dtls13_in_both_modes`
+  passed under `strace -f -s 0` with UDP send and receive syscalls selected.
+  The retained summary contains 35 successful `sendto` and 29 successful
+  `recvfrom` calls, each carrying 31–1,200 bytes. The test asserts
+  migration and data delivery. The capture verifies datagram I/O sizes.
+- The `api` and `api_native` callback tests each passed for TLS 1.2 and
+  1.3. TLS 1.3 asserts handshake and initial application secrets in both
+  directions and the exporter label, with matching client and server
+  entries and 32-byte random fields. TLS 1.2 asserts one `CLIENT_RANDOM`
+  record with a 48-byte master-secret field. The summary retains no
+  field values.
+
+## Phase 6 handoff
+
+Start each follow-up from the claim and its named regression. Re-evaluate
+rows touched by source or RFC changes and record exact commands,
+providers, platforms, fixture provenance, results, and missing coverage.
+For a substantive change, obtain a named non-author review of the actual
+diff and affected callers under [CONTRIBUTING][contrib]. Extend the
+affected fuzz targets and format, build, test, and interop gates as
+applicable. This baseline supports that review and carries no full-RFC
+compliance or release qualification claim.
+
+The three review owners above were separate read-only Codex agents.
+Their runtime reports exposed the GPT-6 family. The requested variants
+identify the assignments and the runtime exposed no finer model
+identifiers. They compared the map to the pinned source, public RFC
+text, errata, and the available unit, peer and adapter evidence.
+The review applies to this baseline documentation.
+
+[dtls-flight-rfc]: https://www.rfc-editor.org/rfc/rfc9147.html#section-5
+[rrc-rfc]: https://www.rfc-editor.org/rfc/rfc9853.html#section-3
+[keylog-rfc]: https://www.rfc-editor.org/rfc/rfc9850.html#section-1.1
+[dtls-core]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/dtls/connection.rs#L88
+[dtls-flight]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/dtls/flight.rs
+[dtls-state]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/dtls/state.rs
+[rrc-engine]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/dtls/rrc_engine.rs
+[rrc-udp]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/dtls/udp/migration.rs
+[keylog-core]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/key_log.rs
+[keylog-file]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/key_log_file.rs#L68
+[keylog-ks]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/tls13/key_schedule.rs#L187
+[contrib]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/CONTRIBUTING.md#independent-review

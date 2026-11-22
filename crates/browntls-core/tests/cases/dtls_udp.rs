@@ -704,7 +704,10 @@ fn exchange_across_rebind(versions: dtls::Versions, selection: dtls::rrc::Select
                     }
                     Ok(ServerEvent::Received(peer, data)) => {
                         assert_eq!(peer, admitted);
-                        assert_ne!(data, b"unvalidated");
+                        assert!(matches!(
+                            data.as_slice(),
+                            b"old path" | b"before" | b"after"
+                        ));
                         server.send_to(&data, peer).unwrap();
                         received.push(data);
                     }
@@ -737,6 +740,44 @@ fn exchange_across_rebind(versions: dtls::Versions, selection: dtls::rrc::Select
         let timeout = Some(Duration::from_secs(10));
         client.set_read_timeout(timeout);
         client.complete_handshake().unwrap();
+        let mut candidate = Vec::new();
+        client
+            .connection_mut()
+            .send(b"candidate while old path works", &mut candidate)
+            .unwrap();
+        assert_eq!(replacement.send(&candidate).unwrap(), candidate.len());
+        // Observe the first probe before sending on the admitted path.
+        // Leave it unanswered so the echo exercises a pending validation.
+        let mut wire = [0; 65_535];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let probe_socket = match selection {
+                dtls::rrc::Selection::Basic => &replacement,
+                dtls::rrc::Selection::Enhanced => client.socket(),
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "path probe did not arrive");
+            probe_socket.set_read_timeout(Some(remaining)).unwrap();
+            let len = probe_socket.recv(&mut wire).unwrap();
+            let received = client
+                .connection_mut()
+                .read_datagram(&mut wire[..len], start.elapsed())
+                .unwrap();
+            if let Some(range) = received
+                .authenticated_records()
+                .iter()
+                .find_map(|record| record.rrc_payload_range())
+            {
+                let probe = dtls::rrc::Message::decode(&wire[range]).unwrap().unwrap();
+                assert_eq!(probe.kind, dtls::rrc::MessageType::Challenge);
+                break;
+            }
+        }
+        client.send(b"old path").unwrap();
+        let mut buf = [0; 32];
+        let len = client.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"old path");
+
         client.send(b"before").unwrap();
         // Preserve already queued plaintext across the replacement too.
         assert_eq!(
@@ -753,7 +794,6 @@ fn exchange_across_rebind(versions: dtls::Versions, selection: dtls::rrc::Select
         drop(client.replace_socket(replacement).unwrap());
         assert_eq!(client.read_timeout(), timeout);
         assert_eq!(client.socket().peer_addr().unwrap(), remote);
-        let mut buf = [0; 32];
         let len = client.recv(&mut buf).unwrap();
         assert_eq!(&buf[..len], b"before");
         client.send(b"unvalidated").unwrap();
@@ -766,7 +806,7 @@ fn exchange_across_rebind(versions: dtls::Versions, selection: dtls::rrc::Select
         assert_eq!(client.into_parts_with_clock().2, start);
         assert_eq!(
             serving.join().unwrap(),
-            [b"before".to_vec(), b"after".to_vec()]
+            [b"old path".to_vec(), b"before".to_vec(), b"after".to_vec()]
         );
     }
 }

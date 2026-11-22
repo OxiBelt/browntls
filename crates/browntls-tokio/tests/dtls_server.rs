@@ -640,24 +640,42 @@ async fn reference_path_exchange(
     versions: browntls_core::dtls::Versions,
     selection: browntls_core::dtls::rrc::Selection,
 ) {
-    use browntls_core::dtls::rrc::{Message, MessageType, Selection};
+    use browntls_core::dtls::rrc::{DEFAULT_TIMEOUT, Message, MessageType, Selection};
     use browntls_core::dtls::{ConnectionIdPolicy, Settings};
 
-    async fn challenge(socket: &UdpSocket, conn: &mut ClientConnection, start: Instant) -> [u8; 8] {
-        let mut datagram = [0; 1200];
-        loop {
-            let len = socket.recv(&mut datagram).await.unwrap();
-            let input = &mut datagram[..len];
-            let received = conn.read_datagram(input, start.elapsed()).unwrap();
-            for metadata in received.authenticated_records() {
-                if let Some(range) = metadata.rrc_payload_range() {
-                    let payload = &input[range];
-                    assert_eq!(payload.len(), 9);
-                    assert_eq!(payload[0], 0);
-                    return payload[1..].try_into().unwrap();
+    async fn advance_path_timeout() {
+        // Waiting for UDP with time paused can auto-advance the watchdog.
+        tokio::time::pause();
+        tokio::time::advance(DEFAULT_TIMEOUT).await;
+        tokio::time::resume();
+    }
+
+    async fn control_cookie(
+        socket: &UdpSocket,
+        conn: &mut ClientConnection,
+        start: Instant,
+        kind: MessageType,
+        scenario: &str,
+        phase: &str,
+    ) -> [u8; 8] {
+        timeout(LIMIT, async {
+            let mut datagram = [0; 1200];
+            loop {
+                let len = socket.recv(&mut datagram).await.unwrap();
+                let input = &mut datagram[..len];
+                let received = conn.read_datagram(input, start.elapsed()).unwrap();
+                for metadata in received.authenticated_records() {
+                    if let Some(range) = metadata.rrc_payload_range() {
+                        let payload = &input[range];
+                        assert_eq!(payload.len(), 9);
+                        assert_eq!(payload[0], kind as u8);
+                        return payload[1..].try_into().unwrap();
+                    }
                 }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}, {phase}: timed out waiting for {kind:?}"))
     }
 
     async fn answer(
@@ -672,6 +690,7 @@ async fn reference_path_exchange(
         assert_eq!(socket.send(&datagram).await.unwrap(), datagram.len());
     }
 
+    let scenario = format!("DTLS {versions:?} {selection:?}");
     let pki = Pki::new();
     let settings = Settings::default()
         .with_versions(versions)
@@ -703,9 +722,133 @@ async fn reference_path_exchange(
     let mut datagram = Vec::new();
     client.conn.send(b"path trigger", &mut datagram).unwrap();
     assert_eq!(new.send(&datagram).await.unwrap(), datagram.len());
+
+    server.set_read_timeout(Some(Duration::from_millis(25)));
+    let first = if selection == Selection::Enhanced {
+        &client.socket
+    } else {
+        &new
+    };
+    let ((), cookie) = together(
+        no_event(&mut server),
+        control_cookie(
+            first,
+            &mut client.conn,
+            client.start,
+            MessageType::Challenge,
+            &scenario,
+            "initial probe",
+        ),
+    )
+    .await;
+    assert_eq!(server.peer_addr(admitted), Some(admitted));
+
+    // Application traffic in either direction still uses the old binding.
+    client.send(b"old path while validating").await;
+    assert!(matches!(
+        server.next_event().await.unwrap(),
+        ServerEvent::Received(peer, data) if peer == admitted
+            && data == b"old path while validating"
+    ));
+    server.send_to(b"old path reply", admitted).await.unwrap();
+    assert_eq!(client.recv().await, b"old path reply");
+
+    if selection == Selection::Enhanced {
+        answer(
+            &client.socket,
+            &mut client.conn,
+            MessageType::Response,
+            cookie,
+        )
+        .await;
+        no_event(&mut server).await;
+        assert_eq!(server.peer_addr(admitted), Some(admitted));
+        datagram.clear();
+        client
+            .conn
+            .send(b"unanswered validation", &mut datagram)
+            .unwrap();
+        assert_eq!(new.send(&datagram).await.unwrap(), datagram.len());
+        together(
+            no_event(&mut server),
+            control_cookie(
+                &client.socket,
+                &mut client.conn,
+                client.start,
+                MessageType::Challenge,
+                &scenario,
+                "unanswered old-path probe",
+            ),
+        )
+        .await;
+    }
+
+    // Keep the peer silent through expiry, then start a separate
+    // validation from the same candidate address.
+    if selection == Selection::Enhanced {
+        advance_path_timeout().await;
+        server.set_read_timeout(None);
+        let phase = "candidate probe after old-path timeout";
+        let mut challenge = pin!(control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Challenge,
+            &scenario,
+            phase,
+        ));
+        let mut event = pin!(server.next_event());
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = event.as_mut().poll(cx) {
+                panic!("{scenario}, {phase}: unexpected server result {result:?}");
+            }
+            challenge.as_mut().poll(cx)
+        })
+        .await;
+    }
+    advance_path_timeout().await;
+    server.set_read_timeout(Some(Duration::ZERO));
+    no_event(&mut server).await;
+    assert_eq!(server.peer_addr(admitted), Some(admitted));
+
+    // The peer probes its new socket before choosing it. An unchanged
+    // listener acknowledges that probe and starts its own validation.
+    let peer_cookie = [0x61; 8];
+    answer(&new, &mut client.conn, MessageType::Challenge, peer_cookie).await;
+    server.set_read_timeout(Some(Duration::from_millis(25)));
+    let ((), echoed) = together(
+        no_event(&mut server),
+        control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Response,
+            &scenario,
+            "peer probe reply",
+        ),
+    )
+    .await;
+    assert_eq!(echoed, peer_cookie);
+    assert_eq!(server.peer_addr(admitted), Some(admitted));
+    server.set_read_timeout(None);
+
+    datagram.clear();
+    client
+        .conn
+        .send(b"fresh validation", &mut datagram)
+        .unwrap();
+    assert_eq!(new.send(&datagram).await.unwrap(), datagram.len());
     let reference = async {
         if selection == Selection::Enhanced {
-            let old_cookie = challenge(&client.socket, &mut client.conn, client.start).await;
+            let old_cookie = control_cookie(
+                &client.socket,
+                &mut client.conn,
+                client.start,
+                MessageType::Challenge,
+                &scenario,
+                "final old-path probe",
+            )
+            .await;
             answer(
                 &client.socket,
                 &mut client.conn,
@@ -714,7 +857,15 @@ async fn reference_path_exchange(
             )
             .await;
         }
-        let new_cookie = challenge(&new, &mut client.conn, client.start).await;
+        let new_cookie = control_cookie(
+            &new,
+            &mut client.conn,
+            client.start,
+            MessageType::Challenge,
+            &scenario,
+            "final candidate probe",
+        )
+        .await;
         answer(&new, &mut client.conn, MessageType::Response, new_cookie).await;
     };
     let (event, ()) = together(server.next_event(), reference).await;
@@ -723,12 +874,23 @@ async fn reference_path_exchange(
         ServerEvent::PeerAddressChanged(peer, path) if peer == admitted && path == changed
     ));
     assert_eq!(server.peer_addr(admitted), Some(changed));
+    assert_eq!(server.peers().collect::<Vec<_>>(), [admitted]);
+    datagram.clear();
+    client
+        .conn
+        .send(b"after validation", &mut datagram)
+        .unwrap();
+    assert_eq!(new.send(&datagram).await.unwrap(), datagram.len());
+    assert!(matches!(
+        server.next_event().await.unwrap(),
+        ServerEvent::Received(peer, data) if peer == admitted && data == b"after validation"
+    ));
 }
 
 #[test]
 fn reference_peer_controls_basic_and_enhanced_path_selection() {
     use browntls_core::dtls::{Versions, rrc::Selection};
-    run(async {
+    run_with_limit(Duration::from_secs(30), async {
         for selection in [Selection::Basic, Selection::Enhanced] {
             reference_path_exchange(&browntls_core::version::TLS13, Versions::V1_3, selection)
                 .await;

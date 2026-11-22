@@ -389,7 +389,9 @@ pub(super) fn compress_op(input: &mut Input<'_>) {
     // Fuzzed input with a fuzzed declared length.
     let decompressor = *input.pick(decompressors);
     let mut out = vec![0u8; usize::from(input.u16()) % 4096];
-    let _ = decompressor.decompress(input.field(), &mut out);
+    let size = usize::from(input.u16()) + 1;
+    let limits = compress::ZstdDecompressionLimits::new(8 << 20, size).expect("positive limits");
+    let _ = decompressor.decompress_with_zstd_limits(input.field(), &mut out, limits);
 }
 
 /// The key log file (without `SSLKEYLOGFILE` it logs nothing) and enum

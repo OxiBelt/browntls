@@ -21,6 +21,80 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
+/// Adds an observable Zstandard-only receive path to a facade handshake.
+#[cfg(feature = "zstd")]
+pub fn zstd_server(
+    mut server: ServerConfig,
+    client: &mut ClientConfig,
+) -> (ServerConfig, &'static ZstdReception) {
+    use browntls::CertificateCompressionAlgorithm;
+    use browntls::compress::{self, CertCompressor, CompressionFailed, CompressionLevel};
+
+    #[derive(Debug)]
+    struct ZstdSender;
+
+    impl CertCompressor for ZstdSender {
+        fn algorithm(&self) -> CertificateCompressionAlgorithm {
+            CertificateCompressionAlgorithm::Zstd
+        }
+
+        fn compress(
+            &self,
+            plain: Vec<u8>,
+            _: CompressionLevel,
+        ) -> Result<Vec<u8>, CompressionFailed> {
+            let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x68];
+            frame.extend_from_slice(&(((plain.len() as u32) << 3) | 1).to_le_bytes()[..3]);
+            frame.extend_from_slice(&plain);
+            Ok(frame)
+        }
+    }
+
+    let probe = Box::leak(Box::new(ZstdReception::default()));
+    client.cert_decompressors = vec![probe];
+    client.cert_zstd_decompression_limits =
+        compress::ZstdDecompressionLimits::new(8 << 20, 128 << 10).unwrap();
+    server.cert_compressors = vec![&ZstdSender];
+    (server, probe)
+}
+
+#[cfg(feature = "zstd")]
+#[derive(Debug, Default)]
+pub struct ZstdReception(std::sync::atomic::AtomicUsize);
+
+#[cfg(feature = "zstd")]
+impl ZstdReception {
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "zstd")]
+impl browntls::compress::CertDecompressor for ZstdReception {
+    fn algorithm(&self) -> browntls::CertificateCompressionAlgorithm {
+        browntls::CertificateCompressionAlgorithm::Zstd
+    }
+
+    fn decompress(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), browntls::compress::DecompressionFailed> {
+        self.decompress_with_zstd_limits(input, output, Default::default())
+    }
+
+    fn decompress_with_zstd_limits(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        limits: browntls::compress::ZstdDecompressionLimits,
+    ) -> Result<(), browntls::compress::DecompressionFailed> {
+        browntls::compress::ZSTD.decompress_with_limits(input, output, limits)?;
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// The native provider, named explicitly: a build with both the `native` and
 /// the `rustcrypto` feature has no process default to fall back on.
 pub fn provider() -> Arc<CryptoProvider> {

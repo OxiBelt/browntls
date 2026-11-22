@@ -208,6 +208,15 @@ impl CertDecompressor for Zstd {
         self.decompress_with_limits(input, output, ZstdDecompressionLimits::default())
     }
 
+    fn decompress_with_zstd_limits(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        limits: ZstdDecompressionLimits,
+    ) -> Result<(), DecompressionFailed> {
+        self.decompress_with_limits(input, output, limits)
+    }
+
     fn algorithm(&self) -> CertificateCompressionAlgorithm {
         CertificateCompressionAlgorithm::Zstd
     }

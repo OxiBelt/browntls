@@ -150,6 +150,8 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
+            #[cfg(feature = "zstd")]
+            cert_zstd_decompression_limits: compress::ZstdDecompressionLimits::default(),
             enable_delegated_credentials: false,
             request_transparency_info: false,
             external_psks: Vec::new(),

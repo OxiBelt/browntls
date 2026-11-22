@@ -38,8 +38,11 @@ fn client_hands_its_connection_to_the_kernel() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     // Built before either side blocks on the socket.
-    let server_config = Arc::new(pki.server_config());
+    let server_config = pki.server_config();
     let mut client_config = pki.client_config();
+    #[cfg(feature = "zstd")]
+    let (server_config, probe) = zstd_server(server_config, &mut client_config);
+    let server_config = Arc::new(server_config);
     client_config.enable_secret_extraction = true;
     let identity = browntls::ClientServerIdentity::new(
         browntls::pki_types::ServerName::try_from("localhost").unwrap(),
@@ -100,6 +103,8 @@ fn client_hands_its_connection_to_the_kernel() {
             Err(HandoffError::Failed(error)) => panic!("handover failed: {error}"),
         }
         assert_eq!(reply, b"world");
+        #[cfg(feature = "zstd")]
+        assert_eq!(probe.count(), 1);
     });
 }
 

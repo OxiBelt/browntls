@@ -375,7 +375,7 @@ impl<'a> Codec<'a> for CompressedCertificatePayload<'a> {
     fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
         let alg = CertificateCompressionAlgorithm::read(r)?;
         let uncompressed_len = u24::read(r)?.0;
-        if uncompressed_len as usize > MAX_CERTIFICATE_SIZE_LIMIT {
+        if uncompressed_len > super::MAX_HANDSHAKE_SIZE {
             return Err(InvalidMessage::CertificatePayloadTooLarge);
         }
         let compressed = PayloadU24::read(r)?;
@@ -697,7 +697,14 @@ mod tests {
             CompressedCertificatePayload::read_bytes(&cc.get_encoding()).unwrap(),
             cc
         );
-        let too_big = [0, 1, 0x01, 0, 1, 0, 0, 1, 0];
+        let at_limit = [0, 1, 0, 0xff, 0xff, 0, 0, 1, 0];
+        assert_eq!(
+            CompressedCertificatePayload::read_bytes(&at_limit)
+                .unwrap()
+                .uncompressed_len,
+            super::super::MAX_HANDSHAKE_SIZE
+        );
+        let too_big = [0, 1, 1, 0, 0, 0, 0, 1, 0];
         assert_eq!(
             CompressedCertificatePayload::read_bytes(&too_big),
             Err(InvalidMessage::CertificatePayloadTooLarge)

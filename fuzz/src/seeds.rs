@@ -350,19 +350,35 @@ fn cert_decompress() -> Vec<Vec<u8>> {
         &browntls_core::compress::ZSTD,
     ];
     let mut seeds = Vec::new();
+    let encode = |limit, algorithm: u16, compressed: &[u8]| {
+        let mut seed = vec![limit];
+        seed.extend_from_slice(&algorithm.to_be_bytes());
+        seed.extend_from_slice(&(message.len() as u32).to_be_bytes()[1..]);
+        seed.extend_from_slice(&(compressed.len() as u32).to_be_bytes()[1..]);
+        seed.extend_from_slice(compressed);
+        seed
+    };
     for compressor in compressors {
         let compressed = compressor
             .compress(message.clone(), CompressionLevel::Interactive)
             .expect("compressible");
         for limit in 0..4u8 {
-            let mut seed = vec![limit];
-            seed.extend_from_slice(&u16::from(compressor.algorithm()).to_be_bytes());
-            seed.extend_from_slice(&(message.len() as u32).to_be_bytes()[1..]);
-            seed.extend_from_slice(&(compressed.len() as u32).to_be_bytes()[1..]);
-            seed.extend_from_slice(&compressed);
-            seeds.push(seed);
+            seeds.push(encode(
+                limit,
+                u16::from(compressor.algorithm()),
+                &compressed,
+            ));
         }
     }
+    // Two dictionary-free data frames with a large advertised window, each
+    // carrying half of the expanded Certificate body.
+    let mut frames = Vec::new();
+    for part in [&message[..message.len() / 2], &message[message.len() / 2..]] {
+        frames.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0x68]);
+        frames.extend_from_slice(&(((part.len() as u32) << 3) | 1).to_le_bytes()[..3]);
+        frames.extend_from_slice(part);
+    }
+    seeds.push(encode(2, 3, &frames));
     seeds
 }
 

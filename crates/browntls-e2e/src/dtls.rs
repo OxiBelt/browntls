@@ -14,6 +14,8 @@ use super::{IO_TIMEOUT, Options, Result, ServerName, emit, negotiated, required,
 const MESSAGE: &str = "hello from browntls";
 
 pub(super) fn client(options: &Options) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    super::observed_zstd::reset();
     if options.unbuffered_io {
         return Err("--unbuffered currently selects the TCP unbuffered stream adapter".into());
     }
@@ -34,6 +36,13 @@ pub(super) fn client(options: &Options) -> Result<()> {
             .map_err(|error| error.to_string())?,
         None => builder.with_no_client_auth(),
     };
+    if options.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            config.cert_compressors = vec![&browntls::compress::ZSTD];
+            config.cert_decompressors = vec![&super::observed_zstd::OBSERVED_ZSTD];
+        }
+    }
     if let Some(psk) = options.external_psk()? {
         config.external_psks.push(psk);
         config.cert_with_extern_psk = true;
@@ -193,7 +202,8 @@ fn tokio_client(
                 }
                 let common = client.connection();
                 check_handshake(common, index, options)?;
-                let mut fields = connection_fields(common, "client", &expected, message);
+                let mut fields =
+                    connection_fields(common, "client", &expected, message, Some(options));
                 fields.extend([
                     ("index", super::Value::Num(index)),
                     ("io", "tokio-dtls".into()),
@@ -211,6 +221,8 @@ fn tokio_client(
 }
 
 pub(super) fn server(options: &Options) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    super::observed_zstd::reset();
     if options.unbuffered_io {
         return Err("--unbuffered currently selects the TCP unbuffered stream adapter".into());
     }
@@ -222,6 +234,13 @@ pub(super) fn server(options: &Options) -> Result<()> {
     let cookies = TicketRotator::new(6 * 60 * 60, || Ok(Box::new(AeadTicketProducer::new()?)))
         .map_err(|error| error.to_string())?;
     let owned = Arc::get_mut(&mut config).ok_or("expected an owned DTLS server configuration")?;
+    if options.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            owned.cert_compressors = vec![&browntls::compress::ZSTD];
+            owned.cert_decompressors = vec![&super::observed_zstd::OBSERVED_ZSTD];
+        }
+    }
     owned.hello_retry_cookies = Some(Arc::new(cookies));
     if let Some(mechanism) = options.dtls12_resumption.as_deref() {
         if mechanism == "ticket" {
@@ -412,7 +431,7 @@ fn exchange_fields(
     index: usize,
     options: &Options,
 ) -> Vec<(&'static str, super::Value)> {
-    let mut fields = connection_fields(common, role, received, sent);
+    let mut fields = connection_fields(common, role, received, sent, Some(options));
     fields.push(("record_size_limit_configured", limit_value(options)));
     if let Some(mechanism) = options.dtls12_resumption.as_deref() {
         fields.extend([
@@ -428,8 +447,14 @@ fn connection_fields(
     role: &str,
     received: &str,
     sent: &str,
+    options: Option<&Options>,
 ) -> Vec<(&'static str, super::Value)> {
     let mut fields = negotiated(common);
+    if let Some(options) = options
+        && let Some(field) = super::zstd_compression_diagnostic(options)
+    {
+        fields.push(field);
+    }
     fields.extend([
         ("event", "connection".into()),
         ("role", role.into()),
@@ -528,7 +553,13 @@ fn rebind_client(
         }
     }
     client.close().map_err(|e| e.to_string())?;
-    let mut fields = connection_fields(client.connection(), "client", &reverse(MESSAGE), MESSAGE);
+    let mut fields = connection_fields(
+        client.connection(),
+        "client",
+        &reverse(MESSAGE),
+        MESSAGE,
+        None,
+    );
     fields.extend([
         ("mode", mode.into()),
         ("initial_local", original.to_string().into()),
@@ -584,6 +615,7 @@ fn rebind_server(mut server: UdpServer, mode: &str) -> Result<()> {
                         "server",
                         MESSAGE,
                         &reverse(MESSAGE),
+                        None,
                     ));
                 } else if data == REBIND_MESSAGE.as_bytes() && rebound {
                     continue;

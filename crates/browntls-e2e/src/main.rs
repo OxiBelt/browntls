@@ -21,7 +21,8 @@
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
 //!         --record-size-limit N|none, --delegated-credentials, --grease,
-//!         --async (buffered Tokio), --unbuffered (unbuffered Tokio)
+//!         --async (buffered Tokio), --unbuffered (unbuffered Tokio),
+//!         --zstd-cert-compression (only when built with browntls/zstd)
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
 //!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
@@ -99,6 +100,8 @@ mod client_facing;
 mod dtls;
 mod early_data;
 mod ech_options;
+#[cfg(feature = "zstd")]
+mod observed_zstd;
 mod output;
 mod unbuffered_io;
 
@@ -176,6 +179,21 @@ fn configured_record_size_limit(options: &Options) -> Value {
         Some(None) => "none".into(),
         Some(Some(limit)) => limit.to_string().into(),
     }
+}
+
+fn zstd_compression_diagnostic(options: &Options) -> Option<(&'static str, Value)> {
+    if !options.zstd_cert_compression {
+        return None;
+    }
+    #[cfg(feature = "zstd")]
+    {
+        Some((
+            "zstd_certificate_messages_received",
+            Value::Num(observed_zstd::received()),
+        ))
+    }
+    #[cfg(not(feature = "zstd"))]
+    None
 }
 
 fn main() {
@@ -271,6 +289,7 @@ struct Options {
     dtls_cid: bool,
     external_psk_file: Option<String>,
     external_psk_identity: Option<String>,
+    zstd_cert_compression: bool,
 }
 
 impl Options {
@@ -300,6 +319,7 @@ impl Options {
                 "--async" => Some(&mut o.async_io),
                 "--unbuffered" => Some(&mut o.unbuffered_io),
                 "--dtls-cid" => Some(&mut o.dtls_cid),
+                "--zstd-cert-compression" => Some(&mut o.zstd_cert_compression),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -399,6 +419,9 @@ impl Options {
             }
         }
         o.validate_ech_options(command)?;
+        if o.zstd_cert_compression && !cfg!(feature = "zstd") {
+            return Err("--zstd-cert-compression requires a build with the zstd feature".into());
+        }
         Ok(o)
     }
 
@@ -623,6 +646,13 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
     }
     config.enable_grease = o.grease;
     config.enable_delegated_credentials = o.delegated_credentials;
+    if o.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            config.cert_compressors = vec![&browntls::compress::ZSTD];
+            config.cert_decompressors = vec![&observed_zstd::OBSERVED_ZSTD];
+        }
+    }
     if let Some(psk) = o.external_psk()? {
         config.external_psks = Some(Arc::new(vec![psk]));
         config.cert_with_extern_psk = true;
@@ -686,6 +716,8 @@ fn serve(
     index: usize,
     o: &Options,
 ) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    observed_zstd::reset();
     let line = match read_line(&mut tls) {
         Ok(line) => line,
         Err(e) => {
@@ -714,6 +746,9 @@ fn serve(
         ("index", Value::Num(index)),
     ];
     fields.extend(negotiated(&tls.conn));
+    if let Some(field) = zstd_compression_diagnostic(o) {
+        fields.push(field);
+    }
     fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
     fields.push((
         "delegated_credential",
@@ -769,6 +804,13 @@ fn client(o: &Options) -> Result<()> {
     }
     config.enable_grease = o.grease;
     config.enable_delegated_credentials = o.delegated_credentials;
+    if o.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            config.cert_compressors = vec![&browntls::compress::ZSTD];
+            config.cert_decompressors = vec![&observed_zstd::OBSERVED_ZSTD];
+        }
+    }
     if let Some(psk) = o.external_psk()? {
         config.external_psks.push(psk);
         config.cert_with_extern_psk = true;
@@ -796,6 +838,8 @@ fn client(o: &Options) -> Result<()> {
     let mut retried = false;
     let mut index = 0;
     while index < o.connections {
+        #[cfg(feature = "zstd")]
+        observed_zstd::reset();
         let sock = connect_with_retry(connect, o.wait)?;
         set_timeouts(&sock)?;
         let conn = match &identity {
@@ -844,6 +888,9 @@ fn client(o: &Options) -> Result<()> {
             ("index", Value::Num(index)),
         ];
         fields.extend(negotiated(&tls.conn));
+        if let Some(field) = zstd_compression_diagnostic(o) {
+            fields.push(field);
+        }
         fields.push((
             "delegated_credential",
             Value::Bool(tls.conn.delegated_credential().is_some()),

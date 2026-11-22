@@ -137,3 +137,27 @@ fits both limits. Every case checks the negotiated protocol, certificate
 authentication, delegated credential use where applicable, configured
 limits, application data, and closure. The runner uses an isolated namespace
 and image and verifies ownership-scoped cleanup.
+
+## Zstandard certificate compression over Kubernetes Services
+
+Build the peer with Zstandard enabled, then run against a running minikube
+profile:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --zstd --tag browntls-e2e:zstd-amd64
+python3 -B tests/kubernetes/zstd_compression.py --image browntls-e2e:zstd-amd64 \
+  --profile PROFILE
+```
+
+The harness runs TLS 1.3 over a TCP Service with buffered Tokio and unbuffered
+Tokio, then DTLS 1.3 over a UDP Service with Tokio. The clients connect
+through the Service ClusterIP and verify its DNS identity in the
+certificate. The servers require and verify client certificates. The test
+tool configs permit only Zstandard.
+Connection JSON reports the per-connection count of successfully decoded
+Zstandard certificates alongside the authenticated peer-certificate count
+and request/reply data. DTLS records must report `DTLSv1_3`. The OpenSSL Docker
+harness provides direct wire-level evidence for the compressed-certificate
+algorithm. The runner reuses the ECH Service environment helper to create an
+ownership-labelled image and namespace and verify their removal. The supplied
+minikube profile remains running.

@@ -188,6 +188,27 @@ python3 -B tests/e2e/boringssl_dc.py --image browntls-e2e:amd64 --build-peer
 This fixture covers TLS 1.3 server authentication. The in-process tests
 cover client credentials, DTLS 1.3 and QUIC-TLS.
 
+## TLS 1.3 Zstandard certificate compression with OpenSSL
+
+Build the BrownTLS peer with its Zstandard feature and run the standalone
+mutual-authentication interoperability harness:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --zstd --tag browntls-e2e:zstd-amd64
+python3 -B tests/e2e/zstd_interop.py --image browntls-e2e:zstd-amd64
+```
+
+The peer builds checksum-pinned OpenSSL 4.0.3 with `enable-zstd`.
+Both browntls roles and both OpenSSL roles are exercised. Each side
+permits only Zstandard, authenticates the peer, and exchanges application
+data. An OpenSSL
+message callback records the algorithm identifier in each transmitted and
+received `CompressedCertificate`; the run fails unless it sees Zstandard in
+both directions for each role. The peer emits only counts and status fields.
+The test tool wraps its Zstandard decompressor with a test-only counter and
+reports `zstd_certificate_messages_received` per connection. Each browntls
+endpoint must successfully decode at least one compressed certificate.
+
 ## Limitations
 
 - The native RISC-V runners have no RVV 1.0, so they exercise the scalar and

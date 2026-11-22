@@ -242,6 +242,24 @@ length mismatch and offer handling. No certificate bytes are included
 in this summary. Local libzstd CLI 1.5.7 was available. An independent
 fixture and peer exchange remain future evidence.
 
+### Phase 3 implementation
+
+The table above records the baseline. The Phase 3 changes validate
+equivalent PSS signature identifiers in both certificates and CRLs and
+preserve the signed DER. They compare matching RSA public-key bytes and
+the exact key restrictions for credential pairing and path loop detection.
+The existing verification profile remains in force, including the
+issuer's minimum salt, TLS digest-length salt, and SHA-1 rejection.
+
+The Zstandard decoder separates the accepted window advertisement, the
+decoder workspace, and the exact expanded Certificate body. It verifies
+present checksums and accepts up to 64 data frames. Dictionary-dependent
+and skippable frames remain unsupported. The TLS handshake body ceiling
+applies both with and without compression. The focused codec fixtures
+include libzstd one-shot and streaming output. Provider and transport
+tests distinguish receipt of a compressed message from offering the
+algorithm alone.
+
 [dc-rfc]: https://www.rfc-editor.org/rfc/rfc9345.html#section-4
 [pss-encoding]: https://www.rfc-editor.org/rfc/rfc4055.html#section-2.1
 [pss-rfc]: https://www.rfc-editor.org/rfc/rfc4055.html#section-3.2

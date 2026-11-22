@@ -12,6 +12,9 @@ publish.workspace = true
 name = "browntls-e2e"
 path = "src/main.rs"
 
+[features]
+zstd = ["browntls/zstd"]
+
 [dependencies]
 # The facade only, as an application depends on it: `browntls::tokio` is
 # `browntls-tokio`. `logging` is off: the peer installs no logger.

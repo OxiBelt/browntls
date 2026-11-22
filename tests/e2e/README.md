@@ -147,6 +147,27 @@ short-lived containers per run, all labelled
 when the run ends, including on failure. It uses no bind mounts, so it also
 works with a remote Docker daemon.
 
+## ECH PEM interoperability with OpenSSL 4.0.3
+
+Run the standalone [ECH PEM harness](ech_pem.py) from the repository root.
+It builds a separate [OpenSSL peer](peer/openssl-ech.Dockerfile) from the
+checksum-pinned 4.0.3 release and uses its own image tag.
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64
+python3 -B tests/e2e/ech_pem.py --image browntls-e2e:amd64 --build-peer
+```
+
+For each of X25519, X448, P-256, P-384, and P-521, both implementations
+generate an RFC 9934 private bundle and public PEM. Each generator's files
+drive a TLS 1.3 handshake with browntls as client and another with browntls
+as server, for 20 exchanges. The harness checks the advertised DHKEM, ECH
+acceptance on both peers, certificate verification against the fixture CA and
+inner name, and the request and reply. The browntls side uses Tokio. The
+OpenSSL peer emits status and verification results through its ECH and TLS
+APIs. The private bundles remain in a run-owned server volume. Client
+containers mount a separate volume with the public configurations and CA.
+
 ## Limitations
 
 - The native RISC-V runners have no RVV 1.0, so they exercise the scalar and

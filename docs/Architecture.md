@@ -2542,6 +2542,32 @@ Not implemented: ECH with DTLS or QUIC, and a client-facing server that
 inspects anything after the back-end server's ServerHello (by design: it
 relays the encrypted handshake unmodified).
 
+### ECH configuration files (RFC 9934)
+
+`ech::pem::EchPem` reads an ordered ECHConfigList with an optional matching
+PKCS #8 key. Use `to_public_pem` or `ech_config_list` for material shared with
+clients or published in DNS. Protect private files and any copy of their
+contents like the TLS server's certificate private key. The native key codec
+supports X25519, X448, P-256, P-384 and P-521. It reads BER and DER and writes
+DER. NIST keys with the ECDH-only PKCS #8 algorithm identifier retain that
+restriction on export. Applications without the native provider may supply
+a PKCS #8 codec, and public-only parsing requires only the allocator.
+
+For a shared server, put an `EchServerConfig::from_pems` result in
+`ServerConfig::ech`. A split-mode client-facing server uses the same
+configuration for decryption and for its local TLS fallback. Pass decryption
+bundles and advertised retry lists separately. This allows a retiring key to
+continue decrypting existing client offers while the retry list advertises
+only current configs. A public-only retry config may identify a key on
+another instance if clients can reach it using the original deployment's
+retry routing. Clients with a public file select a config using
+`EchConfig::from_pem`.
+
+Tokio's buffered and unbuffered connectors and acceptors also accept parsed
+PEM inputs through `from_ech_pem`. Linux kTLS helpers prepare the userspace
+connection. The existing handoff APIs still manage kernel offload and fallback
+with explicit opt-in to traffic secret extraction.
+
 ### QUIC-TLS (RFC 9001)
 
 `browntls_core::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a

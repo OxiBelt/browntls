@@ -581,6 +581,9 @@ pub enum CertificateError {
     /// verified: a list is malformed or too large, or verification went
     /// over one of its budgets.
     InvalidTransparencyEvidence(browntls_pki::transparency::TransparencyError),
+    /// CT policy requires a ClientHello that offered both
+    /// `transparency_info` and `status_request` (RFC 9162 §8.1.6).
+    TransparencyOfferRequired,
 }
 
 impl From<CertificateError> for AlertDescription {
@@ -604,7 +607,9 @@ impl From<CertificateError> for AlertDescription {
             InvalidPurpose => Self::UnsupportedCertificate,
             ApplicationVerificationFailure => Self::AccessDenied,
             InvalidTransparencyEvidence(_) => Self::BadCertificate,
-            Other(..) | InsufficientTransparency { .. } => Self::CertificateUnknown,
+            Other(..) | InsufficientTransparency { .. } | TransparencyOfferRequired => {
+                Self::CertificateUnknown
+            }
         }
     }
 }

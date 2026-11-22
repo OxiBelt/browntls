@@ -181,8 +181,8 @@ pub mod client {
         pub use super::builder::danger::DangerousClientConfigBuilder;
         pub use super::client_conn::danger::DangerousClientConfig;
         pub use crate::verify::{
-            CertificateIdentity, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-            ServerCertificateVerification,
+            CertificateIdentity, HandshakeSignatureValid, ServerCertVerificationContext,
+            ServerCertVerified, ServerCertVerifier, ServerCertificateVerification,
         };
     }
 

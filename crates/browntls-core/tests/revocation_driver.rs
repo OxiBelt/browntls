@@ -11,8 +11,8 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 
 use browntls_core::client::danger::{
-    CertificateIdentity, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-    ServerCertificateVerification,
+    CertificateIdentity, HandshakeSignatureValid, ServerCertVerificationContext,
+    ServerCertVerified, ServerCertVerifier, ServerCertificateVerification,
 };
 use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
 use browntls_core::revocation::{
@@ -87,6 +87,11 @@ impl ServerCertVerifier for Deferred {
         allow_live: bool,
     ) -> Result<ServerCertificateVerification, Error> {
         let (revocation, matched_reference) = match identity {
+            CertificateIdentity::Name(_) if !allow_live => {
+                return Err(Error::InvalidCertificate(
+                    CertificateError::UnknownRevocationStatus,
+                ));
+            }
             CertificateIdentity::Name(name) => (
                 self.verify_server_cert_with_evidence(end, chain, name, evidence, now)?,
                 None,
@@ -145,6 +150,35 @@ impl ServerCertVerifier for Deferred {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+#[test]
+fn standalone_and_authenticator_checks_keep_their_verifier_dispatch() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let verifier = Deferred {
+        inner: PinnedServerVerifier::new(&chain),
+    };
+    let name = common::server_name();
+    let verify = |context| {
+        verifier.verify_server_cert_with_context(
+            &chain.end_entity,
+            &[],
+            CertificateIdentity::Name(&name),
+            &[],
+            UnixTime::now(),
+            context,
+        )
+    };
+    assert_eq!(
+        verify(ServerCertVerificationContext::LocalEvidence { allow_live: false }).unwrap_err(),
+        Error::InvalidCertificate(CertificateError::UnknownRevocationStatus)
+    );
+    assert!(matches!(
+        verify(ServerCertVerificationContext::ExportedAuthenticator)
+            .unwrap()
+            .revocation,
+        RevocationCheck::Complete(None)
+    ));
 }
 
 fn configs(

@@ -29,6 +29,7 @@ use crate::revocation::{RevocationCheck, finish_or_pause, require_local};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::KeyScheduleHandshake;
+use crate::verify::ServerCertVerificationContext;
 
 pub(super) struct ExpectCertificateOrCertReq {
     pub(super) config: Arc<ClientConfig>,
@@ -38,8 +39,7 @@ pub(super) struct ExpectCertificateOrCertReq {
     pub(super) transcript: HandshakeHash,
     pub(super) key_schedule: KeyScheduleHandshake,
     pub(super) offered_sigschemes: Vec<crate::enums::SignatureScheme>,
-    /// Whether the ClientHello carried `transparency_info` (RFC 9162 §6.5).
-    pub(super) offered_transparency_info: bool,
+    pub(super) verification_context: ServerCertVerificationContext,
 }
 
 impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
@@ -63,7 +63,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 client_cert_extensions: ClientCertificateExtensions::default(),
                 client_cert_compression: Vec::new(),
                 offered_sigschemes: self.offered_sigschemes,
-                offered_transparency_info: self.offered_transparency_info,
+                verification_context: self.verification_context,
             })
             .handle(cx, m),
             MessagePayload::Handshake {
@@ -77,7 +77,7 @@ impl State<ClientConnectionData> for ExpectCertificateOrCertReq {
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
                 offered_sigschemes: self.offered_sigschemes,
-                offered_transparency_info: self.offered_transparency_info,
+                verification_context: self.verification_context,
             })
             .handle(cx, m),
             payload => Err(crate::check::inappropriate_handshake_message(
@@ -100,7 +100,7 @@ struct ExpectCertificateRequest {
     transcript: HandshakeHash,
     key_schedule: KeyScheduleHandshake,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
-    offered_transparency_info: bool,
+    verification_context: ServerCertVerificationContext,
 }
 
 impl State<ClientConnectionData> for ExpectCertificateRequest {
@@ -157,7 +157,7 @@ impl State<ClientConnectionData> for ExpectCertificateRequest {
             client_cert_extensions: (&certreq.extensions).into(),
             client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
-            offered_transparency_info: self.offered_transparency_info,
+            verification_context: self.verification_context,
         }))
     }
 }
@@ -175,7 +175,7 @@ struct ExpectCertificate {
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
-    offered_transparency_info: bool,
+    verification_context: ServerCertVerificationContext,
 }
 
 impl State<ClientConnectionData> for ExpectCertificate {
@@ -253,7 +253,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
         // RFC 9162 §6.5: only on the end entity's entry, if offered.
         let transparency_info = super::super::transparency::tls13_end_entity_list(
             cx.common,
-            self.offered_transparency_info,
+            self.verification_context.offered_transparency_info(),
             &cert_chain,
         )?;
 
@@ -276,6 +276,7 @@ impl State<ClientConnectionData> for ExpectCertificate {
             client_cert_extensions: self.client_cert_extensions,
             client_cert_compression: self.client_cert_compression,
             offered_sigschemes: self.offered_sigschemes,
+            verification_context: self.verification_context,
             delegated_credential,
         }))
     }
@@ -295,6 +296,7 @@ struct ExpectCertificateVerify {
     /// for our Certificate (RFC 8879 §3); empty when it named none.
     client_cert_compression: Vec<CertificateCompressionAlgorithm>,
     offered_sigschemes: Vec<crate::enums::SignatureScheme>,
+    verification_context: ServerCertVerificationContext,
     delegated_credential: Option<DelegatedCredential>,
 }
 
@@ -330,13 +332,13 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
         let verification = self
             .config
             .verifier()
-            .verify_server_cert_with_identity(
+            .verify_server_cert_with_context(
                 end_entity,
                 intermediates,
                 identity,
                 &self.server_cert.evidence(),
                 now,
-                true,
+                self.verification_context,
             )
             .map_err(|err| send_cert_path_error_alert(cx.common, err))?;
         let matched_identity = if cx.data.ech_status == EchStatus::Rejected {

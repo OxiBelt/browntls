@@ -606,10 +606,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 suite: self.suite,
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
-                offered_transparency_info: self
-                    .hello
-                    .sent_extensions
-                    .contains(&ExtensionType::TransparencyInfo),
+                verification_context: self.hello.verification_context(),
                 offered_sigschemes: self.hello.offered_sigschemes,
             })),
         }

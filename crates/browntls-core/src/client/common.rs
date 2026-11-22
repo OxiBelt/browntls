@@ -15,6 +15,7 @@ use crate::msgs::handshake::{CertificateChain, DistinguishedName};
 use crate::revocation::CertificateEvidence;
 use crate::sign::{CertifiedKey, Signer};
 use crate::sync::Arc;
+use crate::verify::ServerCertVerificationContext;
 
 /// What the server presented to authenticate itself.
 pub(super) struct ServerCertDetails {
@@ -177,6 +178,15 @@ pub(super) struct ClientHelloDetails {
 }
 
 impl ClientHelloDetails {
+    pub(super) fn verification_context(&self) -> ServerCertVerificationContext {
+        ServerCertVerificationContext::TlsHandshake {
+            offered_transparency_info: self
+                .sent_extensions
+                .contains(&ExtensionType::TransparencyInfo),
+            offered_status_request: self.sent_extensions.contains(&ExtensionType::StatusRequest),
+        }
+    }
+
     pub(super) fn new() -> Self {
         Self {
             sent_extensions: Vec::new(),

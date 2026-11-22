@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 use super::ServerContext;
+use crate::common_state::CommonState;
 use crate::crypto::SupportedKxGroup;
 use crate::enums::{AlertDescription, CertificateType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible};
@@ -16,13 +17,16 @@ use crate::server::server_conn::ServerConfig;
 /// configured value, clamped to the protocol maximum, when the client sent
 /// the extension and the configuration has one.
 pub(in crate::server) fn record_size_limit_ack(
+    common: &CommonState,
     config: &ServerConfig,
     client_hello: &ClientHelloPayload,
     version: ProtocolVersion,
 ) -> Option<u16> {
     client_hello.extensions.record_size_limit?;
-    let max = crate::common_state::max_record_size_limit(version == ProtocolVersion::TLSv1_3);
-    config.record_size_limit.map(|limit| limit.min(max))
+    common.local_record_size_limit(
+        config.record_size_limit,
+        version == ProtocolVersion::TLSv1_3,
+    )
 }
 
 /// How many TLS 1.3 tickets to send, and the RFC 9149 `expected_count` to

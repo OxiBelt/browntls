@@ -230,6 +230,7 @@ impl Dtls {
         {
             return Err(InvalidMessage::MessageTooShort.into());
         }
+        self.check_inbound_record_size_limit(plain.record_plaintext_len())?;
         self.v12.window.mark(seq);
         self.peer_authenticated = true;
         let number = RecordNumber { epoch: 1, seq };

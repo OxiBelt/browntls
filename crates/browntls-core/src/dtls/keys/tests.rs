@@ -81,6 +81,13 @@ fn round_trip_every_suite() {
             let opened = keys.open(&mut record, seq, body.clone(), 0x1_2340).unwrap();
             assert_eq!(opened.seq, number.seq);
             assert_eq!(opened.typ, ContentType::Handshake);
+            assert_eq!(
+                opened.plaintext_len,
+                content
+                    .len()
+                    .max(MIN_CIPHERTEXT_LEN.saturating_sub(keys.packet.tag_len()))
+                    + 1
+            );
             assert_eq!(&record[opened.content], content.as_slice());
         }
     }

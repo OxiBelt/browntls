@@ -1,5 +1,6 @@
 //! State shared by client and server connections.
 
+mod record_limits;
 #[cfg(feature = "tls12")]
 mod tls12;
 
@@ -475,47 +476,6 @@ impl CommonState {
     /// The largest plaintext fragment we put in one record.
     pub(crate) fn max_fragment_len(&self) -> usize {
         self.message_fragmenter.max_fragment_len()
-    }
-
-    /// A value below 64 is illegal even when we decline negotiation.
-    pub(crate) fn validate_peer_record_size_limit(&mut self, limit: u16) -> Result<(), Error> {
-        if limit < MIN_RECORD_SIZE_LIMIT {
-            return Err(self.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::IllegalRecordSizeLimit,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Applies the advertised bounds in their respective directions.
-    /// RFC 8449 §4 allows us to accept values above the version maximum.
-    pub(crate) fn apply_record_size_limits(
-        &mut self,
-        ours: u16,
-        peers: u16,
-        tls13: bool,
-    ) -> Result<(), Error> {
-        self.validate_peer_record_size_limit(peers)?;
-        let max = max_record_size_limit(tls13);
-        let peers = usize::from(peers.min(max)) - usize::from(tls13);
-        self.message_fragmenter.set_peer_record_size_limit(peers);
-        self.record_layer
-            .set_inbound_record_size_limit(ours.min(max))
-            .map_err(|err| self.send_fatal_alert(AlertDescription::RecordOverflow, err))
-    }
-
-    pub(crate) fn negotiated_receive_record_size_limit(&self) -> Option<u16> {
-        self.record_layer.inbound_record_size_limit()
-    }
-
-    pub(crate) fn peer_tls13_record_size_limit(&self) -> u16 {
-        self.message_fragmenter.peer_max_fragment_len() as u16 + 1
-    }
-
-    pub(crate) fn set_early_data_record_size_limit(&mut self, limit: Option<u16>) {
-        self.message_fragmenter
-            .set_early_data_max_fragment_len(limit.map(|limit| usize::from(limit) - 1));
     }
 
     pub(crate) fn current_io_state(&self) -> IoState {

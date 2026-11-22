@@ -1220,6 +1220,13 @@ RFC 9257 guidance and what browntls enforces:
   sessions without the cap can resume without early data. External PSKs
   use the cap provisioned on both peers with
   `ExternalPsk::with_early_data_record_size_limit` (default 16385).
+  DTLS 1.2 and 1.3 support the extension through opt-in
+  `dtls::Settings::with_record_size_limit`. The effective send cap
+  composes with the datagram MTU and CID overhead. Protected handshake
+  fragments, acknowledgements and application data share the cap.
+  Application sends remain one datagram. An authenticated record over
+  the negotiated limit fails with `record_overflow`; DTLS 1.2 CID and
+  DTLS 1.3 count the entire inner plaintext.
 - `ticket_request` (RFC 9149), TLS 1.3 only: the client sends
   `ClientConfig::tls13_ticket_request` (default none) when it offers TLS
   1.3; the server sends at most `resumption_count` tickets for a resumed

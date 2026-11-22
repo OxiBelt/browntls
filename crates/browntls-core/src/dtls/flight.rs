@@ -270,7 +270,7 @@ impl Dtls {
 
         if self.ack_due.is_some_and(|due| due <= now) {
             self.ack_due = None;
-            self.write_ack(out, space(out))?;
+            self.write_ack(out, start, now)?;
         }
 
         let wrote = self.write_fragments(out, start)?;
@@ -370,7 +370,7 @@ impl Dtls {
     /// least that of the records it covers, so records of later epochs wait;
     /// afterwards it is sent in our highest sending epoch whatever the
     /// epochs of the peer's records.
-    fn write_ack(&mut self, out: &mut Vec<u8>, space: usize) -> Result<(), Error> {
+    fn write_ack(&mut self, out: &mut Vec<u8>, start: usize, now: Duration) -> Result<(), Error> {
         let epoch = self.write_epoch();
         let numbers: Vec<RecordNumber> = self
             .acks
@@ -378,21 +378,34 @@ impl Dtls {
             .filter(|n| n.epoch <= epoch || epoch >= APPLICATION_EPOCH)
             .copied()
             .collect();
-        if numbers.is_empty() {
-            return Ok(());
+        let split = self.has_negotiated_record_size_limits();
+        let mut remaining = numbers.as_slice();
+        while !remaining.is_empty() {
+            let space = self.settings.mtu.saturating_sub(out.len() - start);
+            let Some(room) = self.record_room(epoch, space) else {
+                break;
+            };
+            let count = (room.saturating_sub(2) / wire::RECORD_NUMBER_LEN).min(MAX_ACKS);
+            if count == 0 {
+                break;
+            }
+            // Prefer newer records as in the single-record ACK. With a
+            // negotiated limit, leave earlier records pending across writes.
+            let (rest, ack) = remaining.split_at(remaining.len().saturating_sub(count));
+            let mut body = Vec::with_capacity(2 + ack.len() * wire::RECORD_NUMBER_LEN);
+            wire::put_ack(&mut body, ack);
+            self.seal_record(out, epoch, ContentType::Ack, &body)?;
+            if !split {
+                return Ok(());
+            }
+            remaining = rest;
         }
-        let Some(room) = self.record_room(epoch, space) else {
-            return Ok(());
-        };
-        let count = (room.saturating_sub(2) / wire::RECORD_NUMBER_LEN).min(MAX_ACKS);
-        if count == 0 {
-            return Ok(());
+        if split && remaining.len() < numbers.len() {
+            let sent = &numbers[remaining.len()..];
+            self.acks
+                .retain(|number| sent.binary_search(number).is_err());
+            self.ack_due = (!remaining.is_empty()).then_some(now);
         }
-        // The most recent records matter most.
-        let numbers = &numbers[numbers.len().saturating_sub(count)..];
-        let mut body = Vec::with_capacity(2 + numbers.len() * wire::RECORD_NUMBER_LEN);
-        wire::put_ack(&mut body, numbers);
-        self.seal_record(out, epoch, ContentType::Ack, &body)?;
         Ok(())
     }
 

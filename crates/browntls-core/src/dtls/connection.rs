@@ -103,6 +103,7 @@ impl<Data: SideData> ConnectionCommon<Data> {
                     let desc = match &err {
                         Error::InvalidMessage(e) => AlertDescription::from(*e),
                         Error::DecryptError => AlertDescription::BadRecordMac,
+                        Error::PeerSentOversizedRecord => AlertDescription::RecordOverflow,
                         _ => AlertDescription::UnexpectedMessage,
                     };
                     let err = common.send_fatal_alert(desc, err);

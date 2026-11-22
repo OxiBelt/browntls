@@ -49,6 +49,9 @@ DTLS 1.2 uses the following protocol boundaries:
   DTLS version to the existing AEAD interface. Sequence consumption,
   confidentiality limits, failed authentication limits, replay rejection,
   datagram MTU limits and bounded handshake reassembly remain explicit.
+  `dtls::Settings::with_record_size_limit` optionally limits protected
+  records in each direction, independently of MTU. With a connection ID it
+  covers the inner content type and any padding.
   DTLS 1.2 closes on key exhaustion; it has no KeyUpdate.
 - Whole-flight acknowledgement waits for a ClientHello, ServerHelloDone or
   in-order Finished boundary. The server sends and retains the final flight

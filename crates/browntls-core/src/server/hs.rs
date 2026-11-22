@@ -296,13 +296,13 @@ impl ExpectClientHello {
         // RFC 8449: once we answer the client's record_size_limit (in the
         // TLS 1.3 EncryptedExtensions or the TLS 1.2 ServerHello), each
         // side's protected records respect the other's limit. This runs
-        // again for a second ClientHello. Not on DTLS, whose records do
-        // not honour it yet.
-        if !cx.common.is_dtls()
-            && !cx.common.is_quic()
+        // again for a second ClientHello. QUIC carries no TLS records.
+        if !cx.common.is_quic()
             && let Some(theirs) = client_hello.extensions.record_size_limit
         {
-            if let Some(ours) = record_size_limit_ack(&self.config, client_hello, version) {
+            if let Some(ours) =
+                record_size_limit_ack(cx.common, &self.config, client_hello, version)
+            {
                 cx.common.apply_record_size_limits(
                     ours,
                     theirs,

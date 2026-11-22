@@ -50,6 +50,9 @@ pub(crate) struct Opened {
     pub(crate) typ: ContentType,
     /// The content within the record buffer passed to `open`.
     pub(crate) content: Range<usize>,
+    /// Authenticated DTLSInnerPlaintext length, including the content type
+    /// and any trailing zero padding.
+    pub(crate) plaintext_len: usize,
 }
 
 impl RecordKeys {
@@ -217,6 +220,7 @@ impl RecordKeys {
             seq: number,
             typ,
             content: body.start..body.start + type_at,
+            plaintext_len: inner.len(),
         })
     }
 }

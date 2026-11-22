@@ -451,11 +451,12 @@ impl CompleteClientHelloHandling {
                 && client_hello.extensions.trusted_ca_keys.is_some())
             .then_some(()),
             // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
-            record_size_limit: if cx.common.is_dtls() {
-                None
-            } else {
-                hs::record_size_limit_ack(&self.config, client_hello, ProtocolVersion::TLSv1_2)
-            },
+            record_size_limit: hs::record_size_limit_ack(
+                cx.common,
+                &self.config,
+                client_hello,
+                ProtocolVersion::TLSv1_2,
+            ),
             // RFC 7924 §4: the types replaced by their fingerprint.
             cached_info,
             ..Default::default()

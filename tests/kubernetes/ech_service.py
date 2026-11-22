@@ -414,6 +414,8 @@ def service_environment(profile, source_image, purpose):
         if loaded_id is None:
             raise RuntimeError(f"minikube did not confirm the loaded image for {image}")
         create_namespace(kubectl, register, namespace, owner)
+        kubectl("wait", "--for=create", "serviceaccount/default", "--timeout=30s",
+                capture=True, seconds=35)
         yield kubectl, image, directory, namespace, owner
 
 

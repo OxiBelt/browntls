@@ -264,7 +264,9 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   16 identities. On RFC 9973 offers the server checks the entire
   wire-bounded list for recognizable tickets. The extension forbids
   resumption identities and early data. Ordinary external-PSK 0-RTT is
-  off by default and has no anti-replay protection. Imported PSKs are
+  off by default. Acceptance requires a credential cutoff and an atomic
+  application-supplied replay policy shared by servers using the credential.
+  Imported PSKs are
   checked with independent derivation vectors and across browntls
   providers. The [wolfSSL RFC 9973 suite](../tests/e2e/README.md)
   covers direct external PSKs in both roles over TLS and DTLS on amd64.

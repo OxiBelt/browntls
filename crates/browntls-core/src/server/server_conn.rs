@@ -4,6 +4,7 @@ mod accept;
 #[cfg(feature = "std")]
 mod buffered;
 mod client_hello;
+mod early_data;
 mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
@@ -19,6 +20,7 @@ pub use unbuffered_acceptor::{
     UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
 };
 
+use self::early_data::EarlyDataState;
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
 use crate::common_state::{CommonState, Side};
@@ -33,7 +35,6 @@ use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
-use crate::vecbuf::ChunkVecBuffer;
 use crate::verify::ClientCertVerifier;
 use crate::versions::EnabledVersions;
 
@@ -57,7 +58,10 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
         version
     }
 
-    /// Fetches and removes the value under `key`.
+    /// Atomically fetches and removes the value under `key`.
+    ///
+    /// At most one concurrent taker may receive a stored TLS 1.3 ticket.
+    /// This is required for single-use ticket early data.
     fn take(&self, key: &[u8]) -> Option<Vec<u8>>;
 
     /// Whether `put` can ever succeed.
@@ -129,8 +133,8 @@ pub struct ServerConfig {
     pub enable_secret_extraction: bool,
 
     /// How much 0-RTT data to accept under resumption; zero disables it.
-    /// Early data under an external PSK is governed by that PSK's own limit
-    /// (`ExternalPsk::with_early_data`) instead, whatever this value.
+    /// External PSKs use their own limit, expiry, and
+    /// [`Self::external_psk_replay_policy`].
     ///
     /// It also bounds the rejected 0-RTT records skipped during the
     /// handshake: their plaintext, and their number, since each costs at
@@ -297,6 +301,10 @@ pub struct ServerConfig {
     /// An ordinary TLS 1.3 external-PSK handshake can proceed when
     /// [`Self::cert_resolver`] returns no certificate.
     pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
+
+    /// Atomically authorizes external-PSK 0-RTT. Without this policy, the
+    /// server declines such early data. Ticket 0-RTT uses session storage.
+    pub external_psk_replay_policy: Option<Arc<dyn crate::psk::ExternalPskReplayPolicy>>,
 
     /// Whether to authenticate with our certificate as well when the
     /// client asks for it with `tls_cert_with_extern_psk` (RFC 9973) and an
@@ -502,105 +510,6 @@ impl TimeProvider for NoTime {
     }
 }
 
-/// Where 0-RTT stands on a server connection.
-#[derive(Default)]
-enum EarlyDataKind {
-    /// No decision yet.
-    #[default]
-    New,
-    /// Accepted: `received` holds the data (buffered API only), `left` what
-    /// may still arrive.
-    Accepted {
-        received: ChunkVecBuffer,
-        left: usize,
-    },
-    /// Declined (by configuration, policy, or the application).
-    Rejected,
-}
-
-/// The server's 0-RTT bookkeeping.
-#[derive(Default)]
-pub(super) struct EarlyDataState {
-    kind: EarlyDataKind,
-    /// Unbuffered API: accepted early data stays in the caller's buffer.
-    in_place: bool,
-    /// Unbuffered API: the record just processed was accepted early data.
-    in_place_pending: bool,
-}
-
-impl EarlyDataState {
-    pub(super) fn reject(&mut self) {
-        self.kind = EarlyDataKind::Rejected;
-    }
-
-    pub(super) fn accept(&mut self, max_size: usize) {
-        self.kind = EarlyDataKind::Accepted {
-            received: ChunkVecBuffer::new(Some(max_size)),
-            left: max_size,
-        };
-    }
-
-    pub(super) fn was_accepted(&self) -> bool {
-        matches!(self.kind, EarlyDataKind::Accepted { .. })
-    }
-
-    pub(super) fn was_rejected(&self) -> bool {
-        matches!(self.kind, EarlyDataKind::Rejected)
-    }
-
-    /// Stores early data; `false` if it exceeds what was announced.
-    ///
-    /// With the unbuffered API nothing is copied: the record stays where it
-    /// was decrypted and only the budget is charged.
-    pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
-        let EarlyDataKind::Accepted { received, left } = &mut self.kind else {
-            return false;
-        };
-        let available = bytes.len();
-        if self.in_place {
-            if available > *left {
-                return false;
-            }
-            *left -= available;
-            self.in_place_pending = true;
-            return true;
-        }
-        if received.apply_limit(available) != available || available > *left {
-            return false;
-        }
-        received.append(bytes.to_vec());
-        *left -= available;
-        true
-    }
-
-    /// Unbuffered API: leave accepted early data in the caller's buffer.
-    fn set_in_place(&mut self) {
-        self.in_place = true;
-    }
-
-    #[cfg(feature = "std")]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match &mut self.kind {
-            EarlyDataKind::Accepted { received, .. } => Ok(received.read(buf)),
-            _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
-        }
-    }
-}
-
-impl fmt::Debug for EarlyDataState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            EarlyDataKind::New => f.write_str("EarlyDataState::New"),
-            EarlyDataKind::Accepted { received, left } => f
-                .debug_struct("EarlyDataState::Accepted")
-                .field("received", &received.len())
-                .field("left", left)
-                .finish(),
-            EarlyDataKind::Rejected => f.write_str("EarlyDataState::Rejected"),
-        }
-    }
-}
-
 /// Per-connection server data.
 #[derive(Debug, Default)]
 pub struct ServerConnectionData {
@@ -664,11 +573,11 @@ impl SideData for ServerConnectionData {
     }
 
     fn take_early_data_in_place(&mut self) -> bool {
-        core::mem::take(&mut self.early_data.in_place_pending)
+        self.early_data.take_in_place_pending()
     }
 
     fn has_unread_early_data(&self) -> bool {
-        matches!(&self.early_data.kind, EarlyDataKind::Accepted { received, .. } if !received.is_empty())
+        self.early_data.has_buffered_plaintext()
     }
 }
 

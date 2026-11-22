@@ -350,6 +350,7 @@ name = "browntls-tokio"
 version = "0.1.0-dev"
 dependencies = [
  "browntls-core",
+ "browntls-crypto",
  "rcgen",
  "rustls",
  "rustls-pki-types",

@@ -772,15 +772,31 @@ impl EarlySetup {
 /// kernel sends. `into_inner` would have dropped it.
 #[tokio::test]
 async fn declined_early_data_is_resent_before_the_handover() {
-    let setup = EarlySetup::new(&[]);
+    let setup = EarlySetup::new(&[b"h2"]);
     setup.first_connection().await;
 
     let (c, s) = duplex(1 << 16);
     let client_side = async {
-        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        let mut client = setup
+            .connector
+            .clone()
+            .rejected_early_data_policy(browntls_tokio::RejectedEarlyDataPolicy::ResendIfSameAlpn {
+                max_bytes: std::num::NonZeroUsize::new(512).unwrap(),
+            })
+            .connect(localhost(), c)
+            .await
+            .unwrap();
         assert!(client.get_ref().1.is_handshaking());
         client.write_all(b"early request").await.unwrap();
         let handoff = client.into_kernel_handoff().await.unwrap();
+        assert_eq!(
+            handoff.early_data_outcome(),
+            browntls_tokio::EarlyDataOutcome::Rejected {
+                early_bytes: 13,
+                resent_bytes: 13,
+                unresent_bytes: 0,
+            }
+        );
         let (io, conn, received) = handoff.into_parts();
         assert!(received.is_empty());
         assert!(!conn.is_early_data_accepted());
@@ -826,6 +842,7 @@ async fn early_data_that_is_not_resent_is_reported_by_the_handoff() {
             .expect("EarlyDataNotResent");
         assert_eq!(not_resent.len, 13);
         assert!(received.is_empty());
+        assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
         client.write_all(b"chosen again").await.unwrap();
         let handoff = client.into_kernel_handoff().await.unwrap();
         let (io, conn, _) = handoff.into_parts();

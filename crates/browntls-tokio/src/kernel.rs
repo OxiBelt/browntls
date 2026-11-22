@@ -92,6 +92,11 @@ impl<S> KernelHandoff<S> {
 }
 
 impl<IO> KernelHandoff<client::TlsStream<IO>> {
+    /// The local outcome of any early data the client wrote.
+    pub fn early_data_outcome(&self) -> crate::EarlyDataOutcome {
+        self.stream.early_data_outcome()
+    }
+
     /// The transport and the connection.
     pub fn get_ref(&self) -> (&IO, &ClientConnection) {
         self.stream.get_ref()
@@ -141,7 +146,8 @@ pub struct KernelHandoffError<S> {
     /// The stream. It is still usable when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded:
     /// a [`KernelHandoffBlocker`] that driving the stream does not clear)
-    /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent),
+    /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent)
+    /// (acknowledge the rejection before trying again),
     /// and it can still write and shut down when the error says that data
     /// follows the peer's `close_notify`
     /// ([`io::ErrorKind::InvalidData`] without a [`browntls_core::Error`]
@@ -273,7 +279,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> sealed::Prepare for client::TlsStream<I
         self.st.begin_poll();
         // The 0-RTT phase first: only the stream knows what to send again
         // when the server declined the early data.
-        ready!(self.poll_finish_early(cx))?;
+        ready!(self.poll_finish_early_for_write(cx))?;
         poll_prepare(
             &mut self.io,
             &mut self.session,

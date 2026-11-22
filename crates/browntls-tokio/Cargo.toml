@@ -45,6 +45,7 @@ zstd = ["browntls-core/zstd"]
 
 [dependencies]
 browntls-core = { workspace = true, features = ["std"] }
+browntls-crypto.workspace = true
 # The I/O traits (`AsyncRead`, `AsyncWrite`, `AsyncBufRead`, `ReadBuf`), which
 # need no tokio feature: the runtime is the caller's. The `coop` feature adds
 # `rt` for the task budget.

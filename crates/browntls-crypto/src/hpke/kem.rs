@@ -5,6 +5,7 @@ use super::{Kem, MAX_ENC_LEN, MAX_PRIVATE_KEY_LEN, MAX_PUBLIC_KEY_LEN};
 use crate::Error;
 use crate::curve448::x448;
 use crate::curve25519::x25519;
+use crate::der::{Writer, tag};
 use crate::nist::{p256, p384, p521};
 use crate::zeroize::Zeroizing;
 
@@ -118,6 +119,7 @@ pub struct PrivateKey {
     kem: Kem,
     inner: Inner,
     public: PublicKey,
+    pkcs8_ecdh_oid: bool,
 }
 
 impl core::fmt::Debug for PrivateKey {
@@ -198,7 +200,25 @@ impl PrivateKey {
             kem,
             inner,
             public: pk,
+            pkcs8_ecdh_oid: false,
         }
+    }
+
+    /// Whether PKCS#8 export uses the restricted `id-ecDH` algorithm OID.
+    #[must_use]
+    pub fn pkcs8_uses_ecdh_oid(&self) -> bool {
+        self.pkcs8_ecdh_oid
+    }
+
+    /// Selects the restricted `id-ecDH` algorithm OID for PKCS#8 export of a
+    /// NIST key. X25519 and X448 retain their own algorithm OIDs.
+    #[must_use]
+    pub fn with_pkcs8_ecdh_oid(mut self) -> Self {
+        self.pkcs8_ecdh_oid = matches!(
+            &self.inner,
+            Inner::P256(_) | Inner::P384(_) | Inner::P521(_)
+        );
+        self
     }
 
     /// The KEM this key belongs to.
@@ -236,6 +256,22 @@ impl PrivateKey {
             Inner::P521(k) => out.copy_from_slice(&k.to_bytes()[..]),
         }
         Ok(n)
+    }
+
+    /// Writes the DER carried by the PKCS#8 privateKey OCTET STRING.
+    pub(super) fn write_pkcs8_inner_der(&self, out: &mut [u8]) -> Result<usize, Error> {
+        match &self.inner {
+            Inner::P256(k) => k.to_sec1_der(out),
+            Inner::P384(k) => k.to_sec1_der(out),
+            Inner::P521(k) => k.to_sec1_der(out),
+            Inner::X25519(_) | Inner::X448(_) => {
+                let mut scalar = Zeroizing([0u8; MAX_PRIVATE_KEY_LEN]);
+                let n = self.write_bytes(&mut scalar[..])?;
+                let mut writer = Writer::new(out);
+                writer.tlv(tag::OCTET_STRING, &scalar[..n])?;
+                Ok(writer.len())
+            }
+        }
     }
 
     /// `DH(skX, pkY)` into a zeroising buffer; returns the output length.

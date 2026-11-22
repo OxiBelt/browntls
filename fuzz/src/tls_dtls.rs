@@ -232,7 +232,9 @@ fn connect<'a>(session: &mut Session<'a>, input: &mut Input<'a>) {
         return;
     };
     let settings = || {
-        let settings = dtls::Settings::default();
+        let settings = dtls::Settings::default()
+            .with_record_size_limit(Some(1024))
+            .expect("record size limit is valid");
         if session.migration {
             settings.with_return_routability_checks(dtls::ConnectionIdPolicy::new(8, true).unwrap())
         } else {

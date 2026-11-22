@@ -30,6 +30,7 @@ use crate::msgs::handshake::MAX_HANDSHAKE_SIZE;
 use crate::msgs::message::MAX_PLAINTEXT_LEN;
 use crate::tls13::Tls13CipherSuite;
 
+mod record_size_limit;
 #[cfg(test)]
 mod tests;
 
@@ -89,6 +90,7 @@ pub struct Settings {
     pub(crate) versions: super::Versions,
     pub(crate) mtu: usize,
     pub(crate) initial_timeout: Duration,
+    pub(crate) record_size_limit: Option<u16>,
     pub(crate) peer_address: Vec<u8>,
     pub(crate) require_cookie: bool,
     pub(crate) connection_ids: Option<ConnectionIdPolicy>,
@@ -101,6 +103,7 @@ impl Default for Settings {
             versions: super::Versions::default(),
             mtu: DEFAULT_MTU,
             initial_timeout: super::flight::INITIAL_TIMEOUT,
+            record_size_limit: None,
             peer_address: Vec::new(),
             require_cookie: true,
             connection_ids: None,
@@ -139,6 +142,12 @@ pub(crate) struct Dtls {
     #[cfg(feature = "tls12")]
     pub(super) v12: super::v12::State,
     pub(super) settings: Settings,
+    /// Limits active after the handshake acknowledges RFC 8449.
+    record_size_limits: Option<record_size_limit::RecordSizeLimits>,
+    /// During the client's encrypted handshake, remember overflows until
+    /// EncryptedExtensions confirms whether the server accepted the offer.
+    observe_record_size_limit: bool,
+    observed_record_size_limit_overflow: bool,
     /// Sending epochs still needed: the current one (last) and any that
     /// unacknowledged handshake messages were queued under.
     pub(super) write: Vec<WriteEpoch>,
@@ -191,6 +200,9 @@ impl Dtls {
             v12: super::v12::State::default(),
             out: Outgoing::new(settings.initial_timeout),
             settings,
+            record_size_limits: None,
+            observe_record_size_limit: false,
+            observed_record_size_limit_overflow: false,
             write: alloc::vec![WriteEpoch {
                 epoch: 0,
                 keys: None,
@@ -561,6 +573,8 @@ impl Dtls {
         if !read.window.is_new(opened.seq) {
             return Ok(Incoming::Handled);
         }
+        self.check_inbound_record_size_limit(opened.plaintext_len)?;
+        let read = &mut self.read[index];
         read.window.mark(opened.seq);
         let number = RecordNumber {
             epoch: read.epoch,
@@ -861,7 +875,7 @@ impl Dtls {
         typ: ContentType,
         content: &[u8],
     ) -> Result<RecordNumber, Error> {
-        if content.len() > MAX_PLAINTEXT_LEN {
+        if content.len() > self.outbound_content_limit(epoch) {
             return Err(Error::EncryptError);
         }
         #[cfg(feature = "tls12")]
@@ -899,7 +913,7 @@ impl Dtls {
     /// The bytes one record under `epoch` takes to carry `content_len`
     /// bytes, if the epoch is still kept.
     pub(super) fn record_len(&self, epoch: u64, content_len: usize) -> Option<usize> {
-        if content_len > MAX_PLAINTEXT_LEN {
+        if content_len > self.outbound_content_limit(epoch) {
             return None;
         }
         #[cfg(feature = "tls12")]
@@ -923,16 +937,16 @@ impl Dtls {
         #[cfg(feature = "tls12")]
         if self.is_v12() && epoch == 1 {
             let overhead = self.record_len(epoch, 0)?;
-            return space.checked_sub(overhead).map(|room| {
-                room.min(MAX_PLAINTEXT_LEN - usize::from(!self.cid.outbound().is_empty()))
-            });
+            return space
+                .checked_sub(overhead)
+                .map(|room| room.min(self.outbound_content_limit(epoch)));
         }
         let write = self.write.iter().find(|w| w.epoch == epoch)?;
         let room = match &write.keys {
             None => space.checked_sub(wire::PLAINTEXT_HEADER_LEN),
             Some(keys) => keys.content_room(space, self.cid.outbound().len()),
         }?;
-        Some(room.min(MAX_PLAINTEXT_LEN))
+        Some(room.min(self.outbound_content_limit(epoch)))
     }
 }
 

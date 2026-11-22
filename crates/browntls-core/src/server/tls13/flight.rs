@@ -245,14 +245,12 @@ pub(super) fn emit_encrypted_extensions(
             .as_ref()
             .map(|q| Payload::new(q.local_params.clone())),
         // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
-        // QUIC has no TLS records: never acknowledged there. Nor on DTLS,
-        // whose records do not honour it yet.
         record_size_limit: hs::record_size_limit_ack(
+            cx.common,
             config,
             client_hello,
             ProtocolVersion::TLSv1_3,
-        )
-        .filter(|_| !cx.common.is_quic() && !cx.common.is_dtls()),
+        ),
         // RFC 9149 §3: `expected_count`.
         ticket_request: expected_tickets,
         ..Default::default()

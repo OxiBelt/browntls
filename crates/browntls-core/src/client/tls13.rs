@@ -344,7 +344,11 @@ pub(super) fn handle_server_hello(
     // early key; the handshake key is installed once that question settles.
     let hash_at_server_hello = transcript.current_hash();
     if hello.sent_record_size_limit.is_some() {
-        cx.common.record_layer.start_record_size_limit_observation();
+        if let Some(dtls) = &mut cx.common.dtls {
+            dtls.start_record_size_limit_observation();
+        } else {
+            cx.common.record_layer.start_record_size_limit_observation();
+        }
     }
     let key_schedule = key_schedule.derive_client_handshake_secrets(
         cx.data.early_data.is_enabled(),

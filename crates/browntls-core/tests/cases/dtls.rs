@@ -976,3 +976,6 @@ include!("dtls/service_identity.rs");
 
 #[path = "dtls/rfc10024.rs"]
 mod rfc10024;
+
+#[path = "dtls/record_size_limit.rs"]
+mod record_size_limit;

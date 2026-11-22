@@ -718,12 +718,9 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 8449: the largest record we accept. The protocol maximum is that
     // of the highest version offered; a TLS 1.2 server does not enforce a
     // larger value (RFC 8449 §4) and we clamp what we enforce.
-    // QUIC has no TLS records, so no limit is offered there; nor over DTLS,
-    // whose records do not honour it yet.
-    exts.record_size_limit = config
-        .record_size_limit
-        .filter(|_| !quic && !dtls)
-        .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    exts.record_size_limit = cx
+        .common
+        .local_record_size_limit(config.record_size_limit, supports_tls13);
     // RFC 6066 §6: a TLS 1.2 extension only; `supports_tls12` is false
     // over QUIC and with an ECH offer (RFC 9849 §6.1).
     exts.trusted_ca_keys = config.trusted_ca_keys.clone().filter(|_| supports_tls12);

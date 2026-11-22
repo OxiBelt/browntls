@@ -170,7 +170,11 @@ pub(super) fn process_record_size_limit(
     match (hello.sent_record_size_limit, servers) {
         (Some(ours), Some(servers)) => common.apply_record_size_limits(ours, servers, tls13),
         _ => {
-            common.record_layer.clear_record_size_limit_observation();
+            if let Some(dtls) = &mut common.dtls {
+                dtls.clear_record_size_limit_observation();
+            } else {
+                common.record_layer.clear_record_size_limit_observation();
+            }
             Ok(())
         }
     }

@@ -44,6 +44,16 @@ impl ConnectionIdPolicy {
 }
 
 impl Settings {
+    /// Offers an RFC 8449 record size limit for this DTLS connection.
+    /// The value is kept unchanged here; the negotiated-version handshake
+    /// layer clamps it before encoding or enforcing it. `None` disables the
+    /// extension. This setting is independent of the datagram MTU.
+    pub fn with_record_size_limit(mut self, limit: Option<u16>) -> Result<Self, Error> {
+        crate::common_state::check_record_size_limit_config(limit)?;
+        self.record_size_limit = limit;
+        Ok(self)
+    }
+
     /// Chooses which DTLS versions this endpoint can negotiate.
     pub fn with_versions(mut self, versions: super::Versions) -> Self {
         self.versions = versions;

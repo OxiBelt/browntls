@@ -6,7 +6,7 @@ use browntls_pki::CertificateDer;
 
 use super::extensions::{encode_extension, read_extensions};
 use super::{DistinguishedName, MAX_CERTIFICATE_SIZE_LIMIT};
-use crate::delegated_credential::DelegatedCredential;
+use crate::delegated_credential::{AttachmentError, DelegatedCredential, EXTENSION_HEADER_LEN};
 use crate::enums::{CertificateCompressionAlgorithm, SignatureScheme};
 use crate::error::InvalidMessage;
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
@@ -154,6 +154,26 @@ impl<'a> CertificateEntry<'a> {
             transparency_info: None,
             delegated_credential: None,
         }
+    }
+
+    pub(crate) fn set_delegated_credential(
+        &mut self,
+        credential: &DelegatedCredential,
+    ) -> Result<(), crate::Error> {
+        let status = self.status.as_ref().map_or(0, |status| {
+            // Extension header, status type, and three-byte response length.
+            EXTENSION_HEADER_LEN + 4 + status.ocsp_response.0.bytes().len()
+        });
+        let opaque_extension = |payload: &Payload<'_>| EXTENSION_HEADER_LEN + payload.bytes().len();
+        let total = credential.encoded_extension_len()?
+            + status
+            + self.sct_list.as_ref().map_or(0, opaque_extension)
+            + self.transparency_info.as_ref().map_or(0, opaque_extension);
+        if total > usize::from(u16::MAX) {
+            return Err(AttachmentError::InvalidEncoding.into());
+        }
+        self.delegated_credential = Some(credential.clone());
+        Ok(())
     }
 
     pub(crate) fn into_owned(self) -> CertificateEntry<'static> {

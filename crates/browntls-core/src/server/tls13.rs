@@ -753,7 +753,7 @@ impl CompleteClientHelloHandling {
                 client_hello,
                 delegated,
                 self.cert_types.server,
-            );
+            )?;
             emit_certificate_verify_tls13(
                 &mut self.transcript,
                 cx.common,

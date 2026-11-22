@@ -65,7 +65,7 @@ fn emit_certificate_tls13(
     compression: &[CertificateCompressionAlgorithm],
     extensions: &ClientCertificateExtensions,
     common: &mut CommonState,
-) {
+) -> Result<(), Error> {
     let mut cert_payload = match certkey {
         Some(key) => {
             CertificatePayloadTls13::from_certified_key(key, extensions.ocsp, extensions.sct)
@@ -73,7 +73,9 @@ fn emit_certificate_tls13(
         None => CertificatePayloadTls13::new(core::iter::empty(), None),
     };
     if let (Some(dc), Some(first)) = (delegated, cert_payload.entries.first_mut()) {
-        first.delegated_credential = Some(dc.credential().clone());
+        first
+            .set_delegated_credential(dc.credential())
+            .map_err(|err| common.send_fatal_alert(AlertDescription::InternalError, err))?;
     }
     cert_payload.context = PayloadU8::new(auth_context.unwrap_or_default());
 
@@ -93,7 +95,7 @@ fn emit_certificate_tls13(
         };
         transcript.add_message(&m);
         common.send_msg(m, true);
-        return;
+        return Ok(());
     }
 
     let m = Message {
@@ -104,6 +106,7 @@ fn emit_certificate_tls13(
     };
     transcript.add_message(&m);
     common.send_msg(m, true);
+    Ok(())
 }
 
 fn emit_certverify_tls13(
@@ -235,7 +238,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
                         cx.common,
-                    );
+                    )?;
                 }
                 ClientAuthDetails::Verify {
                     certkey,
@@ -252,7 +255,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
                         cx.common,
-                    );
+                    )?;
                     emit_certverify_tls13(&mut st.transcript, &*signer, cx.common)?;
                 }
             }
@@ -505,7 +508,7 @@ impl ExpectTraffic {
                     &compression,
                     &extensions,
                     cx.common,
-                );
+                )?;
             }
             ClientAuthDetails::Verify {
                 certkey,
@@ -522,7 +525,7 @@ impl ExpectTraffic {
                     &compression,
                     &extensions,
                     cx.common,
-                );
+                )?;
                 emit_certverify_tls13(&mut transcript, &*signer, cx.common)?;
             }
         }

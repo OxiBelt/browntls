@@ -219,8 +219,9 @@ impl CertifiedKey {
         self,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
+        provider: &CryptoProvider,
     ) -> Result<Self, Error> {
-        self.with_delegated_credential_for(Side::Server, credential, key)
+        self.with_delegated_credential_for(Side::Server, credential, key, provider)
     }
 
     /// Adds a client's delegated credential for the end entity (one issued
@@ -236,8 +237,9 @@ impl CertifiedKey {
         self,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
+        provider: &CryptoProvider,
     ) -> Result<Self, Error> {
-        self.with_delegated_credential_for(Side::Client, credential, key)
+        self.with_delegated_credential_for(Side::Client, credential, key, provider)
     }
 
     fn with_delegated_credential_for(
@@ -245,8 +247,15 @@ impl CertifiedKey {
         side: Side,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
+        provider: &CryptoProvider,
     ) -> Result<Self, Error> {
-        let dc = DelegatedCredentialKey::new_for(side, self.end_entity_cert()?, credential, key)?;
+        let dc = DelegatedCredentialKey::new_for(
+            side,
+            self.end_entity_cert()?,
+            credential,
+            key,
+            provider,
+        )?;
         self.delegated_credentials.push(Arc::new(dc));
         Ok(self)
     }

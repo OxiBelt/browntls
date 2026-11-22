@@ -43,7 +43,7 @@ fn client_authenticates_with_a_delegated_credential() {
         ] {
             let (dc, key) = issue_for(Side::Client, &chain, dc_scheme, shifted(24 * 3600));
             let ck = certified_key(&chain)
-                .with_client_delegated_credential(dc.clone(), key)
+                .with_client_delegated_credential(dc.clone(), key, &provider())
                 .unwrap();
             let verifier = SchemeRecordingClientVerifier::new(
                 PinnedClientVerifier::new(&chain, true),
@@ -133,7 +133,8 @@ fn with_client_credentials(
     dcs: Vec<(DelegatedCredential, Arc<dyn SigningKey>)>,
 ) -> CertifiedKey {
     dcs.into_iter().fold(certified_key(chain), |ck, (dc, key)| {
-        ck.with_client_delegated_credential(dc, key).unwrap()
+        ck.with_client_delegated_credential(dc, key, &provider())
+            .unwrap()
     })
 }
 
@@ -181,7 +182,7 @@ fn client_credential_not_used_unless_both_sides_opt_in() {
         shifted(3600),
     );
     let server_only = certified_key(&chain)
-        .with_delegated_credential(server_dc, server_key)
+        .with_delegated_credential(server_dc, server_key, &provider())
         .unwrap();
     assert_eq!(server_only.delegated_credentials()[0].side(), Side::Server);
     let verifier = recording_verifier(&chain);
@@ -286,12 +287,13 @@ fn client_skips_unusable_credentials() {
     );
     let good_dc = good.0.clone();
     let ck = certified_key(&chain)
-        .with_delegated_credential(server_side.0, server_side.1)
+        .with_delegated_credential(server_side.0, server_side.1, &provider())
         .unwrap();
     let ck = [expired, too_long, good]
         .into_iter()
         .fold(ck, |ck, (dc, key)| {
-            ck.with_client_delegated_credential(dc, key).unwrap()
+            ck.with_client_delegated_credential(dc, key, &provider())
+                .unwrap()
         });
     let verifier = recording_verifier(&chain);
     let (mut client, mut server) = connect(
@@ -375,24 +377,24 @@ fn server_rejects_client_credential_valid_too_long() {
 /// A credential issued for a server, attached as a client's: its signature
 /// covers the side (RFC 9345 §4), so it does not verify as a client's.
 #[test]
-fn server_rejects_a_server_credential_presented_by_a_client() {
+fn attachment_rejects_a_server_credential_in_the_client_role() {
     let chain = delegation_client_chain(KeyType::EcdsaP256);
-    let dc = issue_for(
+    let (dc, key) = issue_for(
         Side::Server,
         &chain,
         SignatureScheme::ED25519,
         shifted(3600),
     );
-    let ck = with_client_credentials(&chain, vec![dc]);
-    assert_eq!(ck.delegated_credentials()[0].side(), Side::Client);
-    assert_illegal_parameter(
-        presented_to_server(&chain, ck, 0),
-        PeerMisbehaved::DelegatedCredentialBadSignature,
-    );
+    assert!(matches!(
+        certified_key(&chain).with_client_delegated_credential(dc, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
+        ))
+    ));
 }
 
 #[test]
-fn server_rejects_tampered_client_credential() {
+fn attachment_rejects_a_tampered_client_credential() {
     let chain = delegation_client_chain(KeyType::EcdsaP256);
     // Moving the expiry by a second invalidates the signature.
     let (mut dc, key) = issue_for(
@@ -402,11 +404,12 @@ fn server_rejects_tampered_client_credential() {
         shifted(3600),
     );
     dc.credential.valid_time -= 1;
-    let ck = with_client_credentials(&chain, vec![(dc, key)]);
-    assert_illegal_parameter(
-        presented_to_server(&chain, ck, 0),
-        PeerMisbehaved::DelegatedCredentialBadSignature,
-    );
+    assert!(matches!(
+        certified_key(&chain).with_client_delegated_credential(dc, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
+        ))
+    ));
 
     // So does a flipped bit in the signature itself.
     let (mut dc, key) = issue_for(
@@ -416,11 +419,12 @@ fn server_rejects_tampered_client_credential() {
         shifted(3600),
     );
     *dc.signature.last_mut().unwrap() ^= 1;
-    let ck = with_client_credentials(&chain, vec![(dc, key)]);
-    assert_illegal_parameter(
-        presented_to_server(&chain, ck, 0),
-        PeerMisbehaved::DelegatedCredentialBadSignature,
-    );
+    assert!(matches!(
+        certified_key(&chain).with_client_delegated_credential(dc, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
+        ))
+    ));
 }
 
 #[test]
@@ -444,7 +448,7 @@ fn client_certificate_must_permit_delegation() {
                 valid_time: valid_time_until(&plain.end_entity, shifted(3600)).unwrap(),
                 dc_cert_verify_algorithm: SignatureScheme::ED25519,
                 public_key: spki,
-            },
+            }
         )
         .is_err()
     );
@@ -456,7 +460,7 @@ fn client_certificate_must_permit_delegation() {
     );
     assert!(
         certified_key(&plain)
-            .with_client_delegated_credential(dc, key)
+            .with_client_delegated_credential(dc, key, &provider())
             .is_err()
     );
 }
@@ -591,7 +595,7 @@ fn both_sides_authenticate_with_delegated_credentials() {
         shifted(3600),
     );
     let server_ck = certified_key(&server_chain)
-        .with_delegated_credential(server_dc.clone(), server_key)
+        .with_delegated_credential(server_dc.clone(), server_key, &provider())
         .unwrap();
     let mut server_config = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
@@ -651,6 +655,14 @@ fn validate_a_client_credential_directly() {
         check(&Presented {
             side: Side::Server,
             ..presented
+        }),
+        Err(PeerMisbehaved::DelegatedCredentialBadSignature.into())
+    );
+    let mut tampered = dc.clone();
+    tampered.signature[0] ^= 1;
+    assert_eq!(
+        validate(&tampered, &presented, |message, dss| {
+            verifier.verify_tls13_signature(message, &chain.end_entity, dss)
         }),
         Err(PeerMisbehaved::DelegatedCredentialBadSignature.into())
     );

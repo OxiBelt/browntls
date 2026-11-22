@@ -53,7 +53,11 @@ fn native_issuing_helper() {
                 issued.credential.credential.public_key.as_ref()
             );
             let ck = certified_key(&chain)
-                .with_delegated_credential(issued.credential.clone(), issued.signing_key)
+                .with_delegated_credential(
+                    issued.credential.clone(),
+                    issued.signing_key,
+                    &provider(),
+                )
                 .unwrap();
             let (mut client, mut server) = connect(dc_client(&chain), server_with(ck));
             do_handshake(&mut client, &mut server).unwrap();

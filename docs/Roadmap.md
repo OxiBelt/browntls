@@ -198,9 +198,8 @@ These requirements from [Maintenance](Maintenance.md) are not yet met:
   it (RFC 7924 predates TLS 1.3 and defines no TLS 1.3 behaviour).
 - Delegated credentials (RFC 9345) have no interoperability evidence: no
   implementation the project tests against (OpenSSL 3, rustls) supports
-  them. Neither side checks a credential's signature when it is
-  attached, so a credential issued for another certificate, or for the
-  other side, is only rejected by the peer. Verifiers that do not override
+  them. Attachment verifies the signature against the configured leaf
+  and role with the caller's provider. Verifiers that do not override
   `verify_tls13_signature_with_delegated_key` refuse credentials. The Docker
   end-to-end matrix does not exercise delegated credentials.
   `CertifiedKey` gained a private field, so struct-literal construction no

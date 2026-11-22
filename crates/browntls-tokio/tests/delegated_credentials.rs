@@ -104,13 +104,15 @@ fn client_config(
     let mut key =
         CertifiedKey::from_der(pki.client_chain.clone(), pki.client_key(), &provider()).unwrap();
     if let Some((dc, dc_key)) = credential {
-        key = key.with_client_delegated_credential(dc, dc_key).unwrap();
+        key = key
+            .with_client_delegated_credential(dc, dc_key, &provider())
+            .unwrap();
     }
     ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[version])
         .unwrap()
         .with_root_certificates(pki.roots())
-        .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(key)))
+        .with_client_auth_certified_key(key)
 }
 
 fn client_verifier(pki: &Pki) -> Arc<dyn ClientCertVerifier> {
@@ -226,7 +228,7 @@ async fn both_sides_authenticate_with_delegated_credentials() {
     let server_key =
         CertifiedKey::from_der(pki.server_chain.clone(), pki.server_key(), &provider())
             .unwrap()
-            .with_delegated_credential(server_dc.clone(), server_key)
+            .with_delegated_credential(server_dc.clone(), server_key, &provider())
             .unwrap();
     let mut server = ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[TLS13])
@@ -295,28 +297,25 @@ async fn tls12_ignores_the_credential() {
     exchange(&mut client, &mut server).await;
 }
 
-#[tokio::test]
-async fn a_server_credential_presented_by_the_client_is_refused() {
+#[test]
+fn a_server_credential_cannot_be_installed_for_the_tokio_client() {
     let pki = Pki::with_delegation();
     // Signed for the server's side: the signature over the client's
     // context does not verify.
-    let wrong_side = issue(
+    let (dc, delegated_key) = issue(
         Side::Server,
         &pki.client_chain,
         pki.client_key(),
         shifted(DAY),
     );
-    let (client, server) = connect(
-        client_config(&pki, TLS13, Some(wrong_side)),
-        dc_server_config(&pki, TLS13),
-    )
-    .await;
-    let err = server.unwrap_err();
-    assert!(
-        is_misbehaviour(&err, PeerMisbehaved::DelegatedCredentialBadSignature),
-        "{err:?}"
-    );
-    assert_client_got_illegal_parameter(client).await;
+    let key =
+        CertifiedKey::from_der(pki.client_chain.clone(), pki.client_key(), &provider()).unwrap();
+    assert!(matches!(
+        key.with_client_delegated_credential(dc, delegated_key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
+        ))
+    ));
 }
 
 #[tokio::test]

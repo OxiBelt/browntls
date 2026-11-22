@@ -431,13 +431,14 @@ empty list in the TLS extension. `verify_tls_extension` accepts an empty
 extension body or an empty list; the strict parser, the certificate
 extension and the OCSP extension reject an empty list.
 
-Not covered: the HTTP API of §5, log operation, monitoring and the final STH
-log parameter (§4.1). No public CT 2.0 log ecosystem and no second
-implementation were available, and RFC 9162 has no test vectors for its
-hashes or items. The tests check the code against independent encoders and a
-reference Merkle tree written from the RFC text in
-`crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
-self-consistency against the RFC text only, not interoperability.
+The PKI tests check the public verifier and auditor APIs against
+[Python and OpenSSL fixtures][ct-independent], including both log signature
+algorithms and proofs from an independently constructed tree. The fixtures
+cover certificates and the CT list extracted from OCSP. Public CT 2.0 log
+interoperability, the HTTP API of §5, log operation, monitoring, and the
+final STH log parameter (§4.1) remain outside this evidence.
+
+[ct-independent]: ../crates/browntls-pki/tests/data/ct_v2_independent/README.md
 
 #### CT 2.0 in TLS
 
@@ -515,8 +516,9 @@ Interactions with other features:
   `InsufficientTransparency` rather than return its retry configurations:
   they are authenticated by that certificate, and CT is what would reveal
   a mis-issued one.
-- QUIC uses the TLS 1.3 handshake unchanged, extension and policy
-  included; it has no CT test of its own.
+- QUIC-TLS and DTLS tests check certificate authentication with both
+  offers and refusal when the CT offer is absent. DTLS tests include the
+  address-bound cookie retry in both versions.
 - Early data is sent only on resumption or with an external PSK, before
   any server certificate arrives. A resumption evaluates no certificate;
   an RFC 9973 handshake (certificate with an external PSK) evaluates the
@@ -531,12 +533,10 @@ Interactions with other features:
   `transparency_info` is refused as unsolicited. Under a CT 2.0 policy an
   authenticator therefore passes only with SCTs embedded in its certificate.
 
-The tests (`crates/browntls-core/tests/transparency*.rs`,
-`crates/browntls-tokio/tests/transparency.rs`) run browntls against itself
-on both providers, buffered and unbuffered, with run-time generated logs
-and lists encoded independently of `browntls-pki`. No other implementation
-of the extension is available in the repository's interoperability tooling,
-so there is no third-party test.
+The TLS tests run browntls against itself on both providers through
+buffered and unbuffered core and Tokio connections, including the lazy
+acceptor. A blocking Linux kTLS test checks the userspace CT decision
+before handoff and authenticated data exchange after handoff.
 
 ## Crypto provider mount point
 
@@ -2788,6 +2788,8 @@ record and handshake details describe DTLS 1.3.
   on the validated address and discard candidate application input while
   validation is pending. Blocking and Tokio clients can replace a
   connected local UDP socket while retaining the association and clock.
+  A single-socket server responds to a valid probe on its preferred
+  local socket independently of validation of the peer's address.
   A server handle stays bound to the originally admitted address and its
   current validated address is reported separately. See
   [Tokio DTLS](../crates/browntls-tokio/README.md#dtls-over-udp).
@@ -2877,6 +2879,10 @@ sans-I/O tests. The
 [Docker DTLS suite](../tests/e2e/README.md#dtls-13-interoperability)
 covers mutually authenticated full DTLS 1.3 handshakes against wolfSSL in
 both roles, with ECDSA P-256, application data and `close_notify`.
+The opt-in Pion suite checks RFC 9853 rebind after mutual authentication and
+an application exchange on one association. The simulated network checks
+ACK loss and ordering, timeout, epoch rollover and replay independently
+of peer support for those scenarios.
 
 ### Cargo features (`browntls-core`)
 

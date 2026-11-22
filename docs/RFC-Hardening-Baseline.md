@@ -363,6 +363,29 @@ configuration and API migration.
 
 [phase2-dc-api]: Architecture.md#delegated-credentials-rfc-9345
 
+## Phase 4 follow-up
+
+Phase 4 starts from the Phase 3 tip `a664b6c`. The RFC Editor index lists
+DTLS erratum 8100 as verified. The existing ACK content type already
+matches its correction. Flight and epoch errata remain reported. CT
+erratum 8670 is held for document update and concerns the Merkle proof
+description. The index lists no RFC 9853 errata for this baseline.
+
+| Requirement | Regression and interoperability coverage |
+| --- | --- |
+| RFC 9162 §§2.1 and 4.7–4.12 | [Independent PKI vectors][phase4-ct-vectors] verify both log algorithms, embedded and delivered items, signed heads, and inclusion and consistency against public fixture roots. They exercise timestamp and work bounds. OCSP artifacts enter after extraction of the CT list. |
+| RFC 9162 §8.1.6 | The context-aware verifier checks both offers from the effective ClientHello in both TLS versions, after cookies or HelloRetryRequest where applicable. Core, Tokio, QUIC-TLS, DTLS, and kTLS tests exercise the shared authentication path. Standalone verification and exported authenticators use explicit contexts. |
+| RFC 9147 §§4, 5, 7 and 8 | Caller-clock and socket-adapter tests cover deadlines, delayed original ACKs, prior epochs, rollover, replay, cookies and bounded reassembly. A bounded sent-record history keeps eligible original ACKs usable after retry is scheduled. |
+| RFC 9853 §§3–5 | Both versions and selection modes exercise protected probes, the candidate byte budget, old-path traffic, address binding, expiry, and retained session identity. A single listening socket treats its local path as preferred while validating a remote address independently. |
+
+Public log coverage remains open for CT 2.0. DTLS peer coverage is
+documented by suite and direction in the [Docker DTLS matrix][phase4-dtls-e2e].
+The minikube UDP Service harness uses browntls at both endpoints for
+deployment and adapter coverage.
+
+[phase4-ct-vectors]: ../crates/browntls-pki/tests/data/ct_v2_independent/README.md
+[phase4-dtls-e2e]: ../tests/e2e/README.md#dtls-13-interoperability
+
 ## Phase 6 handoff
 
 Start each follow-up from the claim and its named regression. Re-evaluate

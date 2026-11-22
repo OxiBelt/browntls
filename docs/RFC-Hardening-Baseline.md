@@ -189,3 +189,79 @@ event names. Test assertions supply the result of the protected exchange.
 [rsl-ee]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/client/tls13.rs#L474
 [ktls-timing]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/docs/Architecture.md#linux-kernel-tls-browntls-ktls
 [dtls-scope]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/docs/Roadmap.md
+
+## Credential and certificate processing
+
+Review owner for these rows is
+**Codex PKI and crypto review (requested GPT-6 Luna)**.
+Checked errata include RFC 4055 verified 1468 (§3) and 1676 (§§3.1,
+4.1), RFC 8879 verified 8753 (§4), and RFC 8878 verified 6442
+(§3.1.1.5) and 7297 (§3.1.1.3.1.1). The RFC 5280 §4.1.1.3 item
+3986 and RFC 9162 §2.1.3.2 item 8670 are held. The index includes
+other clauses of these RFCs outside this map. RFC 5756 erratum 2021
+is held. RFC 9345 had no entries.
+
+| Claim and requirement | Entry points and transition | Existing coverage | Gap, constraints, and smallest follow-up |
+| --- | --- | --- | --- |
+| **2B. Delegated credentials.** RFC 9345 [§§4–4.2][dc-rfc] requires authorization by the parent certificate and peer validation of the signature, role context, algorithms and validity. Use is permitted when the peer offers it. | [`CertifiedKey` attachment][dc-attach] checks parent authorization and key and scheme suitability. [Credential validation][dc-validate] checks the signature and validity during the peer handshake. Client and server enforce the expiry on descendant resumption state. | Native and RustCrypto handshake targets include `handshake_with_delegated_credential`, `tampered_credential_is_illegal_parameter`, `credential_key_must_match`, and client-auth and resumption cases. Tokio has its own integration test. | Attachment leaves issuer signature verification to the peer. Treat optional early validation as local configuration hardening. Evaluate what the existing key and verifier APIs can validate without checking a staged credential against the wrong clock or trusting it on the peer's behalf. `attachment_checks_delegated_credential_issuer_and_role` should assert typed error reporting once the fallible API is decided. |
+| **3A. PSS parameter identity and restrictions.** RFC 4055 [§2.1][pss-encoding] and [§§3.1–3.3][pss-rfc] distinguish algorithm encodings, PSS SPKI restrictions and signature parameters. RFC 5756 [§2][pss-update] requires PSS signature parameters and distinguishes CA and end-entity SPKI recommendations. RFC 5280 [§§4.1.1.2 and 4.1.2.3][pkix-rfc] requires the certificate's inner and outer signature algorithm identifiers to agree. RFC 9846 [§4.3.3][tls-sigs] adds TLS signature-scheme rules. | [Algorithm matching][pss-id] and the [PSS parser][pss-parser] already canonicalize supported incoming identifiers. [Certificate parsing][pss-cert] compares the two certificate fields bytewise. [Signed-data verification][pss-signed] and native signer checks apply key and signature restrictions at use. | `equivalent_pss_encodings_match_the_canonical_algorithms`, `equivalent_identifiers_in_certificate_chains_validate`, `signature_algorithm_mismatch_is_rejected_at_parse_time`, cover parsing and path validation. Native signing tests separately cover supported private-key restrictions. | Preserve strict DER, TLS digest-length salt, hash and MGF checks, and the existing SHA-1 policy. Review whether any remaining comparison requires semantic equivalence, separately for certificates, CRLs and custom verification descriptors. `restricted_pss_parameter_equivalence_preserves_policy` should distinguish valid supported encodings from different or disallowed parameters. |
+| **3B. Zstandard bounds.** RFC 8879 [§§3–5][cc-rfc] permits an offered algorithm and requires exact decompressed length and failure on decompression errors. Verified erratum 8753 specifies the Certificate body without the handshake header. RFC 8878 [§3.1.1.1.2][zstd-rfc] recommends support for windows up to 8 MiB and permits local decoder limits. | [Zstandard codec][zstd-source] checks its 128 KiB window limit before decoding. The [handshake encoder][cc-wire] compresses the serialized Certificate body. The [compression layer][cc-source] bounds decoded output independently with a configurable limit and a 64 KiB hard cap. It feeds normal certificate verification. | `frames_declaring_a_large_window_are_refused_unread`, `built_ins_compress_both_certificates`, `a_server_certificate_of_another_length_is_bad_certificate`, `compression_across_providers`, and the memory suite. | The smaller window is a documented interoperability tradeoff. Seek independently produced libzstd one-shot and streaming frames with provenance, then evaluate an allocation budget independently of output size. Keep zlib and Brotli coverage separate. `libzstd_frames_within_budget_decode_exactly` should cover legitimate encoder output and independently check output bounds. |
+| **4A. CT 2.0 evidence.** RFC 9162 [§2.1][ct-merkle] specifies Merkle proof algorithms, [§§4.8–4.12][ct-artifacts] specifies signed artifacts and proofs, and [§§6.3–6.5][ct-transport] specifies TLS presentation. Log count, freshness and trust configuration require an explicit relying-party policy. | [PKI transparency][ct-pki] checks artifacts and proofs. [WebPKI CT policy][ct-core] evaluates evidence from certificates, OCSP and TLS. The core TLS offer and server list are shared by supported stream adapters. | `scts_from_the_three_sources`, `inclusion_with_a_delivered_tree_head`, `sct_of_a_wrong_key_or_certificate_does_not_count`, and both providers' TLS cases. The stock fixtures and separate RFC-derived Merkle reference are repository-generated. | Independent signed artifacts and public log interoperability remain open. Prefer a published or independently generated fixture with revision, producer, expected result and reuse terms. `independent_ct_v2_signatures_and_proofs_validate` should check SCT and STH signatures, inclusion and consistency, and the configured proof and policy limits. |
+
+### API reach and boundaries
+
+- Delegated credentials use common certificate configuration and
+  verification hooks for buffered, unbuffered and Tokio TLS. Client
+  use includes handshake and post-handshake authentication on supported
+  stream paths. Key issuance coverage uses the native provider. Peer
+  verification uses the configured provider and verifier. A custom
+  verifier must supply its delegated-key verification hook.
+- PSS parsing and PKI validation can run with `alloc`. Verify shared
+  path, CRL, and TLS 1.2/1.3 verification separately from the native
+  PSS-key signing cases. The presence of a provider entry point does
+  not imply that it can load each key type.
+- Zstandard is an optional core and facade codec. A Tokio TLS stream
+  uses the selected core configuration. QUIC-TLS and DTLS share parts of the
+  TLS 1.3 handshake. Their applicability is feature-specific and
+  subject to each transport's rules. Shared code is source evidence
+  and dedicated adapter assertions remain a qualification gap.
+  Linux kTLS inherits the established identity at handoff.
+- CT low-level parsing and proof logic are independent of sockets.
+  Tests for TLS 1.2 and 1.3 cover the offer, policy and connection
+  observation. This is distinct from demonstrating CT in QUIC or
+  DTLS end to end. The [documented QUIC paths][ct-quic] distinguish
+  TLS handshake support from independent QUIC interoperability.
+
+### Representative certificate evidence
+
+`built_ins_compress_both_certificates` passed in both
+`cert_compression` targets. The current fixture asserts that each
+enabled codec processes both peer Certificate messages during TLS 1.3
+client authentication. The other checked tests validate failure on
+length mismatch and offer handling. No certificate bytes are included
+in this summary. Local libzstd CLI 1.5.7 was available. An independent
+fixture and peer exchange remain future evidence.
+
+[dc-rfc]: https://www.rfc-editor.org/rfc/rfc9345.html#section-4
+[pss-encoding]: https://www.rfc-editor.org/rfc/rfc4055.html#section-2.1
+[pss-rfc]: https://www.rfc-editor.org/rfc/rfc4055.html#section-3.2
+[pss-update]: https://www.rfc-editor.org/rfc/rfc5756.html#section-2
+[pkix-rfc]: https://www.rfc-editor.org/rfc/rfc5280.html#section-4.1
+[tls-sigs]: https://www.rfc-editor.org/rfc/rfc9846.html#section-4.3.3
+[cc-rfc]: https://www.rfc-editor.org/rfc/rfc8879.html#section-3
+[zstd-rfc]: https://www.rfc-editor.org/rfc/rfc8878.html#section-3.1.1.1.2
+[ct-merkle]: https://www.rfc-editor.org/rfc/rfc9162.html#section-2.1
+[ct-artifacts]: https://www.rfc-editor.org/rfc/rfc9162.html#section-4.8
+[ct-transport]: https://www.rfc-editor.org/rfc/rfc9162.html#section-6.3
+[dc-attach]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/crypto/signer.rs#L218
+[dc-validate]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/delegated_credential.rs
+[pss-id]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/alg_id.rs#L41
+[pss-parser]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/rsassa_pss.rs
+[pss-cert]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/cert.rs#L125
+[pss-signed]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/signed_data.rs#L203
+[zstd-source]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/compress/zstd.rs#L54
+[cc-wire]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/server/tls13/flight.rs#L423
+[cc-source]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/compress.rs
+[ct-pki]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-pki/src/transparency.rs
+[ct-core]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/crates/browntls-core/src/webpki/transparency.rs
+[ct-quic]: https://github.com/OxiBelt/browntls/blob/c6ac441cecba25b9d524e6dec8c55613f8815fb0/docs/Architecture.md#ct-20-in-tls

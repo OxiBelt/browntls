@@ -701,6 +701,8 @@ impl World {
             let _ = (
                 client.tls13_tickets_received(),
                 client.is_early_data_accepted(),
+                client.early_data_alpn(),
+                client.early_data_bytes_left(),
                 client.post_handshake_auth_responses(),
                 client.fips(),
                 format!("{client:?}"),

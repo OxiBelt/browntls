@@ -8,6 +8,44 @@ use super::setup::{Knobs, server_name};
 use super::{ConnectArgs, Op};
 use crate::input::{put_field, put_short_field};
 
+#[test]
+fn early_data_alpn_retains_the_ticket_protocol_after_rejection() {
+    use std::io::Write;
+
+    use super::World;
+    use crate::input::Input;
+
+    crate::init();
+    let knobs = Knobs::read(&mut Input::new(&[0x41, 0x40, 0, 0, 0]));
+    let mut world = World::new(knobs).expect("world");
+    world.connect(&ConnectArgs::default());
+    world.pump();
+    assert!(world.healthy());
+    let client = world.client().expect("client");
+    assert_eq!(client.alpn_protocol(), Some(b"fuzz".as_slice()));
+    assert!(client.tls13_tickets_received() > 0);
+
+    world.connect(&ConnectArgs {
+        flags: 2,
+        alpn: b"\x02h2",
+        ..ConnectArgs::default()
+    });
+    let client = world.client().expect("resuming client");
+    assert_eq!(client.early_data_alpn(), Some(b"fuzz".as_slice()));
+    client
+        .early_data()
+        .expect("offered early data")
+        .write_all(b"early")
+        .expect("early write");
+    world.early_sent.extend_from_slice(b"early");
+    world.pump();
+    assert!(world.healthy());
+    let client = world.client().expect("resumed client");
+    assert!(!client.is_early_data_accepted());
+    assert_eq!(client.alpn_protocol(), Some(b"h2".as_slice()));
+    assert_eq!(client.early_data_alpn(), Some(b"fuzz".as_slice()));
+}
+
 // ------------------------------------------------------------------ seeds
 
 /// Builds one seed: knobs, first connection, then operations.
@@ -113,6 +151,7 @@ pub fn seeds() -> Vec<Vec<u8>> {
         .op(Op::CloseNotify, &[1])
         .op(Op::Pump, &[])
         .reconnect(&resume)
+        .op(Op::Accessors, &[])
         .op(Op::EarlyWrite, &[5, b'e', b'a', b'r', b'l', b'y'])
         .op(Op::Export, &[1, b'x', 2, 0, 0, 16])
         .transfer(0, 0, 0, 0)

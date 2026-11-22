@@ -1840,8 +1840,10 @@ nothing per record and copy plaintext at most once:
   alert, writes it and then fails; later operations fail the same way.
   Early data a server accepts is appended to a vector the stream keeps
   (`early_data`, `take_early_data`), bounded by
-  `ServerConfig::max_early_data_size`. The connector does not send early
-  data.
+  the configured allowance. By default the connector completes the
+  handshake before returning. On opt-in, the client adds early ciphertext
+  behind ClientHello using the core transmit grant. It uses the same
+  resend and acknowledgement policy as the buffered client.
 - A write encrypts at most 65 536 bytes and returns that count; the next
   write first waits for `Outgoing` to drain, so it holds the records of
   one write at most, besides the bounded answers below and `close_notify`. A

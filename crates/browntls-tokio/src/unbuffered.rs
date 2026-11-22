@@ -67,22 +67,19 @@
 //!   [`process_tls_records`] by hand or to hand the connection to the
 //!   kernel. One generic [`TlsStream`] serves both sides; there is no enum
 //!   over a client and a server stream.
-//! * **0-RTT.** A client does not send early data here; a configuration
-//!   that enables it handshakes without sending any. A server that accepts
-//!   early data ([`ServerConfig::max_early_data_size`]) has it collected
-//!   during the handshake: [`TlsStream::early_data`]. The acceptors have no
-//!   `early_data` option: a stream is returned only after the handshake.
+//! * **0-RTT.** A client can opt into early writes with
+//!   [`TlsConnector::early_data`]. It uses the same resend policy and
+//!   acknowledgement as the buffered client. A server that accepts early
+//!   data has it collected during the handshake in [`TlsStream::early_data`].
 //!
 //! Flushing, closing and errors are as described at the
-//! [crate root](crate). Two things described there are not here yet. The
-//! streams of this module have no `into_split`; [`tokio::io::split`] splits
-//! them. And they take nothing from Tokio's task budget themselves (the
-//! `coop` feature does not cover this module): a task that drives one
-//! yields when its transport does, as Tokio's sockets do.
+//! [crate root](crate). Clients support a native [`TlsStream::into_split`]
+//! with early-data controls. [`tokio::io::split`] splits either stream.
+//! These streams yield when their transport does. The `coop` feature
+//! applies to the buffered adapter.
 //!
 //! [`tokio::io::split`]: https://docs.rs/tokio/1/tokio/io/fn.split.html
 //! [`process_tls_records`]: browntls_core::unbuffered::UnbufferedConnectionCommon::process_tls_records
-//! [`ServerConfig::max_early_data_size`]: browntls_core::ServerConfig::max_early_data_size
 //! [`UnbufferedClientConnection`]: browntls_core::client::UnbufferedClientConnection
 //! [`UnbufferedServerConnection`]: browntls_core::server::UnbufferedServerConnection
 
@@ -98,7 +95,9 @@ use browntls_core::server::UnbufferedServerConnection;
 use browntls_core::unbuffered::UnbufferedConnectionCommon;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::client_early::{EarlyDataOutcome, EarlyResult};
 use crate::common::{PeerRevocation, TlsState};
+use crate::split::{self, ReadHalf, WriteHalf};
 
 mod buffers;
 mod driver;
@@ -131,6 +130,9 @@ pub struct TlsStream<IO, C> {
     outgoing: Outgoing,
     /// 0-RTT data a server accepted during the handshake.
     early_data: Vec<u8>,
+    /// An opt-in client early write phase and its durable result.
+    client_early: Option<driver::ClientEarly<C>>,
+    client_early_result: EarlyResult,
     /// Scratch space of vectored writes; empty between them.
     gather: Vec<u8>,
     state: TlsState,
@@ -178,6 +180,8 @@ impl<IO, C> TlsStream<IO, C> {
             incoming,
             outgoing: Outgoing::new(),
             early_data: Vec::new(),
+            client_early: None,
+            client_early_result: EarlyResult::default(),
             gather: Vec::new(),
             state: TlsState::Stream,
             need_flush: false,
@@ -225,10 +229,10 @@ impl<IO, C> TlsStream<IO, C> {
 
     /// Takes the stream apart without losing what it buffered.
     ///
-    /// Flush the stream first: TLS bytes already written to the transport
-    /// are not flushed here. A connection whose peer has closed (reads
-    /// returned end of file) reports `WriteTraffic` or `Closed` from then
-    /// on, not `PeerClosed` again.
+    /// Settle client early data and flush the stream first. The adapter's
+    /// pending resend state is dropped, and TLS bytes already written to
+    /// the transport are not flushed here. After the peer closes and
+    /// reads return EOF, the connection reports `WriteTraffic` or `Closed`.
     pub fn into_parts(self) -> StreamParts<IO, C> {
         let (plaintext, incoming_tls) = self.incoming.into_parts();
         StreamParts {
@@ -238,7 +242,62 @@ impl<IO, C> TlsStream<IO, C> {
             incoming_tls,
             outgoing_tls: self.outgoing.into_unsent(),
             early_data: self.early_data,
+            early_data_outcome: self.client_early_result.outcome,
         }
+    }
+}
+
+impl<IO> TlsStream<IO, UnbufferedClientConnection> {
+    /// Returns the local early-data outcome without consuming it.
+    pub fn early_data_outcome(&self) -> EarlyDataOutcome {
+        self.client_early_result.outcome
+    }
+
+    /// Acknowledges unresent early data, returning its byte count once.
+    ///
+    /// Subsequent writes may proceed. The caller decides what to send.
+    pub fn acknowledge_rejected_early_data(&mut self) -> Option<usize> {
+        self.client_early_result.acknowledge()
+    }
+
+    /// Splits the client into halves that share its early-data state.
+    pub fn into_split(self) -> (ReadHalf<Self>, WriteHalf<Self>) {
+        split::split(self)
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO, UnbufferedClientConnection> {
+    /// Completes the early phase and returns its outcome. A rejected
+    /// outcome leaves the stream usable after acknowledgement.
+    pub async fn finish_early_data(&mut self) -> io::Result<EarlyDataOutcome> {
+        std::future::poll_fn(|cx| self.poll_early_data_outcome(cx)).await
+    }
+}
+
+impl<IO> ReadHalf<ClientTlsStream<IO>> {
+    /// Returns the shared stream's local early-data outcome.
+    pub async fn early_data_outcome(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.inspect(TlsStream::early_data_outcome).await
+    }
+}
+
+impl<IO> WriteHalf<ClientTlsStream<IO>> {
+    /// Returns the shared stream's local early-data outcome.
+    pub async fn early_data_outcome(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.inspect(|stream| stream.early_data_outcome()).await
+    }
+
+    /// Acknowledges unresent early data on the shared stream.
+    pub async fn acknowledge_rejected_early_data(&mut self) -> io::Result<Option<usize>> {
+        self.inspect(TlsStream::acknowledge_rejected_early_data)
+            .await
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> WriteHalf<ClientTlsStream<IO>> {
+    /// Completes the shared stream's early phase and returns its outcome.
+    pub async fn finish_early_data(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.drive(TlsStream::poll_early_data_outcome).await
     }
 }
 
@@ -271,6 +330,7 @@ impl<IO: fmt::Debug, C: fmt::Debug> fmt::Debug for TlsStream<IO, C> {
             .field("incoming", &self.incoming)
             .field("outgoing", &self.outgoing)
             .field("early_data", &self.early_data.len())
+            .field("early_data_outcome", &self.client_early_result.outcome)
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
@@ -296,6 +356,8 @@ pub struct StreamParts<IO, C> {
     /// 0-RTT data a server accepted and that was not taken; see
     /// [`TlsStream::early_data`].
     pub early_data: Vec<u8>,
+    /// The local client early-data outcome, if any.
+    pub early_data_outcome: EarlyDataOutcome,
 }
 
 /// Lengths only: the buffers hold application plaintext.

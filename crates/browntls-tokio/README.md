@@ -423,19 +423,20 @@ async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> 
 `get_ref` gives an `UnbufferedClientConnection` or
 `UnbufferedServerConnection` (the negotiated parameters and exporters, no
 reader, writer or I/O methods), and `into_parts` the connection with the
-stream's buffers. The unbuffered connector does not send 0-RTT early data; a
-server's accepted early data is collected during the handshake
+stream's buffers. The unbuffered connector starts in handshake-first mode.
+Opt into early writes and, separately, into bounded automatic resend using
+the same settings as the buffered connector. Settle and flush before
+unwrapping a stream for manual kernel handoff. A server's accepted early
+data is collected during the handshake
 (`TlsStream::early_data`), and the unbuffered acceptors have no
 `early_data` option to return a stream before the handshake completes.
 While more than 16 KiB of answers to the peer are unwritten, reads take no
 more input.
 
-Three things under Behaviour below are not there for these streams yet:
-they have no `into_split` (`tokio::io::split` splits them), the `coop`
-feature does not cover them, so they take nothing from the task budget
-themselves (a transport that counts, such as Tokio's sockets, still does),
-and their handshake futures give only the transport (`get_ref`, `get_mut`),
-not the connection.
+Clients can use `into_split` and inspect early-data results on either half.
+`tokio::io::split` also works for either stream. Unbuffered streams use the
+transport's task budget behavior. Their handshake futures give access to
+the transport through `get_ref` and `get_mut`.
 
 ## Behaviour
 

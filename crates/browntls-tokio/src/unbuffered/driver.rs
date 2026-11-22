@@ -32,6 +32,9 @@ use super::TlsStream;
 use super::buffers::Outgoing;
 use crate::common::{joint_waker, write_after_shutdown};
 
+mod early;
+pub(super) use early::ClientEarly;
+
 /// The most plaintext one write encrypts: four records of the largest size
 /// (more, smaller ones under a lower fragment size or record size limit). A
 /// write takes more only once the transport took the records of the one
@@ -465,6 +468,7 @@ where
     /// [`CONTROL_BACKLOG_LIMIT`] bytes of such records are unwritten, the
     /// read takes no more input and waits for the transport to take them.
     pub(super) fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        ready!(self.poll_finish_client_early_for_read(cx))?;
         if self.answering {
             // An answer an earlier read could not write out entirely.
             self.answer_peer(cx);
@@ -633,7 +637,16 @@ where
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.write_side(cx, |this, cx| this.write_plain(cx, buf))
+        if buf.is_empty() {
+            return self.write_side(cx, |this, cx| this.write_plain(cx, buf));
+        }
+        self.write_side(cx, |this, cx| {
+            let early = ready!(this.poll_write_client_early(cx, &[IoSlice::new(buf)]))?;
+            if early > 0 {
+                return Poll::Ready(Ok(early));
+            }
+            this.write_plain(cx, buf)
+        })
     }
 
     fn write_plain(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -663,7 +676,16 @@ where
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        self.write_side(cx, |this, cx| this.write_slices(cx, bufs))
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return self.write_side(cx, |this, cx| this.write_slices(cx, bufs));
+        }
+        self.write_side(cx, |this, cx| {
+            let early = ready!(this.poll_write_client_early(cx, bufs))?;
+            if early > 0 {
+                return Poll::Ready(Ok(early));
+            }
+            this.write_slices(cx, bufs)
+        })
     }
 
     fn write_slices(
@@ -718,6 +740,8 @@ where
     }
 
     fn flush_all(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        ready!(self.poll_finish_client_early(cx))?;
+        self.client_early_result.check_write()?;
         // A connection that failed has its alert encoded already: write
         // that out before reporting the failure.
         let queued = self.encode_queued();
@@ -735,6 +759,8 @@ where
     }
 
     fn shutdown_all(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        ready!(self.poll_finish_client_early(cx))?;
+        self.client_early_result.check_write()?;
         if self.state.writeable() {
             while !self.close_notify() {
                 // `close_notify` cannot be queued before the connection

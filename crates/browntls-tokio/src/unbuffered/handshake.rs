@@ -21,12 +21,16 @@ use browntls_core::{ClientConfig, ClientServerIdentity, ServerConfig, SideData};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::buffers::{Incoming, Outgoing};
+use super::driver::ClientEarly;
 use super::lazy::poll_send_alert;
 use super::{ClientTlsStream, ServerTlsStream, TlsStream};
+use crate::client_early::{EarlyResult, RejectedEarlyDataPolicy};
 use crate::common::RevocationSource;
 
 /// A handshake in progress, or how it ended.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum MidHandshake<IO, C> {
+    // Keep the stream inline to avoid allocating a box on every handshake.
     Handshaking(TlsStream<IO, C>),
     /// Continuing a handshake failed before any I/O, with an alert to send
     /// before reporting `error`.
@@ -91,6 +95,9 @@ where
             #[allow(clippy::panic)]
             Self::End => panic!("TLS handshake future polled after completion"),
         };
+        if stream.client_early.is_some() {
+            return Poll::Ready(Ok(stream));
+        }
         match stream.poll_handshake(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(stream)),
             Poll::Ready(Err(error)) => Poll::Ready(Err((error, stream.io))),
@@ -109,10 +116,28 @@ where
 #[derive(Clone)]
 pub struct TlsConnector {
     inner: Arc<ClientConfig>,
+    early_data: bool,
+    rejected_early_data: RejectedEarlyDataPolicy,
     revocation: RevocationSource,
 }
 
 impl TlsConnector {
+    /// Enables returning before the handshake to write eligible 0-RTT
+    /// data. Also enable it in [`ClientConfig`]. Off by default.
+    ///
+    /// Early data is replayable. Send only requests that are safe to repeat.
+    pub fn early_data(mut self, enabled: bool) -> Self {
+        self.early_data = enabled;
+        self
+    }
+
+    /// Sets how the client handles early data the server declines.
+    /// This does not enable early writes.
+    pub fn rejected_early_data_policy(mut self, policy: RejectedEarlyDataPolicy) -> Self {
+        self.rejected_early_data = policy;
+        self
+    }
+
     /// Replaces the ECH mode in `config` with the first usable configuration
     /// from `pem`, using the caller's HPKE `suites`.
     ///
@@ -143,8 +168,8 @@ impl TlsConnector {
     ///
     /// `domain` is checked against the server's certificate and sent as SNI
     /// when it is a DNS name. The returned future resolves once the
-    /// handshake completes. No 0-RTT data is sent, whatever the
-    /// configuration enables.
+    /// handshake completes, or earlier when [`Self::early_data`] is
+    /// enabled and the selected PSK allows early writes.
     pub fn connect<IO>(&self, domain: ServerName<'static>, stream: IO) -> Connect<IO>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
@@ -259,12 +284,14 @@ impl TlsConnector {
         match result {
             Ok(mut conn) => {
                 f(&mut conn);
-                Connect(MidHandshake::Handshaking(TlsStream::new(
-                    stream,
-                    conn,
-                    Incoming::new(),
-                    self.revocation.for_stream(),
-                )))
+                let has_early = self.early_data && conn.early_data_bytes_left() > 0;
+                let mut stream =
+                    TlsStream::new(stream, conn, Incoming::new(), self.revocation.for_stream());
+                if has_early {
+                    stream.client_early = Some(ClientEarly::new(self.rejected_early_data));
+                    stream.client_early_result = EarlyResult::pending();
+                }
+                Connect(MidHandshake::Handshaking(stream))
             }
             Err(error) => Connect(MidHandshake::Error {
                 io: stream,
@@ -278,6 +305,8 @@ impl From<Arc<ClientConfig>> for TlsConnector {
     fn from(inner: Arc<ClientConfig>) -> Self {
         Self {
             inner,
+            early_data: false,
+            rejected_early_data: RejectedEarlyDataPolicy::default(),
             revocation: RevocationSource::default(),
         }
     }
@@ -286,6 +315,8 @@ impl From<Arc<ClientConfig>> for TlsConnector {
 impl fmt::Debug for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsConnector")
+            .field("early_data", &self.early_data)
+            .field("rejected_early_data", &self.rejected_early_data)
             .field("revocation", &self.revocation)
             .finish_non_exhaustive()
     }

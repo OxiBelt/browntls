@@ -570,6 +570,13 @@ impl CompleteClientHelloHandling {
         };
         let skip_early_data_limit =
             max_early_data_size(self.config.max_early_data_size).max(early_data_limit as usize);
+        let early_record_size_limit = match &external {
+            Some((candidate, _)) => candidate.psk.early_data_record_size_limit(),
+            None => resumedata
+                .as_ref()
+                .and_then(|session| session.early_data_record_size_limit)
+                .unwrap_or(crate::common_state::max_record_size_limit(true)),
+        };
 
         let client_hello_hash = self.transcript.current_hash();
         let psk_secret: Option<&[u8]> = match (&resumedata, &external) {
@@ -589,6 +596,7 @@ impl CompleteClientHelloHandling {
                         &*self.config.key_log,
                         &self.randoms.client,
                         cx.common,
+                        early_record_size_limit,
                     );
                 }
                 // RFC 9846 §7.5: the early exporter, for use with the 0-RTT

@@ -505,6 +505,19 @@ impl CommonState {
             .map_err(|err| self.send_fatal_alert(AlertDescription::RecordOverflow, err))
     }
 
+    pub(crate) fn negotiated_receive_record_size_limit(&self) -> Option<u16> {
+        self.record_layer.inbound_record_size_limit()
+    }
+
+    pub(crate) fn peer_tls13_record_size_limit(&self) -> u16 {
+        self.message_fragmenter.peer_max_fragment_len() as u16 + 1
+    }
+
+    pub(crate) fn set_early_data_record_size_limit(&mut self, limit: Option<u16>) {
+        self.message_fragmenter
+            .set_early_data_max_fragment_len(limit.map(|limit| usize::from(limit) - 1));
+    }
+
     pub(crate) fn current_io_state(&self) -> IoState {
         IoState {
             tls_bytes_to_write: self.sendable_tls.len(),

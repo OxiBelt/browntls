@@ -418,6 +418,8 @@ impl Spec {
         if self.early != 0 {
             psk = psk
                 .with_early_data(self.early)
+                .with_early_data_record_size_limit(64 + (self.early % 1024) as u16)
+                .expect("record size limit in range")
                 .with_early_data_expiry(UnixTime::since_unix_epoch(Duration::from_secs(u64::MAX)));
         }
         if self.server_name {

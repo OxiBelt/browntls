@@ -66,6 +66,7 @@ pub(super) fn decide_if_early_data_allowed(
         && resume.is_fresh()
         && Some(resume.version) == cx.common.negotiated_version
         && resume.cipher_suite == suite.common.suite
+        && (cx.common.is_quic() || resume.early_data_record_size_limit.is_some())
         && resume.alpn.as_ref().map(|p| p.0.as_slice()) == cx.common.alpn_protocol.as_deref();
 
     if early_data_configured && early_data_possible && !cx.data.early_data.was_rejected() {

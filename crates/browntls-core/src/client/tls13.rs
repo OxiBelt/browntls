@@ -76,8 +76,8 @@ pub(super) fn fill_in_psk_binders(
 pub(super) fn derive_early_traffic_secret(
     key_log: &dyn crate::key_log::KeyLog,
     cx: &mut ClientContext<'_>,
-    hash_provider: &'static dyn crate::crypto::hash::Hash,
-    early_key_schedule: &KeyScheduleEarly,
+    first_psk: &OfferedPsk,
+    resuming: Option<&persist::Tls13ClientSessionValue>,
     sent_tls13_fake_ccs: &mut bool,
     transcript_buffer: &HandshakeHashBuffer,
     client_random: &[u8; 32],
@@ -85,12 +85,23 @@ pub(super) fn derive_early_traffic_secret(
     // The compatibility ChangeCipherSpec must precede our first ciphertext.
     emit_fake_ccs(sent_tls13_fake_ccs, cx.common);
 
-    let client_hello_hash = transcript_buffer.hash_given(hash_provider, &[]);
+    let record_size_limit = match (&first_psk.external, resuming) {
+        (Some(psk), _) => psk.early_data_record_size_limit(),
+        (None, Some(session)) => session.early_data_record_size_limit(),
+        (None, None) => crate::common_state::max_record_size_limit(true),
+    };
+    let early_key_schedule = KeyScheduleEarly::new(
+        first_psk.suite,
+        first_psk.secret.as_ref(),
+        Protocol::of(cx.common),
+    );
+    let client_hello_hash = transcript_buffer.hash_given(first_psk.suite.common.hash_provider, &[]);
     early_key_schedule.client_early_traffic_secret(
         client_hello_hash.as_ref(),
         key_log,
         client_random,
         cx.common,
+        record_size_limit,
     );
     cx.common.early_exporter =
         Some(early_key_schedule.early_exporter(client_hello_hash.as_ref(), key_log, client_random));

@@ -131,17 +131,21 @@ fn replay_expiry() -> browntls_core::pki_types::UnixTime {
 fn early_data_with_an_external_psk_when_allowed() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    let mut client_config = client_with(&chain, vec![early_psk()]);
+    let configured_psk = || early_psk().with_early_data_record_size_limit(64).unwrap();
+    let mut client_config = client_with(&chain, vec![configured_psk()]);
     client_config.enable_early_data = true;
     let replay = Arc::new(ReplayFixture::default());
-    let mut server_config =
-        psk_only_server(vec![early_psk().with_early_data_expiry(replay_expiry())]);
+    let mut server_config = psk_only_server(vec![
+        configured_psk().with_early_data_expiry(replay_expiry()),
+    ]);
+    server_config.record_size_limit = Some(256);
     server_config.external_psk_replay_policy = Some(replay.clone());
     let (mut client, mut server) = connect(client_config, server_config);
+    let request = [b'a'; 512];
     {
         let mut early = client.early_data().expect("PSK allows early data");
         assert_eq!(early.bytes_left(), 1024);
-        early.write_all(b"GET /idempotent").unwrap();
+        early.write_all(&request).unwrap();
     }
     do_handshake(&mut client, &mut server).unwrap();
     assert!(client.is_early_data_accepted());
@@ -151,7 +155,7 @@ fn early_data_with_an_external_psk_when_allowed() {
         .expect("server accepted early data")
         .read_to_end(&mut got)
         .unwrap();
-    assert_eq!(got, b"GET /idempotent");
+    assert_eq!(got, request);
     assert_eq!(replay.seen.lock().unwrap().len(), 1);
     exchange_data(&mut client, &mut server);
 }

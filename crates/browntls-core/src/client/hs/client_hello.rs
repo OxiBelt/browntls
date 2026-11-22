@@ -38,7 +38,7 @@ use crate::msgs::persist::{Retrieved, Tls13ClientSessionValue};
 use crate::psk::{OfferedPsk, PskSecret};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly, Protocol};
+use crate::tls13::key_schedule::{BinderLabel, Protocol};
 
 /// Looks up and validates a session to offer for `server_name`.
 fn find_session(
@@ -900,13 +900,11 @@ pub(super) fn emit_client_hello_for_retry(
     if let Some(first) = offered_psks.first()
         && cx.data.early_data.is_enabled()
     {
-        let schedule =
-            KeyScheduleEarly::new(first.suite, first.secret.as_ref(), Protocol::of(cx.common));
         tls13::derive_early_traffic_secret(
             &*config.key_log,
             cx,
-            first.suite.common.hash_provider,
-            &schedule,
+            first,
+            tls13_session.as_ref().map(|session| session.value),
             &mut input.sent_tls13_fake_ccs,
             &transcript_buffer,
             &input.random.0,

@@ -247,7 +247,10 @@ async fn migration_roundtrip(
         socket,
         settings(8),
         selection,
-        SessionLimits::default(),
+        SessionLimits {
+            receive_queue: 1,
+            ..SessionLimits::default()
+        },
     )
     .unwrap();
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -269,7 +272,10 @@ async fn migration_roundtrip(
         replacement.connect(address).await.unwrap();
         let migrated = replacement.local_addr().unwrap();
         drop(client.replace_socket(replacement).unwrap());
-        client.send(b"candidate").await.unwrap();
+        // Both arrive before the client reads and answers path probes.
+        // Either would occupy the single receive slot if delivered.
+        client.send(b"first candidate datagram").await.unwrap();
+        client.send(b"second candidate datagram").await.unwrap();
         let ((), ()) = tokio::join!(
             async {
                 assert_eq!(session.peer_addr_changed().await.unwrap(), migrated);
@@ -286,6 +292,8 @@ async fn migration_roundtrip(
         client.send(b"after").await.unwrap();
         assert_eq!(session.recv().await.unwrap(), Some(b"after".to_vec()));
         session.close().await.unwrap();
+        assert_eq!(session.recv().await.unwrap(), None);
+        assert_eq!(session.original_peer_addr(), admitted);
         drop(listener);
     })
     .await;

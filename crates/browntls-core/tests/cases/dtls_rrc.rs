@@ -208,3 +208,263 @@ fn protected_path_validation(versions: dtls::Versions) {
     assert!(pair.client.send_rrc(&message, &mut closed).is_err());
     assert!(closed.is_empty());
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn rrc_candidate_never_delivers_application_data_before_validation() {
+    socket_path_validation(dtls::Versions::V1_3);
+    #[cfg(feature = "tls12")]
+    socket_path_validation(dtls::Versions::V1_2);
+}
+
+#[cfg(feature = "std")]
+fn socket_path_validation(versions: dtls::Versions) {
+    use dtls::rrc::{DEFAULT_TIMEOUT, Message, MessageType, Selection};
+    use dtls::{ServerConnection, UdpPathValidation};
+    use std::net::SocketAddr;
+
+    fn input(
+        server: &mut ServerConnection,
+        paths: &mut UdpPathValidation,
+        mut datagram: Vec<u8>,
+        source: SocketAddr,
+        now: Duration,
+        output: &mut Vec<(SocketAddr, Vec<u8>)>,
+    ) -> Vec<Vec<u8>> {
+        let received = server.read_datagram(&mut datagram, now).unwrap();
+        paths
+            .input(
+                server,
+                &received,
+                &datagram,
+                source,
+                now,
+                &mut |data, peer| {
+                    output.push((peer, data.to_vec()));
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|range| datagram[range].to_vec())
+            .collect()
+    }
+
+    fn decode_rrc(pair: &mut Pair, data: &mut [u8], now: Duration) -> Message {
+        let received = pair.client.read_datagram(data, now).unwrap();
+        let payload = received.authenticated_records()[0]
+            .rrc_payload_range()
+            .unwrap();
+        Message::decode(&data[payload]).unwrap().unwrap()
+    }
+
+    fn probe(
+        pair: &mut Pair,
+        paths: &mut UdpPathValidation,
+        now: Duration,
+    ) -> (SocketAddr, Message) {
+        let mut output = None;
+        paths
+            .poll(&mut pair.server, now, &mut |data, peer| {
+                assert!(output.replace((peer, data.to_vec())).is_none());
+            })
+            .unwrap();
+        let (path, mut data) = output.unwrap();
+        let message = decode_rrc(pair, &mut data, now);
+        assert_eq!(message.kind, MessageType::Challenge);
+        (path, message)
+    }
+
+    let old = SocketAddr::from(([127, 0, 0, 1], 41000));
+    let candidate = SocketAddr::from(([127, 0, 0, 1], 41001));
+    let settings = || rrc_settings(8, true).with_versions(versions);
+    for selection in [Selection::Basic, Selection::Enhanced] {
+        let mut pair = cid_pair(settings(), settings());
+        let mut sim = Sim::perfect();
+        pair.handshake(&mut sim).unwrap();
+        let mut paths = UdpPathValidation::new(&pair.server, old, selection).unwrap();
+        let mut output = Vec::new();
+        let mut trigger = Vec::new();
+        pair.client
+            .send_rrc(
+                &Message {
+                    kind: MessageType::Challenge,
+                    cookie: [7; 8],
+                },
+                &mut trigger,
+            )
+            .unwrap();
+        let credited = trigger.len();
+        assert!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                trigger,
+                candidate,
+                sim.now,
+                &mut output
+            )
+            .is_empty()
+        );
+        assert_eq!(paths.active(), old);
+        assert_eq!(paths.pending(), Some(candidate));
+        let (reply_path, mut reply) = output.pop().unwrap();
+        assert_eq!(reply_path, candidate);
+        assert_eq!(reply.len(), credited);
+        assert_eq!(
+            decode_rrc(&mut pair, &mut reply, sim.now),
+            Message {
+                kind: MessageType::Response,
+                cookie: [7; 8]
+            }
+        );
+
+        let mut candidate_bytes = reply.len();
+        let mut last_probe = None;
+        let mut now = sim.now;
+        for _ in 0..16 {
+            let Some(due) = paths.next_timeout() else {
+                break;
+            };
+            assert!(due >= now && due <= sim.now + DEFAULT_TIMEOUT * 3);
+            now = due;
+            paths
+                .poll(&mut pair.server, now, &mut |data, peer| {
+                    output.push((peer, data.to_vec()))
+                })
+                .unwrap();
+            for (peer, mut data) in output.drain(..) {
+                assert!(peer == candidate || (peer == old && selection == Selection::Enhanced));
+                if peer == candidate {
+                    candidate_bytes += data.len();
+                }
+                let probe = decode_rrc(&mut pair, &mut data, now);
+                assert_eq!(probe.kind, MessageType::Challenge);
+                if peer == candidate {
+                    last_probe = Some(probe);
+                }
+            }
+            assert_eq!(paths.active(), old);
+        }
+        assert_eq!(candidate_bytes, 3 * credited, "{versions:?} {selection:?}");
+        assert_eq!(paths.pending(), None);
+        assert_eq!(paths.next_timeout(), None);
+
+        // A genuine but late reply cannot revive the expired validation.
+        let mut late = Vec::new();
+        pair.client
+            .send_rrc(
+                &Message {
+                    kind: MessageType::Response,
+                    ..last_probe.unwrap()
+                },
+                &mut late,
+            )
+            .unwrap();
+        assert!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                late,
+                candidate,
+                now,
+                &mut output
+            )
+            .is_empty()
+        );
+        assert_eq!(paths.active(), old);
+        assert_eq!(paths.next_timeout(), None);
+        assert!(output.is_empty());
+
+        let mut active_data = Vec::new();
+        pair.client
+            .send(b"old path after expiry", &mut active_data)
+            .unwrap();
+        assert_eq!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                active_data,
+                old,
+                now,
+                &mut output
+            ),
+            [b"old path after expiry".to_vec()]
+        );
+
+        // A new observation can succeed. Only data following the matching
+        // response in wire order is released, even in the same datagram.
+        let mut trigger = Vec::new();
+        pair.client
+            .send(b"start a fresh validation", &mut trigger)
+            .unwrap();
+        assert!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                trigger,
+                candidate,
+                now,
+                &mut output
+            )
+            .is_empty()
+        );
+        let (mut path, mut challenge) = probe(&mut pair, &mut paths, now);
+        if selection == Selection::Enhanced {
+            assert_eq!(path, old);
+            let mut drop = Vec::new();
+            pair.client
+                .send_rrc(
+                    &Message {
+                        kind: MessageType::Drop,
+                        ..challenge
+                    },
+                    &mut drop,
+                )
+                .unwrap();
+            assert!(input(&mut pair.server, &mut paths, drop, old, now, &mut output).is_empty());
+            now = paths.next_timeout().unwrap();
+            (path, challenge) = probe(&mut pair, &mut paths, now);
+        }
+        assert_eq!(path, candidate);
+        let response = Message {
+            kind: MessageType::Response,
+            ..challenge
+        };
+        let mut wrong_path = Vec::new();
+        pair.client.send_rrc(&response, &mut wrong_path).unwrap();
+        assert!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                wrong_path,
+                old,
+                now,
+                &mut output
+            )
+            .is_empty()
+        );
+        assert_eq!(paths.active(), old);
+        assert_eq!(paths.pending(), Some(candidate));
+
+        let mut coalesced = Vec::new();
+        pair.client
+            .send(b"before response", &mut coalesced)
+            .unwrap();
+        pair.client.send_rrc(&response, &mut coalesced).unwrap();
+        pair.client.send(b"after response", &mut coalesced).unwrap();
+        assert_eq!(
+            input(
+                &mut pair.server,
+                &mut paths,
+                coalesced,
+                candidate,
+                now,
+                &mut output
+            ),
+            [b"after response".to_vec()]
+        );
+        assert_eq!(paths.active(), candidate);
+        assert_eq!(paths.next_timeout(), None);
+        assert!(output.is_empty());
+    }
+}

@@ -75,12 +75,14 @@ impl UdpPathValidation {
                 continue;
             }
             if !conn.peer_has_closed() && !conn.has_sent_close_notify() {
+                // RFC 9853 §5.2 uses the responder's local preference.
+                // This socket remains preferred when the peer changes address.
                 let action = conn.handle_path_record(
                     &mut self.validation,
                     record,
                     datagram,
                     source,
-                    active,
+                    true,
                     now,
                 )?;
                 Self::execute(conn, action, send)?;

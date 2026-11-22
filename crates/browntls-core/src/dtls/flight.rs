@@ -57,6 +57,8 @@ struct SentRecord {
     number: RecordNumber,
     message_seq: u16,
     range: Range<u32>,
+    /// A later record was acknowledged and this copy was queued for retry.
+    retry_scheduled: bool,
 }
 
 /// The outgoing half of the DTLS engine.
@@ -169,6 +171,7 @@ impl Outgoing {
     fn progress(&mut self) {
         self.retransmissions = 0;
         if self.messages.is_empty() {
+            self.sent.clear();
             self.deadline = None;
             self.timeout = self.initial_timeout;
         }
@@ -467,6 +470,7 @@ impl Dtls {
                 number,
                 message_seq,
                 range: piece,
+                retry_scheduled: false,
             });
             if self.out.sent.len() > MAX_SENT_RECORDS {
                 self.out.sent.pop_front();
@@ -502,15 +506,25 @@ impl Dtls {
             let Some(sent) = self.out.sent.remove(at) else {
                 continue;
             };
-            if let Some(message) = self
+            let Some(message) = self
                 .out
                 .messages
                 .iter_mut()
                 .find(|m| m.message_seq == sent.message_seq)
+            else {
+                continue;
+            };
+            // An ACK for another copy of already acknowledged bytes cannot
+            // make progress on this flight or reset its retry counter.
+            if !message
+                .unacked
+                .iter()
+                .any(|r| intersect(r, &sent.range).is_some())
             {
-                remove_range(&mut message.unacked, &sent.range);
-                remove_range(&mut message.pending, &sent.range);
+                continue;
             }
+            remove_range(&mut message.unacked, &sent.range);
+            remove_range(&mut message.pending, &sent.range);
             newest = Some(newest.map_or(number, |n| n.max(number)));
         }
         let Some(newest) = newest else {
@@ -518,24 +532,27 @@ impl Dtls {
         };
         trace!("DTLS acknowledged up to {:?}", newest);
         self.out.messages.retain(|m| !m.unacked.is_empty());
-        // RFC 9147 §7.2: what was sent before the newest acknowledged
-        // record and is still unacknowledged was lost; send it again now.
-        let (lost, kept): (Vec<SentRecord>, Vec<SentRecord>) =
-            self.out.sent.drain(..).partition(|s| s.number < newest);
-        self.out.sent = kept.into();
-        for sent in lost {
+        // RFC 9147 §7.2: schedule earlier unacknowledged fragments once.
+        // Keep the original record number in the bounded history: its own
+        // ACK can still arrive and cancel the retry.
+        for sent in self
+            .out
+            .sent
+            .iter_mut()
+            .filter(|s| s.number < newest && !s.retry_scheduled)
+        {
+            sent.retry_scheduled = true;
             if let Some(message) = self
                 .out
                 .messages
                 .iter_mut()
                 .find(|m| m.message_seq == sent.message_seq)
             {
-                let still_unacked: Vec<Range<u32>> = message
+                for range in message
                     .unacked
                     .iter()
                     .filter_map(|r| intersect(r, &sent.range))
-                    .collect();
-                for range in still_unacked {
+                {
                     add_range(&mut message.pending, range);
                 }
             }

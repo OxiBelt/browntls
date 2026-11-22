@@ -632,6 +632,13 @@ fn an_unanswered_client_gives_up() {
     }
     // Within a few minutes of virtual time.
     assert!(sim.now < Duration::from_secs(1000 + 600));
+    assert_eq!(pair.client.next_timeout(), None);
+    // After draining any terminal alert, another timer tick emits nothing.
+    let _ = client_datagrams(&mut pair.client, sim.now);
+    pair.client
+        .handle_timeout(sim.now + Duration::from_secs(60))
+        .unwrap();
+    assert!(client_datagrams(&mut pair.client, sim.now + Duration::from_secs(60)).is_empty());
 }
 
 #[test]
@@ -701,6 +708,7 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
 
     let mut first = client_datagrams(&mut client, now);
     assert_eq!(first.len(), 1, "the first ClientHello fits one datagram");
+    let hello_bytes = first[0].len();
     let mut retry = Vec::new();
     match acceptor
         .accept(&mut first[0].clone(), PEER, &mut retry, now)
@@ -709,6 +717,8 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
         dtls::Accepted::Retry => {}
         other => panic!("{other:?}"),
     }
+    // RFC 9147 §5.1 counts UDP payload bytes before address validation.
+    assert!(!retry.is_empty() && retry.len() <= 3 * hello_bytes);
     // Answering the same ClientHello again keeps nothing either.
     let mut again = Vec::new();
     assert!(matches!(
@@ -717,6 +727,7 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
             .unwrap(),
         dtls::Accepted::Retry
     ));
+    assert!(!again.is_empty() && again.len() <= 3 * hello_bytes);
     // Noise is ignored.
     assert!(matches!(
         acceptor
@@ -728,22 +739,15 @@ fn stateless_acceptor_keeps_nothing_until_the_cookie_returns() {
     client.read_datagram(&mut retry, now).unwrap();
     let second = client_datagrams(&mut client, now);
 
-    // From another address the cookie does not verify.
-    let mut stolen = second.clone();
-    let mut conn = match acceptor
-        .accept(&mut stolen[0], b"198.51.100.7:9", &mut Vec::new(), now)
-        .unwrap()
-    {
-        dtls::Accepted::Connection(conn) => Some(*conn),
-        dtls::Accepted::Ignored => None,
-        other => panic!("{other:?}"),
-    };
-    if let Some(conn) = &mut conn {
-        let failed = stolen[1..]
-            .iter_mut()
-            .any(|d| conn.read_datagram(d, now).is_err());
-        assert!(failed);
-    }
+    // A changed source address needs its own cookie before admission.
+    let mut reply = Vec::new();
+    assert!(matches!(
+        acceptor
+            .accept(&mut second[0].clone(), b"198.51.100.7:9", &mut reply, now)
+            .unwrap(),
+        dtls::Accepted::Ignored
+    ));
+    assert!(reply.is_empty());
 
     // From the right address the handshake continues.
     let mut datagrams = second.into_iter();
@@ -979,3 +983,6 @@ mod rfc10024;
 
 #[path = "dtls/record_size_limit.rs"]
 mod record_size_limit;
+
+#[path = "dtls/recovery.rs"]
+mod recovery;

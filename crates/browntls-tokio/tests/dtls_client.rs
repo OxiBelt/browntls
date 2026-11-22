@@ -496,3 +496,92 @@ async fn a_lost_clienthello_is_retransmitted_on_tokio_time() {
     .await
     .expect("retransmission test timed out");
 }
+
+/// Read through control records up to one application record, leaving the
+/// server's ACK queued so the caller can decide when to deliver it.
+async fn receive_app_epoch(peer: &mut Peer, expected: &[u8]) -> u64 {
+    let mut input = vec![0; 65_535];
+    loop {
+        let len = peer.socket.recv(&mut input).await.unwrap();
+        let received = peer
+            .conn
+            .read_datagram(&mut input[..len], peer.start.elapsed())
+            .unwrap();
+        if let [range] = received.app_data() {
+            assert_eq!(&input[range.clone()], expected);
+            let record = received
+                .authenticated_records()
+                .iter()
+                .find(|record| {
+                    let bounds = record.range();
+                    bounds.start <= range.start && range.end <= bounds.end
+                })
+                .unwrap();
+            return record.epoch();
+        }
+        assert!(received.app_data().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn key_update_waits_for_ack_across_driver_deadline() {
+    timeout(LIMIT, async {
+        let (mut client, mut peer) = pair(&Pki::new()).await;
+        let (client_result, server_result) =
+            tokio::join!(client.complete_handshake(), peer.handshake());
+        client_result.unwrap();
+        server_result.unwrap();
+        let mut buf = [0; 32];
+        // Drain the initial tickets and acknowledgments in both directions.
+        peer.send(b"ready").await;
+        assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(5));
+        client.send(b"ready").await.unwrap();
+        assert_eq!(peer.recv().await, b"ready");
+        assert_eq!(client.connection().next_timeout(), None);
+        assert_eq!(peer.conn.next_timeout(), None);
+
+        // The server requests a reciprocal update. Its marker follows the
+        // request, so the driver has processed it when recv completes.
+        peer.conn.refresh_traffic_keys().unwrap();
+        peer.flush().await.unwrap();
+        peer.send(b"requested").await;
+        assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(9));
+        client.send(b"awaiting ACK").await.unwrap();
+        assert_eq!(receive_app_epoch(&mut peer, b"awaiting ACK").await, 3);
+        let mut lost = Vec::new();
+        while peer
+            .conn
+            .write_datagram(&mut lost, peer.start.elapsed())
+            .unwrap()
+        {}
+        assert!(!lost.is_empty());
+
+        // The send-side driver must service the elapsed protocol timer even
+        // when no application receive is pending. Advance only virtual time.
+        let due = client.connection().next_timeout().unwrap();
+        tokio::time::pause();
+        tokio::time::advance(due).await;
+        tokio::time::resume();
+        client.complete_handshake().await.unwrap();
+        let mut retry = [0; 256];
+        let len = peer.socket.recv(&mut retry).await.unwrap();
+        let received = peer
+            .conn
+            .read_datagram(&mut retry[..len], peer.start.elapsed())
+            .unwrap();
+        assert!(received.app_data().is_empty());
+        let [record] = received.authenticated_records() else {
+            panic!("expected one retransmitted KeyUpdate");
+        };
+        assert_eq!(record.epoch(), 3);
+
+        peer.flush().await.unwrap();
+        peer.send(b"acknowledged").await;
+        assert_eq!(client.recv(&mut buf).await.unwrap(), Recv::Data(12));
+        assert_eq!(client.connection().next_timeout(), None);
+        client.send(b"new keys").await.unwrap();
+        assert_eq!(receive_app_epoch(&mut peer, b"new keys").await, 4);
+    })
+    .await
+    .expect("KeyUpdate recovery timed out");
+}

@@ -406,6 +406,7 @@ impl ExpectTraffic {
                 .external_psk_binding(&self.config.provider.cipher_suites, &secret)?,
         )
         .with_delegated_credential_expiry(cx.data.delegated_credential_expiry)
+        .with_early_data_alpn(cx.common.alpn_protocol.as_deref())
         .with_protocol(Protocol::of(cx.common));
         value.common.bind_server_identity(
             &self.server_name,

@@ -33,6 +33,36 @@ fn prime_ticket(client_config: &Arc<ClientConfig>, server_config: &Arc<ServerCon
 }
 
 #[test]
+fn early_data_alpn_belongs_to_the_ticket_not_the_new_offer() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = Arc::unwrap_or_clone(early_data_client(&chain));
+    client_config.alpn_protocols = vec![b"first".to_vec(), b"ticket".to_vec()];
+    let client_config = Arc::new(client_config);
+    let mut server_config = server_config(&chain);
+    server_config.alpn_protocols = vec![b"ticket".to_vec()];
+    server_config.max_early_data_size = 1024;
+    let mut next_server_config = server_config.clone();
+    next_server_config.alpn_protocols = vec![b"first".to_vec()];
+    let server_config = Arc::new(server_config);
+    prime_ticket(&client_config, &server_config);
+
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(next_server_config)).unwrap();
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(!client.is_early_data_accepted());
+    assert_eq!(client.alpn_protocol(), Some(&b"first"[..]));
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+
+    prime_ticket(&client_config, &server_config);
+    let client =
+        browntls_core::client::UnbufferedClientConnection::new(client_config, server_name())
+            .unwrap();
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+    assert_eq!(client.early_data_bytes_left(), 1024);
+}
+
+#[test]
 fn early_data_is_accepted_and_readable() {
     use std::io::{Read, Write};
     init_logging();

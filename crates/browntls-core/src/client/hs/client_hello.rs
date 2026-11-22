@@ -666,16 +666,15 @@ pub(super) fn emit_client_hello_for_retry(
         && !ech_tls13_only
         && !dtls
     {
-        let max_early_data_size = match (&first.external, &tls13_session) {
-            (Some(psk), _) => {
-                if psk.cipher_suite() == Some(first.suite.common.suite) && !cert_with_extern_psk {
-                    psk.max_early_data_size()
-                } else {
-                    0
-                }
+        let (max_early_data_size, alpn) = match (&first.external, &tls13_session) {
+            (Some(psk), _)
+                if psk.cipher_suite() == Some(first.suite.common.suite)
+                    && !cert_with_extern_psk =>
+            {
+                (psk.max_early_data_size(), psk.alpn_protocol())
             }
-            (None, Some(resuming)) => resuming.max_early_data_size(),
-            (None, None) => 0,
+            (None, Some(resuming)) => (resuming.max_early_data_size(), resuming.early_data_alpn()),
+            _ => (0, None),
         };
         // RFC 9001 §4.6.1: in QUIC a ticket allows 0-RTT only with the
         // sentinel size, and 0-RTT needs the server's remembered transport
@@ -686,7 +685,9 @@ pub(super) fn emit_client_hello_for_retry(
             (true, _) => 0,
         };
         if max_early_data_size > 0 {
-            cx.data.early_data.enable(max_early_data_size as usize);
+            cx.data
+                .early_data
+                .enable(max_early_data_size as usize, alpn);
             exts.early_data = Some(());
             // RFC 9000 §7.4.1: 0-RTT runs under the server's remembered
             // transport parameters until EncryptedExtensions brings new ones.

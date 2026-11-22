@@ -77,6 +77,7 @@ pub struct Tls13ClientSessionValue {
     suite: &'static Tls13CipherSuite,
     age_add: u32,
     max_early_data_size: u32,
+    early_data_alpn: Option<Vec<u8>>,
     /// QUIC: the server's transport parameters, remembered for 0-RTT
     /// (RFC 9000 §7.4.1); empty otherwise.
     quic_params: PayloadU16,
@@ -109,6 +110,7 @@ impl Tls13ClientSessionValue {
             suite,
             age_add,
             max_early_data_size,
+            early_data_alpn: None,
             quic_params: PayloadU16::empty(),
             common: ClientSessionCommon::new(
                 ticket,
@@ -170,6 +172,17 @@ impl Tls13ClientSessionValue {
     /// How much early data the server will accept with this ticket.
     pub fn max_early_data_size(&self) -> u32 {
         self.max_early_data_size
+    }
+
+    pub(crate) fn with_early_data_alpn(mut self, alpn: Option<&[u8]>) -> Self {
+        if self.max_early_data_size != 0 {
+            self.early_data_alpn = alpn.map(<[u8]>::to_vec);
+        }
+        self
+    }
+
+    pub(crate) fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.early_data_alpn.as_deref()
     }
 
     /// QUIC: the server's transport parameters when the ticket was issued.

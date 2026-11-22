@@ -19,6 +19,8 @@
 
 mod codec;
 mod connection;
+#[cfg(test)]
+mod early_data_adapters;
 pub mod input;
 mod pki;
 pub mod seeds;

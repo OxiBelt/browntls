@@ -316,7 +316,7 @@ impl CertifiedKey {
             return Err(InconsistentKeys::Unknown.into());
         };
         let cert_spki = x509::subject_public_key_info(self.end_entity_cert()?.as_ref())?;
-        if key_spki.as_ref() == cert_spki {
+        if browntls_pki::subject_public_keys_match(key_spki.as_ref(), cert_spki).unwrap_or(false) {
             Ok(())
         } else {
             Err(InconsistentKeys::KeyMismatch.into())

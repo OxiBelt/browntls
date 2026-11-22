@@ -319,6 +319,21 @@ pub(crate) fn public_key(contents: &[u8]) -> Result<AlgorithmIdentifier, Rejecte
     }
 }
 
+/// Tests equality of restrictions, without projecting different minimum
+/// salts onto the same TLS verification algorithm.
+pub(crate) fn equivalent_key_restrictions(left: &[u8], right: &[u8]) -> bool {
+    let strict = |identifier| {
+        let params = rsassa_pss_parameters(identifier).ok()??;
+        let fields = fields(params).ok()?;
+        if fields.trailer.is_some() {
+            return None;
+        }
+        let params = supported_params(fields).ok()?;
+        (params.salt_len? <= params.hash.len()).then_some(params)
+    };
+    strict(left).is_some_and(|params| strict(right) == Some(params))
+}
+
 /// The canonical form of a signature algorithm.
 pub(crate) fn signature(contents: &[u8]) -> Result<AlgorithmIdentifier, Rejected> {
     // RFC 4055 §3.1: the parameters MUST be present for a signature value.

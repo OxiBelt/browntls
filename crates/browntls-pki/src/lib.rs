@@ -73,7 +73,7 @@ pub use server_name::{DnsName, InvalidDnsNameError, IpAddr, ServerName};
 pub use service_identity::{
     InvalidServiceIdentity, ReferenceIdentifier, ServiceIdentity, SrvId, UriId, WildcardPolicy,
 };
-pub use signed_data::SignedData;
+pub use signed_data::{SignedData, subject_public_keys_match};
 pub use time::UnixTime;
 pub use types::{
     CertificateDer, CertificateRevocationListDer, CertificateSigningRequestDer, Der,

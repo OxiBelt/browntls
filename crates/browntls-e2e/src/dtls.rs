@@ -14,6 +14,9 @@ use super::{IO_TIMEOUT, Options, Result, ServerName, emit, negotiated, required,
 const MESSAGE: &str = "hello from browntls";
 
 pub(super) fn client(options: &Options) -> Result<()> {
+    if options.unbuffered_io {
+        return Err("--unbuffered currently selects the TCP unbuffered stream adapter".into());
+    }
     if options.async_io && options.dtls_rebind.is_some() {
         return Err("--async does not support --dtls-rebind".into());
     }
@@ -194,6 +197,11 @@ fn tokio_client(
                 fields.extend([
                     ("index", super::Value::Num(index)),
                     ("io", "tokio-dtls".into()),
+                    ("record_size_limit_configured", limit_value(options)),
+                    (
+                        "max_application_data",
+                        super::Value::Num(common.max_application_data().ok_or("no DTLS send cap")?),
+                    ),
                 ]);
                 emit(&fields);
                 bounded("close", client.close()).await?;
@@ -203,6 +211,9 @@ fn tokio_client(
 }
 
 pub(super) fn server(options: &Options) -> Result<()> {
+    if options.unbuffered_io {
+        return Err("--unbuffered currently selects the TCP unbuffered stream adapter".into());
+    }
     if options.async_io && options.dtls_rebind.is_some() {
         return Err("--async does not support --dtls-rebind".into());
     }
@@ -328,7 +339,17 @@ fn tokio_server(options: &Options, config: Arc<browntls::ServerConfig>) -> Resul
                         check_handshake(connection, index, options)?;
                         let mut fields =
                             exchange_fields(connection, "server", message, &reply, index, options);
-                        fields.push(("io", "tokio-dtls".into()));
+                        fields.extend([
+                            ("io", "tokio-dtls".into()),
+                            (
+                                "max_application_data",
+                                super::Value::Num(
+                                    connection
+                                        .max_application_data()
+                                        .ok_or("no DTLS send cap")?,
+                                ),
+                            ),
+                        ]);
                         server
                             .close(peer)
                             .await
@@ -392,6 +413,7 @@ fn exchange_fields(
     options: &Options,
 ) -> Vec<(&'static str, super::Value)> {
     let mut fields = connection_fields(common, role, received, sent);
+    fields.push(("record_size_limit_configured", limit_value(options)));
     if let Some(mechanism) = options.dtls12_resumption.as_deref() {
         fields.extend([
             ("index", super::Value::Num(index)),
@@ -422,10 +444,22 @@ fn connection_fields(
     fields
 }
 
+fn limit_value(options: &Options) -> super::Value {
+    options
+        .record_size_limit
+        .flatten()
+        .map_or_else(|| "none".into(), |limit| limit.to_string().into())
+}
+
 const REBIND_MESSAGE: &str = "hello after rebind";
 
 fn settings(options: &Options) -> Result<dtls::Settings> {
-    let settings = dtls::Settings::default().with_versions(options.dtls_versions());
+    let mut settings = dtls::Settings::default().with_versions(options.dtls_versions());
+    if let Some(limit) = options.record_size_limit {
+        settings = settings
+            .with_record_size_limit(limit)
+            .map_err(|error| error.to_string())?;
+    }
     if options.dtls_rebind.is_some() || options.dtls_cid {
         let policy = dtls::ConnectionIdPolicy::new(8, true).map_err(|e| e.to_string())?;
         Ok(if options.dtls_rebind.is_some() {

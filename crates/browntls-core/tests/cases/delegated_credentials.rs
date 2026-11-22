@@ -167,3 +167,6 @@ include!("delegated_credentials/client_auth.rs");
 include!("delegated_credentials/client_auth_selection.rs");
 include!("delegated_credentials/client_auth_post_handshake.rs");
 include!("delegated_credentials/client_auth_resumption.rs");
+
+#[path = "delegated_credentials/transports.rs"]
+mod transports;

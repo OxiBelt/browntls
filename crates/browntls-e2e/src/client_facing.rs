@@ -81,7 +81,7 @@ fn front(
         let conn = front
             .into_server_connection(local.clone())
             .map_err(|e| e.to_string())?;
-        return serve(StreamOwned::new(conn, client), index);
+        return serve(StreamOwned::new(conn, client), index, o);
     }
 
     let name = front.server_name().unwrap_or_default().to_owned();

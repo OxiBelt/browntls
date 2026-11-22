@@ -20,7 +20,8 @@
 //!
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
-//!         --record-size-limit N|none, --grease, --async
+//!         --record-size-limit N|none, --delegated-credentials, --grease,
+//!         --async (buffered Tokio), --unbuffered (unbuffered Tokio)
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
 //!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
@@ -45,12 +46,11 @@
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
 //! NewSessionTicket messages); `--ticket-request` sends the RFC 9149
 //! extension; `--padding` pads the ClientHello to at least N bytes (RFC
-//! 7685). `--async` runs TLS connections through `browntls-tokio` on a
-//! single-threaded Tokio runtime instead of the blocking `StreamOwned` (same
-//! exchange and output, with `"io":"async"`; a client then does not retry
-//! after an ECH rejection). For DTLS it selects the Tokio UDP client and
-//! server, reported as `"io":"tokio-dtls"`; `--async` cannot be combined
-//! with `--dtls-rebind`.
+//! 7685). `--async` runs TLS connections through the buffered `browntls-tokio`
+//! adapters and `--unbuffered` through its unbuffered adapters, both on a
+//! single-threaded Tokio runtime. For DTLS, `--async` selects the Tokio
+//! UDP client and server and reports `"io":"tokio-dtls"`. It cannot be
+//! combined with `--dtls-rebind`.
 //!
 //! Encrypted Client Hello (RFC 9849): `ech-keygen` writes an X25519 key for
 //! every native HPKE suite with that KEM to `DIR/ech-config` (one
@@ -100,6 +100,7 @@ mod dtls;
 mod early_data;
 mod ech_options;
 mod output;
+mod unbuffered_io;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -110,6 +111,7 @@ use std::time::{Duration, Instant};
 use browntls::client::{ClientHelloPadding, TicketRequest};
 use browntls::crypto::hash::HashAlgorithm;
 use browntls::crypto::hpke::HpkeKem;
+use browntls::crypto::native::delegated_credential;
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
 use browntls::ech::EchServerConfig;
 use browntls::pki_types::pem::PemObject;
@@ -133,6 +135,48 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LINE: usize = 16 * 1024;
 
 type Result<T, E = String> = std::result::Result<T, E>;
+
+fn certified_key_with_credential(
+    side: browntls::Side,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    provider: &CryptoProvider,
+) -> Result<CertifiedKey> {
+    let mut certified =
+        CertifiedKey::from_der(chain, key, provider).map_err(|error| error.to_string())?;
+    let cert = certified
+        .end_entity_cert()
+        .map_err(|error| error.to_string())?;
+    let issued = delegated_credential::generate(
+        side,
+        cert,
+        certified.key.as_ref(),
+        &[browntls::SignatureScheme::ECDSA_NISTP256_SHA256],
+        browntls::SignatureScheme::ECDSA_NISTP256_SHA256,
+        24 * 60 * 60,
+    )
+    .map_err(|error| error.to_string())?;
+    certified = match side {
+        browntls::Side::Server => {
+            certified.with_delegated_credential(issued.credential, issued.signing_key, provider)
+        }
+        browntls::Side::Client => certified.with_client_delegated_credential(
+            issued.credential,
+            issued.signing_key,
+            provider,
+        ),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(certified)
+}
+
+fn configured_record_size_limit(options: &Options) -> Value {
+    match options.record_size_limit {
+        None => "default".into(),
+        Some(None) => "none".into(),
+        Some(Some(limit)) => limit.to_string().into(),
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -196,6 +240,7 @@ struct Options {
     /// `None`: the library default; `Some(None)`: no extension.
     record_size_limit: Option<Option<u16>>,
     grease: bool,
+    delegated_credentials: bool,
     ticket_request: Option<TicketRequest>,
     padding: Option<u16>,
     /// Certificates for particular server names: (name, chain, key).
@@ -221,6 +266,8 @@ struct Options {
     backends: Vec<(String, String)>,
     /// Client and server I/O through `browntls-tokio` (`--async`).
     async_io: bool,
+    /// Client and server I/O through `browntls-tokio::unbuffered`.
+    unbuffered_io: bool,
     dtls_cid: bool,
     external_psk_file: Option<String>,
     external_psk_identity: Option<String>,
@@ -242,6 +289,7 @@ impl Options {
             }
             let switch = match flag.as_str() {
                 "--grease" => Some(&mut o.grease),
+                "--delegated-credentials" => Some(&mut o.delegated_credentials),
                 "--ech-backend" => Some(&mut o.ech_backend),
                 "--ech-grease" => Some(&mut o.ech_grease),
                 "--ech-random-config-id" => Some(&mut o.ech_random_config_id),
@@ -250,6 +298,7 @@ impl Options {
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
                 "--async" => Some(&mut o.async_io),
+                "--unbuffered" => Some(&mut o.unbuffered_io),
                 "--dtls-cid" => Some(&mut o.dtls_cid),
                 _ => None,
             };
@@ -540,14 +589,23 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
         None => builder.with_no_client_auth(),
     };
     let mut config = if o.sni_certs.is_empty() {
-        builder
-            .with_single_cert(chain, key)
-            .map_err(|e| e.to_string())?
+        if o.delegated_credentials {
+            let certified =
+                certified_key_with_credential(browntls::Side::Server, chain, key, &provider)?;
+            builder.with_cert_resolver(Arc::new(browntls::sign::SingleCertAndKey::from(certified)))
+        } else {
+            builder
+                .with_single_cert(chain, key)
+                .map_err(|e| e.to_string())?
+        }
     } else {
         let certified = |chain, key: PrivateKeyDer<'static>| {
-            CertifiedKey::from_der(chain, key, &provider)
-                .map(Arc::new)
-                .map_err(|e| e.to_string())
+            let certified = if o.delegated_credentials {
+                certified_key_with_credential(browntls::Side::Server, chain, key, &provider)?
+            } else {
+                CertifiedKey::from_der(chain, key, &provider).map_err(|e| e.to_string())?
+            };
+            Ok::<Arc<CertifiedKey>, String>(Arc::new(certified))
         };
         let mut by_name = Vec::new();
         for (name, cert, key) in &o.sni_certs {
@@ -564,6 +622,7 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    config.enable_delegated_credentials = o.delegated_credentials;
     if let Some(psk) = o.external_psk()? {
         config.external_psks = Some(Arc::new(vec![psk]));
         config.cert_with_extern_psk = true;
@@ -588,6 +647,12 @@ fn listen(o: &Options) -> Result<TcpListener> {
 
 fn server(o: &Options) -> Result<()> {
     let config = server_config(o, o.ech_server()?)?;
+    if o.async_io && o.unbuffered_io {
+        return Err("--async and --unbuffered are mutually exclusive".into());
+    }
+    if o.unbuffered_io {
+        return unbuffered_io::server(o, config);
+    }
     if o.async_io {
         return async_io::server(o, config);
     }
@@ -597,7 +662,7 @@ fn server(o: &Options) -> Result<()> {
         let (sock, peer) = listener.accept().map_err(|e| format!("accept: {e}"))?;
         let result = set_timeouts(&sock).and_then(|()| {
             let conn = ServerConnection::new(config.clone()).map_err(|e| e.to_string())?;
-            serve(StreamOwned::new(conn, sock), index)
+            serve(StreamOwned::new(conn, sock), index, o)
         });
         if let Err(e) = result {
             emit(&[
@@ -616,7 +681,11 @@ fn server(o: &Options) -> Result<()> {
 
 /// Answers one line on `tls`. A client refusing our ECH rejection
 /// (`ech_required`) is reported as such, not as an error.
-fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Result<()> {
+fn serve(
+    mut tls: StreamOwned<ServerConnection, TcpStream>,
+    index: usize,
+    o: &Options,
+) -> Result<()> {
     let line = match read_line(&mut tls) {
         Ok(line) => line,
         Err(e) => {
@@ -647,6 +716,14 @@ fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Res
     fields.extend(negotiated(&tls.conn));
     fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
     fields.push((
+        "delegated_credential",
+        Value::Bool(tls.conn.client_delegated_credential().is_some()),
+    ));
+    fields.push((
+        "record_size_limit_configured",
+        configured_record_size_limit(o),
+    ));
+    fields.push((
         "server_name",
         tls.conn.server_name().unwrap_or("none").to_owned().into(),
     ));
@@ -669,6 +746,18 @@ fn client(o: &Options) -> Result<()> {
         .map_err(|e| e.to_string())?
         .with_root_certificates(roots(ca)?);
     let mut config = match o.chain()? {
+        Some((chain, key)) if o.delegated_credentials => {
+            let provider = o.provider();
+            let certified = certified_key_with_credential(
+                browntls::Side::Client,
+                chain,
+                key,
+                provider.as_ref(),
+            )?;
+            builder.with_client_cert_resolver(Arc::new(browntls::sign::SingleCertAndKey::from(
+                certified,
+            )))
+        }
         Some((chain, key)) => builder
             .with_client_auth_cert(chain, key)
             .map_err(|e| e.to_string())?,
@@ -679,6 +768,7 @@ fn client(o: &Options) -> Result<()> {
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    config.enable_delegated_credentials = o.delegated_credentials;
     if let Some(psk) = o.external_psk()? {
         config.external_psks.push(psk);
         config.cert_with_extern_psk = true;
@@ -693,6 +783,12 @@ fn client(o: &Options) -> Result<()> {
     let mut config = Arc::new(config);
     let server_name = ServerName::try_from(name.to_owned()).map_err(|e| e.to_string())?;
     let identity = service_identity(&o.reference_ids)?;
+    if o.async_io && o.unbuffered_io {
+        return Err("--async and --unbuffered are mutually exclusive".into());
+    }
+    if o.unbuffered_io {
+        return unbuffered_io::client(o, config, server_name, identity, message);
+    }
     if o.async_io {
         return async_io::client(o, config, server_name, identity, message);
     }
@@ -748,6 +844,14 @@ fn client(o: &Options) -> Result<()> {
             ("index", Value::Num(index)),
         ];
         fields.extend(negotiated(&tls.conn));
+        fields.push((
+            "delegated_credential",
+            Value::Bool(tls.conn.delegated_credential().is_some()),
+        ));
+        fields.push((
+            "record_size_limit_configured",
+            configured_record_size_limit(o),
+        ));
         fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
         fields.push(("sent", message.into()));
         fields.push(("received", reply.clone().into()));

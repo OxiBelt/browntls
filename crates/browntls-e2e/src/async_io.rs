@@ -80,7 +80,7 @@ pub(super) fn server(o: &Options, config: Arc<ServerConfig>) -> Result<()> {
                 .accept()
                 .await
                 .map_err(|e| format!("accept: {e}"))?;
-            if let Err(e) = serve(&acceptor, sock, index).await {
+            if let Err(e) = serve(&acceptor, sock, index, o).await {
                 emit(&[
                     ("event", "error".into()),
                     ("index", Value::Num(index)),
@@ -96,7 +96,7 @@ pub(super) fn server(o: &Options, config: Arc<ServerConfig>) -> Result<()> {
     })
 }
 
-async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize) -> Result<()> {
+async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize, o: &Options) -> Result<()> {
     let mut tls = bounded("handshake", acceptor.accept(sock)).await?;
     let line = read_line(&mut tls).await?;
     let reply: String = line.chars().rev().collect();
@@ -111,6 +111,14 @@ async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize) -> Result<
     ];
     fields.extend(negotiated(conn));
     fields.push(("ech", format!("{:?}", conn.ech_status()).into()));
+    fields.push((
+        "delegated_credential",
+        Value::Bool(conn.client_delegated_credential().is_some()),
+    ));
+    fields.push((
+        "record_size_limit_configured",
+        super::configured_record_size_limit(o),
+    ));
     fields.push((
         "server_name",
         conn.server_name().unwrap_or("none").to_owned().into(),
@@ -155,6 +163,14 @@ pub(super) fn client(
                 ("io", "async".into()),
             ];
             fields.extend(negotiated(conn));
+            fields.push((
+                "delegated_credential",
+                Value::Bool(conn.delegated_credential().is_some()),
+            ));
+            fields.push((
+                "record_size_limit_configured",
+                super::configured_record_size_limit(o),
+            ));
             fields.push(("ech", format!("{:?}", conn.ech_status()).into()));
             fields.push(("sent", message.into()));
             fields.push(("received", reply.clone().into()));

@@ -91,6 +91,9 @@ allows it, with browntls as server against the peer's client:
   answer a GREASE CertificateRequest with its certificate); and, as a
   browntls client, `ticket_request` (RFC 9149) and a ClientHello padded to
   1024 bytes (RFC 7685);
+- focused GnuTLS record-size-limit exchanges in TLS 1.2 and 1.3, in both
+  browntls roles, with asymmetric 1024-byte and 512-byte endpoint limits and
+  4096 bytes of application data in each direction;
 - the asynchronous streams of `browntls-tokio`, reached as `browntls::tokio`
   (`browntls-e2e --async`, a single-threaded Tokio runtime, confirmed by
   `"io":"async"` in the output):
@@ -168,6 +171,23 @@ OpenSSL peer emits status and verification results through its ECH and TLS
 APIs. The private bundles remain in a run-owned server volume. Client
 containers mount a separate volume with the public configurations and CA.
 
+## TLS 1.3 delegated credentials with BoringSSL
+
+The standalone [delegated-credential harness](boringssl_dc.py) uses a
+[pinned BoringSSL server](peer/boringssl-dc.Dockerfile) and a Tokio browntls
+client. The test generates a fresh CA, an authorized leaf and a delegated
+credential. The client volume contains only the trust anchor. The run checks
+that the client verified the fixture DNS identity, accepted the credential
+and exchanged the expected payload with the server.
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64
+python3 -B tests/e2e/boringssl_dc.py --image browntls-e2e:amd64 --build-peer
+```
+
+This fixture covers TLS 1.3 server authentication. The in-process tests
+cover client credentials, DTLS 1.3 and QUIC-TLS.
+
 ## Limitations
 
 - The native RISC-V runners have no RVV 1.0, so they exercise the scalar and
@@ -201,7 +221,11 @@ python3 -B -m unittest discover -s tests/e2e -p 'test_dtls.py'
 ```
 
 The default `--suite all` runs DTLS 1.3 against wolfSSL and DTLS 1.2 against
-OpenSSL. Select `--suite wolfssl` or `--suite openssl` to run one peer only:
+OpenSSL, plus a GnuTLS client against a browntls server. The GnuTLS case checks
+the negotiated RFC 8449 extension in its debug output, uses 512-byte GnuTLS
+and 1024-byte browntls limits, and exchanges 480 bytes in both directions.
+Select `--suite wolfssl`,
+`--suite openssl` or `--suite gnutls` to run one peer only:
 
 ```sh
 python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl

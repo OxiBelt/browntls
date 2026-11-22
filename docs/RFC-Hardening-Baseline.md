@@ -319,6 +319,32 @@ Its reported flight and epoch errata remain open, including 8107
   record with a 48-byte master-secret field. The summary retains no
   field values.
 
+## Phase 2 follow-up
+
+The baseline above records the earlier source revision. Phase 2 applies
+these checks over the Phase 1 parent.
+
+| Requirement | Implementation and regression evidence |
+| --- | --- |
+| RFC 8449 §4, negotiated stream limits | `extensions` and `extensions_native` cover asymmetric caps, lower-bound errors when the server declines, the first protected EncryptedExtensions record, and extension omission. The record-layer cases check the full TLS 1.3 authenticated plaintext length, including type and padding. |
+| RFC 8449 §4, records use their key epoch's cap | Both TLS 1.3 targets exercise acceptance across ticket rollover with a smaller or larger new-handshake cap. Unit tests distinguish old server session encodings from encodings that carry the cap. External PSKs provision their early-data cap on both endpoints and still require the replay policy. |
+| RFC 8449 §4, DTLS limits independent of PMTU | The native and RustCrypto DTLS targets cover opt-in asymmetric limits with cookies, retransmission, CID and MTU changes. The DTLS 1.3 case also refreshes traffic keys. Limits apply to protected records, and QUIC continues to use transport parameters. |
+| Kernel TLS compatibility | Direct blocking and Tokio handoffs refuse a reduced negotiated receive cap. Routing continues the existing userspace connection. The real Linux transmit test separately checks kernel TX with a peer's smaller cap. |
+| RFC 9345 §§4–4.2, credential attachment | Both core provider targets and the Tokio credential tests cover role and leaf binding, issuer signature, expiry, and the existing authentication paths. Opaque-key verification and wire bounds have focused unit tests. Peer authentication and original resumption deadlines are checked independently of attachment. Separate DTLS 1.3 and QUIC-TLS tests verify that the peer used the delegated key. |
+
+The Docker fixtures check asymmetric stream negotiation against GnuTLS in
+both TLS versions and both browntls roles. The pinned BoringSSL fixture
+checks a browntls TLS 1.3 client authenticating a server delegated
+credential. The minikube fixtures check asymmetric negotiated DTLS limits
+on UDP Services in both versions and mutual delegated credentials over
+Tokio TCP, including unbuffered connections.
+
+See [Architecture](Architecture.md#optional-clienthello-extensions),
+[DTLS 1.2](DTLS12.md), and [delegated credentials][phase2-dc-api] for
+configuration and API migration.
+
+[phase2-dc-api]: Architecture.md#delegated-credentials-rfc-9345
+
 ## Phase 6 handoff
 
 Start each follow-up from the claim and its named regression. Re-evaluate

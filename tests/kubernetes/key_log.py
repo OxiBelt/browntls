@@ -2,6 +2,7 @@
 """Qualify TLS key-log file permissions over isolated minikube TCP Services."""
 
 import argparse
+import ipaddress
 import json
 import subprocess
 import sys
@@ -61,7 +62,8 @@ def service_objects(image, directory_mode, name, certificate_name):
     client_args = ["client", "--connect", f"peer-{name}:{PORT}", "--server-name",
                    certificate_name, "--ca", "/fixture/ca.pem", "--cert",
                    "/fixture/client.pem", "--key", "/fixture/client.key", "--message",
-                   MESSAGE, "--expect-reply", MESSAGE[::-1], "--tls", "1.3", "--async"]
+                   MESSAGE, "--expect-reply", MESSAGE[::-1], "--tls", "1.3", "--async",
+                   "--wait", "25"]
     return (service,
             pod(server_name, image, server_args, directory_mode),
             pod(client_name, image, client_args, directory_mode))
@@ -94,8 +96,10 @@ def wait_peer(kubectl, pod_name, listening=False):
                            if item.get("name") == "peer"), {})
         terminated = peer_state.get("terminated")
         if terminated is not None:
-            if listening or terminated.get("exitCode") != 0:
-                raise RuntimeError(f"{pod_name} peer container exited before expected state")
+            code = terminated.get("exitCode")
+            reason = terminated.get("reason", "unknown")
+            if listening or code != 0:
+                raise RuntimeError(f"{pod_name} exited before expected state ({reason}, {code})")
             return
         if listening and phase == "Running":
             try:
@@ -137,6 +141,14 @@ def run_case(kubectl, image, name, enabled, directory_mode, fixture, server_name
     kubectl("create", "-f", "-", data=json.dumps({"apiVersion": "v1", "kind": "List",
             "items": [service, server]}), seconds=30)
     wait_peer(kubectl, server["metadata"]["name"], listening=True)
+    ip = ipaddress.ip_address(kubectl(
+        "get", "service", service["metadata"]["name"],
+        "-o", "jsonpath={.spec.clusterIP}", capture=True, seconds=25,
+    ).strip())
+    # Connect to the Service IP while preserving the certificate's DNS name.
+    # This avoids depending on DNS propagation for a newly created Service.
+    args = client["spec"]["containers"][0]["args"]
+    args[args.index("--connect") + 1] = f"[{ip}]:{PORT}" if ip.version == 6 else f"{ip}:{PORT}"
     kubectl("create", "-f", "-", data=json.dumps(client), seconds=30)
     wait_peer(kubectl, client["metadata"]["name"])
     wait_peer(kubectl, server["metadata"]["name"])

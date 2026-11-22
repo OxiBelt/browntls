@@ -26,6 +26,7 @@ class KeyLogHarnessTest(unittest.TestCase):
             self.assertEqual(container["image"], "peer-image")
             if peer is client:
                 self.assertEqual(args[args.index("--server-name") + 1], "peer.example.test")
+                self.assertEqual(args[args.index("--wait") + 1], "25")
 
         _, plain_server, plain_client = key_log.service_objects(
             "plain-image", "permissive", "off-permissive", "peer.example.test")

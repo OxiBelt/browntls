@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use browntls_core::client::UnbufferedClientConnection;
+use browntls_core::crypto::hpke::Hpke;
+use browntls_core::ech::pem::{EchPem, EchPemError};
+use browntls_core::ech::{EchConfig, EchMode, EchServerConfig};
 use browntls_core::pki_types::ServerName;
 use browntls_core::server::UnbufferedServerConnection;
 use browntls_core::unbuffered::UnbufferedConnectionCommon;
@@ -110,6 +113,19 @@ pub struct TlsConnector {
 }
 
 impl TlsConnector {
+    /// Replaces the ECH mode in `config` with the first usable configuration
+    /// from `pem`, using the caller's HPKE `suites`.
+    ///
+    /// All other client settings are preserved. Real ECH requires TLS 1.3.
+    pub fn from_ech_pem(
+        mut config: ClientConfig,
+        pem: &EchPem,
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        config.ech_mode = Some(EchMode::Enable(EchConfig::from_pem(pem, suites)?));
+        Ok(Self::from(Arc::new(config)))
+    }
+
     /// Answers the certificate status (OCSP) queries of this connector's
     /// connections with `fetcher`: during the handshake, and in the
     /// operations after it. Without one, such a query is answered as
@@ -351,6 +367,24 @@ pub struct TlsAcceptor {
 }
 
 impl TlsAcceptor {
+    /// Replaces the shared-mode ECH configuration in `config` with
+    /// `decryption` keys and `retry` configurations, using the caller's
+    /// HPKE `suites`.
+    ///
+    /// All other server settings are preserved. Shared mode requires
+    /// `config.ech_backend` to be false.
+    pub fn from_ech_pem(
+        mut config: ServerConfig,
+        decryption: &[EchPem],
+        retry: &[EchPem],
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        config.ech = Some(Arc::new(EchServerConfig::from_pems(
+            decryption, retry, suites,
+        )?));
+        Ok(Self::from(Arc::new(config)))
+    }
+
     /// Answers the certificate status (OCSP) queries of this acceptor's
     /// connections (about client certificates) with `fetcher`: during the
     /// handshake, and in the operations after it (post-handshake

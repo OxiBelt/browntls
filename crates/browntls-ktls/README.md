@@ -61,6 +61,22 @@ pile up. A `KtlsStream` read then returns `WouldBlock` although the socket
 stays readable: wait for it to be writable before reading again. An
 `AsyncKtlsStream` read waits for that itself.
 
+## Encrypted Client Hello
+
+`ech::prepare_client` and `ech::prepare_server` install ECH from parsed
+`browntls::ech::pem::EchPem` objects on an owned TLS configuration.
+For kernel handoff, set `enable_secret_extraction` on the configuration
+before calling either helper. With extraction disabled, the connection
+can run in userspace and handoff is refused. For blocking handoff, pass
+the connection and a connected TCP socket to `KtlsStream::new` to finish
+the handshake and hand off the record layer.
+For the async path, finish the handshake, flush queued records and drain
+userspace input to a record boundary. Then pass the connection, socket
+and any received plaintext to `AsyncKtlsStream::new`. For Tokio TLS
+streams, set `enable_secret_extraction` on the input configurations
+before calling `from_ech_pem` and use the Tokio handoff described
+[below](#tokio).
+
 ## Zero copy
 
 `sendfile` on either stream sends part of a regular file as application

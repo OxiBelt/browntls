@@ -78,6 +78,8 @@
 mod crypto_info;
 pub use crypto_info::{CryptoInfo, UnsupportedCipher};
 
+pub mod ech;
+
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]

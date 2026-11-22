@@ -456,10 +456,12 @@ work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
   `ClientConfig::request_transparency_info` is set, and never with a
   verifier that requires raw public keys. Whether a server's extension
   was solicited is decided by the ClientHello actually sent. A verifier
-  that wraps another must forward `requests_transparency_info`: otherwise
-  nothing is offered while the wrapped policy still runs on the
-  certificate and the staple alone, which §8.1.6 forbids but which fails
-  closed.
+  that wraps a CT-enabled WebPKI verifier forwards
+  `requests_transparency_info` and `verify_server_cert_with_context`.
+  The connection records `transparency_info` and `status_request` from the
+  effective ClientHello. A missing offer or lost context returns
+  `CertificateError::TransparencyOfferRequired` (`certificate_unknown`)
+  before evaluation, as required by §8.1.6.
 - Client policy: `ServerCertVerifierBuilder::with_certificate_transparency`
   takes `CtV2Requirements` (trusted logs as `CtV2LogConfig`, trusted tree
   heads, `min_verified_scts`, `min_distinct_logs`, `require_inclusion`,
@@ -480,16 +482,16 @@ work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
   extension. Too few SCTs or logs fail with
   `CertificateError::InsufficientTransparency` (`certificate_unknown`); an
   evidence error such as an exceeded budget with
-  `InvalidTransparencyEvidence` (`bad_certificate`). Called directly,
-  `verify_server_cert` enforces the policy with the certificate and the
-  staple only.
+  `InvalidTransparencyEvidence` (`bad_certificate`). Direct callers
+  evaluate local evidence with `verify_server_cert_with_context` and
+  `ServerCertVerificationContext::LocalEvidence`. Context-free methods
+  return `TransparencyOfferRequired` when the verifier has a CT policy.
 - What a connection reports: `peer_transparency_info` (the extension body,
   unverified, also without a policy) and `peer_transparency_status`
   (`TransparencyStatus` counts) on `ClientConnection` and
   `UnbufferedClientConnection`. A custom verifier receives the body in
   `CertificateEvidence::transparency_info` and reports a status through
-  `ServerCertVerifier::verify_server_cert_with_transparency`, whose default
-  reports none.
+  `ServerCertVerifier::verify_server_cert_with_context`.
 - Peer errors: a list that does not parse is `decode_error` in the codec (an
   empty body and an empty list are accepted, §6.5), as is a non-empty body
   in the ClientHello; an extension the client did not offer is
@@ -524,11 +526,10 @@ Interactions with other features:
 - `Acceptor`, `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`: the
   configuration chosen after the ClientHello supplies the list through
   its certificate resolver, and the offer is read from that ClientHello.
-- Exported authenticators (RFC 9261) are verified through
-  `verify_server_cert` with no OCSP response, and an authenticator whose
-  entry carries `transparency_info` is refused as unsolicited. Under a CT
-  2.0 policy an authenticator therefore passes only with SCTs embedded in
-  its certificate.
+- Exported authenticators (RFC 9261) use the `ExportedAuthenticator`
+  verification context with live revocation disabled. An entry carrying
+  `transparency_info` is refused as unsolicited. Under a CT 2.0 policy an
+  authenticator therefore passes only with SCTs embedded in its certificate.
 
 The tests (`crates/browntls-core/tests/transparency*.rs`,
 `crates/browntls-tokio/tests/transparency.rs`) run browntls against itself

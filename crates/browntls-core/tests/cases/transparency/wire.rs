@@ -132,6 +132,7 @@ fn client_hello_extension_must_be_empty() {
 struct Flipping {
     inner: Arc<WebPkiServerVerifier>,
     offer: std::sync::atomic::AtomicBool,
+    forward_context: bool,
 }
 
 impl browntls_core::client::danger::ServerCertVerifier for Flipping {
@@ -156,6 +157,35 @@ impl browntls_core::client::danger::ServerCertVerifier for Flipping {
         self.inner.verify_tls12_signature(message, cert, dss)
     }
 
+    fn verify_server_cert_with_context(
+        &self,
+        end_entity: &browntls_core::pki_types::CertificateDer<'_>,
+        intermediates: &[browntls_core::pki_types::CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: browntls_core::revocation::PeerEvidence<'_>,
+        now: browntls_core::pki_types::UnixTime,
+        context: ServerCertVerificationContext,
+    ) -> Result<ServerCertificateVerification, Error> {
+        if self.forward_context {
+            return self.inner.verify_server_cert_with_context(
+                end_entity,
+                intermediates,
+                identity,
+                evidence,
+                now,
+                context,
+            );
+        }
+        self.inner.verify_server_cert_with_identity(
+            end_entity,
+            intermediates,
+            identity,
+            evidence,
+            now,
+            true,
+        )
+    }
+
     fn verify_tls13_signature(
         &self,
         message: &[u8],
@@ -178,34 +208,105 @@ impl browntls_core::client::danger::ServerCertVerifier for Flipping {
 /// extension was solicited, not what the verifier says later.
 #[test]
 fn tls13_answer_to_the_sent_offer_is_accepted() {
+    check_sent_ct_offer(false);
+    check_sent_ct_offer(true);
+}
+
+fn check_sent_ct_offer(retry: bool) {
     use browntls_core::client::danger::ServerCertVerifier as _;
 
     let fx = Fixture::new();
     let v = &version::TLS13;
     let flipping = Arc::new(Flipping {
-        inner: verifier(&fx.pki, None),
+        inner: verifier(&fx.pki, Some(fx.requirements(&[&fx.log_a]))),
         offer: true.into(),
+        forward_context: true,
     });
     assert!(flipping.requests_transparency_info());
-    let client = ClientConfig::builder_with_provider(provider())
+    let mut client_provider = prov::default_provider();
+    client_provider.kx_groups = vec![prov::kx_group::X25519, prov::kx_group::SECP256R1];
+    let client = ClientConfig::builder_with_provider(Arc::new(client_provider))
         .with_protocol_versions(&[v])
         .unwrap()
         .dangerous()
         .with_custom_certificate_verifier(flipping.clone())
         .with_no_client_auth();
     let items = list(&[fx.sct(&fx.log_a)]);
-    let server = server(&fx.chain, Some(items.clone()), None, v);
+    let mut server_provider = prov::default_provider();
+    let group = if retry {
+        prov::kx_group::SECP256R1
+    } else {
+        prov::kx_group::X25519
+    };
+    server_provider.kx_groups = vec![group];
+    let mut key = CertifiedKey::from_der(
+        fx.chain.cert_chain(),
+        fx.chain.private_key(),
+        &server_provider,
+    )
+    .unwrap();
+    key.set_transparency_info(Some(items.clone())).unwrap();
+    let server = ServerConfig::builder_with_provider(Arc::new(server_provider))
+        .with_protocol_versions(&[v])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(SingleCertAndKey::from(key)));
     // The ClientHello offers the extension; the Certificate then finds a
     // verifier that no longer asks for it.
     let mut c = ClientConnection::new(Arc::new(client), server_name()).unwrap();
     flipping
         .offer
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    let mut s = ServerConnection::new(server).unwrap();
+    let mut s = ServerConnection::new(Arc::new(server)).unwrap();
     let (cr, sr) = do_handshake_until_error(&mut c, &mut s);
     cr.unwrap();
     sr.unwrap();
+    assert_eq!(
+        c.handshake_kind(),
+        Some(if retry {
+            HandshakeKind::FullWithHelloRetryRequest
+        } else {
+            HandshakeKind::Full
+        })
+    );
     assert_eq!(c.peer_transparency_info(), Some(&items[..]));
+    assert_eq!(c.peer_transparency_status(), Some(status(1, 1, 0)));
+}
+
+#[test]
+fn ct_wrappers_preserve_the_offer_and_verification_context() {
+    let fx = Fixture::new();
+    let ocsp = fx
+        .pki
+        .ocsp(&fx.chain.end_entity, Some(&list(&[fx.sct(&fx.log_a)])));
+    for v in VERSIONS {
+        let server = server(&fx.chain, None, Some(ocsp.clone()), v);
+        for (offers, forwards) in [(true, true), (false, true), (true, false)] {
+            let wrapper = Arc::new(Flipping {
+                inner: verifier(&fx.pki, Some(fx.requirements(&[&fx.log_a]))),
+                offer: offers.into(),
+                forward_context: forwards,
+            });
+            let client = Arc::new(
+                ClientConfig::builder_with_provider(provider())
+                    .with_protocol_versions(&[v])
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(wrapper)
+                    .with_no_client_auth(),
+            );
+            let (c, _, cr, sr) = connect(&client, &server);
+            if offers && forwards {
+                cr.unwrap();
+                sr.unwrap();
+                assert_eq!(c.peer_transparency_info(), None);
+                assert_eq!(c.peer_transparency_status(), Some(status(1, 1, 0)));
+            } else {
+                assert_refused(cr, sr, CertificateError::TransparencyOfferRequired);
+                assert_eq!(c.peer_transparency_status(), None);
+            }
+        }
+    }
 }
 
 /// Records what it "compresses" and sends it as it is.

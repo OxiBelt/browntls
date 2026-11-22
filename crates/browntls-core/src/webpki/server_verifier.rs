@@ -26,8 +26,9 @@ use crate::revocation::{
 use crate::sync::Arc;
 use crate::transparency::{CtV2Requirements, TransparencyStatus};
 use crate::verify::{
-    CertificateIdentity, DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified,
-    ServerCertVerifier, ServerCertificateVerification,
+    CertificateIdentity, DigitallySignedStruct, HandshakeSignatureValid,
+    ServerCertVerificationContext, ServerCertVerified, ServerCertVerifier,
+    ServerCertificateVerification,
 };
 
 /// Builds a [`WebPkiServerVerifier`].
@@ -67,6 +68,8 @@ impl ServerCertVerifierBuilder {
     /// extension ([`ServerCertVerifier::requests_transparency_info`]) and
     /// reports what it verified on the connection. See the
     /// [`transparency` module](crate::transparency).
+    /// Direct callers must supply an explicit verification context with
+    /// [`ServerCertVerifier::verify_server_cert_with_context`].
     ///
     /// Each log is checked by [`Self::build`], which also refuses two logs
     /// sharing an ID or a key.
@@ -460,6 +463,46 @@ impl ServerCertVerifier for WebPkiServerVerifier {
         now: UnixTime,
         allow_live: bool,
     ) -> Result<ServerCertificateVerification, Error> {
+        if self.transparency.is_some() {
+            return Err(Error::InvalidCertificate(
+                crate::CertificateError::TransparencyOfferRequired,
+            ));
+        }
+        self.verify_server_cert_with_context(
+            end_entity,
+            intermediates,
+            identity,
+            evidence,
+            now,
+            ServerCertVerificationContext::LocalEvidence { allow_live },
+        )
+    }
+
+    fn verify_server_cert_with_context(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        context: ServerCertVerificationContext,
+    ) -> Result<ServerCertificateVerification, Error> {
+        if self.transparency.is_some()
+            && matches!(
+                context,
+                ServerCertVerificationContext::TlsHandshake {
+                    offered_transparency_info: false,
+                    ..
+                } | ServerCertVerificationContext::TlsHandshake {
+                    offered_status_request: false,
+                    ..
+                }
+            )
+        {
+            return Err(Error::InvalidCertificate(
+                crate::CertificateError::TransparencyOfferRequired,
+            ));
+        }
         match &self.revocation_policy {
             Some(policy) => self.verify_with_policy(
                 policy,
@@ -468,7 +511,7 @@ impl ServerCertVerifier for WebPkiServerVerifier {
                 identity,
                 evidence,
                 now,
-                allow_live,
+                context.allow_live(),
             ),
             None => self.verify_without_policy(end_entity, intermediates, identity, evidence, now),
         }

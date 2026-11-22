@@ -491,7 +491,9 @@ pub(super) fn emit_client_hello_for_retry(
         }),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
         sct_request: config.revocation_enabled().then_some(()),
-        transparency_info: config.offers_transparency_info().then_some(()),
+        transparency_info: input
+            .offers_transparency_info(retryreq.is_some())
+            .then_some(()),
         extended_master_secret: supports_tls12.then_some(()),
         encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),

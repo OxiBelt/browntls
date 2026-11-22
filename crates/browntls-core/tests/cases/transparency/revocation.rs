@@ -32,18 +32,6 @@ fn revocation_policy_keeps_the_transparency_policy() {
     let now = UnixTime::now();
     let refused = Error::InvalidCertificate(insufficient(0, 0));
 
-    // The legacy entry point: the staple is the only CT source.
-    assert_eq!(
-        verifier
-            .verify_server_cert(ee, &[], &server_name(), &plain_staple, now)
-            .unwrap_err(),
-        refused
-    );
-    verifier
-        .verify_server_cert(ee, &[], &server_name(), &ct_staple, now)
-        .unwrap();
-
-    // The evidence entry points, with the list in the TLS extension.
     fn evidence<'a>(ocsp: &'a [u8], info: Option<&'a [u8]>) -> [CertificateEvidence<'a>; 1] {
         [CertificateEvidence {
             ocsp: Some(ocsp),
@@ -55,29 +43,26 @@ fn revocation_policy_keeps_the_transparency_policy() {
         evidence(&plain_staple, None),
         evidence(&plain_staple, Some(&items)),
     );
-    assert_eq!(
-        verifier
-            .verify_server_cert_with_evidence(ee, &[], &server_name(), &without, now)
-            .unwrap_err(),
-        refused
-    );
-    assert_eq!(
-        verifier
-            .verify_server_cert_with_transparency(ee, &[], &server_name(), &without, now)
-            .unwrap_err(),
-        refused
-    );
-    verifier
-        .verify_server_cert_with_evidence(ee, &[], &server_name(), &with, now)
-        .unwrap();
-    let (check, ct) = verifier
-        .verify_server_cert_with_transparency(ee, &[], &server_name(), &with, now)
-        .unwrap();
-    assert!(matches!(
-        check,
-        browntls_core::revocation::RevocationCheck::Complete(Some(RevocationStatus::Good))
-    ));
-    assert_eq!(ct, Some(status(1, 1, 0)));
+    let name = server_name();
+    let check = |evidence: &[CertificateEvidence<'_>]| {
+        verifier.verify_server_cert_with_context(
+            ee,
+            &[],
+            CertificateIdentity::Name(&name),
+            evidence,
+            now,
+            ServerCertVerificationContext::LocalEvidence { allow_live: false },
+        )
+    };
+    assert_eq!(check(&without).unwrap_err(), refused);
+    for evidence in [with, evidence(&ct_staple, None)] {
+        let verified = check(&evidence).unwrap();
+        assert!(matches!(
+            verified.revocation,
+            browntls_core::revocation::RevocationCheck::Complete(Some(RevocationStatus::Good))
+        ));
+        assert_eq!(verified.transparency, Some(status(1, 1, 0)));
+    }
 
     // Handshakes: the staple satisfies revocation; CT needs the list too.
     for v in VERSIONS {
@@ -137,16 +122,29 @@ fn transparency_is_decided_before_a_live_query() {
             ..Default::default()
         }]
     }
-    // Without SCTs it fails at once, before any query is asked for.
+    let check = |info, offered_transparency_info| {
+        verifier.verify_server_cert_with_context(
+            ee,
+            &[],
+            CertificateIdentity::Name(&server_name()),
+            &evidence(info),
+            now,
+            ServerCertVerificationContext::TlsHandshake {
+                offered_transparency_info,
+                offered_status_request: true,
+            },
+        )
+    };
+    // The offer and evidence must both pass before a live query is returned.
     assert_eq!(
-        verifier
-            .verify_server_cert_with_transparency(ee, &[], &server_name(), &evidence(None), now)
-            .unwrap_err(),
+        check(Some(&items), false).unwrap_err(),
+        Error::InvalidCertificate(CertificateError::TransparencyOfferRequired)
+    );
+    assert_eq!(
+        check(None, true).unwrap_err(),
         Error::InvalidCertificate(insufficient(0, 0))
     );
-    let (check, ct) = verifier
-        .verify_server_cert_with_transparency(ee, &[], &server_name(), &evidence(Some(&items)), now)
-        .unwrap();
-    assert!(matches!(check, RevocationCheck::Pending(_)));
-    assert_eq!(ct, Some(status(1, 1, 0)));
+    let verified = check(Some(&items), true).unwrap();
+    assert!(matches!(verified.revocation, RevocationCheck::Pending(_)));
+    assert_eq!(verified.transparency, Some(status(1, 1, 0)));
 }

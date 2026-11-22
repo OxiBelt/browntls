@@ -25,14 +25,15 @@ fn sct_binds_the_intermediate_issuer() {
             ..Default::default()
         }];
         verifier
-            .verify_server_cert_with_transparency(
+            .verify_server_cert_with_context(
                 &chain.end_entity,
                 std::slice::from_ref(&chain.ca),
-                &server_name(),
+                CertificateIdentity::Name(&server_name()),
                 &evidence,
                 UnixTime::now(),
+                ServerCertVerificationContext::LocalEvidence { allow_live: false },
             )
-            .map(|(_, status)| status)
+            .map(|verification| verification.transparency)
     };
     assert_eq!(check(sct_over(&pki.ca_spki)), Ok(Some(status(1, 1, 0))));
     assert_eq!(

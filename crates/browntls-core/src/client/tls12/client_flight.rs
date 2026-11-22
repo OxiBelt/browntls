@@ -45,13 +45,13 @@ impl State<ClientConnectionData> for ExpectServerDone {
         let verification = st
             .config
             .verifier()
-            .verify_server_cert_with_identity(
+            .verify_server_cert_with_context(
                 end_entity,
                 intermediates,
                 identity,
                 &st.server_cert.evidence(),
                 now,
-                true,
+                st.hello.verification_context(),
             )
             .map_err(|err| tls13::send_cert_path_error_alert(cx.common, err))?;
         let matched_identity = identity

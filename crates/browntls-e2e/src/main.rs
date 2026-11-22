@@ -97,6 +97,7 @@
 mod async_io;
 mod client_facing;
 mod dtls;
+mod early_data;
 mod ech_options;
 mod output;
 
@@ -150,13 +151,16 @@ fn main() {
         Some((cmd, rest)) if cmd == "ech-keygen" => {
             Options::parse(rest, cmd).and_then(|o| ech_options::keygen(&o))
         }
+        Some((cmd, rest)) if matches!(cmd.as_str(), "early-data-server" | "early-data-client") => {
+            early_data::run(cmd, rest)
+        }
         Some((cmd, rest)) if cmd == "info" && rest.is_empty() => {
             info();
             Ok(())
         }
         _ => Err(concat!(
             "usage: browntls-e2e info | ech-keygen | server | client-facing | client",
-            " | dtls-server | dtls-client [OPTIONS]"
+            " | dtls-server | dtls-client | early-data-server | early-data-client [OPTIONS]"
         )
         .into()),
     };

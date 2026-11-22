@@ -202,6 +202,7 @@ dependencies = [
  "sha1",
  "sha2",
  "signature",
+ "twox-hash",
  "x25519-dalek",
  "zeroize",
 ]
@@ -1609,6 +1610,12 @@ dependencies = [
  "socket2",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typenum"

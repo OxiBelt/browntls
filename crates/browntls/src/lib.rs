@@ -153,6 +153,7 @@
 //! | `rustcrypto` | no | A provider backed by the RustCrypto crates (`crypto::rustcrypto`). Together with `native` there is no implicit process default: install or pass a provider |
 //! | `tls12` | yes | TLS 1.2 |
 //! | `logging` | yes | Debug logging through the `log` crate |
+//! | `key-log` | no | RFC 9850 callbacks and a Linux diagnostic file sink |
 //! | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default key exchange groups |
 //! | `zlib`, `brotli`, `zstd` | no | Built-in certificate compression (RFC 8879), one feature per algorithm; `brotli` enables `std` |
 //! | `tokio` | no | `browntls::tokio`; enables `std` |

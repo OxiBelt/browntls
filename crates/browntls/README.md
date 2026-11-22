@@ -32,6 +32,34 @@ The items are the ones those crates define, not copies:
 library written against `browntls-core` or `browntls-tokio` works with an
 application that depends on `browntls`.
 
+## Key logging
+
+Configurations discard key-log events by default. For test traffic, enable
+the non-default `key-log` feature and install a sink. Omit `key-log` from the
+resolved Cargo feature graph in production. Another dependency can enable it
+through Cargo feature unification.
+
+On Linux, `KeyLogFile::try_from_path` opens an explicit path. The directory
+must already exist and prevent writes by other users. `KeyLogFile::new()`
+is the best-effort constructor that reads `SSLKEYLOGFILE`. Custom `KeyLog`
+implementations also work on other platforms and with `alloc` alone.
+
+```rust,no_run
+use std::sync::Arc;
+
+use browntls::{ClientConfig, KeyLogFile};
+
+# fn configure(mut config: ClientConfig) -> std::io::Result<ClientConfig> {
+// Use an existing private directory controlled by your diagnostic program.
+config.key_log = Arc::new(KeyLogFile::try_from_path("private/session.keys")?);
+# Ok(config)
+# }
+```
+
+The same configuration applies to core and Tokio TLS, QUIC-TLS, DTLS, and
+the userspace handshake before kTLS handoff. Treat the diagnostic file as
+secret material. Access can compromise both old and active connections.
+
 ## Tokio
 
 The module `browntls::tokio` has the name of the Tokio crate. Name its items
@@ -132,6 +160,7 @@ this one that have it. The default set is `browntls-core`'s plus `coop`.
 | `rustcrypto` | no | A provider backed by the RustCrypto crates. Together with `native` there is no implicit process default: install or pass a provider |
 | `tls12` | yes | TLS 1.2 |
 | `logging` | yes | Debug logging through the `log` crate |
+| `key-log` | no | Opt-in RFC 9850 traffic-secret callbacks and supported file sink |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default key exchange groups |
 | `zlib`, `brotli`, `zstd` | no | Built-in certificate compression (RFC 8879); `brotli` enables `std` |
 | `tokio` | no | `browntls::tokio`; enables `std` |

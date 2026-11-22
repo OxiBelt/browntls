@@ -47,6 +47,10 @@ compared byte for byte except for `id-RSASSA-PSS`, whose equivalent
 parameter encodings (RFC 4055) are first mapped to one canonical constant
 (`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
 path validation and by handshake signature verification alike).
+Certificate and CRL parsers also compare supported PSS inner and outer
+signature parameters semantically. They retain the original signed bytes.
+PSS certificate and signing-key pairing and path loop checks compare the
+actual key and its restrictions, including the exact minimum salt length.
 
 ### Facade crate (`browntls`)
 
@@ -2901,7 +2905,8 @@ pair per RFC 8879 algorithm (`compress::ZLIB`, `BROTLI`, `ZSTD`). Enabled
 built-ins are the default compressor and decompressor lists of new client and
 server configurations, in the order Brotli, zlib, Zstandard; without those
 features the lists are empty and the extension is neither offered nor
-accepted. Compression applies to TLS 1.3 only, in both directions: a server
+accepted. Compression applies in both directions in TLS 1.3, DTLS 1.3,
+and QUIC-TLS: a server
 compresses its Certificate with its first compressor the ClientHello offered,
 a client its own with the first one the CertificateRequest offered, and a
 built-in compressor sends uncompressed a message that compression would not
@@ -2913,9 +2918,9 @@ On receipt (`compress::receive_compressed_certificate`, used by both sides):
 
 - an algorithm that was not offered is `illegal_parameter`;
 - `uncompressed_length` must be non-zero and at most the configuration's
-  `cert_decompression_limit`, itself capped at 64 KiB
-  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the limit for an
-  uncompressed Certificate message); the codec already rejects a length above
+  `cert_decompression_limit`, itself capped at 65,535 bytes
+  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the same handshake body
+  limit as for an uncompressed Certificate); the codec rejects a length above
   that cap with `decode_error`, anything else over a limit is
   `bad_certificate`, in both cases before any decompression;
 - the output buffer is allocated once at the declared length and the
@@ -2934,18 +2939,25 @@ length and the format, never by what the stream declares:
 |---|---|---|
 | zlib | Fixed decoder state (about 11 KiB); the output buffer is the window | |
 | Brotli | A window of at most the expected length rounded up to a power of two (the decoder's byte allocator refuses larger requests, so a stream announcing more fails without the allocation), context maps up to 16 KiB, prefix code tables (at most 256 per category) | Large-window streams |
-| Zstandard | The declared window, at most 128 KiB, plus one block (128 KiB) and entropy tables | Skippable frames, dictionaries, a declared content size other than the expected length, a window above 128 KiB |
+| Zstandard | At most 128 KiB of retained history and bounded block scratch, including temporary growth during a rejected block | Skippable frames, a nonzero dictionary ID, and windows or blocks outside the limits |
 
-The Zstandard window limit is below the 8 MiB that RFC 8878 §3.1.1.1.2
-recommends decoders accept. One-shot encoders, which know the size of a
-Certificate message, write single-segment frames whose window is the content
-size, and the built-in encoder declares 128 KiB; a frame from a streaming
-encoder that was not told the size (libzstd then declares at least 512 KiB)
-is refused. `tests/cert_compression_memory.rs` checks, on Linux, that
-refusing streams of at most about 52 KB (a few hundred bytes for Brotli and
-Zstandard) which announce 8 to 16 MiB does not raise the process's peak
-resident memory by more than 1 MiB. Zstandard
-compression uses the single level `ruzstd` implements.
+With `zstd` enabled, `ClientConfig::cert_zstd_decompression_limits` and
+`ServerConfig::cert_zstd_decompression_limits` govern the built-in decoder
+independently of the expanded body limit. The defaults accept advertised
+windows up to 8 MiB and cap decoder history at 128 KiB. For a large
+advertised window the decoder uses at most 128 KiB when the longest
+acceptable frame output fits in that history. The decoder handles up to
+64 concatenated data frames and verifies any checksum. Each declared
+content size and the aggregate expanded length must match exactly.
+
+Callers can set stricter limits with `ZstdDecompressionLimits::new`, or
+pass them to `ZSTD.decompress_with_limits` for direct use. Both configs flow
+through the buffered, unbuffered, Tokio, DTLS and QUIC-TLS entry points.
+Stream post-handshake client authentication uses the same receiving
+policy. Linux kTLS inherits the authenticated connection after the userspace
+handshake. Zstandard compression uses the single level implemented by
+`ruzstd`.
+
 
 ## Primitive backends
 

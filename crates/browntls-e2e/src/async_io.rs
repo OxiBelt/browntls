@@ -97,6 +97,8 @@ pub(super) fn server(o: &Options, config: Arc<ServerConfig>) -> Result<()> {
 }
 
 async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize, o: &Options) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    super::observed_zstd::reset();
     let mut tls = bounded("handshake", acceptor.accept(sock)).await?;
     let line = read_line(&mut tls).await?;
     let reply: String = line.chars().rev().collect();
@@ -110,6 +112,9 @@ async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize, o: &Option
         ("io", "async".into()),
     ];
     fields.extend(negotiated(conn));
+    if let Some(field) = super::zstd_compression_diagnostic(o) {
+        fields.push(field);
+    }
     fields.push(("ech", format!("{:?}", conn.ech_status()).into()));
     fields.push((
         "delegated_credential",
@@ -141,6 +146,8 @@ pub(super) fn client(
     runtime()?.block_on(async {
         let connector = TlsConnector::from(config);
         for index in 0..o.connections {
+            #[cfg(feature = "zstd")]
+            super::observed_zstd::reset();
             let sock = connect_with_retry(connect, o.wait).await?;
             let handshake = match &identity {
                 Some(identity) => connector.connect_with_identity(
@@ -163,6 +170,9 @@ pub(super) fn client(
                 ("io", "async".into()),
             ];
             fields.extend(negotiated(conn));
+            if let Some(field) = super::zstd_compression_diagnostic(o) {
+                fields.push(field);
+            }
             fields.push((
                 "delegated_credential",
                 Value::Bool(conn.delegated_credential().is_some()),

@@ -76,12 +76,16 @@ locked version of that crate only; the exception is due for review by
 
 The `zlib`, `brotli` and `zstd` features of `browntls-core` pull in
 `miniz_oxide` (with `adler2`), `brotli` (with `brotli-decompressor`,
-`alloc-no-stdlib`, `alloc-stdlib`) and `ruzstd`. All are pure Rust from
+`alloc-no-stdlib`, `alloc-stdlib`) and `ruzstd` (with `twox-hash` for the
+Zstandard content checksum). All are pure Rust from
 crates.io, have no build script and no native code, and carry licences already
 on the allow list. As used here, `miniz_oxide`, `adler2`, `brotli-decompressor`
 and the two `alloc-*` crates forbid `unsafe`, and the `brotli` encoder has none
 outside its unused FFI module; `ruzstd` contains `unsafe` in its decoder ring
-buffer. They parse peer-controlled data during the handshake, so they are
+buffer. The optional `twox-hash` dependency is MIT-licensed and uses unsafe
+for fixed-width byte views and unaligned reads. Only its `xxhash64` feature
+is enabled. The codecs parse peer-controlled data during the handshake, so
+they are
 runtime dependencies (`safe-to-deploy`), are reached only when a feature is
 enabled, and run under the length limits described in
 [Architecture](Architecture.md#certificate-compression-rfc-8879) and under the

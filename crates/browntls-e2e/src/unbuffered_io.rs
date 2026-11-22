@@ -93,6 +93,8 @@ async fn serve(
     index: usize,
     options: &Options,
 ) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    super::observed_zstd::reset();
     let mut tls = bounded("handshake", acceptor.accept(socket)).await?;
     let request = read_line(&mut tls).await?;
     let reply: String = request.chars().rev().collect();
@@ -106,6 +108,9 @@ async fn serve(
         ("io", "tokio-unbuffered".into()),
     ];
     fields.extend(negotiated(connection));
+    if let Some(field) = super::zstd_compression_diagnostic(options) {
+        fields.push(field);
+    }
     fields.extend([
         (
             "delegated_credential",
@@ -138,6 +143,8 @@ pub(super) fn client(
     runtime()?.block_on(async {
         let connector = TlsConnector::from(config);
         for index in 0..options.connections {
+            #[cfg(feature = "zstd")]
+            super::observed_zstd::reset();
             let socket = connect_with_retry(address, options.wait).await?;
             let handshake = match &identity {
                 Some(identity) => connector.connect_with_identity(
@@ -160,6 +167,9 @@ pub(super) fn client(
                 ("io", "tokio-unbuffered".into()),
             ];
             fields.extend(negotiated(connection));
+            if let Some(field) = super::zstd_compression_diagnostic(options) {
+                fields.push(field);
+            }
             fields.extend([
                 (
                     "delegated_credential",

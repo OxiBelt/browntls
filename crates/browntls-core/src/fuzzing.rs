@@ -124,7 +124,9 @@ pub fn compressed_certificate(limit: usize, data: &[u8]) {
     };
     let declared = compressed.uncompressed_len as usize;
     let decompressors = crate::compress::default_cert_decompressors();
-    if let Ok(body) = crate::compress::decompress_certificate(decompressors, limit, &compressed) {
+    if let Ok(body) =
+        crate::compress::decompress_certificate(decompressors, limit.into(), &compressed)
+    {
         assert!(body.len() == declared && declared <= limit);
         assert!(body.len() <= crate::compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE);
         let _ = CertificatePayloadTls13::read_bytes(&body);

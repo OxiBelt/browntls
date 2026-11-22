@@ -16,6 +16,10 @@ use browntls_core::{
 };
 use common::*;
 
+#[cfg(feature = "zstd")]
+#[path = "cert_compression/zstd_transports.rs"]
+mod zstd_transports;
+
 type Builtin = (&'static dyn CertCompressor, &'static dyn CertDecompressor);
 
 /// Every built-in algorithm this build has.
@@ -53,6 +57,19 @@ impl Counting {
 impl CertDecompressor for Counting {
     fn decompress(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecompressionFailed> {
         self.inner.decompress(input, output)?;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[cfg(feature = "zstd")]
+    fn decompress_with_zstd_limits(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        limits: compress::ZstdDecompressionLimits,
+    ) -> Result<(), DecompressionFailed> {
+        self.inner
+            .decompress_with_zstd_limits(input, output, limits)?;
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

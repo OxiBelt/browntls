@@ -42,6 +42,44 @@ async fn handshake_and_data_through_the_tokio_module() {
     tokio::join!(server, client);
 }
 
+#[cfg(feature = "zstd")]
+#[tokio::test]
+async fn zstd_policy_reaches_buffered_and_unbuffered_lazy_acceptors() {
+    use browntls::server::{Acceptor, UnbufferedAcceptor};
+    use browntls::tokio::{LazyConfigAcceptor, unbuffered};
+
+    let pki = Pki::new();
+    let mut client = pki.client_config();
+    let (server, probe) = zstd_server(pki.server_config(), &mut client);
+    let client = Arc::new(client);
+    let server = Arc::new(server);
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let connector = TlsConnector::from(client.clone());
+    let (client_result, server_result) =
+        tokio::join!(connector.connect(localhost(), client_io), async {
+            LazyConfigAcceptor::new(Acceptor::default(), server_io)
+                .await?
+                .into_stream(server.clone())
+                .await
+        },);
+    client_result.unwrap();
+    server_result.unwrap();
+    assert_eq!(probe.count(), 1);
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let connector = unbuffered::TlsConnector::from(client);
+    let (client_result, server_result) =
+        tokio::join!(connector.connect(localhost(), client_io), async {
+            unbuffered::LazyConfigAcceptor::new(UnbufferedAcceptor::new(), server_io)
+                .await?
+                .into_stream(server)
+                .await
+        },);
+    client_result.unwrap();
+    server_result.unwrap();
+    assert_eq!(probe.count(), 2);
+}
+
 #[tokio::test]
 async fn hybrid_groups_negotiate_through_the_tokio_facade_adapter() {
     for (expected, provider) in hybrid_providers() {
@@ -106,7 +144,10 @@ async fn hybrid_groups_handoff_through_the_facade_async_ktls_adapter() {
         let provider = Arc::new(provider);
         let mut client_config = pki.client_config_with_provider(provider.clone());
         client_config.enable_secret_extraction = true;
-        let acceptor = TlsAcceptor::from(Arc::new(pki.server_config_with_provider(provider)));
+        let server_config = pki.server_config_with_provider(provider);
+        #[cfg(feature = "zstd")]
+        let (server_config, probe) = zstd_server(server_config, &mut client_config);
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
         let connector = TlsConnector::from(Arc::new(client_config));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -132,6 +173,8 @@ async fn hybrid_groups_handoff_through_the_facade_async_ktls_adapter() {
                 "{expected:?} facade async peer before handoff"
             );
             let mut offloaded = AsyncKtlsStream::from_client(tls).await.unwrap();
+            #[cfg(feature = "zstd")]
+            assert_eq!(probe.count(), 1);
             offloaded.write_all(b"hybrid").await.unwrap();
             let mut reply = [0; 6];
             offloaded.read_exact(&mut reply).await.unwrap();

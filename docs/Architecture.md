@@ -3471,6 +3471,10 @@ Test certificates and keys are generated at run time; no private keys are
 committed. Successful CI is evidence for the tested configurations only and
 is not a security assessment.
 
+The [RFC hardening integration report](RFC-Hardening-Integration.md) maps
+the Phase 0–5 requirements to public APIs, the tested provider and feature
+configurations, and native Linux peer and Service runs.
+
 ## Status
 
 The first implementation milestone establishes the crates, the provider mount

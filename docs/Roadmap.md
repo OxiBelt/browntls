@@ -77,6 +77,10 @@ intent.
 
 ## Governance gaps
 
+See the [RFC hardening integration report](RFC-Hardening-Integration.md)
+for the tested configurations and the remaining interoperability limits
+of the Phase 0–5 work.
+
 These requirements from [Maintenance](Maintenance.md) are not yet met:
 
 - `cargo vet` admission with real audits for every dependency.

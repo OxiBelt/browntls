@@ -388,6 +388,9 @@ deployment and adapter coverage.
 
 ## Phase 6 handoff
 
+The [RFC hardening integration report](RFC-Hardening-Integration.md)
+records the qualification revision, current tests, and remaining gaps.
+
 Start each follow-up from the claim and its named regression. Re-evaluate
 rows touched by source or RFC changes and record exact commands,
 providers, platforms, fixture provenance, results, and missing coverage.

@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use browntls_core::compress::{
     self, CertCompressor, CertDecompressor, CompressionFailed, CompressionLevel,
-    DecompressionFailed,
 };
 use browntls_core::server::PostHandshakeAuthStatus;
 use browntls_core::{
@@ -15,6 +14,10 @@ use browntls_core::{
     PeerMisbehaved, ServerConfig, ServerConnection, version,
 };
 use common::*;
+
+#[path = "../common/counting_decompressor.rs"]
+mod counting_decompressor;
+use counting_decompressor::Counting;
 
 #[cfg(feature = "zstd")]
 #[path = "cert_compression/zstd_transports.rs"]
@@ -32,51 +35,6 @@ fn builtins() -> Vec<Builtin> {
         #[cfg(feature = "zstd")]
         (&compress::ZSTD, &compress::ZSTD),
     ]
-}
-
-/// Wraps a decompressor and counts the messages it expanded.
-#[derive(Debug)]
-struct Counting {
-    inner: &'static dyn CertDecompressor,
-    calls: AtomicUsize,
-}
-
-impl Counting {
-    fn new(inner: &'static dyn CertDecompressor) -> &'static Self {
-        Box::leak(Box::new(Self {
-            inner,
-            calls: AtomicUsize::new(0),
-        }))
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl CertDecompressor for Counting {
-    fn decompress(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecompressionFailed> {
-        self.inner.decompress(input, output)?;
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    #[cfg(feature = "zstd")]
-    fn decompress_with_zstd_limits(
-        &self,
-        input: &[u8],
-        output: &mut [u8],
-        limits: compress::ZstdDecompressionLimits,
-    ) -> Result<(), DecompressionFailed> {
-        self.inner
-            .decompress_with_zstd_limits(input, output, limits)?;
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn algorithm(&self) -> CertificateCompressionAlgorithm {
-        self.inner.algorithm()
-    }
 }
 
 /// What a misbehaving peer compresses instead of its Certificate message;

@@ -25,6 +25,36 @@ const CHAINS: [ChainSpec; 5] = [
     },
 ];
 
+#[cfg(feature = "zstd")]
+#[path = "../common/counting_decompressor.rs"]
+mod counting_decompressor;
+
+#[cfg(feature = "zstd")]
+#[test]
+fn compressed_restricted_pss_mutual_authentication() {
+    use browntls_core::compress::ZSTD;
+    use counting_decompressor::Counting;
+
+    let server_chain = server_with_key(restricted(Sha384));
+    let client_chain = client_with_key(restricted(Sha256));
+    let (mut client_config, mut server_config) =
+        webpki_configs(ProtocolVersion::TLSv1_3, &server_chain, &client_chain);
+    let client_counter = Counting::new(&ZSTD);
+    let server_counter = Counting::new(&ZSTD);
+    client_config.cert_compressors = vec![&ZSTD];
+    client_config.cert_decompressors = vec![client_counter];
+    server_config.cert_compressors = vec![&ZSTD];
+    server_config.cert_decompressors = vec![server_counter];
+
+    let (mut client, mut server) = connect(client_config, server_config);
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client_counter.calls(), 1);
+    assert_eq!(server_counter.calls(), 1);
+    assert_eq!(client.peer_certificates().unwrap(), server_chain.chain);
+    assert_eq!(server.peer_certificates().unwrap(), client_chain.chain);
+    round_trip(&mut client, &mut server);
+}
+
 #[test]
 fn webpki_verifiers_validate_chains_with_pss_keys() {
     init_logging();

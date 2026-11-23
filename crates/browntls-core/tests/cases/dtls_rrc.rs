@@ -72,13 +72,87 @@ fn dtls12_rrc_protected_control_and_path_validation() {
 }
 
 fn protected_path_validation(versions: dtls::Versions) {
-    use dtls::rrc::{Action, DEFAULT_TIMEOUT, Selection};
     let mut pair = cid_pair(
         rrc_settings(8, true).with_versions(versions),
         rrc_settings(16, true).with_versions(versions),
     );
     let mut sim = Sim::perfect();
     pair.handshake(&mut sim).unwrap();
+    let (_, message) = validate_candidate(&mut pair, sim.now);
+    pair.exchange(&mut sim, "application data after protected RRC");
+    pair.client.send_close_notify();
+    let mut closed = Vec::new();
+    assert!(pair.client.send_rrc(&message, &mut closed).is_err());
+    assert!(closed.is_empty());
+}
+
+#[test]
+fn delayed_key_update_ack_settles_after_retry_and_path_migration() {
+    let settings = || rrc_settings(8, true).with_versions(dtls::Versions::V1_3);
+    let mut pair = cid_pair(settings(), settings());
+    let mut sim = Sim::perfect();
+    pair.handshake(&mut sim).unwrap();
+    pair.server.refresh_traffic_keys().unwrap();
+    flush_to(&mut pair.server, &mut pair.client, sim.now);
+    let delayed = client_datagrams(&mut pair.client, sim.now);
+    assert!(!delayed.is_empty());
+
+    // The client's path changes while its ACK to the server is in transit.
+    let due = pair.server.next_timeout().unwrap();
+    assert!(due > sim.now);
+    let (mut validation, _) = validate_candidate(&mut pair, sim.now);
+    assert_eq!(pair.server.next_timeout(), Some(due));
+    pair.server.handle_timeout(due).unwrap();
+    let mut retry = Vec::new();
+    assert!(pair.server.write_datagram(&mut retry, due).unwrap());
+    let received = pair.client.read_datagram(&mut retry, due).unwrap();
+    assert!(received.app_data().is_empty());
+    assert_eq!(received.authenticated_records().len(), 1);
+    assert_eq!(received.authenticated_records()[0].epoch(), 3);
+
+    for mut original in delayed {
+        pair.server.read_datagram(&mut original, due).unwrap();
+    }
+    let mut out = Vec::new();
+    pair.server.send(b"updated", &mut out).unwrap();
+    let received = pair.client.read_datagram(&mut out, due).unwrap();
+    assert_eq!(received.authenticated_records()[0].epoch(), 4);
+    assert_eq!(&out[received.app_data()[0].clone()], b"updated");
+
+    // The delayed response can also contain the reciprocal KeyUpdate.
+    flush_to(&mut pair.server, &mut pair.client, due);
+    flush_to(&mut pair.client, &mut pair.server, due);
+    assert_eq!(pair.server.next_timeout(), None);
+    assert_eq!(pair.client.next_timeout(), None);
+    out.clear();
+    pair.client.send(b"migrated", &mut out).unwrap();
+    let mut duplicate = out.clone();
+    let received = pair.server.read_datagram(&mut out, due).unwrap();
+    assert_eq!(
+        pair.server
+            .handle_path_record(
+                &mut validation,
+                &received.authenticated_records()[0],
+                &out,
+                "candidate",
+                true,
+                due,
+            )
+            .unwrap(),
+        dtls::rrc::Action::None
+    );
+    assert_eq!(validation.bound_path(), &"candidate");
+    assert_eq!(received.app_data().len(), 1);
+    assert_eq!(&out[received.app_data()[0].clone()], b"migrated");
+    let received = pair.server.read_datagram(&mut duplicate, due).unwrap();
+    assert!(received.app_data().is_empty());
+}
+
+fn validate_candidate(
+    pair: &mut Pair,
+    now: Duration,
+) -> (dtls::rrc::Validation<&'static str>, dtls::rrc::Message) {
+    use dtls::rrc::{Action, DEFAULT_TIMEOUT, Selection};
     let ids: Vec<Vec<u8>> = pair
         .server
         .local_connection_ids()
@@ -101,8 +175,8 @@ fn protected_path_validation(versions: dtls::Versions) {
     pair.client
         .send(b"most recent datagram", &mut latest)
         .unwrap();
-    pair.server.read_datagram(&mut latest, sim.now).unwrap();
-    let old = pair.server.read_datagram(&mut reordered, sim.now).unwrap();
+    pair.server.read_datagram(&mut latest, now).unwrap();
+    let old = pair.server.read_datagram(&mut reordered, now).unwrap();
     assert_eq!(old.app_data().len(), 1);
     assert_eq!(
         pair.server
@@ -112,7 +186,7 @@ fn protected_path_validation(versions: dtls::Versions) {
                 &reordered,
                 "candidate",
                 true,
-                sim.now,
+                now,
             )
             .unwrap(),
         Action::None
@@ -123,7 +197,7 @@ fn protected_path_validation(versions: dtls::Versions) {
     pair.client
         .send(b"transparent application datagram", &mut app)
         .unwrap();
-    let received = pair.server.read_datagram(&mut app, sim.now).unwrap();
+    let received = pair.server.read_datagram(&mut app, now).unwrap();
     assert_eq!(received.app_data().len(), 1);
     assert_eq!(
         &app[received.app_data()[0].clone()],
@@ -135,21 +209,14 @@ fn protected_path_validation(versions: dtls::Versions) {
     assert_eq!(server_validation.pending_path(), None);
     assert_eq!(
         pair.server
-            .handle_path_record(
-                &mut server_validation,
-                record,
-                &app,
-                "candidate",
-                true,
-                sim.now,
-            )
+            .handle_path_record(&mut server_validation, record, &app, "candidate", true, now)
             .unwrap(),
         Action::None
     );
     assert_eq!(server_validation.bound_path(), &"old");
     let Action::Send { path, message } = pair
         .server
-        .poll_path_validation(&mut server_validation, sim.now)
+        .poll_path_validation(&mut server_validation, now)
         .unwrap()
     else {
         panic!("challenge expected")
@@ -158,7 +225,7 @@ fn protected_path_validation(versions: dtls::Versions) {
     let mut challenge = Vec::new();
     pair.server.send_rrc(&message, &mut challenge).unwrap();
     assert_eq!(challenge.len(), pair.server.rrc_record_len().unwrap());
-    let received = pair.client.read_datagram(&mut challenge, sim.now).unwrap();
+    let received = pair.client.read_datagram(&mut challenge, now).unwrap();
     assert!(received.app_data().is_empty());
     assert_eq!(received.authenticated_records().len(), 1);
     let record = &received.authenticated_records()[0];
@@ -171,7 +238,7 @@ fn protected_path_validation(versions: dtls::Versions) {
             &challenge,
             "server",
             true,
-            sim.now,
+            now,
         )
         .unwrap()
     else {
@@ -181,7 +248,7 @@ fn protected_path_validation(versions: dtls::Versions) {
     let mut response = Vec::new();
     pair.client.send_rrc(&message, &mut response).unwrap();
     assert_eq!(response.len(), pair.client.rrc_record_len().unwrap());
-    let received = pair.server.read_datagram(&mut response, sim.now).unwrap();
+    let received = pair.server.read_datagram(&mut response, now).unwrap();
     assert!(received.app_data().is_empty());
     assert_eq!(server_validation.bound_path(), &"old");
     assert_eq!(
@@ -192,7 +259,7 @@ fn protected_path_validation(versions: dtls::Versions) {
                 &response,
                 "candidate",
                 true,
-                sim.now,
+                now,
             )
             .unwrap(),
         Action::Adopt { path: "candidate" }
@@ -202,11 +269,7 @@ fn protected_path_validation(versions: dtls::Versions) {
         pair.server.local_connection_ids().collect::<Vec<_>>(),
         ids.iter().map(Vec::as_slice).collect::<Vec<_>>()
     );
-    pair.exchange(&mut sim, "application data after protected RRC");
-    pair.client.send_close_notify();
-    let mut closed = Vec::new();
-    assert!(pair.client.send_rrc(&message, &mut closed).is_err());
-    assert!(closed.is_empty());
+    (server_validation, message)
 }
 
 #[cfg(feature = "std")]

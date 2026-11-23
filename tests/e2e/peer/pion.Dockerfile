@@ -15,7 +15,7 @@ RUN go build -trimpath -o /out/pion-dtls . \
       if [ -n "$dir" ]; then mkdir -p "/out/licenses/$module" && cp "$dir/LICENSE" "/out/licenses/$module/"; fi; \
     done < /tmp/deps
 
-FROM ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssl \
  && rm -rf /var/lib/apt/lists/*

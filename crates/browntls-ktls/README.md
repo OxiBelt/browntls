@@ -38,6 +38,10 @@ that: a kernel that lacks the suite's cipher (built without it, or
 restricted to approved algorithms) refuses the keys only after they were
 taken out of the connection, which is then lost (`HandoffError::Failed`).
 
+Key logging uses the same `ClientConfig` or `ServerConfig` sink while the
+userspace handshake runs. kTLS does not create a separate sink after handoff;
+see the facade's [key logging](../browntls/README.md#key-logging) section.
+
 Linux kernel TLS can be told to limit transmitted records (Linux 6.19), but
 it cannot enforce a negotiated receive `record_size_limit` below the
 protocol maximum. Such a connection is refused before the socket is attached

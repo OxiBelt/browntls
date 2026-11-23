@@ -1982,6 +1982,30 @@ KeyUpdate from either side, tickets after the handover, post-handshake
 authentication, closure, the blockers, the limits and malformed records, for
 every suite with a kernel form on both providers.
 
+### Key logging
+
+Client and server configurations use `NoKeyLog` by default. The non-default
+`key-log` Cargo feature enables the shared RFC 9850 callbacks. It applies to
+buffered and unbuffered TLS, DTLS and QUIC-TLS. Tokio uses the core config,
+and a kTLS handoff logs only during the userspace handshake. Omit the Cargo
+feature for production. To check whether any dependency enables it, use
+`cargo tree -e features -i browntls-core` with the production build options.
+
+With `std` and `key-log` on Linux, `KeyLogFile::try_from_path` opens an
+explicit path, and `KeyLogFile::new()` reads `SSLKEYLOGFILE` at construction.
+The sink requires local Unix ownership, permission, and lock semantics. It
+accepts owner-only regular files under trusted directories, rejects links
+and shared destination directories, and skips writes during advisory-lock
+contention. File errors leave the TLS exchange usable. The file API stays
+available as an inactive sink on other platforms. Custom callbacks do not
+require `std`.
+
+The log contains TLS 1.2 master secrets and TLS 1.3 traffic and exporter
+secrets. Access can defeat confidentiality and integrity for recorded and
+active sessions, including applications relying on exporters. Use synthetic
+test traffic and enforce access control and retention for any sink. This
+feature is independent of the ordinary telemetry controlled by `logging`.
+
 ### Linux kernel TLS (`browntls-ktls`)
 
 `KtlsStream::new` takes a buffered `ClientConnection` or `ServerConnection`
@@ -2894,6 +2918,7 @@ of peer support for those scenarios.
 | `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
 | `tls12` | yes | TLS 1.2 support |
 | `logging` | yes | `log` crate diagnostics |
+| `key-log` | no | RFC 9850 key-log callbacks and, on Linux, the explicit-path file sink |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
 | `zlib` | no | zlib certificate compression (RFC 8879), `miniz_oxide` |
 | `brotli` | no | Brotli certificate compression (RFC 8879), `brotli`; enables `std` |

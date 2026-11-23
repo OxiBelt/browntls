@@ -40,6 +40,51 @@ mod dtls12_cases {
         assert_eq!(pair.client.tls13_tickets_received(), 0);
     }
 
+    #[cfg(feature = "key-log")]
+    #[test]
+    fn dtls12_client_and_server_emit_the_master_secret_label() {
+        #[derive(Debug, Default)]
+        struct Labels(std::sync::Mutex<Vec<String>>);
+
+        impl browntls_core::KeyLog for Labels {
+            fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+                self.0.lock().unwrap().push(label.to_owned());
+            }
+        }
+
+        fn assert_logged(log: &Labels) {
+            assert!(
+                log.0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|label| label == "CLIENT_RANDOM")
+            );
+        }
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let client_log = Arc::new(Labels::default());
+        let server_log = Arc::new(Labels::default());
+        let mut client_config = client_config(&chain);
+        client_config.key_log = client_log.clone();
+        let mut server_config = dtls_server_config(&chain);
+        server_config.key_log = server_log.clone();
+        let client_config = Arc::new(client_config);
+        let server_config = Arc::new(server_config);
+        let mut pair = make_pair(
+            &client_config,
+            &server_config,
+            dtls::Versions::V1_2,
+            dtls::Versions::V1_2,
+        );
+
+        pair.handshake(&mut Sim::perfect()).unwrap();
+
+        assert_v12(&pair);
+        assert_logged(&client_log);
+        assert_logged(&server_log);
+    }
+
     #[test]
     fn stateless_acceptor_challenges_a_fragmented_initial_dtls12_hello() {
         let chain = server_chain(KeyType::EcdsaP256);

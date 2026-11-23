@@ -317,6 +317,8 @@ fn assert_dtls13(pair: &Pair) {
     }
 }
 
+include!("dtls_key_log.rs");
+
 // ------------------------------------------------------------------ cases
 
 #[test]

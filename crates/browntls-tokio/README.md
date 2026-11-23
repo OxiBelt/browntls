@@ -27,6 +27,11 @@ The items are the same ones (`browntls::tokio::TlsConnector` is
 the items through this crate, `browntls_tokio`, and the protocol crate
 through its re-export `browntls_tokio::browntls`.
 
+Key logging is configured on the shared `browntls::ClientConfig` or
+`ServerConfig`. It is disabled by default; see the facade's
+[key logging](../browntls/README.md#key-logging) section for explicit file
+sink construction and its secret exposure.
+
 ## Client
 
 ```rust,no_run

@@ -163,6 +163,23 @@ Verify hosted signatures after pushing. Release tags must also be signed and
 verified; see the
 [release prerequisites](docs/Maintenance.md#release-prerequisites).
 
+## Portable public references
+
+Keep public contribution records, including commits, issues, pull requests,
+comments, and reviews, portable and repository-relevant. Do not reference
+session-specific command aliases, absolute host paths, local-only environment
+data or artifacts, or private evidence links. Describe the reproducible result
+and any validation limits instead of inaccessible execution details.
+
+When supporting context is useful, prefer stable sources that readers can
+access publicly: tracked repository files, public GitHub projects, issues,
+pull requests, and commits, published security advisories, and official
+documentation. If no suitable public source exists, explain the necessary
+context inline without citing inaccessible local or private material.
+Sanitize all references and descriptions; never expose secrets, personal
+data, or undisclosed vulnerability details. Follow [SECURITY.md](SECURITY.md)
+for private vulnerability reporting and coordinated disclosure.
+
 ## LLM assistance notices
 
 If any LLM agent participated in preparing or reviewing a contribution, disclose

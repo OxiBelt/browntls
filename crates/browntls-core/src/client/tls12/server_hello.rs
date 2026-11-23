@@ -210,7 +210,9 @@ impl CompleteServerHelloHandling {
             resuming.secret(),
             resuming.extended_ms(),
         );
-        self.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*self.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),

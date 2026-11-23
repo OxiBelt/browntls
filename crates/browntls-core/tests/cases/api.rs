@@ -16,10 +16,12 @@ use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
 use browntls_core::server::Acceptor;
 use browntls_core::{
     CertificateCompressionAlgorithm, ClientConfig, ClientConnection, Connection,
-    DigitallySignedStruct, Error, KeyLog, ServerConfig, ServerConnection, SignatureScheme, Stream,
+    DigitallySignedStruct, Error, ServerConfig, ServerConnection, SignatureScheme, Stream,
     StreamOwned, version,
 };
 use common::*;
+
+use browntls_core::KeyLog;
 
 // ---------------------------------------------------------------- Acceptor
 
@@ -241,12 +243,50 @@ fn complete_io_returns_when_close_notify_arrives_during_the_handshake() {
 
 // ---------------------------------------------------------------- key log
 
+#[cfg(not(feature = "key-log"))]
+#[test]
+fn key_log_callbacks_are_compiled_out() {
+    #[derive(Debug)]
+    struct Unexpected;
+    impl KeyLog for Unexpected {
+        fn log(&self, _: &str, _: &[u8], _: &[u8]) {
+            panic!("feature-off connection called KeyLog::log");
+        }
+
+        fn will_log(&self, _: &str) -> bool {
+            panic!("feature-off connection called KeyLog::will_log");
+        }
+    }
+
+    let chain = server_chain(KeyType::Ed25519);
+    let check_handshake = |v| {
+        let mut client_config = ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[v])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+            .with_no_client_auth();
+        client_config.key_log = Arc::new(Unexpected);
+        let mut server_config = server_config(&chain);
+        server_config.key_log = Arc::new(Unexpected);
+        let mut client = ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+        do_handshake(&mut client, &mut server).unwrap();
+    };
+    check_handshake(&version::TLS13);
+    #[cfg(feature = "tls12")]
+    check_handshake(&version::TLS12);
+}
+
 /// `(label, client_random, secret)` as handed to the key log.
+#[cfg(feature = "key-log")]
 type LoggedSecret = (String, Vec<u8>, Vec<u8>);
 
+#[cfg(feature = "key-log")]
 #[derive(Debug, Default)]
 struct CapturingKeyLog(Mutex<Vec<LoggedSecret>>);
 
+#[cfg(feature = "key-log")]
 impl KeyLog for CapturingKeyLog {
     fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
         self.0
@@ -256,6 +296,7 @@ impl KeyLog for CapturingKeyLog {
     }
 }
 
+#[cfg(feature = "key-log")]
 #[test]
 fn key_log_receives_every_tls13_secret() {
     init_logging();
@@ -290,11 +331,11 @@ fn key_log_receives_every_tls13_secret() {
     let mut s = server_entries.clone();
     c.sort();
     s.sort();
-    assert_eq!(c, s);
+    assert!(c == s, "endpoint key log entries differ");
     assert!(c.iter().all(|(_, random, _)| random.len() == 32));
 }
 
-#[cfg(feature = "tls12")]
+#[cfg(all(feature = "key-log", feature = "tls12"))]
 #[test]
 fn key_log_receives_the_tls12_master_secret() {
     init_logging();

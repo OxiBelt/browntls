@@ -1,11 +1,12 @@
-//! Logging of session secrets for debugging (NSS key log format).
+//! Logging of session secrets for diagnostics (RFC 9850).
 
 use core::fmt::Debug;
 
-/// A sink for session secrets in the NSS key log format.
+/// A sink for session secrets in the RFC 9850 key log format.
 ///
-/// Secrets written through this trait defeat the confidentiality of the
-/// connection; enable it only in debugging builds.
+/// Connections invoke the sink only with the non-default `key-log` feature.
+/// Use it with test traffic only. The application is responsible for access
+/// control, retention, and disposal of any secrets its sink receives.
 pub trait KeyLog: Debug + Send + Sync {
     /// Logs `secret` for the connection identified by `client_random` under
     /// `label`.
@@ -14,6 +15,13 @@ pub trait KeyLog: Debug + Send + Sync {
     /// Whether `log` would do anything for `label`; lets callers skip work.
     fn will_log(&self, _label: &str) -> bool {
         true
+    }
+}
+
+#[cfg(feature = "key-log")]
+pub(crate) fn emit(sink: &dyn KeyLog, label: &str, client_random: &[u8; 32], secret: &[u8]) {
+    if sink.will_log(label) {
+        sink.log(label, client_random, secret);
     }
 }
 

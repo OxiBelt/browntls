@@ -57,6 +57,7 @@ impl SecretKind {
         }
     }
 
+    #[cfg(feature = "key-log")]
     fn log_label(self) -> Option<&'static str> {
         Some(match self {
             Self::ClientEarlyTrafficSecret => "CLIENT_EARLY_TRAFFIC_SECRET",
@@ -188,14 +189,13 @@ impl KeySchedule {
         &self,
         kind: SecretKind,
         hs_hash: &[u8],
-        key_log: &dyn KeyLog,
-        client_random: &[u8; 32],
+        _key_log: &dyn KeyLog,
+        _client_random: &[u8; 32],
     ) -> OkmBlock {
         let output = self.derive(kind, hs_hash);
-        if let Some(label) = kind.log_label()
-            && key_log.will_log(label)
-        {
-            key_log.log(label, client_random, output.as_ref());
+        #[cfg(feature = "key-log")]
+        if let Some(label) = kind.log_label() {
+            crate::key_log::emit(_key_log, label, _client_random, output.as_ref());
         }
         output
     }
@@ -852,14 +852,17 @@ impl KeyScheduleTraffic {
 
 #[cfg(all(test, feature = "native", feature = "std"))]
 mod tests {
+    #[cfg(feature = "key-log")]
     use alloc::string::String;
     use alloc::vec::Vec;
 
     use super::*;
 
+    #[cfg(feature = "key-log")]
     #[derive(Debug, Default)]
     struct Recorder(std::sync::Mutex<Vec<(String, Vec<u8>)>>);
 
+    #[cfg(feature = "key-log")]
     impl KeyLog for Recorder {
         fn log(&self, label: &str, _client_random: &[u8], secret: &[u8]) {
             if let Ok(mut entries) = self.0.lock() {
@@ -899,15 +902,21 @@ mod tests {
             "b2 02 68 66 61 09 37 d7 42 3e 5b e9 08 62
              cc f2 4c 0e 60 91 18 6d 34 f8 12 08 9f f5 be 2e f7 df",
         );
+        #[cfg(feature = "key-log")]
         let recorder = Recorder::default();
+        #[cfg(not(feature = "key-log"))]
+        let recorder = crate::NoKeyLog;
         let exporter = KeyScheduleEarly::new(suite, &psk, Protocol::Tls13).early_exporter(
             &client_hello_hash,
             &recorder,
             &[0; 32],
         );
         assert_eq!(exporter.secret.as_ref(), expected.as_slice());
-        let logged = recorder.0.lock().unwrap().clone();
-        assert_eq!(logged, [(String::from("EARLY_EXPORTER_SECRET"), expected)]);
+        #[cfg(feature = "key-log")]
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            [(String::from("EARLY_EXPORTER_SECRET"), expected)]
+        );
 
         // HkdfLabel cannot hold a label longer than 249 bytes.
         assert!(

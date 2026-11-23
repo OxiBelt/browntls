@@ -357,7 +357,9 @@ impl CompleteClientHelloHandling {
             &resumedata.master_secret.0,
             resumedata.extended_ms,
         );
-        self.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*self.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),
@@ -737,7 +739,9 @@ impl State<ServerConnectionData> for ExpectClientKx {
         })?;
         cx.common.kx_state.complete();
 
-        st.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*st.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),

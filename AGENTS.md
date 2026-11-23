@@ -75,7 +75,12 @@ record gaps explicitly. Do not run a monolithic repository scan by default.
 Every LLM-assisted commit and account-authored issue, comment, PR, or review
 needs the assistance notice required by CONTRIBUTING.md. Keep commit context
 portable: no absolute host paths, session aliases, private evidence links,
-credentials, or undisclosed vulnerability details.
+credentials, or undisclosed vulnerability details. When additional context is
+useful, prefer publicly accessible tracked repository files, GitHub projects,
+issues, pull requests and commits, published security advisories, and official
+documentation. If no suitable public reference exists, explain the context
+inline without citing inaccessible local or private material. Follow the full
+[public reference policy](CONTRIBUTING.md#portable-public-references).
 
 For validated report-worthy vulnerabilities, use one private repository advisory
 per finding until disclosure is authorized. Preview the exact payload and obtain

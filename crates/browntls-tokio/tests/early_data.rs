@@ -152,6 +152,14 @@ async fn declined_early_data_is_resent_as_ordinary_data() {
                 unresent_bytes: 0,
             },
         );
+        assert_eq!(
+            client.early_data_outcome(),
+            EarlyDataOutcome::Rejected {
+                early_bytes: 13,
+                resent_bytes: 13,
+                unresent_bytes: 0,
+            },
+        );
         assert!(!client.get_ref().1.is_handshaking());
         assert!(!client.get_ref().1.is_early_data_accepted());
         client.shutdown().await.unwrap();

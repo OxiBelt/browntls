@@ -37,3 +37,18 @@ for the ACK content type. Its flight and epoch items remain reported.
 The CT Merkle proof item 8670 remains held for document update.
 
 [errata]: https://www.rfc-editor.org/errata.json
+
+## Public API coverage
+
+| Entry points | Regression and caller contract |
+| --- | --- |
+| Buffered and unbuffered core TLS and QUIC-TLS | `tls13`, `unbuffered`, `extensions`, and `quic` observe early-data acceptance, provisional ALPN and resumption. The QUIC caller drives CRYPTO bytes and owns transport parameter enforcement and retransmission. |
+| Tokio buffered and unbuffered clients and acceptors | `early_data`, `unbuffered_early`, and `unbuffered_peers` compare public outcomes to bytes received by the peer. The unbuffered client checks explicit resend with matching, changed and absent ALPN and requires ordered application writes after acknowledgement. `server_early_data`, `lazy`, `unbuffered_lazy`, `delegated_credentials`, and `transparency` exercise handshake continuations and the selected configuration. |
+| Caller-clock DTLS and blocking and Tokio UDP | `dtls` combines delayed ACK delivery and an epoch transition with path validation. `dtls_udp`, `dtls_client`, `dtls_server`, `dtls_sessions`, and `dtls_session_recovery` cover loopback drivers, admission, migration, and recovery. The public facade `dtls` test observes the migrated session through its re-exports. |
+| Linux blocking and async kTLS | `offload`, `tokio_offload`, and `tokio_routing` check the handoff boundary, including direct refusal and userspace fallback for an unenforceable local receive limit. The TX test hands off to the real kernel and checks all bytes at a userspace peer enforcing a reduced cap. `key_log_handoff` checks exact per-label counts at handoff and after data transfer. |
+| `browntls` facade | The `tokio` target exercises both lazy acceptors and Zstandard receive policy. `key_log_public` checks enabled and disabled feature forwarding during public application I/O. The `ktls` target exercises facade blocking offload when Linux supports it. |
+
+For callers settling rejected early data, see the
+[Tokio example](../crates/browntls-tokio/README.md#0-rtt-early-data).
+The outcome tracks TLS bytes written, resent and still unresent. The
+application decides whether a declined request can be retried.

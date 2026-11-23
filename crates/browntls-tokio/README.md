@@ -253,6 +253,21 @@ provisioned PSK (RFC 9846 §4.3.10 and Appendix F.5). Absent, unknown or
 different ALPN leaves the decision to the application. Counts describe
 local TLS progress. The peer application may not have processed the bytes.
 
+In report-only mode the application can use this sequence before it writes
+ordinary data. A returned byte count tells the caller how much of its
+retained payload needs a decision. The same sequence works with
+`unbuffered::ClientTlsStream`.
+
+```rust,no_run
+use browntls_tokio::client::TlsStream;
+use tokio::net::TcpStream;
+
+async fn settle(tls: &mut TlsStream<TcpStream>) -> std::io::Result<usize> {
+    tls.finish_early_data().await?;
+    Ok(tls.acknowledge_rejected_early_data().unwrap_or(0))
+}
+```
+
 A server that set `max_early_data_size` (with stateful session storage) reads
 accepted early data through `server::TlsStream::early_data`, an `AsyncRead`
 of its own: ordinary reads never return early data. By default `accept`

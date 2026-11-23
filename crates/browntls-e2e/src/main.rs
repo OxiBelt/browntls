@@ -22,6 +22,7 @@
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
 //!         --record-size-limit N|none, --delegated-credentials, --grease,
 //!         --async (buffered Tokio), --unbuffered (unbuffered Tokio),
+//!         --key-log (logs only in diagnostic builds with SSLKEYLOGFILE),
 //!         --zstd-cert-compression (only when built with browntls/zstd)
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
 //!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
@@ -94,6 +95,8 @@
 //!
 //! This is test tooling: it loads keys from files given on the command line
 //! and has no hardening beyond the library defaults it configures.
+//! The `--key-log` flag installs the diagnostic sink. The sink can emit
+//! traffic secrets only in builds that enable the `key-log` feature.
 
 mod async_io;
 mod client_facing;
@@ -290,6 +293,7 @@ struct Options {
     external_psk_file: Option<String>,
     external_psk_identity: Option<String>,
     zstd_cert_compression: bool,
+    key_log: bool,
 }
 
 impl Options {
@@ -320,6 +324,7 @@ impl Options {
                 "--unbuffered" => Some(&mut o.unbuffered_io),
                 "--dtls-cid" => Some(&mut o.dtls_cid),
                 "--zstd-cert-compression" => Some(&mut o.zstd_cert_compression),
+                "--key-log" => Some(&mut o.key_log),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -646,6 +651,9 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
     }
     config.enable_grease = o.grease;
     config.enable_delegated_credentials = o.delegated_credentials;
+    if o.key_log {
+        config.key_log = Arc::new(browntls::KeyLogFile::new());
+    }
     if o.zstd_cert_compression {
         #[cfg(feature = "zstd")]
         {
@@ -804,6 +812,9 @@ fn client(o: &Options) -> Result<()> {
     }
     config.enable_grease = o.grease;
     config.enable_delegated_credentials = o.delegated_credentials;
+    if o.key_log {
+        config.key_log = Arc::new(browntls::KeyLogFile::new());
+    }
     if o.zstd_cert_compression {
         #[cfg(feature = "zstd")]
         {

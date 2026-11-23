@@ -209,6 +209,24 @@ The test tool wraps its Zstandard decompressor with a test-only counter and
 reports `zstd_certificate_messages_received` per connection. Each browntls
 endpoint must successfully decode at least one compressed certificate.
 
+## TLS key-log interoperability
+
+Build the diagnostic peer image and run the isolated key-log qualification from
+the repository root:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --key-log --tag browntls-e2e:key-log
+python3 -B tests/e2e/e2e.py build-peer --suite openssl-3.0
+python3 -B tests/e2e/key_log.py --image browntls-e2e:key-log
+```
+
+The harness runs TLS 1.2 and TLS 1.3 with browntls as client and server against
+the existing OpenSSL 3.0 peer image. It verifies the certificate and a
+bidirectional application-data exchange, then compares parsed NSS key-log
+entries in memory for identical labels, ClientHello randoms, and secrets. It
+does not print or persist key-log contents. The fixture uses ephemeral
+certificates in the run volume and a run-owned Docker network.
+
 ## Limitations
 
 - The native RISC-V runners have no RVV 1.0, so they exercise the scalar and

@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [features]
 zstd = ["browntls/zstd"]
+key-log = ["browntls/key-log"]
 
 [dependencies]
 # The facade only, as an application depends on it: `browntls::tokio` is

@@ -1601,8 +1601,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     env["CARGO_TARGET_DIR"] = str(target_dir)
     binary = target_dir / target / "release" / "browntls-e2e"
     cargo = ["cargo", "build", "--release", "--locked", "-p", "browntls-e2e", "--target", target]
+    features = []
     if args.zstd:
-        cargo += ["--features", "browntls-e2e/zstd"]
+        features.append("browntls-e2e/zstd")
+    if args.key_log:
+        features.append("browntls-e2e/key-log")
+    if features:
+        cargo += ["--features", ",".join(features)]
     print("+", shlex.join(cargo), flush=True)
     subprocess.run(cargo, cwd=REPO_ROOT, env=env, check=True)
     tag = args.tag or image_tag(arch.name)
@@ -1767,6 +1772,7 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--tag", help=f"image tag (default {image_tag('<arch>')})")
     b.add_argument("--save", metavar="TAR", help="also write the image to TAR")
     b.add_argument("--zstd", action="store_true", help="enable Zstandard certificate compression")
+    b.add_argument("--key-log", action="store_true", help="enable diagnostic key logging in the peer")
     b.set_defaults(func=cmd_build)
 
     bp = sub.add_parser("build-peer", help="build a suite's peer image")

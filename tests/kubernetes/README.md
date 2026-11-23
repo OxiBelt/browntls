@@ -161,3 +161,30 @@ harness provides direct wire-level evidence for the compressed-certificate
 algorithm. The runner reuses the ECH Service environment helper to create an
 ownership-labelled image and namespace and verify their removal. The supplied
 minikube profile remains running.
+
+## TLS key-log file permissions
+
+Build both peer variants and run them against an already running minikube
+profile:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --key-log \
+  --tag browntls-e2e:key-log-amd64
+python3 -B tests/e2e/e2e.py build --arch amd64 \
+  --tag browntls-e2e:no-key-log-amd64
+python3 -B tests/kubernetes/key_log.py \
+  --key-log-image browntls-e2e:key-log-amd64 \
+  --plain-image browntls-e2e:no-key-log-amd64 --profile PROFILE
+```
+
+The harness runs authenticated TLS 1.3 exchanges over its own TCP Services
+with key logging enabled and disabled, each against memory-backed `emptyDir`
+volumes with directory modes `0700` and `0777`. A BusyBox observer checks
+file existence, nonempty size, and mode without reading its contents. Both
+builds explicitly install the sink and receive `SSLKEYLOGFILE`. Ensure
+`busybox:1.36.1` is available to the minikube profile. To use a locally
+installed kubectl, pass `--kubectl /path/to/kubectl`. Peer output is
+checked for the exact application request and reply without printing session
+secrets. The harness creates isolated namespaces and run-owned copies of both
+peer images and removes those resources after each run. The caller manages the
+minikube profile and the two supplied source image tags.

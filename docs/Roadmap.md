@@ -6,6 +6,11 @@ features. See [Architecture](Architecture.md) for the design. Status values:
 **planned**. This file is updated with each milestone; it reports evidence, not
 intent.
 
+The [new RFC capabilities audit](RFC-Features-Baseline.md) records the
+current API and test baseline. Its [standards matrix](RFC-Features-Standards.md)
+and [implementation and review sequence](RFC-Features-Delivery.md)
+track the prerequisites for follow-on work.
+
 ## Milestone 1: foundations
 
 | Area | Status | Notes |

@@ -21,6 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(15);
+const TICKET_ALPN: &[u8] = b"h2";
 
 struct Setup {
     pki: Pki,
@@ -53,7 +54,11 @@ impl Setup {
             stream
         };
         let server = async {
-            let mut stream = setup.acceptor(1024).accept(server_io).await.unwrap();
+            let mut stream = setup
+                .acceptor(1024, Some(TICKET_ALPN))
+                .accept(server_io)
+                .await
+                .unwrap();
             stream.write_all(b"t").await.unwrap();
             stream.flush().await.unwrap();
         };
@@ -63,9 +68,9 @@ impl Setup {
         setup
     }
 
-    fn acceptor(&self, early_data_size: u32) -> TlsAcceptor {
+    fn acceptor(&self, early_data_size: u32, protocol: Option<&[u8]>) -> TlsAcceptor {
         let mut config = self.pki.server_config(&TLS13);
-        config.alpn_protocols = vec![b"h2".to_vec()];
+        config.alpn_protocols = protocol.into_iter().map(<[u8]>::to_vec).collect();
         config.max_early_data_size = early_data_size;
         config.session_storage = self.cache.clone();
         TlsAcceptor::from(Arc::new(config))
@@ -109,7 +114,11 @@ async fn accepts_early_data_after_the_finish_future_is_cancelled() {
         read.reunite(write).unwrap().into_parts()
     };
     let server_side = async {
-        let mut server = setup.acceptor(1024).accept(server_io).await.unwrap();
+        let mut server = setup
+            .acceptor(1024, Some(TICKET_ALPN))
+            .accept(server_io)
+            .await
+            .unwrap();
         assert_eq!(server.take_early_data(), b"abcd");
         let mut received = Vec::new();
         server.read_to_end(&mut received).await.unwrap();
@@ -127,10 +136,15 @@ async fn accepts_early_data_after_the_finish_future_is_cancelled() {
 
 #[tokio::test]
 async fn rejection_is_acknowledged_or_resent_once_in_order() {
-    for resend in [false, true] {
+    for (allow_resend, protocol, resent) in [
+        (false, Some(TICKET_ALPN), false),
+        (true, Some(TICKET_ALPN), true),
+        (true, Some(b"other".as_slice()), false),
+        (true, None, false),
+    ] {
         let setup = Setup::prime().await;
         let (client_io, server_io) = duplex(128);
-        let connector = if resend {
+        let connector = if allow_resend {
             setup.connector.clone().rejected_early_data_policy(
                 RejectedEarlyDataPolicy::ResendIfSameAlpn {
                     max_bytes: NonZeroUsize::new(4).unwrap(),
@@ -143,16 +157,16 @@ async fn rejection_is_acknowledged_or_resent_once_in_order() {
             let mut stream = connector.connect(localhost(), client_io).await.unwrap();
             let early = [IoSlice::new(b"ab"), IoSlice::new(b"cdef")];
             let len = stream.write_vectored(&early).await.unwrap();
-            assert_eq!(len, if resend { 4 } else { 6 });
+            assert_eq!(len, if allow_resend { 4 } else { 6 });
             let (mut read, mut write) = stream.into_split();
             assert_eq!(read.read_u8().await.unwrap(), b'!');
             let outcome = EarlyDataOutcome::Rejected {
                 early_bytes: len,
-                resent_bytes: if resend { len } else { 0 },
-                unresent_bytes: if resend { 0 } else { len },
+                resent_bytes: if resent { len } else { 0 },
+                unresent_bytes: if resent { 0 } else { len },
             };
             assert_eq!(write.early_data_outcome().await.unwrap(), outcome);
-            if !resend {
+            if !resent {
                 let error = write.write(b"out of order").await.unwrap_err();
                 assert_eq!(
                     error
@@ -174,13 +188,14 @@ async fn rejection_is_acknowledged_or_resent_once_in_order() {
             (read, write)
         };
         let server_side = async {
-            let mut server = setup.acceptor(0).accept(server_io).await.unwrap();
+            let mut server = setup.acceptor(0, protocol).accept(server_io).await.unwrap();
+            assert_eq!(server.get_ref().1.alpn_protocol(), protocol);
             assert!(server.early_data().is_empty());
             server.write_all(b"!").await.unwrap();
             server.flush().await.unwrap();
             let mut received = Vec::new();
             server.read_to_end(&mut received).await.unwrap();
-            let expected: &[u8] = if resend { b"abcdordinary" } else { b"ordinary" };
+            let expected: &[u8] = if resent { b"abcdordinary" } else { b"ordinary" };
             assert_eq!(received, expected);
         };
         timeout(LIMIT, async { tokio::join!(client_side, server_side) })

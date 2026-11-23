@@ -842,6 +842,33 @@ async fn a_refused_handover_returns_the_stream() {
     assert_eq!(read_n_async(&mut client, 5).await, b"world");
 }
 
+/// The offloaded client can send more than one record's worth of data to
+/// a userspace peer that enforces its advertised limit (Linux 6.19+).
+#[tokio::test]
+async fn a_smaller_peer_record_size_limit_reaches_the_tokio_kernel() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suite = offloadable_suites()
+        .into_iter()
+        .find(|s| tls13(*s))
+        .unwrap();
+    let mut server_config = pki.server_config(suite);
+    server_config.record_size_limit = Some(1000);
+    let (client, mut server) = userspace_pair(pki.client_config(suite), server_config).await;
+    let mut client = client_kernel(client).await;
+    // TLS 1.3 counts the inner content type in the advertised limit.
+    assert_eq!(client.kernel_connection().max_tx_payload_len(), Some(999));
+
+    let data = pattern(32_000, 7);
+    let ((), received) = tokio::join!(
+        write_all_async(&mut client, &data),
+        read_n_async(&mut server, data.len()),
+    );
+    assert_eq!(received, data);
+}
+
 /// A negotiated receive limit below the protocol maximum is permanent for
 /// direct and stream-based Tokio handoffs, before kTLS is installed.
 #[tokio::test]
@@ -851,18 +878,41 @@ async fn a_smaller_receive_record_size_limit_refuses_tokio_handoff() {
 
     let mut client_config = pki.client_config(suite);
     client_config.record_size_limit = Some(1000);
-    let (client, _server) = userspace_pair(client_config, pki.server_config(suite)).await;
+    let (client, mut server) = userspace_pair(client_config, pki.server_config(suite)).await;
     let (tcp, conn) = client.into_inner();
-    let Err(HandoffError::Refused { conn, error, .. }) =
-        AsyncKtlsStream::new(conn, tcp, Vec::new())
+    let Err(HandoffError::Refused {
+        conn,
+        socket,
+        received,
+        error,
+    }) = AsyncKtlsStream::new(conn, tcp, Vec::new())
     else {
         panic!("handed over with a smaller client receive record size limit");
     };
     assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert!(received.is_empty());
     assert_eq!(
         conn.kernel_handoff_blocker(),
         Some(browntls_core::kernel::KernelHandoffBlocker::ReceiveRecordSizeLimit)
     );
+    let client = tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Write};
+
+        let socket = socket.into_std().unwrap();
+        socket.set_nonblocking(false).unwrap();
+        socket.set_read_timeout(Some(LIMIT)).unwrap();
+        socket.set_write_timeout(Some(LIMIT)).unwrap();
+        let mut client = browntls_core::StreamOwned::new(conn, socket);
+        client.write_all(b"request").unwrap();
+        client.flush().unwrap();
+        let mut reply = [0; 5];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"reply");
+    });
+    assert_eq!(read_n_async(&mut server, 7).await, b"request");
+    write_all_async(&mut server, b"reply").await;
+    timeout(LIMIT, server.flush()).await.unwrap().unwrap();
+    client.await.unwrap();
 
     let mut server_config = pki.server_config(suite);
     server_config.record_size_limit = Some(1000);

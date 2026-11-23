@@ -1,35 +1,44 @@
 //! The shared key-log configuration reaches Tokio handshakes without storing
 //! or displaying secret material in the test.
 
+#![cfg(any(feature = "native", feature = "rustcrypto"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
-#[cfg(feature = "key-log")]
 use std::sync::Arc;
-#[cfg(feature = "key-log")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "key-log")]
 use browntls_core::KeyLog;
-#[cfg(feature = "key-log")]
 use browntls_tokio::{TlsAcceptor, TlsConnector};
-#[cfg(feature = "key-log")]
 use common::*;
 
-#[cfg(feature = "key-log")]
 #[derive(Debug, Default)]
 struct CountingKeyLog(AtomicUsize);
 
-#[cfg(feature = "key-log")]
 impl KeyLog for CountingKeyLog {
     fn log(&self, _: &str, _: &[u8], _: &[u8]) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
+impl CountingKeyLog {
+    fn assert_handshake_count(&self) {
+        let count = self.0.load(Ordering::Relaxed);
+        let require_disabled =
+            std::env::var("BROWNTLS_KEY_LOG_REQUIRE_DISABLED").is_ok_and(|value| value == "1");
+        if require_disabled {
+            assert_eq!(count, 0);
+        } else if cfg!(feature = "key-log") {
+            assert_eq!(count, 5);
+        } else {
+            // Another workspace member can enable the core dependency feature.
+            assert!(matches!(count, 0 | 5));
+        }
+    }
+}
+
 #[tokio::test]
-#[cfg(feature = "key-log")]
 async fn key_log_configuration_reaches_tokio_handshake() {
     let pki = Pki::new();
     let client_log = Arc::new(CountingKeyLog::default());
@@ -48,12 +57,11 @@ async fn key_log_configuration_reaches_tokio_handshake() {
     );
     assert!(client.is_ok());
     assert!(server.is_ok());
-    assert!(client_log.0.load(Ordering::Relaxed) > 0);
-    assert!(server_log.0.load(Ordering::Relaxed) > 0);
+    client_log.assert_handshake_count();
+    server_log.assert_handshake_count();
 }
 
 #[tokio::test]
-#[cfg(feature = "key-log")]
 async fn key_log_configuration_reaches_unbuffered_tokio_handshake() {
     use browntls_tokio::unbuffered;
 
@@ -74,6 +82,6 @@ async fn key_log_configuration_reaches_unbuffered_tokio_handshake() {
     );
     assert!(client.is_ok());
     assert!(server.is_ok());
-    assert!(client_log.0.load(Ordering::Relaxed) > 0);
-    assert!(server_log.0.load(Ordering::Relaxed) > 0);
+    client_log.assert_handshake_count();
+    server_log.assert_handshake_count();
 }

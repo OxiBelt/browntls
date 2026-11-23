@@ -591,9 +591,16 @@ impl CompleteClientHelloHandling {
                 // 0-RTT data, and is replaced below when we do not accept it.
                 // DTLS has no 0-RTT here, so no early key either.
                 if !cx.common.is_dtls() && !cert_with_extern_psk {
+                    // RFC 9850 §2.1: trial decryption may use this key
+                    // even when the server must omit it from the key log.
+                    let sink: &dyn crate::KeyLog = if early_data == EarlyDataDecision::Accepted {
+                        &*self.config.key_log
+                    } else {
+                        &crate::NoKeyLog
+                    };
                     early.client_early_traffic_secret(
                         client_hello_hash.as_ref(),
-                        &*self.config.key_log,
+                        sink,
                         &self.randoms.client,
                         cx.common,
                         early_record_size_limit,

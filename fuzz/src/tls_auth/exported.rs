@@ -18,7 +18,7 @@ use browntls_core::{
 };
 
 use super::unbuffered::{Client, End, Server, connect};
-use super::{State, fixture, pick_scheme, tls13_scheme};
+use super::{State, fixture, ml_dsa_scheme, pick_scheme, tls13_scheme};
 use crate::input::Input;
 
 // --------------------------------------------------- exported authenticators
@@ -82,8 +82,10 @@ fn connect_ea(
     }
 }
 
-/// Request extensions from the input, and whether they leave a TLS 1.3
-/// scheme (with `None` the verifier's defaults, which do).
+/// Request extensions from the input, and the schemes they leave to sign
+/// an authenticator with: the TLS 1.3 ones other than ML-DSA, which nothing
+/// specifies for exported authenticators (with `None` the verifier's
+/// defaults).
 fn pick_extensions(input: &mut Input) -> (AuthenticatorRequestExtensions, Vec<SignatureScheme>) {
     let schemes = (input.choose(3) != 0).then(|| {
         let mut schemes: Vec<SignatureScheme> =
@@ -104,7 +106,11 @@ fn pick_extensions(input: &mut Input) -> (AuthenticatorRequestExtensions, Vec<Si
             .collect()
     });
     let effective = match &schemes {
-        Some(s) => s.iter().copied().filter(|s| tls13_scheme(*s)).collect(),
+        Some(s) => s
+            .iter()
+            .copied()
+            .filter(|s| tls13_scheme(*s) && !ml_dsa_scheme(*s))
+            .collect(),
         None => vec![
             SignatureScheme::ECDSA_NISTP256_SHA256,
             SignatureScheme::ED25519,

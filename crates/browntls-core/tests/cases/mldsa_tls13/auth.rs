@@ -113,8 +113,11 @@ fn ml_dsa_87_chains_fit_and_fragment() {
             Some(&client),
         );
         client_config.max_fragment_size = max_fragment_size;
-        let mut server_config =
-            server_config(prov::provider_with_ml_dsa(), &server, Some(client_verifier.clone()));
+        let mut server_config = server_config(
+            prov::provider_with_ml_dsa(),
+            &server,
+            Some(client_verifier.clone()),
+        );
         server_config.max_fragment_size = max_fragment_size;
         let (mut c, mut s) = connect(client_config, server_config);
 
@@ -123,7 +126,10 @@ fn ml_dsa_87_chains_fit_and_fragment() {
         let records = records(&flight);
         if max_fragment_size.is_some() {
             // Encrypted handshake records: inner type and 16-byte tag.
-            assert!(records.iter().all(|(_, len)| *len <= MAX + 17), "{records:?}");
+            assert!(
+                records.iter().all(|(_, len)| *len <= MAX + 17),
+                "{records:?}"
+            );
             assert!(records.len() > (sent + 4627) / MAX, "{}", records.len());
         }
         assert!(flight.len() > sent + 4627);

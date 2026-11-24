@@ -9,7 +9,9 @@
 #[test]
 fn ml_dsa_only_server_against_clients_without_its_scheme() {
     let server = server_id(Alg::Ml(Set::MlDsa44));
-    let mut other_two = prov::provider().signature_verification_algorithms.supported_schemes();
+    let mut other_two = prov::provider()
+        .signature_verification_algorithms
+        .supported_schemes();
     other_two.extend([SignatureScheme::ML_DSA_65, SignatureScheme::ML_DSA_87]);
     let verifiers = [
         ("default", server_verifier(prov::provider(), &server)),
@@ -61,7 +63,9 @@ fn key_loaders() {
                 .load_private_key(id.private_key.clone_key())
                 .is_err()
         );
-        assert!(CertifiedKey::from_der(id.chain.clone(), id.private_key.clone_key(), &default).is_err());
+        assert!(
+            CertifiedKey::from_der(id.chain.clone(), id.private_key.clone_key(), &default).is_err()
+        );
         assert!(
             ServerConfig::builder_with_provider(arc(prov::provider()))
                 .with_protocol_versions(&[&version::TLS13])
@@ -86,7 +90,11 @@ fn key_loaders() {
             .key_provider
             .load_private_key(chain.private_key())
             .unwrap();
-        assert_eq!(from_default.algorithm(), from_opt_in.algorithm(), "{key_type:?}");
+        assert_eq!(
+            from_default.algorithm(),
+            from_opt_in.algorithm(),
+            "{key_type:?}"
+        );
         assert_eq!(
             from_default.public_key().map(|k| k.as_ref().to_vec()),
             from_opt_in.public_key().map(|k| k.as_ref().to_vec()),
@@ -206,7 +214,12 @@ fn server_with_ml_dsa_and_classical_keys() {
         handshake(&mut c, &mut s).unwrap();
         assert_eq!(c.protocol_version(), Some(version.version));
         assert_eq!(c.peer_certificates().unwrap(), expected.chain);
-        assert_eq!(recorder.seen(), [expected.scheme()], "{:?}", version.version);
+        assert_eq!(
+            recorder.seen(),
+            [expected.scheme()],
+            "{:?}",
+            version.version
+        );
         exchange(&mut c, &mut s);
     }
 }
@@ -264,7 +277,13 @@ fn certified_key_consistency() {
         ),
         (
             "other key, same set",
-            identity(Alg::Ml(Set::MlDsa65), &[Alg::P256], Purpose::Server, "other").chain,
+            identity(
+                Alg::Ml(Set::MlDsa65),
+                &[Alg::P256],
+                Purpose::Server,
+                "other",
+            )
+            .chain,
             Err(mismatch.clone()),
         ),
         ("P-256", server_id(Alg::P256).chain, Err(mismatch)),

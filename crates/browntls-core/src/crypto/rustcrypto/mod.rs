@@ -8,6 +8,39 @@
 //!   `rsa` releases before 0.10.0, which are affected by RUSTSEC-2023-0071
 //!   (the Marvin timing attack on private-key operations).
 //! * Nothing here claims FIPS validation.
+//!
+//! # ML-DSA certificates (opt-in)
+//!
+//! [`default_provider`] does not verify ML-DSA signatures (RFC 9881): a
+//! certificate or CRL signed with an ML-DSA key fails as an unsupported
+//! signature algorithm. To accept them in X.509 validation, use
+//! [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`], which adds [`verify::ML_DSA_44`],
+//! [`verify::ML_DSA_65`] and [`verify::ML_DSA_87`] (backed by the RustCrypto
+//! `ml-dsa` crate) to the certificate path algorithms and leaves the TLS
+//! signature scheme mapping as it is. This does not enable TLS
+//! authentication with ML-DSA keys, which is not implemented;
+//! [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists exactly which signatures the
+//! opt-in covers. The native provider has the same opt-in
+//! (`crypto::native::SUPPORTED_SIG_ALGS_WITH_ML_DSA`).
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::rustcrypto;
+//! use browntls_core::{ClientConfig, RootCertStore};
+//!
+//! let mut provider = rustcrypto::default_provider();
+//! provider.signature_verification_algorithms = rustcrypto::SUPPORTED_SIG_ALGS_WITH_ML_DSA;
+//! let provider = Arc::new(provider);
+//!
+//! # let roots = Arc::new(RootCertStore::empty());
+//! let config = ClientConfig::builder_with_provider(provider)
+//!     .with_safe_default_protocol_versions()?
+//!     .with_root_certificates(roots)
+//!     .with_no_client_auth();
+//! # let _ = config;
+//! # Ok::<(), browntls_core::Error>(())
+//! ```
 
 use browntls_pki::PrivateKeyDer;
 
@@ -31,7 +64,12 @@ pub use ticketer::Ticketer;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
 pub(crate) mod tls13;
-pub(crate) mod verify;
+pub mod verify;
+mod verify_mldsa;
+
+pub use verify_mldsa::{
+    ALL_VERIFICATION_ALGS_WITH_ML_DSA, ML_DSA_VERIFICATION_ALGS, SUPPORTED_SIG_ALGS_WITH_ML_DSA,
+};
 
 /// The provider with every supported suite and group enabled.
 pub fn default_provider() -> CryptoProvider {
@@ -141,7 +179,9 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
     kx::SECP521R1,
 ];
 
-/// The signature verification algorithms and their TLS scheme mapping.
+/// The signature verification algorithms and their TLS scheme mapping, as
+/// [`default_provider`] uses them. Without ML-DSA: see
+/// [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`].
 pub static SUPPORTED_SIG_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
     all: &[
         &verify::ECDSA_P256_SHA256,

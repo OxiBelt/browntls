@@ -91,6 +91,38 @@ enabled, and run under the length limits described in
 [Architecture](Architecture.md#certificate-compression-rfc-8879) and under the
 `cert_decompress` fuzz target. None has a `cargo vet` audit yet.
 
+### RustCrypto ML-DSA dependency
+
+The `rustcrypto` feature of `browntls-core` makes `ml-dsa` (FIPS 204, from
+the RustCrypto signatures repository, `Apache-2.0 OR MIT`, locked at 0.1.2)
+an optional runtime dependency. It backs the RustCrypto provider's opt-in
+ML-DSA verification of certificate, CRL and OCSP signatures (RFC 9881; see
+[Architecture](Architecture.md#ml-dsa-certificate-verification-rustcrypto-provider-opt-in))
+and nothing else: no signing, and no TLS signature scheme. The default
+`native` provider verifies ML-DSA with `browntls_crypto::mldsa` and does
+not use the crate at run time; it stays a dev-dependency there as the
+independent oracle of the native tests, with or without `rustcrypto`.
+
+It is used with default features off (no `pkcs8`, `getrandom`,
+`rand_core` or `zeroize`, since nothing secret is handled) and with
+`alloc` only, which stores the decoded key (with the expanded public
+matrix, up to 56 KiB for ML-DSA-87) and the decoded signature on the heap.
+The matrix is still built on the stack first: one ML-DSA-87 verification
+needed about 64 to 80 KiB of stack in a measurement on one x86-64 host,
+against under 32 KiB for the native verifier. The crate is pure Rust with no
+build script and contains no `unsafe` code (its manifest forbids it). Its
+dependencies (`crypto-common`, `ctutils`,
+`hybrid-array`, `module-lattice`, `shake` with `keccak`, `signature`) are
+already in the `rustcrypto` runtime tree through `ml-kem`, `sha3` and the
+other RustCrypto crates, so `ml-dsa` is the only crate the feature adds
+(`cargo tree -e normal` with `std,rustcrypto`, before and after). As the
+provider's other RustCrypto crates, it is a runtime dependency of that
+feature only (`safe-to-deploy`) and has no `cargo vet` audit yet.
+
+Owner: the project owner, who approved the addition. Track in
+[issue #236](https://github.com/OxiBelt/browntls/issues/236), which lists
+the open review items (`cargo vet`, re-review on version changes).
+
 ### Tokio dependency
 
 The workspace requires `tokio` 1.53 or later (`[workspace.dependencies]` in

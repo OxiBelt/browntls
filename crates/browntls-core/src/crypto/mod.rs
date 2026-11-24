@@ -41,6 +41,8 @@ pub mod tls13;
 pub mod native;
 #[cfg(feature = "rustcrypto")]
 pub mod rustcrypto;
+#[cfg(any(feature = "native", feature = "rustcrypto"))]
+mod verify_list;
 
 pub use crate::msgs::handshake::KeyExchangeAlgorithm;
 pub use crate::rand::GetRandomFailed;

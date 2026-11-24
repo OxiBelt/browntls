@@ -1,4 +1,18 @@
 //! Signature verification algorithms for certificates and handshake signatures.
+//!
+//! The ECDSA, Ed25519 and RSA algorithms are internal to the provider and
+//! reached through [`SUPPORTED_SIG_ALGS`](super::SUPPORTED_SIG_ALGS).
+//!
+//! # ML-DSA
+//!
+//! [`ML_DSA_44`], [`ML_DSA_65`] and [`ML_DSA_87`] ([`MlDsaVerify`]) verify
+//! pure ML-DSA signatures with the empty context, for certificates and CRLs
+//! (RFC 9881), with the RustCrypto `ml-dsa` crate. The public key is the
+//! FIPS 204 encoding (1312, 1952 or 2592 bytes) in the `subjectPublicKey`
+//! BIT STRING. They are not part of the `all` list of
+//! [`SUPPORTED_SIG_ALGS`](super::SUPPORTED_SIG_ALGS) and map to no TLS
+//! signature scheme; opt in with
+//! [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`](super::SUPPORTED_SIG_ALGS_WITH_ML_DSA).
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -7,6 +21,8 @@ use browntls_pki::{AlgorithmIdentifier, InvalidSignature, SignatureVerificationA
 use sha2::Digest;
 use signature::Verifier;
 use signature::hazmat::PrehashVerifier;
+
+pub use super::verify_mldsa::{ML_DSA_44, ML_DSA_65, ML_DSA_87, MlDsaVerify};
 
 /// ECDSA over curve `$krate` with hash `D`.
 pub(crate) struct Ecdsa<C, D> {

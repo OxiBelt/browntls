@@ -674,12 +674,43 @@ then authenticate a TLS handshake. The RFC 9881 §5 key usage rules for
 ML-DSA keys are enforced by `browntls-pki` with or without the opt-in; a
 violation is reported as `CertificateError::Other` (alert
 `certificate_unknown`), like other key usage failures. The RustCrypto
-provider does not verify ML-DSA.
+provider has the same opt-in, described below; its default provider does not
+verify ML-DSA either.
 
 `crates/browntls-core/tests/native_mldsa.rs` checks the algorithms against
 the RustCrypto `ml-dsa` crate (signatures of each verified by the other, and
 identical deterministic signatures), the RFC 9881 Appendix C certificates,
 paths, CRLs, stapled OCSP responses and TLS 1.3 handshakes with both tables.
+
+### ML-DSA certificate verification (RustCrypto provider, opt-in)
+
+`crypto::rustcrypto::verify` has the same three algorithms (`ML_DSA_44`,
+`ML_DSA_65`, `ML_DSA_87`, type `MlDsaVerify`) backed by the RustCrypto
+`ml-dsa` crate, an optional dependency enabled by the `rustcrypto` feature
+(see [Maintenance](Maintenance.md#rustcrypto-ml-dsa-dependency)): pure
+ML-DSA with the empty context, the same identifiers matched byte for byte,
+the raw FIPS 204 key, and every failure an invalid signature. Unlike the
+native algorithms they allocate (the `ml-dsa` crate keeps the expanded
+public matrix and the decoded signature on the heap) and need more stack,
+because the matrix is built there first: about 64 to 80 KiB for one
+ML-DSA-87 verification against under 32 KiB, measured on one x86-64 host.
+The tables mirror the
+native ones: `rustcrypto::SUPPORTED_SIG_ALGS` and `default_provider()` are
+unchanged; `ML_DSA_VERIFICATION_ALGS`, `ALL_VERIFICATION_ALGS_WITH_ML_DSA`
+(the `all` list of `SUPPORTED_SIG_ALGS`, computed at compile time with the
+helper the native tables use, followed by the ML-DSA algorithms) and
+`SUPPORTED_SIG_ALGS_WITH_ML_DSA` (with the unchanged `mapping`) are the
+opt-in. Everything said above about where the opt-in applies, the
+unchanged `signature_algorithms` lists and the missing TLS authentication
+with ML-DSA keys holds for it too.
+
+`crates/browntls-core/tests/rustcrypto_mldsa.rs` checks the RustCrypto
+algorithms with signatures by `browntls_crypto::mldsa` and by the `ml-dsa`
+crate, signatures with a non-empty context, the RFC 9881 Appendix C
+certificates, agreement with the native algorithms on valid and mutated
+inputs (including malformed hint encodings) for every parameter set, paths
+and a TLS 1.3 handshake with an ML-DSA CA chain and an ECDSA end entity,
+with the opt-in table and with the default provider.
 
 ### Post-quantum hybrid key agreement (RFC 10024)
 
@@ -3105,10 +3136,11 @@ these decoders and the primitive against the RustCrypto `ml-dsa` crate
 ([fuzz targets](../fuzz/README.md)). The native provider uses ML-DSA for
 opt-in certificate and CRL signature verification (see
 [ML-DSA certificate verification][ml-dsa-verification]); it is not used for
-TLS handshake signatures, by the RustCrypto provider, or for signing
-anywhere in the library, and the provider's `KEY_PROVIDER` loads no ML-DSA
-private key. HashML-DSA is not implemented. Its module documentation states
-which operations are constant time, the stack use and the key sizes.
+TLS handshake signatures, by the RustCrypto provider (whose own opt-in uses
+the RustCrypto `ml-dsa` crate), or for signing anywhere in the library, and
+the provider's `KEY_PROVIDER` loads no ML-DSA private key. HashML-DSA is not
+implemented. Its module documentation states which operations are constant
+time, the stack use and the key sizes.
 
 [ml-dsa-verification]: #ml-dsa-certificate-verification-native-provider-opt-in
 

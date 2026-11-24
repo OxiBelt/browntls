@@ -271,7 +271,8 @@ fn all_ml_dsa_chains_across_implementations() {
     }
 }
 
-/// The RustCrypto provider is unchanged: it has no ML-DSA algorithm.
+/// The default RustCrypto provider has no ML-DSA algorithm (its own opt-in
+/// table is tested in `rustcrypto_mldsa.rs`).
 #[cfg(feature = "rustcrypto")]
 #[test]
 fn rustcrypto_provider_rejects_ml_dsa_chains() {

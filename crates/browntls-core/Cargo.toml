@@ -94,6 +94,11 @@ rsa = { version = "0.10.0", default-features = false, features = ["std", "encodi
 rand_core = "0.10"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 env_logger = { version = "0.11", default-features = false }
+# ML-DSA (FIPS 204): the independent oracle for the native ML-DSA
+# verification algorithms (RFC 9881), and `sha2` for the certificate builder
+# shared with `browntls-pki`'s tests.
+ml-dsa = { version = "0.1", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 
 [lints]
 workspace = true

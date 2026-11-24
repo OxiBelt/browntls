@@ -155,5 +155,21 @@ mod tests {
             pki_error(browntls_pki::Error::MaximumPathDepthExceeded),
             Error::InvalidCertificate(CertificateError::Other(_))
         ));
+        // RFC 9881 §5: a key usage that an ML-DSA key may not assert is a
+        // key usage failure like `IssuerNotCertSigner`, kept in `Other` and
+        // sent as a `certificate_unknown` alert.
+        for e in [
+            browntls_pki::Error::KeyUsageNotPermittedForPublicKey,
+            browntls_pki::Error::IssuerNotCertSigner,
+        ] {
+            let Error::InvalidCertificate(cert_error) = pki_error(e.clone()) else {
+                panic!("{e:?}");
+            };
+            assert!(matches!(cert_error, CertificateError::Other(_)), "{e:?}");
+            assert_eq!(
+                crate::enums::AlertDescription::from(cert_error),
+                crate::enums::AlertDescription::CertificateUnknown
+            );
+        }
     }
 }

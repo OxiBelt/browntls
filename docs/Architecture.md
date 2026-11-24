@@ -590,6 +590,7 @@ negotiated when a peer shares nothing earlier.
 | TLS 1.2 suites | ECDHE with AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 (ECDSA and RSA) | ECDHE AES-CBC: AES-256-CBC-SHA384, AES-128-CBC-SHA256, then AES-256-CBC-SHA, AES-128-CBC-SHA (ECDSA and RSA; RFC 5289, RFC 8422); Encrypt-then-MAC only by default; no kernel TLS export | |
 | Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
 | Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
+| Certificate and CRL signatures only (no TLS scheme) | the algorithms of the signature schemes above | | ML-DSA-44, -65, -87 (`ALL_VERIFICATION_ALGS_WITH_ML_DSA`, see [below](#ml-dsa-certificate-verification-native-provider-opt-in)) |
 
 A browntls server applies the same ranking whatever the client's order:
 within each tier it follows the client's order of suites (or its own with
@@ -604,6 +605,64 @@ records have failed authentication under the client handshake key (RFC 9147
 Appendix B.3), including the client's own early-data records.
 
 The RustCrypto provider does not implement the non-preferred tier.
+
+### ML-DSA certificate verification (native provider, opt-in)
+
+`crypto::native::verify` has ML-DSA verification algorithms (`ML_DSA_44`,
+`ML_DSA_65`, `ML_DSA_87`, type `MlDsaVerify`) over `browntls_crypto::mldsa`:
+pure ML-DSA with the empty context (RFC 9881 §3), the public key being the
+FIPS 204 encoding in the `subjectPublicKey` BIT STRING, and both identifiers
+the RFC 9881 `id-ml-dsa-*` identifier with absent parameters, matched byte
+for byte. A key or signature of the wrong length, and every other failure,
+is an invalid signature; verification does not allocate.
+
+They are not in the defaults: `ALL_VERIFICATION_ALGS`, `SUPPORTED_SIG_ALGS`
+and `default_provider()` are unchanged, so a default configuration rejects
+an ML-DSA-signed certificate or CRL as an unsupported signature algorithm
+(alert `bad_certificate` from a TLS 1.3 client, since the failing signature
+is inside the chain). An application opts in with
+`SUPPORTED_SIG_ALGS_WITH_ML_DSA`, whose `all` list is
+`ALL_VERIFICATION_ALGS_WITH_ML_DSA` (the default list, computed at compile
+time, followed by `ML_DSA_VERIFICATION_ALGS`) and whose `mapping` is the
+unchanged `VERIFICATION_ALG_MAPPING`. Set as a provider's
+`signature_verification_algorithms`, it makes ML-DSA signatures verify
+wherever the library verifies with the `all` list: certificate paths in
+`WebPkiServerVerifier` and `WebPkiClientVerifier` (with or without a
+revocation policy), the CRLs checked in them, OCSP response and delegated
+responder signatures (stapled responses under a `RevocationPolicy` and the
+initial staple of `ServerStapleResolver`, both tested; responses that
+resolver installs later, live-fetched responses and those read for the
+Certificate Transparency 2.0 requirements use the same list but are not
+tested with ML-DSA) and the server chain `ServerStapleResolver`
+validates. Certificate Transparency logs cannot have ML-DSA keys (version 1
+SCTs name no ML-DSA algorithm, version 2 logs are P-256 or Ed25519).
+
+Opting in has a cost per signature: one ML-DSA verification took about 73,
+113 and 180 µs for ML-DSA-44, -65 and -87 in a measurement on one x86-64
+machine (on the order of 0.1 ms), and path building stays bounded by the
+existing budget of 100 signature checks per validation
+(`crates/browntls-pki/src/path.rs`).
+
+The TLS side does not change. The `signature_algorithms` lists a browntls
+peer sends come from the verifier's scheme mapping, which has no ML-DSA
+scheme, so they are identical with and without the opt-in, and a
+`CertificateVerify` or `ServerKeyExchange` signed with an ML-DSA scheme is
+refused as unadvertised. TLS 1.3 authentication with ML-DSA keys
+(`draft-ietf-tls-mldsa`) is not implemented, no ML-DSA private key can be
+loaded, and nothing on the wire tells a peer that ML-DSA chains are
+accepted. The opt-in is for X.509 validation through the verifiers and
+`browntls_pki`: chains with ML-DSA certificates anywhere validate, including
+an ML-DSA end entity certificate, but only a classical end entity key can
+then authenticate a TLS handshake. The RFC 9881 §5 key usage rules for
+ML-DSA keys are enforced by `browntls-pki` with or without the opt-in; a
+violation is reported as `CertificateError::Other` (alert
+`certificate_unknown`), like other key usage failures. The RustCrypto
+provider does not verify ML-DSA.
+
+`crates/browntls-core/tests/native_mldsa.rs` checks the algorithms against
+the RustCrypto `ml-dsa` crate (signatures of each verified by the other, and
+identical deterministic signatures), the RFC 9881 Appendix C certificates,
+paths, CRLs, stapled OCSP responses and TLS 1.3 handshakes with both tables.
 
 ### Post-quantum hybrid key agreement (RFC 10024)
 
@@ -3014,11 +3073,16 @@ reference for testing, plus accelerated backends selected at run time.
 
 ML-DSA (`browntls_crypto::mldsa`: ML-DSA-44, -65 and -87, key generation,
 hedged and deterministic signing with a context string, verification and the
-FIPS 204 key and signature encodings) is a primitive only so far: it has the
-portable scalar backend alone, does not take part in load-aware routing, and
-is not yet used by X.509 path validation, the TLS handshake or either crypto
-provider. HashML-DSA is not implemented. Its module documentation states which
-operations are constant time, the stack use and the key sizes.
+FIPS 204 key and signature encodings) has the portable scalar backend alone
+and does not take part in load-aware routing. The native provider uses it
+for opt-in certificate and CRL signature verification (see
+[ML-DSA certificate verification][ml-dsa-verification]); it is not used for
+TLS handshake signatures, by the RustCrypto provider, or for signing
+anywhere in the library. HashML-DSA is not implemented. Its module
+documentation states which operations are constant time, the stack use and
+the key sizes.
+
+[ml-dsa-verification]: #ml-dsa-certificate-verification-native-provider-opt-in
 
 GHASH is also available on its own as `browntls_crypto::gcm::Ghash` (SP
 800-38D section 6.4, keyed by the hash subkey `H`, the counterpart of the

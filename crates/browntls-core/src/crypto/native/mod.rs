@@ -22,6 +22,7 @@
 //! | [`cipher_suite`] | SHA-2, HMAC, HKDF, the TLS 1.2 PRF, AES-GCM, ChaCha20-Poly1305 and AES-CCM from `browntls_crypto::{hash, hmac, hkdf, tls12_prf, gcm, chacha, ccm}`; TLS 1.2 AES-CBC with HMAC-SHA1/SHA-256/SHA-384 from `browntls_crypto::{cbc, tls_cbc}` |
 //! | [`kx_group`] | `browntls_crypto::{curve25519::x25519, curve448::x448, nist, mlkem, ffdhe}` |
 //! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, curve448::ed448, rsa}` |
+//! | [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`] (opt-in) | the above and `browntls_crypto::mldsa` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
 //! | [`SECURE_RANDOM`] | `browntls_crypto::rand::OsRng` |
 //! | [`ticketer`] | AES-256-GCM from `browntls_crypto::gcm` |
@@ -31,6 +32,40 @@
 //! `browntls-crypto`'s `getrandom` feature.
 //!
 //! Nothing here claims FIPS validation.
+//!
+//! # ML-DSA certificates (opt-in)
+//!
+//! [`default_provider`] does not verify ML-DSA signatures (RFC 9881): a
+//! certificate or CRL signed with an ML-DSA key fails as an unsupported
+//! signature algorithm. To accept them in X.509 validation, use
+//! [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`], which adds [`verify::ML_DSA_44`],
+//! [`verify::ML_DSA_65`] and [`verify::ML_DSA_87`] to the certificate path
+//! algorithms and leaves the TLS signature scheme mapping as it is. This
+//! does not enable TLS authentication with ML-DSA keys, which is not
+//! implemented; [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists exactly which
+//! signatures the opt-in covers.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::native;
+//! use browntls_core::{ClientConfig, RootCertStore};
+//!
+//! let mut provider = native::default_provider();
+//! provider.signature_verification_algorithms = native::SUPPORTED_SIG_ALGS_WITH_ML_DSA;
+//! let provider = Arc::new(provider);
+//!
+//! # let roots = Arc::new(RootCertStore::empty());
+//! // `with_root_certificates` builds a `WebPkiServerVerifier` with the
+//! // provider's algorithms, as `WebPkiServerVerifier::builder_with_provider`
+//! // and `WebPkiClientVerifier::builder_with_provider` do.
+//! let config = ClientConfig::builder_with_provider(provider)
+//!     .with_safe_default_protocol_versions()?
+//!     .with_root_certificates(roots)
+//!     .with_no_client_auth();
+//! # let _ = config;
+//! # Ok::<(), browntls_core::Error>(())
+//! ```
 //!
 //! # Hardware acceleration
 //!
@@ -143,6 +178,11 @@ pub(crate) mod tls12;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12_cbc;
 pub(crate) mod tls13;
+mod verify_mldsa;
+
+pub use verify_mldsa::{
+    ALL_VERIFICATION_ALGS_WITH_ML_DSA, ML_DSA_VERIFICATION_ALGS, SUPPORTED_SIG_ALGS_WITH_ML_DSA,
+};
 
 /// The provider with [`DEFAULT_CIPHER_SUITES`], [`DEFAULT_KX_GROUPS`],
 /// [`SUPPORTED_SIG_ALGS`], [`SECURE_RANDOM`] and [`KEY_PROVIDER`].
@@ -373,6 +413,8 @@ pub static ALL_KX_GROUPS: &[&dyn SupportedKxGroup] = &[
 /// RFC 9846 §4.3.3: Ed448, then RSASSA-PSS with RSASSA-PSS public keys
 /// (`rsa_pss_pss_*`, RFC 4055), for keys without parameters and for keys
 /// restricted to one hash.
+///
+/// ML-DSA is not included; [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] adds it.
 pub static ALL_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] = &[
     &verify::ECDSA_P256_SHA256,
     &verify::ECDSA_P256_SHA384,
@@ -484,7 +526,9 @@ pub static VERIFICATION_ALG_MAPPING: &[(
     ),
 ];
 
-/// The signature verification algorithms and their TLS scheme mapping.
+/// The signature verification algorithms and their TLS scheme mapping, as
+/// [`default_provider`] uses them. Without ML-DSA: see
+/// [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`].
 pub static SUPPORTED_SIG_ALGS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
     all: ALL_VERIFICATION_ALGS,
     mapping: VERIFICATION_ALG_MAPPING,
@@ -521,18 +565,41 @@ mod tests {
         assert_eq!(p.kx_groups[0].name(), NamedGroup::X25519MLKEM768);
         #[cfg(not(feature = "prefer-post-quantum"))]
         assert_eq!(p.kx_groups[0].name(), NamedGroup::X25519);
+        // The default verification table, not the ML-DSA opt-in.
+        let algs = p.signature_verification_algorithms;
+        assert_eq!(algs.all.len(), ALL_VERIFICATION_ALGS.len());
+        assert!(algs.all.iter().zip(ALL_VERIFICATION_ALGS).all(|(a, b)| {
+            core::ptr::addr_eq(
+                *a as *const dyn SignatureVerificationAlgorithm,
+                *b as *const dyn SignatureVerificationAlgorithm,
+            ) && a.public_key_alg_id() == b.public_key_alg_id()
+        }));
+        assert_eq!(
+            algs.supported_schemes(),
+            SUPPORTED_SIG_ALGS.supported_schemes()
+        );
     }
 
     #[test]
     fn mapping_only_references_listed_algorithms() {
         for (_, algs) in VERIFICATION_ALG_MAPPING {
             for alg in *algs {
-                assert!(ALL_VERIFICATION_ALGS.iter().any(|a| core::ptr::addr_eq(
-                    *a as *const dyn SignatureVerificationAlgorithm,
-                    *alg as *const dyn SignatureVerificationAlgorithm
-                )));
+                for list in [ALL_VERIFICATION_ALGS, ALL_VERIFICATION_ALGS_WITH_ML_DSA] {
+                    assert!(list.iter().any(|a| core::ptr::addr_eq(
+                        *a as *const dyn SignatureVerificationAlgorithm,
+                        *alg as *const dyn SignatureVerificationAlgorithm
+                    )));
+                }
+                // No TLS scheme maps to ML-DSA.
+                assert!(!is_ml_dsa(*alg), "{alg:?}");
             }
         }
+        // The opt-in changes the path algorithms only: the schemes (what
+        // the library advertises and accepts in handshakes) are the same.
+        assert_eq!(
+            SUPPORTED_SIG_ALGS_WITH_ML_DSA.supported_schemes(),
+            SUPPORTED_SIG_ALGS.supported_schemes()
+        );
         // Every scheme in the TLS 1.2 suite lists has a verifier.
         let schemes = SUPPORTED_SIG_ALGS.supported_schemes();
         #[cfg(feature = "tls12")]
@@ -554,6 +621,36 @@ mod tests {
                 SignatureScheme::RSA_PSS_PSS_SHA256,
             ]
         );
+    }
+
+    fn is_ml_dsa(alg: &dyn SignatureVerificationAlgorithm) -> bool {
+        use browntls_pki::alg_id::{ML_DSA_44, ML_DSA_65, ML_DSA_87};
+        [ML_DSA_44, ML_DSA_65, ML_DSA_87]
+            .iter()
+            .any(|id| alg.public_key_alg_id() == *id || alg.signature_alg_id() == *id)
+    }
+
+    #[test]
+    fn defaults_exclude_ml_dsa() {
+        assert!(!ALL_VERIFICATION_ALGS.iter().any(|a| is_ml_dsa(*a)));
+        assert!(!SUPPORTED_SIG_ALGS.all.iter().any(|a| is_ml_dsa(*a)));
+        let ml_dsa: alloc::vec::Vec<_> = ALL_VERIFICATION_ALGS_WITH_ML_DSA
+            .iter()
+            .filter(|a| is_ml_dsa(**a))
+            .collect();
+        assert_eq!(ml_dsa.len(), 3);
+        for schemes in [
+            SUPPORTED_SIG_ALGS.supported_schemes(),
+            SUPPORTED_SIG_ALGS_WITH_ML_DSA.supported_schemes(),
+        ] {
+            for scheme in [
+                SignatureScheme::ML_DSA_44,
+                SignatureScheme::ML_DSA_65,
+                SignatureScheme::ML_DSA_87,
+            ] {
+                assert!(!schemes.contains(&scheme), "{scheme:?}");
+            }
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! * [`types`]: DER containers for certificates, public keys, private keys,
 //!   CRLs and trust anchors; [`server_name`]: TLS server names; [`time`]:
 //!   validation time; [`pem`]: PEM decoding; [`alg_id`]: standard
-//!   `AlgorithmIdentifier`s.
+//!   `AlgorithmIdentifier`s, including the RFC 9881 ML-DSA ones.
 //! * [`EndEntityCert`]: certificate parsing, path building to a
 //!   [`TrustAnchor`] (RFC 5280 §6), server name matching ([`ServerName`]) and
 //!   handshake signature verification. Use [`ServiceIdentity`] and

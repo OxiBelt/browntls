@@ -64,6 +64,17 @@ pub enum Error {
     IssuerNotCertSigner,
     /// The CRL issuer is not allowed to sign CRLs.
     IssuerNotCrlSigner,
+    /// A certificate's `KeyUsage` extension asserts a usage its public key
+    /// algorithm does not allow. For an ML-DSA key (`id-ml-dsa-44`, `-65`
+    /// or `-87`), a present `KeyUsage` must assert at least one of
+    /// digitalSignature, nonRepudiation, keyCertSign and cRLSign, and none
+    /// of keyEncipherment, dataEncipherment, keyAgreement, encipherOnly and
+    /// decipherOnly (RFC 9881 §5). Path validation checks this for the end
+    /// entity and every intermediate, not for trust anchors. A delegated
+    /// OCSP responder certificate that breaks the rule is rejected with
+    /// [`OcspError::DelegateKeyUsage`](crate::ocsp::OcspError::DelegateKeyUsage)
+    /// instead.
+    KeyUsageNotPermittedForPublicKey,
     /// A DNS identifier is malformed.
     MalformedDnsIdentifier,
     /// Extensions are malformed (e.g. duplicated).
@@ -145,7 +156,10 @@ impl Error {
             Self::RequiredEkuNotFound => 240,
             Self::NameConstraintViolation => 230,
             Self::PathLenConstraintViolated => 220,
-            Self::CaUsedAsEndEntity | Self::EndEntityUsedAsCa | Self::IssuerNotCertSigner => 210,
+            Self::CaUsedAsEndEntity
+            | Self::EndEntityUsedAsCa
+            | Self::IssuerNotCertSigner
+            | Self::KeyUsageNotPermittedForPublicKey => 210,
             Self::IssuerNotCrlSigner => 200,
 
             Self::InvalidCertValidity => 190,
@@ -223,6 +237,22 @@ mod tests {
             Error::CaUsedAsEndEntity.most_specific(Error::EndEntityUsedAsCa),
             Error::CaUsedAsEndEntity
         );
+        // A key usage the key's algorithm forbids describes a path that
+        // could otherwise be used, like other key usage failures.
+        assert_eq!(
+            Error::UnsupportedSignatureAlgorithm
+                .most_specific(Error::KeyUsageNotPermittedForPublicKey),
+            Error::KeyUsageNotPermittedForPublicKey
+        );
+        assert_eq!(
+            Error::KeyUsageNotPermittedForPublicKey.rank(),
+            Error::IssuerNotCertSigner.rank()
+        );
+        assert!(
+            Error::KeyUsageNotPermittedForPublicKey.rank()
+                < Error::InvalidSignatureForPublicKey.rank()
+        );
+        assert!(!Error::KeyUsageNotPermittedForPublicKey.is_fatal());
         assert!(Error::MaximumSignatureChecksExceeded.is_fatal());
         assert!(!Error::UnknownIssuer.is_fatal());
     }

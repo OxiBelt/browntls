@@ -2,7 +2,8 @@
 
 Public test vectors used by the `browntls-pki` integration tests. Nothing in
 this directory is a private key; the tests that need signing keys generate
-them at run time with `rcgen`.
+them at run time with `rcgen` or, for ML-DSA, from fixed seeds with the
+`ml-dsa` crate.
 
 ## `webpki/`
 
@@ -45,3 +46,28 @@ upstream layout:
 The public certificates under `netflix/`, `sanofi/` and `cloudflare_dns/`
 were issued to their respective owners and are included, as upstream does,
 only as interoperability samples.
+
+## `rfc9881/`
+
+The example ML-DSA public keys and certificates of
+[RFC 9881](https://www.rfc-editor.org/rfc/rfc9881.html) ("Internet X.509
+Public Key Infrastructure -- Algorithm Identifiers for the Module-Lattice-Based
+Digital Signature Algorithm (ML-DSA)"), Appendix C.2 (public keys) and
+Appendix C.3 (certificates). They are specification examples, stored as the
+DER that the RFC prints in the textual encoding of RFC 7468 (the Base64
+lines decoded, nothing else changed). The RFC text is
+"Copyright (c) 2025 IETF Trust and the persons identified as the document
+authors" and is subject to BCP 78 and the IETF Trust's Legal Provisions
+Relating to IETF Documents (<https://trustee.ietf.org/license-info>).
+
+| File | Source |
+| --- | --- |
+| `ml-dsa-{44,65,87}-public-key.der` | Appendix C.2, `SubjectPublicKeyInfo` |
+| `ml-dsa-{44,65,87}-certificate.der` | Appendix C.3, self-signed CA |
+
+The certificates are self-signed v3 CA certificates for
+"O=IETF, CN=LAMPS WG", valid from 2020-02-03T04:32:10Z to
+2040-01-29T04:32:10Z, with critical `keyUsage` (digitalSignature,
+keyCertSign, cRLSign), critical `basicConstraints` (cA TRUE) and a subject
+key identifier. The Appendix C.1 private keys (seeds and expanded keys) were
+deliberately not copied.

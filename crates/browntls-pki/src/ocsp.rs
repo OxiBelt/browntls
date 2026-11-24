@@ -265,7 +265,10 @@ pub enum OcspError {
     /// The responder certificate lacks an explicit `id-kp-OCSPSigning`
     /// extended key usage.
     DelegateNotOcspSigner,
-    /// The responder certificate's key usage forbids signatures.
+    /// The responder certificate's key usage forbids signatures: a present
+    /// `KeyUsage` lacks digitalSignature or, for an ML-DSA key, asserts a
+    /// bit RFC 9881 §5 forbids (keyEncipherment, dataEncipherment,
+    /// keyAgreement, encipherOnly or decipherOnly).
     DelegateKeyUsage,
     /// The responder certificate is listed in a CRL of the issuer.
     DelegateRevoked,

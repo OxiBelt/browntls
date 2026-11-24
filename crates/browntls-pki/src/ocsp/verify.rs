@@ -495,7 +495,10 @@ fn authenticate_delegate(
     if !ocsp_signer {
         return Err(OcspError::DelegateNotOcspSigner);
     }
-    if !delegate.key_usage_permits(KU_DIGITAL_SIGNATURE) {
+    // RFC 9881 §5 further restricts the key usage of an ML-DSA key.
+    if !delegate.key_usage_permits(KU_DIGITAL_SIGNATURE)
+        || delegate.key_usage_allowed_for_public_key().is_err()
+    {
         return Err(OcspError::DelegateKeyUsage);
     }
 

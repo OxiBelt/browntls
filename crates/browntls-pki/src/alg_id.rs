@@ -12,6 +12,36 @@
 //! Certificate path validation and handshake signature verification
 //! (including `browntls-core`'s raw public keys) all match through these two
 //! functions.
+//!
+//! # RFC 9881 and ML-DSA
+//!
+//! [`ML_DSA_44`], [`ML_DSA_65`] and [`ML_DSA_87`] are the RFC 9881 §2
+//! identifiers: the NIST OID with the parameters field *absent*, the only
+//! form RFC 9881 allows. Each serves both as the `SubjectPublicKeyInfo`
+//! algorithm (§4) and as the signature algorithm of certificates and CRLs,
+//! in `signatureAlgorithm` and in the `tbsCertificate` or `tbsCertList`
+//! `signature` field (§3). Matching stays byte for byte, with no
+//! canonicalisation: an explicit `NULL` or any other parameters match no
+//! verification algorithm declaring these constants, so such keys and
+//! signatures are unsupported rather than accepted.
+//!
+//! The key in the `subjectPublicKey` `BIT STRING` is the raw FIPS 204
+//! public key (`pkEncode`) of 1312, 1952 or 2592 octets, and the signature
+//! is pure ML-DSA (FIPS 204 `ML-DSA.Sign`) with the empty context string
+//! over the DER `tbs` element. A [`SignatureVerificationAlgorithm`] for
+//! these identifiers must verify exactly that, and treat a key or signature
+//! of the wrong length as invalid. The RFC 9881 §5 key usage rules for
+//! ML-DSA keys apply to the end entity and intermediates in path
+//! validation ([`Error::KeyUsageNotPermittedForPublicKey`]) and to
+//! delegated OCSP responder certificates
+//! ([`OcspError::DelegateKeyUsage`]), not to trust anchors.
+//!
+//! HashML-DSA identifiers (`id-hash-ml-dsa-*-with-sha512`) are deliberately
+//! not defined (RFC 9881 §8.3), nor are pre-standard Dilithium ones.
+//!
+//! [`SignatureVerificationAlgorithm`]: crate::SignatureVerificationAlgorithm
+//! [`Error::KeyUsageNotPermittedForPublicKey`]: crate::Error::KeyUsageNotPermittedForPublicKey
+//! [`OcspError::DelegateKeyUsage`]: crate::ocsp::OcspError::DelegateKeyUsage
 
 use core::fmt;
 
@@ -248,20 +278,45 @@ pub const ED25519: AlgorithmIdentifier =
 pub const ED448: AlgorithmIdentifier =
     AlgorithmIdentifier::from_slice(&[0x06, 0x03, 0x2b, 0x65, 0x71]);
 
-/// AlgorithmIdentifier for `id-ml-dsa-44`.
+/// AlgorithmIdentifier for `id-ml-dsa-44` (2.16.840.1.101.3.4.3.17) with
+/// absent parameters, for ML-DSA-44 keys and signatures alike (see
+/// [RFC 9881 and ML-DSA]). The public key is 1312 octets.
+///
+/// [RFC 9881 and ML-DSA]: crate::alg_id#rfc-9881-and-ml-dsa
 pub const ML_DSA_44: AlgorithmIdentifier = AlgorithmIdentifier::from_slice(&[
     0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11,
 ]);
 
-/// AlgorithmIdentifier for `id-ml-dsa-65`.
+/// AlgorithmIdentifier for `id-ml-dsa-65` (2.16.840.1.101.3.4.3.18) with
+/// absent parameters, for ML-DSA-65 keys and signatures alike (see
+/// [RFC 9881 and ML-DSA]). The public key is 1952 octets.
+///
+/// [RFC 9881 and ML-DSA]: crate::alg_id#rfc-9881-and-ml-dsa
 pub const ML_DSA_65: AlgorithmIdentifier = AlgorithmIdentifier::from_slice(&[
     0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12,
 ]);
 
-/// AlgorithmIdentifier for `id-ml-dsa-87`.
+/// AlgorithmIdentifier for `id-ml-dsa-87` (2.16.840.1.101.3.4.3.19) with
+/// absent parameters, for ML-DSA-87 keys and signatures alike (see
+/// [RFC 9881 and ML-DSA]). The public key is 2592 octets (RFC 9881
+/// erratum 8699 corrects the size in Appendix A).
+///
+/// [RFC 9881 and ML-DSA]: crate::alg_id#rfc-9881-and-ml-dsa
 pub const ML_DSA_87: AlgorithmIdentifier = AlgorithmIdentifier::from_slice(&[
     0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13,
 ]);
+
+/// Whether the contents of a `SubjectPublicKeyInfo` `algorithm` name an
+/// ML-DSA key: the OID is `id-ml-dsa-44`, `-65` or `-87`, whatever
+/// follows it. Such a key is subject to the RFC 9881 §5 key usage rules
+/// even when its parameters are not the absent ones RFC 9881 §2 requires
+/// (no verification algorithm declaring [`ML_DSA_44`], [`ML_DSA_65`] or
+/// [`ML_DSA_87`] matches those).
+pub(crate) fn is_ml_dsa_public_key(contents: &[u8]) -> bool {
+    [ML_DSA_44, ML_DSA_65, ML_DSA_87]
+        .iter()
+        .any(|alg| contents.starts_with(alg.as_bytes()))
+}
 
 #[cfg(test)]
 mod tests {
@@ -511,5 +566,88 @@ mod tests {
             canonical_signature_alg_id(RSA_PKCS1_SHA256.as_bytes()),
             None
         );
+    }
+
+    #[test]
+    fn ml_dsa_identifiers_match_only_with_absent_parameters() {
+        let sets = [(ML_DSA_44, 0x11u8), (ML_DSA_65, 0x12), (ML_DSA_87, 0x13)];
+        static ALGS: [&dyn SignatureVerificationAlgorithm; 3] = [
+            &AcceptAll {
+                public_key: ML_DSA_44,
+                signature: ML_DSA_44,
+            },
+            &AcceptAll {
+                public_key: ML_DSA_65,
+                signature: ML_DSA_65,
+            },
+            &AcceptAll {
+                public_key: ML_DSA_87,
+                signature: ML_DSA_87,
+            },
+        ];
+        let check = |key: &[u8], sig: &[u8]| {
+            let spki = Spki {
+                algorithm: key,
+                key: &[],
+            };
+            let signed = SignedData {
+                data: &[],
+                algorithm: sig,
+                signature: &[],
+            };
+            verify_signed_data(&ALGS, &spki, &signed, &mut Budget::default())
+        };
+        for (alg, last) in sets {
+            // 2.16.840.1.101.3.4.3.{17,18,19}, parameters absent.
+            let mut expected = alloc::vec![0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04];
+            expected.extend_from_slice(&[0x03, last]);
+            assert_eq!(alg.as_bytes(), expected);
+            assert!(is_ml_dsa_public_key(alg.as_bytes()));
+            assert_eq!(check(&alg, &alg), Ok(()));
+            // No canonical form: an explicit NULL (or anything else) after
+            // the OID matches nothing, in either position.
+            let null = [alg.as_bytes(), &[0x05, 0x00]].concat();
+            assert_eq!(canonical_public_key_alg_id(&null), None);
+            assert_eq!(canonical_signature_alg_id(&null), None);
+            assert!(!alg.matches_public_key(&null));
+            assert!(!alg.matches_signature(&null));
+            assert!(is_ml_dsa_public_key(&null));
+            assert_eq!(
+                check(&alg, &null),
+                Err(Error::UnsupportedSignatureAlgorithm)
+            );
+            assert_eq!(
+                check(&null, &alg),
+                Err(Error::UnsupportedSignatureAlgorithmForPublicKey)
+            );
+            assert_eq!(
+                check(&null, &null),
+                Err(Error::UnsupportedSignatureAlgorithm)
+            );
+            // Truncated or extended OIDs are other algorithms.
+            assert!(!is_ml_dsa_public_key(&alg[..10]));
+            assert!(!alg.matches_public_key(&alg[..10]));
+            let mut extended = alg.as_bytes().to_vec();
+            extended[1] = 0x0a;
+            extended.push(0x01);
+            assert!(!is_ml_dsa_public_key(&extended));
+            assert!(!alg.matches_public_key(&extended));
+        }
+        // Parameter sets never match each other.
+        assert_eq!(
+            check(&ML_DSA_44, &ML_DSA_65),
+            Err(Error::UnsupportedSignatureAlgorithmForPublicKey)
+        );
+        // HashML-DSA-44 with SHA-512 (2.16.840.1.101.3.4.3.32) is neither
+        // an ML-DSA key nor a supported signature.
+        let hash_ml_dsa = [
+            0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x20,
+        ];
+        assert!(!is_ml_dsa_public_key(&hash_ml_dsa));
+        assert_eq!(
+            check(&ML_DSA_44, &hash_ml_dsa),
+            Err(Error::UnsupportedSignatureAlgorithm)
+        );
+        assert!(!is_ml_dsa_public_key(ED25519.as_bytes()));
     }
 }

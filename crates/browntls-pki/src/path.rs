@@ -2,8 +2,9 @@
 //!
 //! The search is depth-first from the end entity towards the trust anchors.
 //! At each step the head of the partial path is checked on its own (validity,
-//! basic constraints, key usage, extended key usage), then every trust anchor
-//! whose subject is the head's issuer is tried (signatures, revocation, name
+//! basic constraints, key usage including the RFC 9881 §5 restrictions on
+//! ML-DSA keys, extended key usage), then every trust anchor whose subject
+//! is the head's issuer is tried (signatures, revocation, name
 //! constraints, the caller's path check), then every intermediate whose
 //! subject is the head's issuer is pushed and the search recurses.
 //!
@@ -363,8 +364,12 @@ fn check_issuer_independent(
 ) -> Result<(), Error> {
     check_validity(cert, time)?;
     check_basic_constraints(cert, role, sub_ca_count)?;
+    // RFC 9881 §5: a KeyUsage on an ML-DSA certificate may only assert
+    // signature usages. Checked for the end entity and every intermediate
+    // (trust anchors carry no key usage), before the issuer rule below.
+    cert.key_usage_allowed_for_public_key()?;
     // RFC 5280 §6.1.4 (n): an issuer's KeyUsage, when present, must assert
-    // keyCertSign. End-entity key usage is left to the protocol layer.
+    // keyCertSign. Other end-entity key usage is left to the protocol layer.
     if role == Role::Issuer && !cert.key_usage_permits(KU_KEY_CERT_SIGN) {
         return Err(Error::IssuerNotCertSigner);
     }

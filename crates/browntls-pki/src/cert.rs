@@ -21,8 +21,30 @@ use crate::{CertificateDer, SubjectPublicKeyInfoDer, UnixTime};
 
 /// `KeyUsage` bit positions (RFC 5280 §4.2.1.3).
 pub(crate) const KU_DIGITAL_SIGNATURE: usize = 0;
+pub(crate) const KU_NON_REPUDIATION: usize = 1;
+pub(crate) const KU_KEY_ENCIPHERMENT: usize = 2;
+pub(crate) const KU_DATA_ENCIPHERMENT: usize = 3;
+pub(crate) const KU_KEY_AGREEMENT: usize = 4;
 pub(crate) const KU_KEY_CERT_SIGN: usize = 5;
 pub(crate) const KU_CRL_SIGN: usize = 6;
+pub(crate) const KU_ENCIPHER_ONLY: usize = 7;
+pub(crate) const KU_DECIPHER_ONLY: usize = 8;
+
+/// The `KeyUsage` bits an ML-DSA key must assert at least one of, and the
+/// bits it must not assert (RFC 9881 §5).
+const KU_ML_DSA_REQUIRED_ONE_OF: [usize; 4] = [
+    KU_DIGITAL_SIGNATURE,
+    KU_NON_REPUDIATION,
+    KU_KEY_CERT_SIGN,
+    KU_CRL_SIGN,
+];
+const KU_ML_DSA_FORBIDDEN: [usize; 5] = [
+    KU_KEY_ENCIPHERMENT,
+    KU_DATA_ENCIPHERMENT,
+    KU_KEY_AGREEMENT,
+    KU_ENCIPHER_ONLY,
+    KU_DECIPHER_ONLY,
+];
 
 /// A parsed X.509 v3 certificate (RFC 5280 §4.1), CA or end entity.
 ///
@@ -280,6 +302,29 @@ impl<'a> Cert<'a> {
     /// absence has been treated as permitting any usage.
     pub(crate) fn key_usage_permits(&self, bit: usize) -> bool {
         self.key_usage.is_none_or(|ku| ku.bit_set(bit))
+    }
+
+    /// Whether the `KeyUsage` extension, when present, is one the subject
+    /// public key's algorithm allows. Only ML-DSA keys (any `id-ml-dsa-*`
+    /// algorithm OID, whatever follows it) are restricted: at least one of
+    /// digitalSignature, nonRepudiation, keyCertSign and cRLSign, and none
+    /// of the encipherment and agreement bits (RFC 9881 §5). An absent
+    /// `KeyUsage` permits any usage, as for [`Self::key_usage_permits`].
+    pub(crate) fn key_usage_allowed_for_public_key(&self) -> Result<(), Error> {
+        let Some(ku) = self.key_usage else {
+            return Ok(());
+        };
+        let spki = Spki::from_contents(self.spki)?;
+        if !crate::alg_id::is_ml_dsa_public_key(spki.algorithm) {
+            return Ok(());
+        }
+        if KU_ML_DSA_REQUIRED_ONE_OF.iter().any(|&bit| ku.bit_set(bit))
+            && !KU_ML_DSA_FORBIDDEN.iter().any(|&bit| ku.bit_set(bit))
+        {
+            Ok(())
+        } else {
+            Err(Error::KeyUsageNotPermittedForPublicKey)
+        }
     }
 
     /// The certificate's DER encoding.

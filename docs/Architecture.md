@@ -729,9 +729,10 @@ unchanged; `ML_DSA_VERIFICATION_ALGS`, `ALL_VERIFICATION_ALGS_WITH_ML_DSA`
 (the `all` list of `SUPPORTED_SIG_ALGS`, computed at compile time with the
 helper the native tables use, followed by the ML-DSA algorithms) and
 `SUPPORTED_SIG_ALGS_WITH_ML_DSA` (with the unchanged `mapping`) are the
-opt-in. Everything said above about where the opt-in applies, the
-unchanged `signature_algorithms` lists and the missing TLS authentication
-with ML-DSA keys holds for it too.
+opt-in. Everything said above about where the opt-in applies and the
+unchanged `signature_algorithms` lists holds for it too, and TLS 1.3
+authentication with ML-DSA keys is likewise a separate opt-in
+([ML-DSA TLS 1.3 authentication][ml-dsa-tls13]).
 
 `crates/browntls-core/tests/rustcrypto_mldsa.rs` checks the RustCrypto
 algorithms with signatures by `browntls_crypto::mldsa` and by the `ml-dsa`
@@ -756,7 +757,8 @@ accepts the schemes and loads no ML-DSA private key. A later revision or
 the published RFC may change the behaviour; the opt-in items are the only
 entry points, so nothing else in a configuration depends on the draft.
 
-The native provider opts in through two independent provider fields:
+A provider opts in through two independent fields, here for the native
+provider:
 
 - `native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13` as
   `signature_verification_algorithms`. Its `all` list is
@@ -817,6 +819,33 @@ without the opt-in fails the handshake with an ML-DSA-only peer as with
 any key type it does not support; nothing falls back to another algorithm
 unless the application configures a second certified key and a resolver
 that chooses by the offered schemes.
+
+The RustCrypto provider has the same opt-in under the same names
+(`rustcrypto::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`,
+`rustcrypto::KEY_PROVIDER_WITH_ML_DSA`, `rustcrypto::sign::any_ml_dsa_type`
+and `MlDsaSigningKey`), backed by the RustCrypto `ml-dsa` crate (see
+[Maintenance](Maintenance.md#rustcrypto-ml-dsa-dependency)), with the same
+table order, scheme binding, hedged signing from the operating system's
+random source and TLS 1.2 behaviour. It differs in three ways. It loads
+the `seed` and `both` forms of an RFC 9881 private key (the `both` form
+only when its expanded key is the one its seed derives) but refuses the
+`expandedKey` form alone, because the crate has no checked decoding of an
+expanded key; the provider parses the PKCS #8 structure itself, in strict
+DER, to the same rules as `browntls_crypto::mldsa`. It needs more stack,
+above all to load a key: for ML-DSA-87 on x86-64, about 100 to 145 KiB to
+sign and 260 to 430 KiB to load a key in optimised builds, and up to
+about 512 KiB and 1.25 MiB in an unoptimised one (the native provider:
+about 102 KiB and 20 KiB, optimised). And the crate wipes the stored key
+on drop but not the temporaries of key derivation and signing, which the
+native implementation wipes (the native one, in turn, does not wipe its
+SHAKE states, which the crate does).
+
+A handshake between the two providers works
+in both directions; `crates/browntls-core/tests/mldsa_tls13.rs` runs the
+same cases as the native target with the RustCrypto provider, and
+`tests/rustcrypto_mldsa.rs` checks that both providers load the same keys
+to the same `SubjectPublicKeyInfo`, verify each other's signatures and
+agree on the RFC 9881 Appendix C keys and on malformed encodings.
 
 Resumption needs nothing specific: a resumed handshake has no
 `CertificateVerify`. As with every algorithm, a client's sessions are bound

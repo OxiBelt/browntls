@@ -150,7 +150,10 @@ class Suite:
     # "etm-toggle": a peer without Encrypt-then-MAC;
     # "ech": Encrypted Client Hello; "ech-only": nothing but ECH scenarios;
     # "browntls-ech-client": the scenarios whose client must be browntls
-    # (GREASE and random configuration identifiers in split mode).
+    # (GREASE and random configuration identifiers in split mode);
+    # "mldsa": ML-DSA certificates from gen-pki.sh (OpenSSL 3.5 or later in
+    # the peer image) and TLS 1.3 ML-DSA authentication (mldsa44/65/87,
+    # draft-ietf-tls-mldsa-06) in the peer.
     features: frozenset[str]
     # Architectures (`Arch.name`) whose runner cannot run the peer image.
     skip_arches: frozenset[str] = frozenset()
@@ -167,7 +170,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5+ (Alpine 3.24)",
             "openssl",
             "alpine",
-            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle", "mldsa"}),
         ),
         Suite(
             "openssl-3.0",
@@ -183,7 +186,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5 (Ubuntu 26.04)",
             "openssl",
             "ubuntu-26.04",
-            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle", "mldsa"}),
             skip_arches=frozenset({"riscv64"}),
         ),
         Suite(
@@ -198,7 +201,7 @@ SUITES: dict[str, Suite] = {
             "browntls client and server in separate containers",
             "browntls",
             "alpine",
-            frozenset({"mlkem", "ech", "browntls-ech-client"}),
+            frozenset({"mlkem", "ech", "browntls-ech-client", "mldsa"}),
         ),
         # Go implements ECH as a client and as a shared-mode server; its
         # client also drives the browntls split-mode servers.
@@ -353,6 +356,10 @@ class Scenario:
     # The browntls side runs its connections through browntls-tokio
     # (`--async`), which its output must confirm (`"io":"async"`).
     async_io: bool = False
+    # ML-DSA authentication (`key` is mldsa44, mldsa65 or mldsa87): browntls
+    # opts in (`--ml-dsa`) and an OpenSSL peer is restricted to the key's
+    # signature scheme (`-sigalgs`), so the scheme is the one under test.
+    ml_dsa: bool = False
     # Focused qualification inputs for asymmetric RFC 8449 exchanges.
     message: str | None = None
     browntls_record_size_limit: int | None = None
@@ -673,6 +680,30 @@ SCENARIOS: tuple[Scenario, ...] = (
         roles=("client",),
         async_io=True,
     ),
+    # TLS 1.3 authentication with ML-DSA certificates
+    # (draft-ietf-tls-mldsa-06): each parameter set with browntls as the
+    # client, ML-DSA-65 in both roles, and mutual authentication.
+    *(
+        _tls13(
+            f"tls13-{key}",
+            "TLS13_AES_128_GCM_SHA256",
+            "X25519",
+            key,
+            ml_dsa=True,
+            roles=ROLES if key == "mldsa65" else ("client",),
+            requires=frozenset({"mldsa"}),
+        )
+        for key in ("mldsa44", "mldsa65", "mldsa87")
+    ),
+    _tls13(
+        "tls13-mldsa65-client-auth",
+        "TLS13_AES_256_GCM_SHA384",
+        "X25519",
+        "mldsa65",
+        client_auth=True,
+        ml_dsa=True,
+        requires=frozenset({"mldsa"}),
+    ),
     # Encrypted Client Hello (RFC 9849). Shared mode: the peer is client or
     # server. Split mode: the servers are browntls, the client the peer.
     _ech("ech-shared", Ech("shared")),
@@ -764,6 +795,8 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
         args += ["--record-size-limit", str(sc.browntls_record_size_limit)]
     if sc.async_io:
         args.append("--async")
+    if sc.ml_dsa:
+        args.append("--ml-dsa")
     return args
 
 
@@ -817,6 +850,8 @@ def peer_server_command(sc: Scenario, implementation: str) -> list[str]:
         cmd = ["openssl", "s_server", "-accept", str(PORT), "-naccept", str(sc.connections)]
         cmd += ["-rev", "-cert", cert, "-key", key]
         cmd += openssl_protocol_args(sc)
+        if sc.ml_dsa:
+            cmd += ["-sigalgs", sc.key]
         if sc.client_auth:
             cmd += ["-Verify", "1", "-verify_return_error", "-CAfile", ca]
         return cmd
@@ -845,6 +880,8 @@ def peer_client_command(sc: Scenario, implementation: str) -> list[str]:
         cmd += ["-servername", SERVER_ALIAS, "-verify_hostname", SERVER_ALIAS]
         cmd += ["-CAfile", ca, "-verify_return_error", "-quiet"]
         cmd += openssl_protocol_args(sc, predict_client_share=True)
+        if sc.ml_dsa:
+            cmd += ["-sigalgs", sc.key]
         if sc.client_auth:
             cmd += ["-cert", cert, "-key", key]
         script = f"printf '%s\\n' {line} | {shlex.join(cmd)}"

@@ -606,7 +606,7 @@ negotiated when a peer shares nothing earlier.
 | TLS 1.3 suites | AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 | AES-128-CCM, then AES-128-CCM-8 (64-bit tag; no kernel TLS export) | |
 | TLS 1.2 suites | ECDHE with AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 (ECDSA and RSA) | ECDHE AES-CBC: AES-256-CBC-SHA384, AES-128-CBC-SHA256, then AES-256-CBC-SHA, AES-128-CBC-SHA (ECDSA and RSA; RFC 5289, RFC 8422); Encrypt-then-MAC only by default; no kernel TLS export | |
 | Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
-| Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | |
+| Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | `mldsa44`, `mldsa65`, `mldsa87` after every default scheme (TLS 1.3 only, experimental: `SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`, see [below](#ml-dsa-tls-13-authentication-opt-in-experimental)) |
 | Certificate and CRL signatures only (no TLS scheme) | the algorithms of the signature schemes above | | ML-DSA-44, -65, -87 (`ALL_VERIFICATION_ALGS_WITH_ML_DSA`, see [below](#ml-dsa-certificate-verification-native-provider-opt-in)) |
 
 A browntls server applies the same ranking whatever the client's order:
@@ -660,24 +660,26 @@ machine (on the order of 0.1 ms), and path building stays bounded by the
 existing budget of 100 signature checks per validation
 (`crates/browntls-pki/src/path.rs`).
 
-The TLS side does not change. The `signature_algorithms` lists a browntls
-peer sends come from the verifier's scheme mapping, which has no ML-DSA
-scheme, so they are identical with and without the opt-in, and a
-`CertificateVerify` or `ServerKeyExchange` signed with an ML-DSA scheme is
-refused as unadvertised. TLS 1.3 authentication with ML-DSA keys
-(`draft-ietf-tls-mldsa`) is not implemented, no ML-DSA private key can be
-loaded, and nothing on the wire tells a peer that ML-DSA chains are
-accepted. The opt-in is for X.509 validation through the verifiers and
+With this table the TLS side does not change. The `signature_algorithms`
+lists a browntls peer sends come from the verifier's scheme mapping, which
+here has no ML-DSA scheme, so they are identical with and without the
+opt-in, and a `CertificateVerify` or `ServerKeyExchange` signed with an
+ML-DSA scheme is refused as unadvertised. Nothing on the wire tells a peer
+that ML-DSA chains are accepted, and `KEY_PROVIDER` loads no ML-DSA private
+key. The opt-in is for X.509 validation through the verifiers and
 `browntls_pki`: chains with ML-DSA certificates anywhere validate, including
 an ML-DSA end entity certificate, but only a classical end entity key can
-then authenticate a TLS handshake. The RFC 9881 §5 key usage rules for
+then authenticate a TLS handshake. TLS 1.3 authentication with ML-DSA keys
+is a further, separate opt-in
+([ML-DSA TLS 1.3 authentication][ml-dsa-tls13]). The RFC 9881 §5 key usage
+rules for
 ML-DSA keys are enforced by `browntls-pki` with or without the opt-in; a
 violation is reported as `CertificateError::Other` (alert
 `certificate_unknown`), like other key usage failures. The RustCrypto
 provider has the same opt-in, described below; its default provider does not
 verify ML-DSA either.
 
-Should a custom verifier or algorithm table name the ML-DSA signature
+Whichever verifier or algorithm table names the ML-DSA signature
 schemes (`mldsa44`, `mldsa65`, `mldsa87`; `draft-ietf-tls-mldsa-06`
 specifies them for TLS 1.3 `CertificateVerify` and certificate signatures),
 the library uses them for handshake signatures in TLS 1.3 only
@@ -699,7 +701,7 @@ are not enabled by assumption. All of this is about handshake signatures
 and what `signature_algorithms` says. Certificate path signatures are
 verified with the table's `all` list in every protocol version, so a chain
 with ML-DSA-signed certificates and a classical end entity also validates
-in TLS 1.2 under the opt-in above.
+in TLS 1.2 under the opt-in.
 `crates/browntls-core/tests/mldsa_tls13_only_rules.rs` checks these rules
 with test doubles (verifiers, keys and cipher suites that name the schemes)
 and with rewritten handshake messages.
@@ -738,6 +740,103 @@ certificates, agreement with the native algorithms on valid and mutated
 inputs (including malformed hint encodings) for every parameter set, paths
 and a TLS 1.3 handshake with an ML-DSA CA chain and an ECDSA end entity,
 with the opt-in table and with the default provider.
+
+### ML-DSA TLS 1.3 authentication (opt-in, experimental)
+
+TLS 1.3 authentication with ML-DSA keys follows `draft-ietf-tls-mldsa-06`
+("Use of ML-DSA in TLS 1.3"), pinned at that revision: an Internet-Draft,
+not a published RFC, whose code points `mldsa44` (0x0904), `mldsa65`
+(0x0905) and `mldsa87` (0x0906) are registered with "Recommended: N". A
+`CertificateVerify` under one of these schemes is pure ML-DSA (FIPS 204
+ML-DSA.Sign and ML-DSA.Verify) over the RFC 9846 §4.5.2 content with the
+empty FIPS 204 context string, and the end-entity key must be the ML-DSA
+key of the same parameter set (§3.2 of the draft). The support is
+experimental and off by default: `default_provider()` neither offers nor
+accepts the schemes and loads no ML-DSA private key. A later revision or
+the published RFC may change the behaviour; the opt-in items are the only
+entry points, so nothing else in a configuration depends on the draft.
+
+The native provider opts in through two independent provider fields:
+
+- `native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13` as
+  `signature_verification_algorithms`. Its `all` list is
+  `ALL_VERIFICATION_ALGS_WITH_ML_DSA` (as for certificate paths above) and
+  its `mapping` is `VERIFICATION_ALG_MAPPING_WITH_ML_DSA`: the default
+  mapping followed, in a list computed at compile time, by
+  `ML_DSA_VERIFICATION_ALG_MAPPING`, which maps each scheme to the one
+  algorithm of its parameter set. A verifier built from it lists the three
+  schemes, after every default scheme, in the `signature_algorithms` of
+  each ClientHello that offers TLS 1.3 and of each TLS 1.3
+  CertificateRequest, so the opt-in is visible on the wire, and it accepts
+  a TLS 1.3 `CertificateVerify` under one of them. Because a scheme maps
+  to one algorithm and algorithms are matched to the key's
+  `AlgorithmIdentifier` byte for byte, a signature under `mldsa65` verifies
+  only with an `id-ml-dsa-65` end-entity key. A key of another parameter
+  set, a classical key or an identifier with parameters is refused as an
+  unsupported signature algorithm for that key, and a signature that does
+  not verify (one made with a non-empty FIPS 204 context included) as a
+  bad signature, both with a `decrypt_error` alert. The browntls peers
+  never send `signature_algorithms_cert`, so the one list also states
+  which certificate signatures are accepted (RFC 9846 §4.3.3),
+  consistently with the `all` list.
+- `native::KEY_PROVIDER_WITH_ML_DSA` as `key_provider`. It loads what
+  `KEY_PROVIDER` loads and, for a PKCS #8 key that fails there, an ML-DSA
+  key (`sign::any_ml_dsa_type`: the RFC 9881 §6 encoding in the `seed`,
+  `expandedKey` or `both` form, with the §8.2 consistency check). The key
+  (`sign::MlDsaSigningKey`) offers a signer only for the scheme of its own
+  parameter set and only when the peer listed it, so the scheme a peer
+  signs with is fixed by its key and must have been offered by the
+  verifying side; there is no fallback to another scheme. Signing is
+  hedged with 32 bytes from the operating system for each signature and
+  fails without them (`FailedToGetRandomBytes`, alert `internal_error`).
+  HashML-DSA is not used. Signing needs about 42, 66 and 102 KiB of stack
+  for ML-DSA-44, -65 and -87 on the thread driving the handshake (release
+  builds on x86-64; unoptimised builds need more).
+
+A side may set either field alone: a client that only verifies ML-DSA
+servers needs the table, a server that only presents an ML-DSA certificate
+needs the key provider. The role checks are those of every scheme: a
+client accepts a server `CertificateVerify` only under a scheme it offered
+in its ClientHello, a server accepts a client `CertificateVerify` only
+under a scheme of its CertificateRequest (initial or post-handshake), and
+an unoffered scheme is refused with `illegal_parameter` before the
+`CertificateVerify` signature is checked. A TLS 1.3 server whose keys can
+sign with none of the client's schemes fails with `handshake_failure`
+(`NoSignatureSchemesInCommon`), which is what a client without the opt-in
+gets from a server that has only an ML-DSA key.
+
+An ML-DSA key reports `SignatureAlgorithm::Unknown(255)`, a value the
+TLS 1.2 `SignatureAlgorithm` registry does not assign, as its key family,
+so no TLS 1.2 cipher suite and no TLS 1.2 client certificate type matches
+it: a server holding only an ML-DSA key completes no TLS 1.2 handshake
+(`NoCipherSuitesInCommon`, alert `handshake_failure`).
+Together with the rules of the previous section, ML-DSA appears in
+TLS 1.3 handshakes (and so in QUIC and DTLS 1.3) only, never in TLS 1.2 or
+DTLS 1.2, in delegated credentials or in exported authenticators. A peer
+without the opt-in fails the handshake with an ML-DSA-only peer as with
+any key type it does not support; nothing falls back to another algorithm
+unless the application configures a second certified key and a resolver
+that chooses by the offered schemes.
+
+Resumption needs nothing specific: a resumed handshake has no
+`CertificateVerify`. As with every algorithm, a client's sessions are bound
+to its verifier, so a configuration without the opt-in does not resume a
+session made with it, while a server resumes a ticket its ticketer can
+open whatever table its client verifier has by then. Tickets issued after
+mutual authentication carry the client's chain and grow with it (two
+tickets take about 35 kB after an ML-DSA-87 chain of two certificates).
+
+`crates/browntls-core/tests/mldsa_tls13_native.rs` runs the cases of
+`tests/cases/mldsa_tls13.rs` with the native provider: server, client and
+mutual authentication for every parameter set with the exact scheme of
+each `CertificateVerify`, mixed classical and ML-DSA chains, each opt-in
+alone, peers without the scheme, keys and signers that break the rules
+(another parameter set, a classical scheme for an ML-DSA key and the
+reverse, an unoffered scheme, damaged signatures, a non-empty context),
+a server with a classical and an ML-DSA key, HelloRetryRequest,
+resumption, post-handshake authentication, certificate compression, raw
+public keys, and the delegated credential and exported authenticator
+refusals.
 
 ### Post-quantum hybrid key agreement (RFC 10024)
 
@@ -3162,14 +3261,18 @@ Appendix C keys and certificates). The `crypto_mldsa` fuzz target checks
 these decoders and the primitive against the RustCrypto `ml-dsa` crate
 ([fuzz targets](../fuzz/README.md)). The native provider uses ML-DSA for
 opt-in certificate and CRL signature verification (see
-[ML-DSA certificate verification][ml-dsa-verification]); it is not used for
-TLS handshake signatures, by the RustCrypto provider (whose own opt-in uses
-the RustCrypto `ml-dsa` crate), or for signing anywhere in the library, and
-the provider's `KEY_PROVIDER` loads no ML-DSA private key. HashML-DSA is not
-implemented. Its module documentation states which operations are constant
+[ML-DSA certificate verification][ml-dsa-verification]) and, as a separate
+experimental opt-in, for TLS 1.3 handshake signatures: verification with
+`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13` and hedged signing with keys loaded
+by `KEY_PROVIDER_WITH_ML_DSA` (see
+[ML-DSA TLS 1.3 authentication][ml-dsa-tls13]). The default `KEY_PROVIDER`
+loads no ML-DSA private key, and the RustCrypto provider does not use this
+module (its own opt-in uses the RustCrypto `ml-dsa` crate). HashML-DSA is
+not implemented. Its module documentation states which operations are constant
 time, the stack use and the key sizes.
 
 [ml-dsa-verification]: #ml-dsa-certificate-verification-native-provider-opt-in
+[ml-dsa-tls13]: #ml-dsa-tls-13-authentication-opt-in-experimental
 
 GHASH is also available on its own as `browntls_crypto::gcm::Ghash` (SP
 800-38D section 6.4, keyed by the hash subkey `H`, the counterpart of the

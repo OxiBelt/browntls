@@ -56,6 +56,11 @@ pub const TARGETS: &[Target] = &[
         crate::crypto_kem::seeds,
     ),
     (
+        "crypto_mldsa",
+        crate::crypto_mldsa::run,
+        crate::crypto_mldsa::seeds,
+    ),
+    (
         "crypto_hpke",
         crate::crypto_hpke::run,
         crate::crypto_hpke::seeds,
@@ -275,7 +280,121 @@ fn pki_cert() -> Vec<Vec<u8>> {
         seed.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
         seeds.push(seed);
     }
+    // RFC 9881 Appendix C.3: a self-signed ML-DSA CA certificate as end
+    // entity and trust anchor, with an ML-DSA CRL of the same issuer;
+    // the Appendix C.2 public key as a raw public key.
+    for (set, cert) in ML_DSA_CERTS.iter().enumerate() {
+        for flags in [0u8, 2, 4, 4 | 16 | 32] {
+            let mut seed = vec![flags];
+            field(&mut seed, cert);
+            field(&mut seed, &[]);
+            field(&mut seed, &[]);
+            field(&mut seed, cert);
+            field(&mut seed, &ml_dsa_crl(set));
+            field(&mut seed, b"localhost");
+            seed.extend_from_slice(&[0x5a; 64]);
+            seeds.push(seed);
+        }
+        let mut seed = vec![0];
+        field(&mut seed, ML_DSA_SPKIS[set]);
+        for _ in 0..4 {
+            field(&mut seed, &[]);
+        }
+        field(&mut seed, b"localhost");
+        seeds.push(seed);
+    }
     seeds
+}
+
+macro_rules! rfc9881 {
+    ($file:literal) => {
+        include_bytes!(concat!(
+            "../../crates/browntls-pki/tests/data/rfc9881/",
+            $file
+        ))
+    };
+}
+
+/// The RFC 9881 Appendix C.3 certificates (ML-DSA-44, -65, -87).
+const ML_DSA_CERTS: [&[u8]; 3] = [
+    rfc9881!("ml-dsa-44-certificate.der"),
+    rfc9881!("ml-dsa-65-certificate.der"),
+    rfc9881!("ml-dsa-87-certificate.der"),
+];
+
+/// The RFC 9881 Appendix C.2 public keys.
+const ML_DSA_SPKIS: [&[u8]; 3] = [
+    rfc9881!("ml-dsa-44-public-key.der"),
+    rfc9881!("ml-dsa-65-public-key.der"),
+    rfc9881!("ml-dsa-87-public-key.der"),
+];
+
+/// A DER TLV (contents shorter than 64 KiB).
+fn der(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let len = contents.len();
+    let mut out = vec![tag];
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len < 0x100 {
+        out.extend_from_slice(&[0x81, len as u8]);
+    } else {
+        out.extend_from_slice(&[0x82, (len >> 8) as u8, len as u8]);
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// A v2 CRL in the name of the Appendix C.3 issuer (`O=IETF, CN=LAMPS
+/// WG`), with the `id-ml-dsa-*` signature algorithm of `set`, revoking
+/// serial number 7b040506, and a signature of the right length that the
+/// `pki_crl` stand-in algorithms accept (its last byte is even).
+fn ml_dsa_crl(set: usize) -> Vec<u8> {
+    let oid = [
+        0x60,
+        0x86,
+        0x48,
+        0x01,
+        0x65,
+        0x03,
+        0x04,
+        0x03,
+        0x11 + set as u8,
+    ];
+    let alg = der(0x30, &der(0x06, &oid));
+    let rdn = |attr: u8, value: &[u8]| {
+        der(
+            0x31,
+            &der(
+                0x30,
+                &[der(0x06, &[0x55, 0x04, attr]), der(0x13, value)].concat(),
+            ),
+        )
+    };
+    let issuer = der(0x30, &[rdn(0x0a, b"IETF"), rdn(0x03, b"LAMPS WG")].concat());
+    let entry = der(
+        0x30,
+        &[der(0x02, &[0x7b, 4, 5, 6]), der(0x17, b"261001000000Z")].concat(),
+    );
+    let crl_number = der(
+        0x30,
+        &[der(0x06, &[0x55, 0x1d, 0x14]), der(0x04, &der(0x02, &[1]))].concat(),
+    );
+    let tbs = der(
+        0x30,
+        &[
+            der(0x02, &[1]),
+            alg.clone(),
+            issuer,
+            der(0x17, b"261101000000Z"),
+            der(0x17, b"271101000000Z"),
+            der(0x30, &entry),
+            der(0xa0, &der(0x30, &crl_number)),
+        ]
+        .concat(),
+    );
+    let sig_len = [2420, 3309, 4627][set];
+    let signature = der(0x03, &[&[0u8][..], &vec![0x5a; sig_len]].concat());
+    der(0x30, &[tbs, alg, signature].concat())
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -317,7 +436,7 @@ fn pki_pem() -> Vec<Vec<u8>> {
 
 fn pki_crl() -> Vec<Vec<u8>> {
     let identity = identity();
-    [0u8, 1]
+    let mut seeds: Vec<Vec<u8>> = [0u8, 1]
         .into_iter()
         .map(|flags| {
             let mut seed = vec![flags];
@@ -326,7 +445,19 @@ fn pki_crl() -> Vec<Vec<u8>> {
             seed.extend_from_slice(&identity.crl);
             seed
         })
-        .collect()
+        .collect();
+    // An ML-DSA CRL with its issuer's RFC 9881 key (and with another
+    // set's key).
+    for set in 0..3 {
+        for (flags, key) in [(0u8, set), (1, set), (0, (set + 1) % 3)] {
+            let mut seed = vec![flags];
+            field(&mut seed, &[0x7b, 4, 5, 6]);
+            field(&mut seed, ML_DSA_SPKIS[key]);
+            seed.extend_from_slice(&ml_dsa_crl(set));
+            seeds.push(seed);
+        }
+    }
+    seeds
 }
 
 fn cert_decompress() -> Vec<Vec<u8>> {

@@ -59,7 +59,7 @@ impl SignatureVerificationAlgorithm for FakeAlgorithm {
     }
 }
 
-fn algorithms(verdict: Verdict) -> [FakeAlgorithm; 6] {
+fn algorithms(verdict: Verdict) -> [FakeAlgorithm; 9] {
     let alg = |public_key, signature| FakeAlgorithm {
         public_key,
         signature,
@@ -72,6 +72,10 @@ fn algorithms(verdict: Verdict) -> [FakeAlgorithm; 6] {
         alg(alg_id::RSA_ENCRYPTION, alg_id::RSA_PSS_SHA256),
         alg(alg_id::RSASSA_PSS, alg_id::RSA_PSS_SHA256),
         alg(alg_id::ED25519, alg_id::ED25519),
+        // RFC 9881: one identifier for the key and the signature.
+        alg(alg_id::ML_DSA_44, alg_id::ML_DSA_44),
+        alg(alg_id::ML_DSA_65, alg_id::ML_DSA_65),
+        alg(alg_id::ML_DSA_87, alg_id::ML_DSA_87),
     ]
 }
 

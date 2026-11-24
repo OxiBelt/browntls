@@ -52,6 +52,23 @@ signature parameters semantically. They retain the original signed bytes.
 PSS certificate and signing-key pairing and path loop checks compare the
 actual key and its restrictions, including the exact minimum salt length.
 
+For ML-DSA (RFC 9881), `browntls-pki` has the `id-ml-dsa-44`, `-65` and
+`-87` identifiers (`alg_id::ML_DSA_*`), each naming both the key and the
+signature algorithm with parameters absent, and matches them byte for byte
+like any other identifier, so an encoding with parameters (NULL included)
+matches no algorithm. It also enforces the RFC 9881 §5 key usage rule: a
+`keyUsage` extension on a certificate with an ML-DSA key must assert at
+least one of digitalSignature, nonRepudiation, keyCertSign and cRLSign, and
+none of keyEncipherment, dataEncipherment, keyAgreement, encipherOnly and
+decipherOnly. Path validation checks it for the end entity and every
+intermediate (not for trust anchors) and reports
+`Error::KeyUsageNotPermittedForPublicKey`; a delegated OCSP responder
+certificate that breaks it is refused with `OcspError::DelegateKeyUsage`.
+The crate ships no ML-DSA verifier: the signatures are checked by the
+provider's algorithms, which in the built-in providers means the native
+provider's opt-in table (see
+[ML-DSA certificate verification][ml-dsa-verification]).
+
 ### Facade crate (`browntls`)
 
 `browntls` is the one dependency of an application. It exists as a separate
@@ -3074,13 +3091,24 @@ reference for testing, plus accelerated backends selected at run time.
 ML-DSA (`browntls_crypto::mldsa`: ML-DSA-44, -65 and -87, key generation,
 hedged and deterministic signing with a context string, verification and the
 FIPS 204 key and signature encodings) has the portable scalar backend alone
-and does not take part in load-aware routing. The native provider uses it
-for opt-in certificate and CRL signature verification (see
+and does not take part in load-aware routing. It also reads and writes the
+RFC 9881 key encodings: `VerifyingKey::{from_spki_der, to_spki_der}` for the
+`SubjectPublicKeyInfo` (§4), and `SigningKey::{from_pkcs8_der,
+to_pkcs8_der}` for the PKCS #8 `OneAsymmetricKey` (§6) in strict DER, with
+the private key in the `seed`, `expandedKey` or `both` form (a `both` key
+whose expanded key is not the one its seed derives, or a `publicKey` that
+is not the key's, is refused; §8.2). Comparing a loaded key's
+`SubjectPublicKeyInfo` with a certificate's associates the two
+(`crates/browntls-core/tests/native_mldsa_keys.rs` does so for the RFC 9881
+Appendix C keys and certificates). The `crypto_mldsa` fuzz target checks
+these decoders and the primitive against the RustCrypto `ml-dsa` crate
+([fuzz targets](../fuzz/README.md)). The native provider uses ML-DSA for
+opt-in certificate and CRL signature verification (see
 [ML-DSA certificate verification][ml-dsa-verification]); it is not used for
 TLS handshake signatures, by the RustCrypto provider, or for signing
-anywhere in the library. HashML-DSA is not implemented. Its module
-documentation states which operations are constant time, the stack use and
-the key sizes.
+anywhere in the library, and the provider's `KEY_PROVIDER` loads no ML-DSA
+private key. HashML-DSA is not implemented. Its module documentation states
+which operations are constant time, the stack use and the key sizes.
 
 [ml-dsa-verification]: #ml-dsa-certificate-verification-native-provider-opt-in
 

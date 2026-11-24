@@ -884,6 +884,24 @@ resumption, post-handshake authentication, certificate compression, raw
 public keys, and the delegated credential and exported authenticator
 refusals.
 
+Interoperability is tested with OpenSSL 3.5 and nothing else:
+`crates/browntls-core/tests/openssl_interop.rs` (`mldsa`, skipped where
+the `openssl` tool lists no ML-DSA TLS scheme) and the Docker end-to-end
+scenarios `tls13-mldsa*` ([end-to-end tests](../tests/e2e/README.md)), in
+both roles, with client authentication, with the scheme fixed on the
+OpenSSL side, and with the `seed`, `expandedKey` and `both` private key
+forms OpenSSL writes (`both` by default). No other implementation has
+been tried: the Go peer of the end-to-end tests implements the schemes
+but its harness is limited to Encrypted Client Hello and reads only
+`seed` keys, and the GnuTLS, wolfSSL, BoringSSL and pion peers there are
+not built with ML-DSA authentication. The draft publishes no handshake
+test vectors. Not covered by any test: Encrypted Client Hello with an
+ML-DSA server, the Tokio DTLS adapter, a real kernel offload, a failing
+randomness source during a handshake, and fuzzing of handshakes with
+ML-DSA identities (the fuzz targets cover the key loaders only). The
+support stays experimental until the draft is published and these gaps
+are closed.
+
 ### Post-quantum hybrid key agreement (RFC 10024)
 
 Both the native and RustCrypto providers implement the three

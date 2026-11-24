@@ -305,7 +305,8 @@ impl core::error::Error for InvalidSignature {}
 pub trait SignatureVerificationAlgorithm: Send + Sync + fmt::Debug {
     /// Verifies `signature` over `message` with `public_key`, which is the
     /// content of the `subjectPublicKey` BIT STRING (e.g. an uncompressed EC
-    /// point or a PKCS #1 `RSAPublicKey`).
+    /// point, a PKCS #1 `RSAPublicKey` or a raw FIPS 204 ML-DSA public key;
+    /// see [`alg_id`](crate::alg_id#rfc-9881-and-ml-dsa) for ML-DSA).
     ///
     /// # Errors
     ///

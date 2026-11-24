@@ -50,8 +50,11 @@ impl<'a> EndEntityCert<'a> {
     /// `trust_anchors`, using `intermediate_certs` as candidate issuers.
     ///
     /// Checks signatures with `supported_sig_algs`, validity at `time`, basic
-    /// constraints, path length, name constraints, the required `usage`, and
-    /// revocation when `revocation` is supplied. `verify_path`, if given, is
+    /// constraints, path length, issuer key usage, the key usage RFC 9881 §5
+    /// allows for ML-DSA keys (end entity and intermediates), name
+    /// constraints, the required `usage`, and revocation when `revocation`
+    /// is supplied. Only `supported_sig_algs` decides which signature
+    /// algorithms are accepted. `verify_path`, if given, is
     /// called for each otherwise-valid path and may reject it so that path
     /// building continues with alternatives.
     ///
@@ -99,6 +102,12 @@ impl<'a> EndEntityCert<'a> {
 
     /// Verifies `signature` over `msg` with this certificate's public key
     /// (used for TLS `CertificateVerify` / `ServerKeyExchange`).
+    ///
+    /// The `KeyUsage` extension is not consulted here. Path validation
+    /// ([`Self::verify_for_usage`]) applies only the issuer rules and the
+    /// RFC 9881 §5 rule for ML-DSA keys; neither checks the end entity's
+    /// digitalSignature bit. A protocol that requires it checks
+    /// [`Self::has_digital_signature_key_usage`].
     ///
     /// # Errors
     ///

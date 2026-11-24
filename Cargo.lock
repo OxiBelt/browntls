@@ -344,6 +344,7 @@ dependencies = [
  "fluent-uri",
  "hex",
  "idna",
+ "ml-dsa",
  "p256",
  "p384",
  "rand",

@@ -49,6 +49,16 @@ pub fn zeroize_i16(buf: &mut [i16]) {
     compiler_fence(Ordering::SeqCst);
 }
 
+/// Overwrites `buf` with zeros using volatile writes.
+#[inline(never)]
+pub fn zeroize_i32(buf: &mut [i32]) {
+    for w in buf.iter_mut() {
+        // SAFETY: `w` is a valid, aligned, exclusive reference to an `i32`.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
 /// Drops the values of a boxed slice, overwrites the whole of their storage
 /// with zeros and frees it.
 ///
@@ -100,6 +110,18 @@ impl Zeroize for [i16] {
 impl<const N: usize> Zeroize for [i16; N] {
     fn zeroize(&mut self) {
         zeroize_i16(self);
+    }
+}
+
+impl Zeroize for [i32] {
+    fn zeroize(&mut self) {
+        zeroize_i32(self);
+    }
+}
+
+impl<const N: usize> Zeroize for [i32; N] {
+    fn zeroize(&mut self) {
+        zeroize_i32(self);
     }
 }
 

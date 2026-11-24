@@ -92,6 +92,9 @@ pub(super) fn zeroize_op(input: &mut Input<'_>) {
     let mut w16 = vec![-1i16; words(2)];
     zeroize::zeroize_i16(&mut w16);
     assert!(w16.iter().all(|&x| x == 0));
+    let mut i32s = vec![-1i32; words(4)];
+    zeroize::zeroize_i32(&mut i32s);
+    assert!(i32s.iter().all(|&x| x == 0));
 
     let mut a8: [u8; 7] = input.array();
     a8.zeroize();

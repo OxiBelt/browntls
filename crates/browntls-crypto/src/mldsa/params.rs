@@ -58,6 +58,9 @@ pub trait ParameterSet:
     const SIGNING_KEY_LEN: usize;
     /// Signature length.
     const SIGNATURE_LEN: usize;
+    /// DER contents of the RFC 9881 `id-ml-dsa-*` OBJECT IDENTIFIER, which
+    /// identifies this parameter set's keys and signatures alike.
+    const OID: &'static [u8];
 
     /// `[u8; VERIFYING_KEY_LEN]`.
     type VerifyingKeyBytes: ByteArray;
@@ -105,7 +108,8 @@ macro_rules! parameter_set {
     ($(#[$m:meta])* $name:ident, $label:literal, k = $k:literal, l = $l:literal,
      eta = $eta:literal, tau = $tau:literal, lambda = $lambda:literal,
      gamma1 = $g1:expr, gamma2 = $g2:expr, omega = $omega:literal,
-     pk = $pk:literal, sk = $sk:literal, sig = $sig:literal) => {
+     pk = $pk:literal, sk = $sk:literal, sig = $sig:literal,
+     oid = $oid:expr) => {
         $(#[$m])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
         pub struct $name;
@@ -143,6 +147,7 @@ macro_rules! parameter_set {
             const VERIFYING_KEY_LEN: usize = $pk;
             const SIGNING_KEY_LEN: usize = $sk;
             const SIGNATURE_LEN: usize = $sig;
+            const OID: &'static [u8] = &$oid;
             type VerifyingKeyBytes = [u8; $pk];
             type SigningKeyBytes = [u8; $sk];
             type Signature = [u8; $sig];
@@ -187,7 +192,8 @@ parameter_set!(
     omega = 80,
     pk = 1312,
     sk = 2560,
-    sig = 2420
+    sig = 2420,
+    oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11]
 );
 parameter_set!(
     /// ML-DSA-65 (security category 3).
@@ -203,7 +209,8 @@ parameter_set!(
     omega = 55,
     pk = 1952,
     sk = 4032,
-    sig = 3309
+    sig = 3309,
+    oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12]
 );
 parameter_set!(
     /// ML-DSA-87 (security category 5).
@@ -219,5 +226,6 @@ parameter_set!(
     omega = 75,
     pk = 2592,
     sk = 4896,
-    sig = 4627
+    sig = 4627,
+    oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13]
 );

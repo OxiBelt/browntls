@@ -98,26 +98,53 @@ the RustCrypto signatures repository, `Apache-2.0 OR MIT`, locked at 0.1.2)
 an optional runtime dependency. It backs the RustCrypto provider's opt-in
 ML-DSA verification of certificate, CRL and OCSP signatures (RFC 9881; see
 [Architecture](Architecture.md#ml-dsa-certificate-verification-rustcrypto-provider-opt-in))
-and nothing else: no signing, and no TLS signature scheme. The default
-`native` provider verifies ML-DSA with `browntls_crypto::mldsa` and does
-not use the crate at run time; it stays a dev-dependency there as the
-independent oracle of the native tests, with or without `rustcrypto`.
+and, with the separate opt-in `rustcrypto::KEY_PROVIDER_WITH_ML_DSA` and
+`rustcrypto::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`, the signing and
+verification of TLS 1.3 handshake signatures (`draft-ietf-tls-mldsa-06`,
+experimental), so it now handles private keys. The default `native`
+provider uses `browntls_crypto::mldsa` for both and does not use the crate
+at run time; it stays a dev-dependency there as the independent oracle of
+the native tests, with or without `rustcrypto`.
 
-It is used with default features off (no `pkcs8`, `getrandom`,
-`rand_core` or `zeroize`, since nothing secret is handled) and with
-`alloc` only, which stores the decoded key (with the expanded public
-matrix, up to 56 KiB for ML-DSA-87) and the decoded signature on the heap.
-The matrix is still built on the stack first: one ML-DSA-87 verification
-needed about 64 to 80 KiB of stack in a measurement on one x86-64 host,
-against under 32 KiB for the native verifier. The crate is pure Rust with no
-build script and contains no `unsafe` code (its manifest forbids it). Its
-dependencies (`crypto-common`, `ctutils`,
-`hybrid-array`, `module-lattice`, `shake` with `keccak`, `signature`) are
-already in the `rustcrypto` runtime tree through `ml-kem`, `sha3` and the
-other RustCrypto crates, so `ml-dsa` is the only crate the feature adds
-(`cargo tree -e normal` with `std,rustcrypto`, before and after). As the
-provider's other RustCrypto crates, it is a runtime dependency of that
-feature only (`safe-to-deploy`) and has no `cargo vet` audit yet.
+It is used with default features off and with `alloc`, `rand_core` and
+`zeroize`. `alloc` stores the decoded keys (with the expanded public
+matrix, up to 56 KiB for ML-DSA-87) and the decoded signature on the heap;
+`rand_core` enables hedged signing, which takes its 32 random bytes from
+the operating system (`getrandom`) through an adapter in the provider and
+fails without them. `pkcs8` and
+`getrandom` stay off: the crate's PKCS #8 support reads only the `seed`
+form of RFC 9881 private keys, so the provider parses the RFC 9881 encoding
+itself. It loads the `seed` and `both` forms (the `both` key only when its
+expanded key is the one its seed derives) and, unlike the native provider,
+refuses the `expandedKey` form alone: the crate offers no checked decoding
+of an expanded key (its deprecated `from_expanded` accepts any `t0` and
+`tr` and panics on out-of-range coefficients).
+
+Two properties of the crate are weaker than those of
+`browntls_crypto::mldsa` and are documented on
+`rustcrypto::sign::MlDsaSigningKey`. Zeroisation is partial: `zeroize`
+wipes the stored signing key on drop, the seed a key is derived from and
+the SHAKE states, but not the temporaries of key derivation and signing
+(`rho'`, the per-signature randomness, `rho''`, the mask `y` and others),
+and loading moves the expanded key by value on the stack; the native
+implementation wipes its signing temporaries (though not its SHAKE
+states). And the crate builds its
+values on the stack: in measurements of ML-DSA-87 on x86-64 hosts, one
+verification needed about 64 to 80 KiB of stack (the native verifier
+needs under 32 KiB), signing about 100 to 145 KiB in optimised builds and
+up to about 512 KiB in an unoptimised one, and loading a key between
+about 260 and 430 KiB optimised and up to about 1.25 MiB unoptimised.
+Targets without stack guard pages do not detect an overflow.
+The crate is pure Rust with no build script and contains no `unsafe` code
+(its manifest forbids it). Its dependencies
+(`crypto-common`, `ctutils`, `hybrid-array`, `module-lattice`, `shake` with
+`keccak`, `signature`, and with these features `rand_core` and `zeroize`)
+are already in the `rustcrypto` runtime tree through `ml-kem`, `sha3` and
+the other RustCrypto crates, so `ml-dsa` is the only crate the feature adds
+(`cargo tree -e normal` with `std,rustcrypto`, before and after; enabling
+the signing features added no crate). As the provider's other RustCrypto
+crates, it is a runtime dependency of that feature only (`safe-to-deploy`)
+and has no `cargo vet` audit yet.
 
 Owner: the project owner, who approved the addition. Track in
 [issue #236](https://github.com/OxiBelt/browntls/issues/236), which lists

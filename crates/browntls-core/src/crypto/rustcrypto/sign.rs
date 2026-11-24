@@ -2,6 +2,15 @@
 //!
 //! RSA private keys are rejected: see the module documentation of
 //! [`super`] for the advisory that motivates this.
+//!
+//! ML-DSA keys ([`MlDsaSigningKey`], loaded by [`any_ml_dsa_type`]) sign
+//! TLS 1.3 handshakes as `draft-ietf-tls-mldsa-06` specifies. That is an
+//! Internet-Draft, so they are an experimental opt-in:
+//! [`any_supported_type`] and the provider's key loader
+//! ([`RustCrypto`](super::RustCrypto)) do not load them;
+//! [`KEY_PROVIDER_WITH_ML_DSA`](super::KEY_PROVIDER_WITH_ML_DSA) does.
+
+pub use super::sign_mldsa::{MlDsaSigningKey, any_ml_dsa_type};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -15,7 +24,8 @@ use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::Error;
 use crate::sync::Arc;
 
-/// Loads any private key this provider can sign with.
+/// Loads any private key the default key loader signs with: ECDSA or
+/// Ed25519. Not ML-DSA, which is an explicit opt-in ([`any_ml_dsa_type`]).
 pub fn any_supported_type(der: &PrivateKeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
     if let Ok(key) = any_ecdsa_type(der) {
         return Ok(key);

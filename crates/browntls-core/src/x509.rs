@@ -198,7 +198,7 @@ pub(crate) fn rsa_modulus(key: &[u8]) -> Result<&[u8], Error> {
 /// Returns the contents of the `privateKeyAlgorithm` `AlgorithmIdentifier`
 /// of a DER PKCS #8 `PrivateKeyInfo` (RFC 5958 §2) without examining the
 /// rest, or `None` if the structure does not start as one.
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", feature = "rustcrypto"))]
 pub(crate) fn pkcs8_algorithm_identifier(der: &[u8]) -> Option<&[u8]> {
     let mut outer = Der { input: der };
     let (info, _) = outer.expect(TAG_SEQUENCE).ok()?;

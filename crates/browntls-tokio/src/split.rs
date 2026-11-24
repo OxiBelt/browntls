@@ -275,6 +275,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for WriteHalf<S> {
 }
 
 impl<S> ReadHalf<S> {
+    pub(crate) async fn inspect<T>(&mut self, mut f: impl FnMut(&S) -> T) -> io::Result<T> {
+        std::future::poll_fn(|cx| {
+            self.shared
+                .poll_lock(Side::Read, cx)
+                .map_ok(|turn| f(&turn.stream))
+        })
+        .await
+    }
+
     /// Whether `write` is the other half of the same stream.
     pub fn is_pair_of(&self, write: &WriteHalf<S>) -> bool {
         Arc::ptr_eq(&self.shared, &write.shared)
@@ -294,6 +303,26 @@ impl<S> ReadHalf<S> {
 }
 
 impl<S> WriteHalf<S> {
+    pub(crate) async fn inspect<T>(&mut self, mut f: impl FnMut(&mut S) -> T) -> io::Result<T> {
+        std::future::poll_fn(|cx| {
+            self.shared
+                .poll_lock(Side::Write, cx)
+                .map_ok(|mut turn| f(&mut turn.stream))
+        })
+        .await
+    }
+
+    pub(crate) async fn drive<T>(
+        &mut self,
+        mut f: impl FnMut(&mut S, &mut Context<'_>) -> Poll<io::Result<T>>,
+    ) -> io::Result<T> {
+        std::future::poll_fn(|cx| {
+            let mut turn = ready!(self.shared.poll_lock(Side::Write, cx))?;
+            f(&mut turn.stream, cx)
+        })
+        .await
+    }
+
     /// Whether `read` is the other half of the same stream.
     pub fn is_pair_of(&self, read: &ReadHalf<S>) -> bool {
         read.is_pair_of(self)

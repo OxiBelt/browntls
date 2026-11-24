@@ -3,7 +3,9 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use browntls_pki::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
+use browntls_pki::{
+    CertificateDer, ServerName, ServiceIdentity, SubjectPublicKeyInfoDer, UnixTime,
+};
 
 use crate::enums::SignatureScheme;
 use crate::error::{Error, InvalidMessage};
@@ -56,6 +58,68 @@ impl ClientCertVerified {
     }
 }
 
+/// The reference identities a server certificate must authenticate.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug)]
+pub enum CertificateIdentity<'a> {
+    /// The implicit DNS-ID or IP-ID of a legacy connection.
+    Name(&'a ServerName<'a>),
+    /// An explicit RFC 9525 reference set independent of the routing name.
+    Service(&'a ServiceIdentity),
+}
+
+/// Where certificate verification is taking place.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerCertVerificationContext {
+    /// Certificate authentication during a TLS, DTLS, or QUIC handshake.
+    TlsHandshake {
+        /// The effective ClientHello included `transparency_info`.
+        offered_transparency_info: bool,
+        /// The effective ClientHello included `status_request`.
+        offered_status_request: bool,
+    },
+    /// Explicit evidence evaluation outside handshake authentication.
+    LocalEvidence {
+        /// Permit a live revocation query if local evidence is insufficient.
+        allow_live: bool,
+    },
+    /// Certificate authentication of an RFC 9261 exported authenticator.
+    ExportedAuthenticator,
+}
+
+impl ServerCertVerificationContext {
+    pub(crate) fn offered_transparency_info(self) -> bool {
+        matches!(
+            self,
+            Self::TlsHandshake {
+                offered_transparency_info: true,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn allow_live(self) -> bool {
+        match self {
+            Self::TlsHandshake { .. } => true,
+            Self::LocalEvidence { allow_live } => allow_live,
+            Self::ExportedAuthenticator => false,
+        }
+    }
+}
+
+/// Evidence and identity reported by a server certificate verifier.
+#[derive(Debug)]
+pub struct ServerCertificateVerification {
+    /// The completed or pending revocation decision.
+    pub revocation: RevocationCheck,
+    /// The verified Certificate Transparency result, when available.
+    pub transparency: Option<TransparencyStatus>,
+    /// The matched reference index, or zero for an implicit DNS-ID or IP-ID.
+    /// A verifier may omit the index only for implicit identities.
+    pub matched_reference: Option<usize>,
+}
+
 /// Decides whether a server's certificate and handshake signatures are
 /// acceptable.
 pub trait ServerCertVerifier: Debug + Send + Sync {
@@ -96,14 +160,9 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// Transparency 2.0 evidence (RFC 9162), which the connection reports
     /// ([`UnbufferedClientConnection::peer_transparency_status`]).
     ///
-    /// A client calls this method for the server certificate of a full
-    /// TLS 1.2 or TLS 1.3 handshake, on buffered, unbuffered and QUIC
-    /// connections. A resumed handshake authenticates no certificate, and
-    /// an RFC 9261 exported authenticator is verified with
-    /// [`Self::verify_server_cert`] instead. The default calls
-    /// [`Self::verify_server_cert_with_evidence`] and reports nothing, so a
-    /// verifier that enforces Certificate Transparency there still does;
-    /// it overrides this method only to report a status.
+    /// The default calls [`Self::verify_server_cert_with_evidence`] and
+    /// reports no transparency status. A WebPKI verifier configured with
+    /// CT policy requires [`Self::verify_server_cert_with_context`].
     ///
     /// [`UnbufferedClientConnection::peer_transparency_status`]: crate::client::UnbufferedClientConnection::peer_transparency_status
     fn verify_server_cert_with_transparency(
@@ -124,6 +183,98 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
         Ok((check, None))
     }
 
+    /// Verifies the chain, evidence and certificate identity together.
+    ///
+    /// An explicit reference set requires an override. An override must
+    /// verify the path and identify the reference it matched. When
+    /// `allow_live` is false, only local revocation evidence may be used.
+    fn verify_server_cert_with_identity(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<ServerCertificateVerification, Error> {
+        let CertificateIdentity::Name(name) = identity else {
+            return Err(Error::General(
+                "verifier does not support explicit service identities".into(),
+            ));
+        };
+        let (revocation, transparency) = if allow_live {
+            self.verify_server_cert_with_transparency(
+                end_entity,
+                intermediates,
+                name,
+                evidence,
+                now,
+            )?
+        } else {
+            self.verify_server_cert(
+                end_entity,
+                intermediates,
+                name,
+                leaf_evidence(evidence).ocsp.unwrap_or_default(),
+                now,
+            )?;
+            (RevocationCheck::Complete(None), None)
+        };
+        Ok(ServerCertificateVerification {
+            revocation,
+            transparency,
+            matched_reference: None,
+        })
+    }
+
+    /// Verifies a certificate with its identity, evidence, and offer context.
+    ///
+    /// For handshake authentication the connection supplies the offer from
+    /// the effective ClientHello. A wrapper around a verifier with CT policy
+    /// must forward the context it received. Use
+    /// [`ServerCertVerificationContext::LocalEvidence`] for standalone
+    /// evaluation outside a handshake.
+    ///
+    /// The default delegates to [`Self::verify_server_cert_with_identity`].
+    /// An exported authenticator with an implicit name uses
+    /// [`Self::verify_server_cert`].
+    fn verify_server_cert_with_context(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        context: ServerCertVerificationContext,
+    ) -> Result<ServerCertificateVerification, Error> {
+        if let (
+            CertificateIdentity::Name(name),
+            ServerCertVerificationContext::ExportedAuthenticator,
+        ) = (identity, context)
+        {
+            self.verify_server_cert(
+                end_entity,
+                intermediates,
+                name,
+                leaf_evidence(evidence).ocsp.unwrap_or_default(),
+                now,
+            )?;
+            return Ok(ServerCertificateVerification {
+                revocation: RevocationCheck::Complete(None),
+                transparency: None,
+                matched_reference: None,
+            });
+        }
+        self.verify_server_cert_with_identity(
+            end_entity,
+            intermediates,
+            identity,
+            evidence,
+            now,
+            context.allow_live(),
+        )
+    }
+
     /// Whether the client should offer the `transparency_info` extension
     /// (RFC 9162 §6.5), so that the server delivers Certificate
     /// Transparency 2.0 items in the handshake, passed to this verifier as
@@ -132,12 +283,8 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// was not offered. Ignored by a client whose verifier
     /// [requires raw public keys](Self::requires_raw_public_keys).
     ///
-    /// A verifier that wraps another must forward this method, and
-    /// [`Self::verify_server_cert_with_transparency`] to report a status.
-    /// Without it the extension is not offered while the wrapped verifier
-    /// still applies its policy, to the certificate and the stapled OCSP
-    /// response alone: contrary to §8.1.6, but failing closed rather than
-    /// open.
+    /// A wrapper around a verifier with CT policy must forward this method
+    /// and [`Self::verify_server_cert_with_context`].
     fn requests_transparency_info(&self) -> bool {
         false
     }

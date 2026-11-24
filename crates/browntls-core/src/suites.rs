@@ -85,6 +85,18 @@ impl SupportedCipherSuite {
         self.tls13().is_some_and(|suite| suite.quic.is_some())
     }
 
+    /// DTLS 1.3 needs record number protection (and excludes CCM_8).
+    /// DTLS 1.2 accepts the existing ECDHE AEAD suites only.
+    pub(crate) fn usable_for_dtls(&self) -> bool {
+        match self {
+            Self::Tls13(_) => self.usable_for_quic(),
+            #[cfg(feature = "tls12")]
+            Self::Tls12(suite) => {
+                suite.kx == KeyExchangeAlgorithm::ECDHE && !suite.record.is_block_cipher()
+            }
+        }
+    }
+
     /// The protocol version this suite belongs to.
     pub fn version(&self) -> &'static SupportedProtocolVersion {
         match self {

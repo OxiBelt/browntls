@@ -139,7 +139,7 @@ fn server_with(certified_key: CertifiedKey) -> ServerConfig {
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
-        .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
+        .with_single_certified_key(certified_key)
 }
 
 fn dc_client(chain: &Chain) -> ClientConfig {
@@ -167,3 +167,6 @@ include!("delegated_credentials/client_auth.rs");
 include!("delegated_credentials/client_auth_selection.rs");
 include!("delegated_credentials/client_auth_post_handshake.rs");
 include!("delegated_credentials/client_auth_resumption.rs");
+
+#[path = "delegated_credentials/transports.rs"]
+mod transports;

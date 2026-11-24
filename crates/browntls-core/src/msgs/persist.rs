@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{DnsName, UnixTime};
+use browntls_pki::{DnsName, ReferenceIdentifier, ServerName, ServiceIdentity, UnixTime};
 
 use super::base::{PayloadU8, PayloadU16};
 use super::codec::{Codec, Reader};
@@ -18,6 +18,7 @@ use crate::sync::{Arc, Weak};
 #[cfg(feature = "tls12")]
 use crate::tls12::Tls12CipherSuite;
 use crate::tls13::Tls13CipherSuite;
+use crate::tls13::key_schedule::Protocol;
 use crate::verify::ServerCertVerifier;
 
 /// A value with the time it was retrieved from storage, for age computations.
@@ -76,6 +77,8 @@ pub struct Tls13ClientSessionValue {
     suite: &'static Tls13CipherSuite,
     age_add: u32,
     max_early_data_size: u32,
+    early_data_alpn: Option<Vec<u8>>,
+    early_data_record_size_limit: u16,
     /// QUIC: the server's transport parameters, remembered for 0-RTT
     /// (RFC 9000 §7.4.1); empty otherwise.
     quic_params: PayloadU16,
@@ -85,6 +88,10 @@ pub struct Tls13ClientSessionValue {
     /// The absolute expiry of the delegated credential that authenticated the
     /// original full handshake. Descendant tickets preserve it unchanged.
     delegated_credential_expiry: Option<UnixTime>,
+    /// The protocol the ticket was issued over, the only one it resumes:
+    /// the binder's label prefix differs between TLS and DTLS (RFC 9147
+    /// §5.9).
+    protocol: Protocol,
 }
 
 impl Tls13ClientSessionValue {
@@ -104,6 +111,8 @@ impl Tls13ClientSessionValue {
             suite,
             age_add,
             max_early_data_size,
+            early_data_alpn: None,
+            early_data_record_size_limit: crate::common_state::max_record_size_limit(true),
             quic_params: PayloadU16::empty(),
             common: ClientSessionCommon::new(
                 ticket,
@@ -115,7 +124,20 @@ impl Tls13ClientSessionValue {
             ),
             external_psk: None,
             delegated_credential_expiry: None,
+            protocol: Protocol::Tls13,
         }
+    }
+
+    /// Records the protocol the ticket was issued over (TLS 1.3 unless
+    /// set).
+    pub(crate) fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// The protocol the ticket was issued over.
+    pub(crate) fn protocol(&self) -> Protocol {
+        self.protocol
     }
 
     /// Records the external PSK the session was established with.
@@ -152,6 +174,26 @@ impl Tls13ClientSessionValue {
     /// How much early data the server will accept with this ticket.
     pub fn max_early_data_size(&self) -> u32 {
         self.max_early_data_size
+    }
+
+    pub(crate) fn with_early_data_alpn(mut self, alpn: Option<&[u8]>) -> Self {
+        if self.max_early_data_size != 0 {
+            self.early_data_alpn = alpn.map(<[u8]>::to_vec);
+        }
+        self
+    }
+
+    pub(crate) fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.early_data_alpn.as_deref()
+    }
+
+    pub(crate) fn with_early_data_record_size_limit(mut self, limit: u16) -> Self {
+        self.early_data_record_size_limit = limit;
+        self
+    }
+
+    pub(crate) fn early_data_record_size_limit(&self) -> u16 {
+        self.early_data_record_size_limit
     }
 
     /// QUIC: the server's transport parameters when the ticket was issued.
@@ -194,14 +236,16 @@ impl fmt::Debug for Tls13ClientSessionValue {
                 "delegated_credential_expiry",
                 &self.delegated_credential_expiry,
             )
+            .field("protocol", &self.protocol)
             .finish_non_exhaustive()
     }
 }
 
-/// A TLS 1.2 session (ID and/or ticket) and its master secret.
+/// A stream TLS 1.2 or DTLS 1.2 session and its master secret.
 #[cfg(feature = "tls12")]
 #[derive(Clone)]
 pub struct Tls12ClientSessionValue {
+    version: ProtocolVersion,
     suite: &'static Tls12CipherSuite,
     pub(crate) session_id: SessionId,
     extended_ms: bool,
@@ -226,6 +270,7 @@ impl Tls12ClientSessionValue {
             suite,
             session_id,
             extended_ms,
+            version: ProtocolVersion::TLSv1_2,
             common: ClientSessionCommon::new(
                 ticket,
                 master_secret,
@@ -235,6 +280,15 @@ impl Tls12ClientSessionValue {
                 binding,
             ),
         }
+    }
+
+    /// The transport and version that established this session.
+    pub fn protocol_version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    pub(crate) fn set_dtls12(&mut self) {
+        self.version = ProtocolVersion::DTLSv1_2;
     }
 
     pub(crate) fn extended_ms(&self) -> bool {
@@ -265,6 +319,7 @@ impl core::ops::Deref for Tls12ClientSessionValue {
 impl fmt::Debug for Tls12ClientSessionValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tls12ClientSessionValue")
+            .field("version", &self.version)
             .field("suite", &self.suite.common.suite)
             .field("extended_ms", &self.extended_ms)
             .field("common", &self.common)
@@ -294,6 +349,9 @@ pub struct ClientSessionCommon {
     epoch: u64,
     lifetime_secs: u32,
     server_cert_chain: Arc<CertificateChain<'static>>,
+    routing_name: Option<ServerName<'static>>,
+    service_identity: Option<Arc<ServiceIdentity>>,
+    pub(crate) matched_service_identity: Option<ReferenceIdentifier>,
     /// Identity of the verifier that authenticated the server. A `Weak`
     /// keeps the allocation (so its address cannot be reused by another
     /// verifier while the session lives) without keeping the verifier
@@ -318,6 +376,9 @@ impl ClientSessionCommon {
             epoch: time_now.as_secs(),
             lifetime_secs: lifetime_secs.min(MAX_TICKET_LIFETIME),
             server_cert_chain,
+            routing_name: None,
+            service_identity: None,
+            matched_service_identity: None,
             server_cert_verifier: Arc::downgrade(binding.server_cert_verifier),
             client_creds: Arc::downgrade(binding.client_creds),
         }
@@ -337,6 +398,31 @@ impl ClientSessionCommon {
             self.client_creds.as_ptr(),
             Arc::as_ptr(binding.client_creds),
         )
+    }
+
+    pub(crate) fn bind_server_identity(
+        &mut self,
+        routing_name: &ServerName<'static>,
+        service_identity: Option<&Arc<ServiceIdentity>>,
+        matched: Option<&ReferenceIdentifier>,
+    ) {
+        self.routing_name = Some(routing_name.clone());
+        self.service_identity = service_identity.cloned();
+        self.matched_service_identity = matched.cloned();
+    }
+
+    pub(crate) fn compatible_server_identity(
+        &self,
+        routing_name: &ServerName<'_>,
+        service_identity: Option<&ServiceIdentity>,
+    ) -> bool {
+        self.routing_name
+            .as_ref()
+            .is_none_or(|saved| saved == routing_name)
+            && self.service_identity.as_deref() == service_identity
+            && (service_identity.is_none()
+                || (self.matched_service_identity.is_some()
+                    && !self.server_cert_chain.0.is_empty()))
     }
 
     pub(crate) fn server_cert_chain(&self) -> &CertificateChain<'static> {
@@ -398,9 +484,27 @@ pub(crate) struct ServerSessionValue {
     pub(crate) client_delegated_credential_expiry: Option<UnixTime>,
     /// The original handshake authenticated with only an external PSK.
     pub(crate) certificate_free: bool,
+    /// The effective server receive limit under stream TLS 1.3 0-RTT
+    /// keys. Absent for older sessions and tickets without stream 0-RTT.
+    pub(crate) early_data_record_size_limit: Option<u16>,
 }
 
 impl ServerSessionValue {
+    /// Classifies a stored or authenticated session without copying its
+    /// certificate chain, key material or application data.
+    pub(crate) fn encoded_version(plaintext: &[u8]) -> Option<ProtocolVersion> {
+        let mut reader = Reader::init(plaintext);
+        match u8::read(&mut reader).ok()? {
+            0 => {}
+            1 => {
+                let name_len = u8::read(&mut reader).ok()?;
+                reader.take(usize::from(name_len))?;
+            }
+            _ => return None,
+        }
+        ProtocolVersion::read(&mut reader).ok()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sni: Option<&DnsName<'_>>,
@@ -429,6 +533,7 @@ impl ServerSessionValue {
             delegated_credential_expiry: None,
             client_delegated_credential_expiry: None,
             certificate_free: false,
+            early_data_record_size_limit: None,
         }
     }
 
@@ -555,7 +660,10 @@ impl Codec<'_> for ServerSessionValue {
         for expiry in deadlines.into_iter().flatten() {
             expiry.as_secs().encode(bytes);
         }
-        if self.certificate_free {
+        if let Some(limit) = self.early_data_record_size_limit {
+            (2 | u8::from(self.certificate_free)).encode(bytes);
+            limit.encode(bytes);
+        } else if self.certificate_free {
             1u8.encode(bytes);
         }
     }
@@ -567,7 +675,7 @@ impl Codec<'_> for ServerSessionValue {
                 let s =
                     core::str::from_utf8(&raw.0).map_err(|_| InvalidMessage::InvalidServerName)?;
                 Some(
-                    DnsName::try_from(s)
+                    DnsName::try_from_ascii(s)
                         .map_err(|_| InvalidMessage::InvalidServerName)?
                         .to_owned(),
                 )
@@ -630,27 +738,50 @@ impl Codec<'_> for ServerSessionValue {
         };
         let delegated_credential_expiry = deadline(1)?;
         let client_delegated_credential_expiry = deadline(2)?;
+        // A DTLS 1.3 session is a TLS 1.3 one issued over DTLS.
+        let tls13 = matches!(
+            version,
+            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
+        );
         // Delegated credentials are TLS 1.3 only, and a client's
         // authenticates a certificate chain.
-        if (deadlines != 0 && version != ProtocolVersion::TLSv1_3)
+        if (deadlines != 0 && !tls13)
             || (client_delegated_credential_expiry.is_some() && client_cert_chain.is_none())
         {
             return Err(InvalidMessage::IllegalEmptyValue);
         }
-        let certificate_free = if r.any_left() {
-            if u8::read(r)? != 1
-                || version != ProtocolVersion::TLSv1_3
+        // The optional tail used to encode only the certificate-free
+        // marker (1). Bit 1 introduces the stream 0-RTT cap.
+        let flags = if r.any_left() {
+            let flags = u8::read(r)?;
+            if !(1..=3).contains(&flags) {
+                return Err(InvalidMessage::IllegalEmptyValue);
+            }
+            flags
+        } else {
+            0
+        };
+        let certificate_free = flags & 1 != 0;
+        if certificate_free
+            && (!tls13
                 || external_psk.is_none()
                 || client_cert_chain.is_some()
-                || delegated_credential_expiry.is_some()
+                || delegated_credential_expiry.is_some())
+        {
+            return Err(InvalidMessage::IllegalEmptyValue);
+        }
+        let early_data_record_size_limit = if flags & 2 != 0 {
+            let limit = u16::read(r)?;
+            if version != ProtocolVersion::TLSv1_3
+                || !(crate::common_state::MIN_RECORD_SIZE_LIMIT
+                    ..=crate::common_state::max_record_size_limit(true))
+                    .contains(&limit)
             {
                 return Err(InvalidMessage::IllegalEmptyValue);
             }
-            true
+            Some(limit)
         } else {
-            // Tickets issued before the marker existed cannot establish
-            // that the original handshake was certificate-free.
-            false
+            None
         };
         Ok(Self {
             sni,
@@ -668,9 +799,10 @@ impl Codec<'_> for ServerSessionValue {
             delegated_credential_expiry,
             client_delegated_credential_expiry,
             certificate_free,
+            early_data_record_size_limit,
         })
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

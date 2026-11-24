@@ -61,17 +61,91 @@ fn early_psk() -> ExternalPsk {
         .with_early_data(1024)
 }
 
+type ReplayDecision = browntls_core::psk::ExternalPskReplayDecision;
+type ReplayKey = browntls_core::psk::ExternalPskReplayKey;
+
+#[derive(Debug, Default)]
+struct ReplayFixture {
+    seen: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl browntls_core::psk::ExternalPskReplayPolicy for ReplayFixture {
+    fn check_and_mark(
+        &self,
+        key: &ReplayKey,
+        _expiry: browntls_core::pki_types::UnixTime,
+    ) -> ReplayDecision {
+        self.mark(key.as_ref())
+    }
+}
+
+impl ReplayFixture {
+    fn mark(&self, key: &[u8]) -> ReplayDecision {
+        use browntls_core::psk::ExternalPskReplayDecision::*;
+        let mut seen = self.seen.lock().unwrap();
+        if seen.iter().any(|entry| entry == key) {
+            return Duplicate;
+        }
+        if seen.len() == 8 {
+            return Unavailable;
+        }
+        seen.push(key.to_vec());
+        FirstUse
+    }
+}
+
+#[test]
+fn shared_replay_fixture_commits_only_one_concurrent_first_use() {
+    let store = ReplayFixture::default();
+    let gate = std::sync::Barrier::new(2);
+    let decisions = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            gate.wait();
+            store.mark(&[42; 32])
+        });
+        gate.wait();
+        [store.mark(&[42; 32]), first.join().unwrap()]
+    });
+    assert!(decisions.contains(&ReplayDecision::FirstUse));
+    assert!(decisions.contains(&ReplayDecision::Duplicate));
+}
+
+#[derive(Debug)]
+struct DeclineReplay(ReplayDecision);
+
+impl browntls_core::psk::ExternalPskReplayPolicy for DeclineReplay {
+    fn check_and_mark(
+        &self,
+        _key: &ReplayKey,
+        _expiry: browntls_core::pki_types::UnixTime,
+    ) -> ReplayDecision {
+        self.0
+    }
+}
+
+fn replay_expiry() -> browntls_core::pki_types::UnixTime {
+    browntls_core::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(u64::MAX))
+}
+
 #[test]
 fn early_data_with_an_external_psk_when_allowed() {
     init_logging();
     let chain = server_chain(KeyType::EcdsaP256);
-    let mut client_config = client_with(&chain, vec![early_psk()]);
+    let configured_psk = || early_psk().with_early_data_record_size_limit(64).unwrap();
+    let mut client_config = client_with(&chain, vec![configured_psk()]);
     client_config.enable_early_data = true;
-    let (mut client, mut server) = connect(client_config, psk_only_server(vec![early_psk()]));
+    let replay = Arc::new(ReplayFixture::default());
+    let mut server_config = psk_only_server(vec![
+        configured_psk().with_early_data_expiry(replay_expiry()),
+    ]);
+    server_config.record_size_limit = Some(256);
+    server_config.external_psk_replay_policy = Some(replay.clone());
+    let (mut client, mut server) = connect(client_config, server_config);
+    let request = [b'a'; 512];
     {
         let mut early = client.early_data().expect("PSK allows early data");
         assert_eq!(early.bytes_left(), 1024);
-        early.write_all(b"GET /idempotent").unwrap();
+        early.write_all(&request).unwrap();
     }
     do_handshake(&mut client, &mut server).unwrap();
     assert!(client.is_early_data_accepted());
@@ -81,7 +155,8 @@ fn early_data_with_an_external_psk_when_allowed() {
         .expect("server accepted early data")
         .read_to_end(&mut got)
         .unwrap();
-    assert_eq!(got, b"GET /idempotent");
+    assert_eq!(got, request);
+    assert_eq!(replay.seen.lock().unwrap().len(), 1);
     exchange_data(&mut client, &mut server);
 }
 
@@ -132,6 +207,52 @@ fn early_data_with_an_external_psk_is_off_by_default() {
     assert!(server.early_data().is_none());
     assert_eq!(server.external_psk_identity(), Some(&b"early"[..]));
     exchange_data(&mut client, &mut server);
+}
+
+#[test]
+fn external_psk_early_data_requires_a_live_cutoff_and_committed_mark() {
+    use browntls_core::pki_types::UnixTime;
+    use browntls_core::psk::ExternalPskReplayPolicy;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let past = UnixTime::since_unix_epoch(std::time::Duration::ZERO);
+    type PolicyCase = (Option<UnixTime>, Option<Arc<dyn ExternalPskReplayPolicy>>);
+    let cases: [PolicyCase; 5] = [
+        (Some(replay_expiry()), None),
+        (
+            None,
+            Some(Arc::new(DeclineReplay(ReplayDecision::FirstUse))),
+        ),
+        (
+            Some(past),
+            Some(Arc::new(DeclineReplay(ReplayDecision::FirstUse))),
+        ),
+        (
+            Some(replay_expiry()),
+            Some(Arc::new(DeclineReplay(ReplayDecision::Duplicate))),
+        ),
+        (
+            Some(replay_expiry()),
+            Some(Arc::new(DeclineReplay(ReplayDecision::Unavailable))),
+        ),
+    ];
+    for (expiry, policy) in cases {
+        let mut client_config = client_with(&chain, vec![early_psk()]);
+        client_config.enable_early_data = true;
+        let psk = match expiry {
+            Some(expiry) => early_psk().with_early_data_expiry(expiry),
+            None => early_psk(),
+        };
+        let mut server_config = psk_only_server(vec![psk]);
+        server_config.external_psk_replay_policy = policy;
+        let (mut client, mut server) = connect(client_config, server_config);
+        client.early_data().unwrap().write_all(b"early").unwrap();
+        do_handshake(&mut client, &mut server).unwrap();
+        assert!(!client.is_early_data_accepted());
+        assert!(server.early_data().is_none());
+        assert_eq!(server.external_psk_identity(), Some(&b"early"[..]));
+        exchange_data(&mut client, &mut server);
+    }
 }
 
 // ------------------------------------------------------------- resumption

@@ -19,9 +19,13 @@
 
 mod codec;
 mod connection;
+#[cfg(test)]
+mod early_data_adapters;
 pub mod input;
 mod pki;
 pub mod seeds;
+#[cfg(test)]
+mod service_identity_adapters;
 
 pub mod crypto_cipher;
 pub mod crypto_ecc;
@@ -37,6 +41,9 @@ pub mod tls_binding;
 pub mod tls_codec;
 pub mod tls_config;
 pub mod tls_conn;
+pub mod tls_dtls;
+pub mod tls_dtls_tokio;
+pub mod tls_dtls_udp;
 pub mod tls_ech;
 pub mod tls_kernel;
 pub mod tls_psk;

@@ -6,7 +6,7 @@ use browntls_pki::CertificateDer;
 
 use super::extensions::{encode_extension, read_extensions};
 use super::{DistinguishedName, MAX_CERTIFICATE_SIZE_LIMIT};
-use crate::delegated_credential::DelegatedCredential;
+use crate::delegated_credential::{AttachmentError, DelegatedCredential, EXTENSION_HEADER_LEN};
 use crate::enums::{CertificateCompressionAlgorithm, SignatureScheme};
 use crate::error::InvalidMessage;
 use crate::msgs::base::{Payload, PayloadU8, PayloadU16, PayloadU24};
@@ -154,6 +154,26 @@ impl<'a> CertificateEntry<'a> {
             transparency_info: None,
             delegated_credential: None,
         }
+    }
+
+    pub(crate) fn set_delegated_credential(
+        &mut self,
+        credential: &DelegatedCredential,
+    ) -> Result<(), crate::Error> {
+        let status = self.status.as_ref().map_or(0, |status| {
+            // Extension header, status type, and three-byte response length.
+            EXTENSION_HEADER_LEN + 4 + status.ocsp_response.0.bytes().len()
+        });
+        let opaque_extension = |payload: &Payload<'_>| EXTENSION_HEADER_LEN + payload.bytes().len();
+        let total = credential.encoded_extension_len()?
+            + status
+            + self.sct_list.as_ref().map_or(0, opaque_extension)
+            + self.transparency_info.as_ref().map_or(0, opaque_extension);
+        if total > usize::from(u16::MAX) {
+            return Err(AttachmentError::InvalidEncoding.into());
+        }
+        self.delegated_credential = Some(credential.clone());
+        Ok(())
     }
 
     pub(crate) fn into_owned(self) -> CertificateEntry<'static> {
@@ -355,7 +375,7 @@ impl<'a> Codec<'a> for CompressedCertificatePayload<'a> {
     fn read(r: &mut Reader<'a>) -> Result<Self, InvalidMessage> {
         let alg = CertificateCompressionAlgorithm::read(r)?;
         let uncompressed_len = u24::read(r)?.0;
-        if uncompressed_len as usize > MAX_CERTIFICATE_SIZE_LIMIT {
+        if uncompressed_len > super::MAX_HANDSHAKE_SIZE {
             return Err(InvalidMessage::CertificatePayloadTooLarge);
         }
         let compressed = PayloadU24::read(r)?;
@@ -563,6 +583,11 @@ mod tests {
             CertificateEntry::read_bytes(&bytes),
             Err(InvalidMessage::DisallowedCertificateExtension)
         );
+        let bytes = [0, 0, 1, 1, 0, 4, 0, 33, 0, 0];
+        assert_eq!(
+            CertificateEntry::read_bytes(&bytes),
+            Err(InvalidMessage::DisallowedCertificateExtension)
+        );
         // An extension type this crate does not know.
         let bytes = [0, 0, 1, 1, 0, 4, 0x12, 0x34, 0, 0];
         assert_eq!(
@@ -672,7 +697,14 @@ mod tests {
             CompressedCertificatePayload::read_bytes(&cc.get_encoding()).unwrap(),
             cc
         );
-        let too_big = [0, 1, 0x01, 0, 1, 0, 0, 1, 0];
+        let at_limit = [0, 1, 0, 0xff, 0xff, 0, 0, 1, 0];
+        assert_eq!(
+            CompressedCertificatePayload::read_bytes(&at_limit)
+                .unwrap()
+                .uncompressed_len,
+            super::super::MAX_HANDSHAKE_SIZE
+        );
+        let too_big = [0, 1, 1, 0, 0, 0, 0, 1, 0];
         assert_eq!(
             CompressedCertificatePayload::read_bytes(&too_big),
             Err(InvalidMessage::CertificatePayloadTooLarge)

@@ -61,7 +61,12 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
         key_der: PrivateKeyDer<'static>,
     ) -> Result<ServerConfig, Error> {
         let certified_key = CertifiedKey::from_der(cert_chain, key_der, self.crypto_provider())?;
-        Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+        Ok(self.with_single_certified_key(certified_key))
+    }
+
+    /// Uses a fixed certified key, including any attached credentials.
+    pub fn with_single_certified_key(self, certified_key: CertifiedKey) -> ServerConfig {
+        self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
     }
 
     /// Like [`Self::with_single_cert`], stapling `ocsp` when clients ask.
@@ -76,7 +81,7 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
         if !ocsp.is_empty() {
             certified_key.ocsp = Some(ocsp);
         }
-        Ok(self.with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key))))
+        Ok(self.with_single_certified_key(certified_key))
     }
 
     /// Picks the certificate per connection with `cert_resolver`.
@@ -93,6 +98,10 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             #[cfg(not(feature = "std"))]
             session_storage: Arc::new(handy::NoServerSessionStorage {}),
             ticketer: Arc::new(handy::NeverProducesTickets {}),
+            #[cfg(feature = "tls12")]
+            dtls12_ticketer: Arc::new(handy::NeverProducesTickets {}),
+            #[cfg(feature = "tls12")]
+            dtls12_resumption_context: None,
             alpn_protocols: Vec::new(),
             versions: self.state.versions,
             key_log: Arc::new(NoKeyLog {}),
@@ -109,8 +118,12 @@ impl ConfigBuilder<ServerConfig, WantsServerCert> {
             cert_compression_cache: Arc::new(compress::CompressionCache::default()),
             cert_decompressors: compress::default_cert_decompressors().to_vec(),
             cert_decompression_limit: compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE,
+            #[cfg(feature = "zstd")]
+            cert_zstd_decompression_limits: compress::ZstdDecompressionLimits::default(),
             external_psks: None,
+            external_psk_replay_policy: None,
             cert_with_extern_psk: false,
+            require_cert_with_extern_psk: false,
             require_external_psk: false,
             client_certificate_url: None,
             enable_delegated_credentials: false,

@@ -13,9 +13,11 @@
 //!
 //! Supported: TLS 1.2 and TLS 1.3 with AES-128-GCM, AES-256-GCM and
 //! ChaCha20-Poly1305, TLS 1.3 AES-128-CCM. TLS 1.3 key updates need Linux
-//! 6.14; records smaller than the protocol maximum (a peer's
-//! `record_size_limit`, or the configured `max_fragment_size`) need
-//! Linux 6.19 (`TLS_TX_MAX_PAYLOAD_LEN`). The `tls` kernel module must be
+//! 6.14; transmitting records smaller than the protocol maximum (a peer's
+//! `record_size_limit`, or the configured `max_fragment_size`) needs Linux
+//! 6.19 (`TLS_TX_MAX_PAYLOAD_LEN`). Linux kernel TLS cannot enforce a
+//! negotiated receive `record_size_limit` below the protocol maximum, so
+//! those connections remain in userspace. The `tls` kernel module must be
 //! available (`modprobe tls`).
 //!
 //! Applications normally reach this crate through the `browntls` crate,
@@ -77,6 +79,8 @@
 
 mod crypto_info;
 pub use crypto_info::{CryptoInfo, UnsupportedCipher};
+
+pub mod ech;
 
 #[cfg(target_os = "linux")]
 mod engine;

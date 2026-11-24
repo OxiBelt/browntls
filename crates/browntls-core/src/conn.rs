@@ -30,6 +30,11 @@ use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 
 /// One position in the handshake state machine.
 pub(crate) trait State<Data>: Send + Sync {
+    #[cfg(feature = "tls12")]
+    fn expects_dtls12_ccs(&self) -> bool {
+        false
+    }
+
     /// Handles `message`, returning the next state.
     fn handle(
         self: Box<Self>,
@@ -431,18 +436,15 @@ impl<Data: SideData> ConnectionCore<Data> {
                 let position = buffer.position();
                 let in_storage = position + plaintext.start..position + plaintext.end;
                 let payload = &buffer.filled()[plaintext];
-                let result = match Message::try_from(InboundPlainMessage {
-                    typ,
-                    version,
-                    payload,
-                }) {
-                    Ok(msg) => {
-                        Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
-                    }
-                    Err(err) => Err(self
-                        .common_state
-                        .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
-                };
+                let result =
+                    match Message::try_from(InboundPlainMessage::new(typ, version, payload)) {
+                        Ok(msg) => {
+                            Self::process_msg(&mut self.common_state, &mut self.data, state, msg)
+                        }
+                        Err(err) => Err(self
+                            .common_state
+                            .send_fatal_alert(AlertDescription::from(err), Error::from(err))),
+                    };
                 // Unbuffered connections leave application data where it was
                 // decrypted; the state machine only flagged that it took it.
                 let app_data = mem::take(&mut self.common_state.app_data_in_place);
@@ -502,7 +504,7 @@ impl<Data: SideData> ConnectionCore<Data> {
         self.common_state.pending_revocation = None;
         self.common_state.pending_certificate_url = None;
         self.data
-            .on_fatal_error(self.common_state.negotiated_version);
+            .on_fatal_error(self.common_state.protocol_version());
         self.state = Err(err.clone());
         err
     }
@@ -813,11 +815,11 @@ impl<Data: SideData> ConnectionCore<Data> {
                     ..
                 })) => {
                     let payload = &buffer.filled()[plaintext];
-                    let result = match Message::try_from(InboundPlainMessage {
-                        typ: ContentType::ChangeCipherSpec,
+                    let result = match Message::try_from(InboundPlainMessage::new(
+                        ContentType::ChangeCipherSpec,
                         version,
                         payload,
-                    }) {
+                    )) {
                         Ok(_) => self.common_state.process_middlebox_ccs(),
                         Err(err) => Err(self
                             .common_state

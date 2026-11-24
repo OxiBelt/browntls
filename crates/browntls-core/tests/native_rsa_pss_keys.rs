@@ -438,16 +438,33 @@ fn issue_with(
     issuer: &TestKey,
     sig_alg: PssParams,
 ) -> CertificateDer<'static> {
+    issue_with_identifiers(
+        subject_cn,
+        subject,
+        role,
+        issuer_cn,
+        issuer,
+        (sig_alg, sig_alg),
+    )
+}
+
+fn issue_with_identifiers(
+    subject_cn: &str,
+    subject: &TestKey,
+    role: Role,
+    issuer_cn: &str,
+    issuer: &TestKey,
+    (inner, outer): (PssParams, PssParams),
+) -> CertificateDer<'static> {
     let mut serial = [0u8; 8];
     OsRng.fill(&mut serial).unwrap();
     serial[0] = (serial[0] & 0x7f) | 0x01;
     const UTC_TIME: u8 = 0x17;
-    let hash = sig_alg.hash;
-    let sig_alg = tlv(tag::SEQUENCE, &sig_alg.encode());
+    let hash = inner.hash;
     let tbs = seq(&[
         &tlv(tag::context_constructed(0), &tlv(tag::INTEGER, &[2])),
         &tlv(tag::INTEGER, &serial),
-        &sig_alg,
+        &tlv(tag::SEQUENCE, &inner.encode()),
         &name(issuer_cn),
         &seq(&[
             &tlv(UTC_TIME, b"240101000000Z"),
@@ -461,7 +478,7 @@ fn issue_with(
     issuer.key.sign_pss(hash, &tbs, &OsRng, &mut sig).unwrap();
     CertificateDer::from(seq(&[
         &tbs,
-        &sig_alg,
+        &tlv(tag::SEQUENCE, &outer.encode()),
         &tlv(tag::BIT_STRING, &[&[0u8][..], &sig].concat()),
     ]))
 }

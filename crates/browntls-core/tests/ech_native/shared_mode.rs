@@ -685,3 +685,28 @@ fn no_trusted_ca_keys_with_an_ech_offer() {
     // The server resolved its certificate for the inner ClientHello.
     assert!(!seen.1.load(std::sync::atomic::Ordering::Relaxed));
 }
+
+#[test]
+fn explicit_identity_does_not_replace_the_public_name_on_rejection() {
+    use browntls_core::pki_types::DnsName;
+    use browntls_core::{ClientServerIdentity, ReferenceIdentifier, ServiceIdentity};
+
+    let certs = Certs::new();
+    let stale = EchServerConfig::new(vec![server_key(1)]).unwrap();
+    let current = Arc::new(EchServerConfig::new(vec![server_key(2)]).unwrap());
+    let policy = ServiceIdentity::new(vec![ReferenceIdentifier::Dns(
+        DnsName::try_from(SECRET).unwrap(),
+    )])
+    .unwrap();
+    let identity = ClientServerIdentity::new(ServerName::try_from(SECRET).unwrap(), policy);
+    let config = Arc::new(client_config(&certs, enable(stale.ech_config_list())));
+    let mut client = ClientConnection::new_with_identity(config, identity).unwrap();
+    let mut server =
+        ServerConnection::new(Arc::new(server_config(&certs, Some(&current), None))).unwrap();
+
+    let Error::RejectedEch(rejected) = expect_rejected(&mut client, &mut server) else {
+        panic!("expected authenticated ECH rejection");
+    };
+    assert_eq!(rejected.retry_configs(), Some(current.ech_config_list()));
+    assert!(client.matched_service_identity().is_none());
+}

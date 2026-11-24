@@ -5,14 +5,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
+#[path = "common/gate.rs"]
+mod gate;
 
+use std::future::Future as _;
 use std::io::Read as _;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Wake, Waker};
 use std::time::Duration;
 
 use browntls_core::server::{ServerSessionMemoryCache, StoresServerSessions};
 use browntls_core::{HandshakeKind, ServerConfig};
-use browntls_tokio::{TlsAcceptor, TlsConnector};
+use browntls_tokio::{EarlyDataOutcome, RejectedEarlyDataPolicy, TlsAcceptor, TlsConnector};
 use common::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::time::timeout;
@@ -41,6 +47,14 @@ impl Setup {
             cache: ServerSessionMemoryCache::new(8),
             pki,
         }
+    }
+
+    fn resend(&self, max_bytes: usize) -> TlsConnector {
+        self.connector.clone().rejected_early_data_policy(
+            RejectedEarlyDataPolicy::ResendIfSameAlpn {
+                max_bytes: NonZeroUsize::new(max_bytes).unwrap(),
+            },
+        )
     }
 
     fn acceptor(&self, max_early_data_size: u32) -> TlsAcceptor {
@@ -123,14 +137,29 @@ async fn accepted_early_data_and_a_read_that_completes_the_handshake() {
 
 #[tokio::test]
 async fn declined_early_data_is_resent_as_ordinary_data() {
-    let setup = Setup::new();
+    let setup = Setup::with_alpn(&[b"http/1.1", b"h2"]);
     setup.first_connection().await;
 
     let (c, s) = duplex(64 * 1024);
     let client_side = async {
-        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        let mut client = setup.resend(512).connect(localhost(), c).await.unwrap();
         client.write_all(b"early request").await.unwrap();
-        client.flush().await.unwrap();
+        assert_eq!(
+            client.finish_early_data().await.unwrap(),
+            EarlyDataOutcome::Rejected {
+                early_bytes: 13,
+                resent_bytes: 13,
+                unresent_bytes: 0,
+            },
+        );
+        assert_eq!(
+            client.early_data_outcome(),
+            EarlyDataOutcome::Rejected {
+                early_bytes: 13,
+                resent_bytes: 13,
+                unresent_bytes: 0,
+            },
+        );
         assert!(!client.get_ref().1.is_handshaking());
         assert!(!client.get_ref().1.is_early_data_accepted());
         client.shutdown().await.unwrap();
@@ -200,12 +229,22 @@ async fn without_a_ticket_connect_waits_for_the_handshake() {
 
 #[tokio::test]
 async fn declined_early_data_is_not_resent_when_the_protocol_may_differ() {
-    let setup = Setup::with_alpn(&[b"h2", b"http/1.1"]);
+    check_rejection(&[b"h2", b"http/1.1"], Some(b"http/1.1")).await;
+    check_rejection(&[], None).await;
+}
+
+async fn check_rejection(initial: &[&[u8]], next: Option<&[u8]>) {
+    let setup = Setup::with_alpn(initial);
     setup.first_connection().await;
 
     let (c, s) = duplex(64 * 1024);
     let client_side = async {
-        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        let mut client = setup
+            .resend(512)
+            .with_alpn(next.into_iter().map(<[u8]>::to_vec).collect())
+            .connect(localhost(), c)
+            .await
+            .unwrap();
         client.write_all(b"early request").await.unwrap();
         let err = client.flush().await.unwrap_err();
         let not_resent = err
@@ -214,7 +253,18 @@ async fn declined_early_data_is_not_resent_when_the_protocol_may_differ() {
             .expect("EarlyDataNotResent");
         assert_eq!(not_resent.len, 13);
         assert!(!client.get_ref().1.is_early_data_accepted());
-        // The stream stays usable.
+        assert_eq!(
+            client.early_data_outcome(),
+            EarlyDataOutcome::Rejected {
+                early_bytes: 13,
+                resent_bytes: 0,
+                unresent_bytes: 13
+            },
+        );
+        assert!(client.write_all(b"must wait").await.is_err());
+        assert!(client.shutdown().await.is_err());
+        assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
+        assert_eq!(client.acknowledge_rejected_early_data(), None);
         client.write_all(b"chosen again").await.unwrap();
         client.shutdown().await.unwrap();
         client
@@ -228,6 +278,99 @@ async fn declined_early_data_is_not_resent_when_the_protocol_may_differ() {
     timeout(LIMIT, async { tokio::join!(client_side, server_side) })
         .await
         .expect("timed out");
+}
+
+#[tokio::test]
+async fn reporting_is_the_default_and_survives_finishing_through_a_read_half() {
+    let setup = Setup::with_alpn(&[b"h2"]);
+    setup.first_connection().await;
+    let (c, s) = duplex(4096);
+    let client_side = async {
+        let mut client = setup.connector.connect(localhost(), c).await.unwrap();
+        client.write_all(b"early").await.unwrap();
+        let (mut read, mut write) = client.into_split();
+        assert_eq!(read.read_u8().await.unwrap(), b'!');
+        let outcome = EarlyDataOutcome::Rejected {
+            early_bytes: 5,
+            resent_bytes: 0,
+            unresent_bytes: 5,
+        };
+        assert_eq!(read.early_data_outcome().await.unwrap(), outcome);
+        assert_eq!(write.finish_early_data().await.unwrap(), outcome);
+        assert!(write.flush().await.is_err());
+        assert_eq!(
+            write.acknowledge_rejected_early_data().await.unwrap(),
+            Some(5)
+        );
+        write.write_all(b"one").await.unwrap();
+        write.shutdown().await.unwrap();
+        (read, write)
+    };
+    let server_side = async {
+        let mut server = setup.acceptor(0).accept(s).await.unwrap();
+        assert!(server.get_mut().1.early_data().is_none());
+        server.write_all(b"!").await.unwrap();
+        server.flush().await.unwrap();
+        let mut received = Vec::new();
+        server.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, b"one");
+    };
+    timeout(LIMIT, async { tokio::join!(client_side, server_side) })
+        .await
+        .expect("timed out");
+}
+
+#[tokio::test]
+async fn a_cancelled_finisher_leaves_the_parked_reader_registered() {
+    struct ReaderWake(AtomicBool);
+    impl Wake for ReaderWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let setup = Setup::new();
+    setup.first_connection().await;
+    let (c, s) = duplex(4096);
+    let gate = Arc::new(gate::GateState::default());
+    let mut stream = setup
+        .connector
+        .connect(localhost(), gate::Gate::new(c, gate.clone()))
+        .await
+        .unwrap();
+    stream.write_all(b"early").await.unwrap();
+    let (mut reader, mut writer) = stream.into_split();
+    gate.close();
+
+    let reader_wake = Arc::new(ReaderWake(AtomicBool::new(false)));
+    let waker = Waker::from(reader_wake.clone());
+    let mut read = std::pin::pin!(reader.read_u8());
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    {
+        let mut finish = std::pin::pin!(writer.finish_early_data());
+        assert!(
+            finish
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    gate.open();
+    assert!(reader_wake.0.load(Ordering::Relaxed));
+
+    let server = async {
+        let mut server = setup.acceptor(1024).accept(s).await.unwrap();
+        server.write_all(b"!").await.unwrap();
+        server.flush().await.unwrap();
+    };
+    let (byte, ()) = timeout(LIMIT, async { tokio::join!(read, server) })
+        .await
+        .unwrap();
+    assert_eq!(byte.unwrap(), b'!');
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -354,7 +497,7 @@ async fn stream_debug_output_omits_buffered_early_data() {
         assert!(client.get_ref().1.is_handshaking());
         for debug in [format!("{client:?}"), format!("{client:#?}")] {
             assert!(!debug_reveals(&debug, SECRET_REQUEST), "{debug}");
-            assert!(debug.contains("sent_len"), "{debug}");
+            assert!(debug.contains("written"), "{debug}");
         }
         let wrapped = browntls_tokio::TlsStream::Client(client);
         assert!(!debug_reveals(&format!("{wrapped:?}"), SECRET_REQUEST));
@@ -411,6 +554,6 @@ async fn stream_debug_output_omits_early_data_after_a_failed_early_phase() {
         assert!(!debug_reveals(&debug, SECRET_REQUEST), "{debug}");
     }
     // The kept bytes can never be resent now, so they are already dropped.
-    assert!(format!("{client:?}").contains("sent_len: 0"));
+    assert!(format!("{client:?}").contains("early: None"));
     peer.abort();
 }

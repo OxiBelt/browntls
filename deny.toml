@@ -30,6 +30,9 @@ allow = [
 # so an upgrade has to revisit it. Review by 2027-05-15.
 exceptions = [
   { allow = ["NCSA"], crate = "libfuzzer-sys@0.4.13" },
+  # MIT No Attribution is used by the URI parser's ownership adapter.
+  # Owner: piquark6046. Track in issue #168. Review by 2027-05-15.
+  { allow = ["MIT-0"], crate = "borrow-or-share@0.2.4" },
 ]
 
 [bans]

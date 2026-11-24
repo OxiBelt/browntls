@@ -42,6 +42,26 @@ fn server_value_roundtrip() {
     assert!(alloc::format!("{back:?}").contains("example.com"));
     assert_eq!(back.external_psk, None);
     assert_eq!(back.delegated_credential_expiry, None);
+    assert_eq!(back.early_data_record_size_limit, None);
+}
+
+#[test]
+fn server_value_stream_early_data_record_size_limit_roundtrip() {
+    let mut value = sample();
+    for limit in [64, 16_385] {
+        value.early_data_record_size_limit = Some(limit);
+        let encoded = value.get_encoding();
+        let decoded = ServerSessionValue::read_bytes(&encoded).unwrap();
+        assert_eq!(decoded.early_data_record_size_limit, Some(limit));
+        assert!(ServerSessionValue::read_bytes(&encoded[..encoded.len() - 1]).is_err());
+    }
+    for limit in [63, 16_386] {
+        value.early_data_record_size_limit = Some(limit);
+        assert!(ServerSessionValue::read_bytes(&value.get_encoding()).is_err());
+    }
+    value.early_data_record_size_limit = Some(64);
+    value.version = ProtocolVersion::DTLSv1_3;
+    assert!(ServerSessionValue::read_bytes(&value.get_encoding()).is_err());
 }
 
 #[test]
@@ -143,6 +163,32 @@ fn server_value_external_psk_roundtrip() {
     }
 }
 
+/// A DTLS ticket is told apart from a TLS one by its version, and is read
+/// back with the TLS 1.3 checks.
+#[test]
+fn server_value_dtls_version_roundtrip() {
+    let expiry = UnixTime::since_unix_epoch(core::time::Duration::from_secs(1_234));
+    let mut v = sample();
+    v.version = ProtocolVersion::DTLSv1_3;
+    v.set_delegated_credential_expiry(Some(expiry));
+    let back = ServerSessionValue::read_bytes(&v.get_encoding()).unwrap();
+    assert_eq!(back.version, ProtocolVersion::DTLSv1_3);
+    assert_eq!(back.delegated_credential_expiry, Some(expiry));
+
+    let tls = ServerSessionValue::read_bytes(&sample().get_encoding()).unwrap();
+    assert_eq!(tls.version, ProtocolVersion::TLSv1_3);
+    assert_ne!(tls.version, back.version);
+}
+
+#[test]
+fn client_value_protocol() {
+    let v = tls13_client_value(1);
+    assert_eq!(v.protocol(), Protocol::Tls13);
+    let v = v.with_protocol(Protocol::Dtls13);
+    assert_eq!(v.protocol(), Protocol::Dtls13);
+    assert!(alloc::format!("{v:?}").contains("Dtls13"));
+}
+
 #[test]
 fn freshness() {
     let v = sample();
@@ -162,7 +208,7 @@ impl ServerCertVerifier for DummyVerifier {
         &self,
         _: &CertificateDer<'_>,
         _: &[CertificateDer<'_>],
-        _: &browntls_pki::ServerName<'_>,
+        _: &ServerName<'_>,
         _: &[u8],
         _: UnixTime,
     ) -> Result<crate::verify::ServerCertVerified, crate::Error> {
@@ -297,6 +343,38 @@ fn client_value_age() {
     let much_later = UnixTime::since_unix_epoch(core::time::Duration::from_secs(1000));
     let r3 = Retrieved::new(r2.value, much_later);
     assert!(r3.has_expired());
+}
+
+/// A TLS 1.3 client ticket whose ticket bytes are `[ticket]`, for tests
+/// that only look at its identity.
+pub(crate) fn tls13_client_value(ticket: u8) -> Tls13ClientSessionValue {
+    let suite = Tls13CipherSuite {
+        common: crate::suites::CipherSuiteCommon {
+            suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
+            hash_provider: &DummyHash,
+            confidentiality_limit: 1,
+        },
+        hkdf_provider: &DummyHkdf,
+        aead_alg: &DummyAead,
+        quic: None,
+    };
+    let suite: &'static Tls13CipherSuite = alloc::boxed::Box::leak(alloc::boxed::Box::new(suite));
+    let (verifier, creds) = binding_objects();
+    let binding = ClientConfigBinding {
+        server_cert_verifier: &verifier,
+        client_creds: &creds,
+    };
+    Tls13ClientSessionValue::new(
+        suite,
+        alloc::vec![ticket],
+        &[2],
+        Arc::new(CertificateChain::default()),
+        &binding,
+        UnixTime::since_unix_epoch(core::time::Duration::from_secs(100)),
+        60,
+        0,
+        0,
+    )
 }
 
 struct DummyHash;

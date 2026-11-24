@@ -28,9 +28,9 @@ Each CI job pairs one architecture with one peer suite.
 
 | Suite | Peer |
 |---|---|
-| `openssl` | OpenSSL 3.5 or later from Alpine 3.24 ([`peer/alpine.Dockerfile`](peer/alpine.Dockerfile)), with X25519MLKEM768 |
+| `openssl` | OpenSSL 3.5 or later from Alpine 3.24 ([`peer/alpine.Dockerfile`](peer/alpine.Dockerfile)), with the three RFC 10024 hybrids |
 | `openssl-3.0` | OpenSSL 3.0 from Ubuntu 24.04 LTS ([`peer/ubuntu.Dockerfile`](peer/ubuntu.Dockerfile)), without post-quantum groups |
-| `openssl-ubuntu-26.04` | OpenSSL 3.5 from Ubuntu 26.04 LTS ([`peer/ubuntu-26.04.Dockerfile`](peer/ubuntu-26.04.Dockerfile)), with X25519MLKEM768; not on `riscv64`, whose runner lacks the RVA23 profile Ubuntu 26.04's riscv64 image requires |
+| `openssl-ubuntu-26.04` | OpenSSL 3.5 from Ubuntu 26.04 LTS ([`peer/ubuntu-26.04.Dockerfile`](peer/ubuntu-26.04.Dockerfile)), with the three RFC 10024 hybrids; not on `riscv64`, whose runner lacks the RVA23 profile Ubuntu 26.04's riscv64 image requires |
 | `gnutls` | GnuTLS 3.8 from Alpine 3.24 |
 | `browntls` | browntls client and server in separate containers |
 | `go` | Go 1.27 `crypto/tls` ([`peer/go.Dockerfile`](peer/go.Dockerfile), the program in [`peer/go/`](peer/go/main.go)): Encrypted Client Hello scenarios only |
@@ -48,6 +48,19 @@ architecture's expected accelerated families (AES-NI, PCLMULQDQ, AVX2 and
 BMI2/ADX on x86-64-v3; AES, PMULL and SHA2 on the Arm runners; Zvkned, Zvkg,
 Zvknh and RVV in the emulated RISC-V job) fell back to portable code.
 
+## RFC 10024 hybrid key agreement
+
+The OpenSSL 3.5 suites exercise all three hybrid groups with browntls in
+each role. A direct case restricts both peers to the target group. A retry
+case offers X25519 as the first client share and restricts the server to
+the target hybrid. The harness verifies the negotiated group and
+handshake kind and checks data in both directions.
+
+The pinned wolfSSL DTLS 1.3 suite uses the same three groups over UDP in
+both roles. These exchanges verify both certificates, retry, negotiated
+group, data and clean shutdown.
+
+
 ## Scenarios
 
 `python3 tests/e2e/e2e.py list` prints the scenarios of each suite. Each one
@@ -57,7 +70,7 @@ allows it, with browntls as server against the peer's client:
 - both sides on their defaults (X25519MLKEM768 with a post-quantum peer,
   X25519 otherwise);
 - TLS 1.3 with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 over X25519,
-  P-256, P-384 and X25519MLKEM768, with ECDSA P-256, RSA 2048 and Ed25519
+  P-256, P-384 and the RFC 10024 hybrids, with ECDSA P-256, RSA 2048 and Ed25519
   certificates;
 - a HelloRetryRequest (the server accepts only P-256, which the browntls
   client does not send a key share for by default);
@@ -78,6 +91,9 @@ allows it, with browntls as server against the peer's client:
   answer a GREASE CertificateRequest with its certificate); and, as a
   browntls client, `ticket_request` (RFC 9149) and a ClientHello padded to
   1024 bytes (RFC 7685);
+- focused GnuTLS record-size-limit exchanges in TLS 1.2 and 1.3, in both
+  browntls roles, with asymmetric 1024-byte and 512-byte endpoint limits and
+  4096 bytes of application data in each direction;
 - the asynchronous streams of `browntls-tokio`, reached as `browntls::tokio`
   (`browntls-e2e --async`, a single-threaded Tokio runtime, confirmed by
   `"io":"async"` in the output):
@@ -134,6 +150,83 @@ short-lived containers per run, all labelled
 when the run ends, including on failure. It uses no bind mounts, so it also
 works with a remote Docker daemon.
 
+## ECH PEM interoperability with OpenSSL 4.0.3
+
+Run the standalone [ECH PEM harness](ech_pem.py) from the repository root.
+It builds a separate [OpenSSL peer](peer/openssl-ech.Dockerfile) from the
+checksum-pinned 4.0.3 release and uses its own image tag.
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64
+python3 -B tests/e2e/ech_pem.py --image browntls-e2e:amd64 --build-peer
+```
+
+For each of X25519, X448, P-256, P-384, and P-521, both implementations
+generate an RFC 9934 private bundle and public PEM. Each generator's files
+drive a TLS 1.3 handshake with browntls as client and another with browntls
+as server, for 20 exchanges. The harness checks the advertised DHKEM, ECH
+acceptance on both peers, certificate verification against the fixture CA and
+inner name, and the request and reply. The browntls side uses Tokio. The
+OpenSSL peer emits status and verification results through its ECH and TLS
+APIs. The private bundles remain in a run-owned server volume. Client
+containers mount a separate volume with the public configurations and CA.
+
+## TLS 1.3 delegated credentials with BoringSSL
+
+The standalone [delegated-credential harness](boringssl_dc.py) uses a
+[pinned BoringSSL server](peer/boringssl-dc.Dockerfile) and a Tokio browntls
+client. The test generates a fresh CA, an authorized leaf and a delegated
+credential. The client volume contains only the trust anchor. The run checks
+that the client verified the fixture DNS identity, accepted the credential
+and exchanged the expected payload with the server.
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64
+python3 -B tests/e2e/boringssl_dc.py --image browntls-e2e:amd64 --build-peer
+```
+
+This fixture covers TLS 1.3 server authentication. The in-process tests
+cover client credentials, DTLS 1.3 and QUIC-TLS.
+
+## TLS 1.3 Zstandard certificate compression with OpenSSL
+
+Build the BrownTLS peer with its Zstandard feature and run the standalone
+mutual-authentication interoperability harness:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --zstd --tag browntls-e2e:zstd-amd64
+python3 -B tests/e2e/zstd_interop.py --image browntls-e2e:zstd-amd64
+```
+
+The peer builds checksum-pinned OpenSSL 4.0.3 with `enable-zstd`.
+Both browntls roles and both OpenSSL roles are exercised. Each side
+permits only Zstandard, authenticates the peer, and exchanges application
+data. An OpenSSL
+message callback records the algorithm identifier in each transmitted and
+received `CompressedCertificate`; the run fails unless it sees Zstandard in
+both directions for each role. The peer emits only counts and status fields.
+The test tool wraps its Zstandard decompressor with a test-only counter and
+reports `zstd_certificate_messages_received` per connection. Each browntls
+endpoint must successfully decode at least one compressed certificate.
+
+## TLS key-log interoperability
+
+Build the diagnostic peer image and run the isolated key-log qualification from
+the repository root:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --key-log --tag browntls-e2e:key-log
+python3 -B tests/e2e/e2e.py build-peer --suite openssl-3.0
+python3 -B tests/e2e/key_log.py --image browntls-e2e:key-log
+```
+
+The harness runs TLS 1.2 and TLS 1.3 with browntls as client and server against
+the existing OpenSSL 3.0 peer image. It verifies the certificate and a
+bidirectional application-data exchange, then compares parsed NSS key-log
+entries in memory for identical labels, ClientHello randoms, and secrets. It
+does not print or persist key-log contents. The fixture uses ephemeral
+certificates in the run volume and a run-owned Docker network.
+
 ## Limitations
 
 - The native RISC-V runners have no RVV 1.0, so they exercise the scalar and
@@ -152,3 +245,190 @@ works with a remote Docker daemon.
   Go's server is shared mode only, and it neither sends GREASE ECH nor
   randomizes configuration identifiers, so those scenarios have a browntls
   client.
+
+<a id="dtls-13-interoperability"></a>
+
+## DTLS interoperability
+
+Run from the repository root with Docker and the musl Rust target for the
+chosen architecture installed. Use a separate image tag for the DTLS peer.
+
+```sh
+python3 tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:dtls-amd64
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64
+python3 -B -m unittest discover -s tests/e2e -p 'test_dtls.py'
+```
+
+The default `--suite all` runs DTLS 1.3 against wolfSSL and DTLS 1.2 against
+OpenSSL, plus a GnuTLS client against a browntls server. The GnuTLS case checks
+the negotiated RFC 8449 extension in its debug output, uses 512-byte GnuTLS
+and 1024-byte browntls limits, and exchanges 480 bytes in both directions.
+Select `--suite wolfssl`,
+`--suite openssl` or `--suite gnutls` to run one peer only:
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite wolfssl
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite wolfssl-cid
+```
+
+The opt-in `wolfssl-cid` suite runs both roles with DTLS 1.2 RFC 9146 and
+DTLS 1.3 initial connection IDs. Both peers opt in to nonempty receiving
+IDs; wolfSSL requires nonempty negotiated receive and transmit IDs before
+the authenticated payload and close exchange. The runner also requires full
+mutual certificate authentication and the expected version on both sides.
+The suite does not exercise CID rotation, migration, or packet loss. It is
+not included in `--suite all`. The browntls `--dtls-cid` switch selects an
+eight-byte receiving ID and allows sending the peer's ID.
+
+The opt-in `pion` suite uses the pinned Pion DTLS v4.0.2 implementation
+with its RFC 9853 path validation enabled. It checks the following
+mutually authenticated exchanges over one association per case.
+
+| Rebinding endpoint | DTLS versions | Validating endpoint |
+| --- | --- | --- |
+| browntls client | 1.2 and 1.3 | Pion server |
+| Pion client | 1.3 | browntls server in basic and enhanced modes |
+
+The runner checks CID and RRC negotiation, pre- and post-rebind
+request/reply, and the source-port change from both endpoints. Pion's
+local path-switch API applies to DTLS 1.3. The [peer](peer/pion/main.go)
+uses its own [Go module](peer/pion/go.mod) and [checksums](peer/pion/go.sum).
+The Docker build verifies the module cache, builds with CGO disabled,
+and copies the linked modules' licenses into the test image.
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite pion
+```
+
+The runner builds the selected peer images and reuses the full mutual
+authentication runner and ephemeral PKI generator. Each suite gets its own
+run-specific Docker network and PKI volume, cleaned up by the existing
+harness. Peers use ECDSA P-256 credentials and run as both client and server,
+verify certificates, exchange exact request and reversed reply bytes (without
+a newline), and check `close_notify` in each direction. The harness requires
+successful exits on both sides, the selected DTLS version, a full handshake,
+peer certificates, both payloads and closure. These default exchanges remain
+one-shot. Pass `--skip-peer-build` to reuse previously built peer images.
+
+Run the isolated DTLS 1.2 resumption cases explicitly after building an image
+with the DTLS 1.2 resumption implementation:
+
+```sh
+python3 -B tests/e2e/dtls.py --arch amd64 --image browntls-e2e:dtls-amd64 --suite openssl --resumption
+python3 -B -m unittest discover -s tests/e2e -p 'test_dtls*.py'
+```
+
+This selects exactly four cases: RFC 6347 session IDs and RFC 5077 tickets,
+each with browntls as client and as server. Each case requires an initial
+full mTLS handshake, then both peers must report `Resumed` on a fresh
+connection. Each handshake must exchange the exact payloads and complete
+bidirectional closure. The harness checks two ordered connection records
+from each peer, including the mechanism, version, cipher and retained peer
+certificates; OpenSSL additionally checks EMS on each handshake. A second
+full handshake fails the case. The existing six default exchanges and the
+TLS matrix are unchanged.
+
+The browntls peer uses `--tls 1.2 --dtls12-resumption session-id|ticket` with
+`--connections 2` as client or `--accept 2` as server. It reuses one client
+configuration/cache or server configuration/resumption context. The server
+calls `ServerConfig::enable_dtls12_resumption()` after setting credentials
+and the client verifier. Ticket mode installs a separate
+`ServerConfig::dtls12_ticketer` with independent keys and disables session-ID
+storage; ID mode keeps tickets disabled and uses a bounded memory cache.
+The client selects `Tls12Resumption::SessionIdOnly` or
+`SessionIdOrTickets`; ticket isolation is enforced by disabling ID storage
+on the selected server. These APIs must be integrated before compiling.
+
+The OpenSSL peer's optional final argument is `session-id` or `ticket`.
+It keeps one `SSL_CTX` across two fresh `SSL` objects and, as client,
+retains an `SSL_SESSION` and supplies it to the second handshake with
+[`SSL_set_session`][openssl-set-session]. ID mode disables tickets; ticket
+mode disables the ID cache. The server sets a fixed per-process mTLS
+[session-ID context][openssl-session-context]. Both implementations retain
+the UDP endpoint across orderly shutdowns, so the connected OpenSSL socket
+continues to serve the same isolated peer without a rebind race. This is a
+two-exchange oracle, not a multi-client server.
+
+The browntls peer's existing repeatable `--tls` option selects the DTLS
+endpoint policy: `--tls 1.2` uses `dtls::Versions::V1_2`, `--tls 1.3` uses
+`V1_3`, and `--tls 1.2 --tls 1.3` uses `V1_2And1_3`. Omitting it preserves
+the DTLS 1.3 default. The OpenSSL suite runs four exchanges: each browntls
+role with DTLS 1.2 only, then each role explicitly permitting both DTLS 1.2
+and 1.3. The mixed cases enable a suite for each version and must negotiate
+DTLS 1.2 with OpenSSL.
+
+[`peer/openssl-dtls.c`](peer/openssl-dtls.c) is a small independent OpenSSL
+C peer because the OpenSSL CLI does not support `s_server -rev` with DTLS.
+[`peer/openssl-dtls.Dockerfile`](peer/openssl-dtls.Dockerfile) uses the same
+pinned Alpine 3.24 base as the existing OpenSSL suite. It installs the
+distribution's OpenSSL 3.5 packages and builds with warnings treated as
+errors; it downloads no separate sources. Build and runtime reject a
+different OpenSSL minor version. Distribution package patch versions still
+depend on the repositories at build time.
+
+The OpenSSL peer uses a connected UDP datagram BIO, bounds socket I/O and
+total runtime, verifies the server's DNS name as a client, and requires a
+verified client certificate as a server. It restricts negotiation to DTLS 1.2
+and `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` with P-256. After the handshake
+it requires [extended master secret][openssl-ems]
+and, by default, rejects a reused session before exchanging application data.
+Session caching and tickets are disabled in that default mode. Success
+requires both authenticated close alerts and a completed bidirectional shutdown.
+
+The mock runner checks need no Docker or Cargo; they validate command
+construction and success/failure gates, not a DTLS implementation. Actual
+interoperability requires the Docker commands above. This bounded
+oracle runs only on the isolated test network; it does not implement a
+multi-client server, stateless cookie defense, or packet loss/reordering
+testing. This suite is a separate runner; the existing TLS matrix and CI
+workflow do not invoke it automatically.
+
+[openssl-ems]: https://docs.openssl.org/3.5/man3/SSL_get_extms_support/
+[openssl-set-session]: https://docs.openssl.org/3.5/man3/SSL_set_session/
+[openssl-session-context]: https://docs.openssl.org/3.5/man3/SSL_CTX_set_session_id_context/
+
+## Certificate with external PSK (RFC 9973)
+
+Build the browntls peer image and the pinned wolfSSL 5.9.4 independent peer,
+then run the four full handshakes:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:psk-amd64
+python3 -B tests/e2e/extern_psk.py --image browntls-e2e:psk-amd64 --build-peer
+python3 -B -m unittest discover -s tests/e2e -p 'test_extern_psk.py'
+```
+
+The runner covers browntls as client and server over TLS 1.3/TCP and
+DTLS 1.3/UDP. It requires browntls to report the negotiated
+`cert_with_extern_psk` result and peer certificate verification at the client,
+checks both application payloads, and requires wolfSSL to complete with an
+external PSK and verify the server certificate. TCP runs through
+`browntls::tokio`. wolfSSL v5.9.4 is checksum-pinned and built with PSK,
+TLS/DTLS 1.3, and certificate-with-external-PSK support.
+
+The runner creates a uniquely named Docker network and volume and removes
+those resources and its exact named containers on exit. A fresh random PSK is
+sent through the container's standard input into a temporary volume file; its
+bytes are not command-line arguments or log output. The generated CA and
+certificates and the PSK are discarded with that volume. The peer image is
+kept for reuse; select an unused `--peer-image` tag if you need to avoid
+replacing an existing local image. These opt-in cases are not added to the
+architecture matrix or its CI job.
+
+## RFC 9525 service identity references
+
+Build the browntls image and pinned OpenSSL 3.5 peer, then qualify DNS, IP,
+URI, and SRV-ID SAN matches plus a CA-trusted DNS mismatch:
+
+```sh
+python3 -B tests/e2e/e2e.py build --arch amd64 --tag browntls-e2e:identity-amd64
+python3 -B tests/e2e/service_identity.py --image browntls-e2e:identity-amd64 --build-peer
+python3 -B -m unittest discover -s tests/e2e -p 'test_service_identity.py'
+```
+
+The browntls client uses buffered Tokio over TCP. Each positive case checks the
+reported service identity match and request/reply data. The negative case
+trusts the generated certificate and requires an unrelated DNS reference to
+fail authentication. Run-owned containers, network, and volume are cleaned
+up; the shared OpenSSL image is retained.

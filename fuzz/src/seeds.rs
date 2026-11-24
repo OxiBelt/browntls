@@ -95,6 +95,17 @@ pub const TARGETS: &[Target] = &[
         crate::tls_binding::seeds,
     ),
     ("tls_quic", crate::tls_quic::run, crate::tls_quic::seeds),
+    ("tls_dtls", crate::tls_dtls::run, crate::tls_dtls::seeds),
+    (
+        "tls_dtls_tokio",
+        crate::tls_dtls_tokio::run,
+        crate::tls_dtls_tokio::seeds,
+    ),
+    (
+        "tls_dtls_udp",
+        crate::tls_dtls_udp::run,
+        crate::tls_dtls_udp::seeds,
+    ),
     ("tls_auth", crate::tls_auth::run, crate::tls_auth::seeds),
     ("tls_codec", crate::tls_codec::run, crate::tls_codec::seeds),
     ("tls_tokio", crate::tls_tokio::run, crate::tls_tokio::seeds),
@@ -242,14 +253,25 @@ fn connection() -> Vec<Vec<u8>> {
 fn pki_cert() -> Vec<Vec<u8>> {
     let identity = identity();
     let mut seeds = Vec::new();
-    for flags in [0u8, 1, 2, 3, 4, 8, 16, 16 | 32, 16 | 64, 16 | 128] {
+    let ordinary = [0u8, 1, 2, 3, 4, 8, 16, 16 | 32, 16 | 64, 16 | 128]
+        .map(|flags| (flags, b"localhost".as_slice()));
+    let service_ids = [
+        b"sip:localhost".as_slice(),
+        b"sip:alice@localhost;transport=tcp",
+        b"service://localhost/path",
+        b"_xmpp-client.localhost",
+        b"127.0.0.1",
+        "bücher.example".as_bytes(),
+    ]
+    .map(|name| (0, name));
+    for (flags, name) in ordinary.into_iter().chain(service_ids) {
         let mut seed = vec![flags];
         field(&mut seed, identity.chain[0].as_ref());
         field(&mut seed, identity.ca.as_ref());
         field(&mut seed, &[]);
         field(&mut seed, identity.ca.as_ref());
         field(&mut seed, &identity.crl);
-        field(&mut seed, b"localhost");
+        field(&mut seed, name);
         seed.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
         seeds.push(seed);
     }
@@ -328,19 +350,35 @@ fn cert_decompress() -> Vec<Vec<u8>> {
         &browntls_core::compress::ZSTD,
     ];
     let mut seeds = Vec::new();
+    let encode = |limit, algorithm: u16, compressed: &[u8]| {
+        let mut seed = vec![limit];
+        seed.extend_from_slice(&algorithm.to_be_bytes());
+        seed.extend_from_slice(&(message.len() as u32).to_be_bytes()[1..]);
+        seed.extend_from_slice(&(compressed.len() as u32).to_be_bytes()[1..]);
+        seed.extend_from_slice(compressed);
+        seed
+    };
     for compressor in compressors {
         let compressed = compressor
             .compress(message.clone(), CompressionLevel::Interactive)
             .expect("compressible");
         for limit in 0..4u8 {
-            let mut seed = vec![limit];
-            seed.extend_from_slice(&u16::from(compressor.algorithm()).to_be_bytes());
-            seed.extend_from_slice(&(message.len() as u32).to_be_bytes()[1..]);
-            seed.extend_from_slice(&(compressed.len() as u32).to_be_bytes()[1..]);
-            seed.extend_from_slice(&compressed);
-            seeds.push(seed);
+            seeds.push(encode(
+                limit,
+                u16::from(compressor.algorithm()),
+                &compressed,
+            ));
         }
     }
+    // Two dictionary-free data frames with a large advertised window, each
+    // carrying half of the expanded Certificate body.
+    let mut frames = Vec::new();
+    for part in [&message[..message.len() / 2], &message[message.len() / 2..]] {
+        frames.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0, 0x68]);
+        frames.extend_from_slice(&(((part.len() as u32) << 3) | 1).to_le_bytes()[..3]);
+        frames.extend_from_slice(part);
+    }
+    seeds.push(encode(2, 3, &frames));
     seeds
 }
 

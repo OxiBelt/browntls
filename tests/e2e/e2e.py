@@ -146,7 +146,8 @@ class Suite:
     description: str
     implementation: str  # "openssl", "gnutls", "go" or "browntls"
     peer_image: str  # Dockerfile under tests/e2e/peer/ (also used for PKI)
-    # "mlkem": X25519MLKEM768; "etm-toggle": a peer without Encrypt-then-MAC;
+    # "mlkem": X25519MLKEM768; "openssl-35": OpenSSL 3.5 hybrid groups;
+    # "etm-toggle": a peer without Encrypt-then-MAC;
     # "ech": Encrypted Client Hello; "ech-only": nothing but ECH scenarios;
     # "browntls-ech-client": the scenarios whose client must be browntls
     # (GREASE and random configuration identifiers in split mode).
@@ -166,7 +167,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5+ (Alpine 3.24)",
             "openssl",
             "alpine",
-            frozenset({"mlkem", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
         ),
         Suite(
             "openssl-3.0",
@@ -182,7 +183,7 @@ SUITES: dict[str, Suite] = {
             "OpenSSL 3.5 (Ubuntu 26.04)",
             "openssl",
             "ubuntu-26.04",
-            frozenset({"mlkem", "etm-toggle"}),
+            frozenset({"mlkem", "openssl-35", "etm-toggle"}),
             skip_arches=frozenset({"riscv64"}),
         ),
         Suite(
@@ -190,7 +191,7 @@ SUITES: dict[str, Suite] = {
             "GnuTLS 3.8 (Alpine 3.24)",
             "gnutls",
             "alpine",
-            frozenset({"etm-toggle"}),
+            frozenset({"etm-toggle", "rsl-gnutls"}),
         ),
         Suite(
             "browntls",
@@ -268,6 +269,8 @@ GROUP_NAMES: dict[str, tuple[str, str | None]] = {
     # GnuTLS builds without a post-quantum backend lack the hybrid group;
     # scenarios that use it require the "mlkem" suite feature.
     "X25519MLKEM768": ("X25519MLKEM768", None),
+    "secp256r1MLKEM768": ("SecP256r1MLKEM768", None),
+    "secp384r1MLKEM1024": ("SecP384r1MLKEM1024", None),
 }
 
 ROLES = ("client", "server")
@@ -327,6 +330,8 @@ class Scenario:
     suite: str | None = None
     groups: tuple[str, ...] = ()
     server_only_groups: bool = False
+    # An explicit client list can offer a different first share to force HRR.
+    client_groups: tuple[str, ...] = ()
     client_auth: bool = False
     connections: int = 1
     # "default", "peer-disabled" (refused) or "peer-disabled-allowed"
@@ -348,6 +353,10 @@ class Scenario:
     # The browntls side runs its connections through browntls-tokio
     # (`--async`), which its output must confirm (`"io":"async"`).
     async_io: bool = False
+    # Focused qualification inputs for asymmetric RFC 8449 exchanges.
+    message: str | None = None
+    browntls_record_size_limit: int | None = None
+    peer_record_size_limit: int | None = None
 
     @property
     def refused(self) -> bool:
@@ -454,6 +463,39 @@ SCENARIOS: tuple[Scenario, ...] = (
         "ecdsa-p256",
         requires=frozenset({"mlkem"}),
     ),
+    *(
+        _tls13(
+            f"tls13-{group.lower()}",
+            "TLS13_AES_128_GCM_SHA256",
+            group,
+            "ecdsa-p256",
+            requires=frozenset({"mlkem", "openssl-35"}),
+        )
+        for group in ("secp256r1MLKEM768", "secp384r1MLKEM1024")
+    ),
+    # In both roles, the client offers an X25519 share first while the
+    # server accepts only the target hybrid group. OpenSSL's configured
+    # group order predicts the first share for its client role.
+    *(
+        Scenario(
+            f"tls13-{group.lower()}-hello-retry-request",
+            "ecdsa-p256",
+            tls="1.3",
+            suite="TLS13_AES_128_GCM_SHA256",
+            groups=(group,),
+            client_groups=("X25519", group),
+            requires=frozenset({"mlkem", "openssl-35"}),
+            expect_version="TLSv1_3",
+            expect_suite="TLS13_AES_128_GCM_SHA256",
+            expect_group=group,
+            expect_handshake="FullWithHelloRetryRequest",
+        )
+        for group in (
+            "X25519MLKEM768",
+            "secp256r1MLKEM768",
+            "secp384r1MLKEM1024",
+        )
+    ),
     # The browntls client's default key shares do not include P-256.
     Scenario(
         "tls13-hello-retry-request",
@@ -508,6 +550,30 @@ SCENARIOS: tuple[Scenario, ...] = (
         connections=2,
         roles=("client",),
         optional_extensions=True,
+    ),
+    *(
+        Scenario(
+            f"tls{tls.replace('.', '')}-rsl-asymmetric",
+            "ecdsa-p256",
+            tls=tls,
+            suite=(
+                "TLS13_AES_128_GCM_SHA256"
+                if tls == "1.3"
+                else "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+            ),
+            requires=frozenset({"rsl-gnutls"}),
+            expect_version="TLSv1_3" if tls == "1.3" else "TLSv1_2",
+            expect_suite=(
+                "TLS13_AES_128_GCM_SHA256"
+                if tls == "1.3"
+                else "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+            ),
+            expect_group="X25519",
+            message="r" * 4096,
+            browntls_record_size_limit=1024,
+            peer_record_size_limit=512,
+        )
+        for tls in ("1.2", "1.3")
     ),
     _tls12(
         "tls12-ecdsa-aes128gcm",
@@ -671,7 +737,7 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
             "--ca",
             pki(sc.key, "ca.pem"),
             "--message",
-            MESSAGE,
+            sc.message or MESSAGE,
             "--connections",
             str(sc.connections),
             "--wait",
@@ -683,21 +749,27 @@ def browntls_args(sc: Scenario, role: str) -> list[str]:
         args += ["--tls", sc.tls]
     if sc.suite:
         args += ["--suite", sc.suite]
-    if role == "server" or not sc.server_only_groups:
-        for group in sc.groups:
-            args += ["--group", group]
+    groups = sc.groups
+    if role == "client":
+        groups = sc.client_groups or (() if sc.server_only_groups else sc.groups)
+    for group in groups:
+        args += ["--group", group]
     if sc.etm == "peer-disabled-allowed":
         args.append("--allow-mac-then-encrypt")
     if sc.optional_extensions:
         args += ["--record-size-limit", str(OPTIONAL_RECORD_SIZE_LIMIT), "--grease"]
         if role == "client":
             args += ["--ticket-request", "1,1", "--padding", "1024"]
+    if sc.browntls_record_size_limit is not None:
+        args += ["--record-size-limit", str(sc.browntls_record_size_limit)]
     if sc.async_io:
         args.append("--async")
     return args
 
 
-def openssl_protocol_args(sc: Scenario) -> list[str]:
+def openssl_protocol_args(
+    sc: Scenario, predict_client_share: bool = False
+) -> list[str]:
     args: list[str] = []
     if sc.tls == "1.3":
         args.append("-tls1_3")
@@ -707,7 +779,10 @@ def openssl_protocol_args(sc: Scenario) -> list[str]:
         args.append("-tls1_2")
         if sc.suite:
             args += ["-cipher", SUITE_NAMES[sc.suite][0]]
-    if sc.groups:
+    if predict_client_share and sc.client_groups:
+        first, *rest = (GROUP_NAMES[g][0] for g in sc.client_groups)
+        args += ["-groups", ":".join((f"*{first}", *rest))]
+    elif sc.groups:
         args += ["-groups", ":".join(GROUP_NAMES[g][0] for g in sc.groups)]
     return args
 
@@ -747,8 +822,12 @@ def peer_server_command(sc: Scenario, implementation: str) -> list[str]:
         return cmd
     if implementation == "gnutls":
         cmd = ["gnutls-serv", "--echo", "--port", str(PORT)]
+        if sc.peer_record_size_limit is not None:
+            cmd += ["--debug", "4"]
         cmd += ["--x509certfile", cert, "--x509keyfile", key]
         cmd += ["--priority", gnutls_priority(sc)]
+        if sc.peer_record_size_limit is not None:
+            cmd += ["--recordsize", str(sc.peer_record_size_limit)]
         if sc.client_auth:
             cmd += ["--require-client-cert", "--verify-client-cert", "--x509cafile", ca]
         return cmd
@@ -758,14 +837,14 @@ def peer_server_command(sc: Scenario, implementation: str) -> list[str]:
 def peer_client_command(sc: Scenario, implementation: str) -> list[str]:
     """A shell command: the peer clients read the message from standard input."""
     cert, key, ca = (pki(sc.key, n) for n in ("client.pem", "client.key", "ca.pem"))
-    line = shlex.quote(MESSAGE)
+    line = shlex.quote(sc.message or MESSAGE)
     if implementation == "openssl":
         # `-quiet` implies `-ign_eof`: s_client keeps the connection open
         # until the browntls server closes it after replying.
         cmd = ["openssl", "s_client", "-connect", f"{SERVER_ALIAS}:{PORT}"]
         cmd += ["-servername", SERVER_ALIAS, "-verify_hostname", SERVER_ALIAS]
         cmd += ["-CAfile", ca, "-verify_return_error", "-quiet"]
-        cmd += openssl_protocol_args(sc)
+        cmd += openssl_protocol_args(sc, predict_client_share=True)
         if sc.client_auth:
             cmd += ["-cert", cert, "-key", key]
         script = f"printf '%s\\n' {line} | {shlex.join(cmd)}"
@@ -773,20 +852,47 @@ def peer_client_command(sc: Scenario, implementation: str) -> list[str]:
         # gnutls-cli ends the session at end of input: keep standard input
         # open until the browntls server has replied and closed.
         cmd = ["gnutls-cli", "--port", str(PORT), "--x509cafile", ca]
+        if sc.peer_record_size_limit is not None:
+            cmd += ["--debug", "4"]
         cmd += ["--priority", gnutls_priority(sc)]
+        if sc.peer_record_size_limit is not None:
+            cmd += ["--recordsize", str(sc.peer_record_size_limit)]
         if sc.client_auth:
             cmd += ["--x509certfile", cert, "--x509keyfile", key]
         cmd.append(SERVER_ALIAS)
-        script = f"{{ printf '%s\\n' {line}; sleep 4; }} | {shlex.join(cmd)}"
+        if sc.peer_record_size_limit is not None:
+            # gnutls-cli can consume more bytes from stdin in one read than
+            # a single gnutls_record_send call accepts at this peer limit.
+            # Feed the line in small writes after the handshake starts.
+            message = sc.message or MESSAGE
+            chunk = max(1, (sc.peer_record_size_limit - 1) // 2)
+            writes = "; ".join(
+                f"printf '%s' {shlex.quote(message[at:at + chunk])}; sleep 0.15"
+                for at in range(0, len(message), chunk)
+            )
+            script = f"{{ sleep 2; {writes}; printf '\\n'; sleep 4; }} | {shlex.join(cmd)}"
+        else:
+            script = f"{{ printf '%s\\n' {line}; sleep 4; }} | {shlex.join(cmd)}"
     else:
         raise ValueError(implementation)
     # Wait for the server: the peer clients do not retry connecting.
     return ["sh", "-c", script]
 
 
-def expected_reply(server_impl: str) -> str:
-    """What a client receives for MESSAGE from a server implementation."""
-    return MESSAGE if server_impl == "gnutls" else MESSAGE[::-1]
+def expected_reply(server_impl: str, sc: Scenario) -> str:
+    """What a client receives for this scenario's request."""
+    message = sc.message or MESSAGE
+    return message if server_impl == "gnutls" else message[::-1]
+
+
+def check_gnutls_record_size_limit(sc: Scenario, peer: Container) -> list[str]:
+    if sc.peer_record_size_limit is None:
+        return []
+    log = peer.stdout + peer.stderr
+    negotiated = f"record_size_limit {sc.browntls_record_size_limit} negotiated"
+    if negotiated not in log:
+        return [f"GnuTLS did not report negotiated record_size_limit: expected {negotiated!r}"]
+    return []
 
 
 # ------------------------------------------------------------------- docker
@@ -909,7 +1015,7 @@ class Run:
         docker("network", "rm", self.network, check=False)
         docker("volume", "rm", "-f", self.volume, check=False)
 
-    def generate_pki(self) -> None:
+    def generate_pki(self, server_name: str = SERVER_ALIAS) -> None:
         docker(
             "run",
             "--rm",
@@ -921,6 +1027,7 @@ class Run:
             self.peer,
             f"{SHARE}/gen-pki.sh",
             "/pki",
+            server_name,
             timeout=600,
         )
 
@@ -1070,13 +1177,20 @@ def check_browntls(sc: Scenario, role: str, c: Container, reply: str | None) -> 
         for k, v in want.items():
             if v is not None and e.get(k) != v:
                 problems.append(f"browntls {role} #{e.get('index')}: {k}={e.get(k)!r}, expected {v!r}")
+        if sc.browntls_record_size_limit is not None and e.get(
+            "record_size_limit_configured"
+        ) != str(sc.browntls_record_size_limit):
+            problems.append(
+                f"browntls {role} did not report its configured record size limit "
+                f"{sc.browntls_record_size_limit}"
+            )
         if role == "client" and e.get("peer_certificates", 0) < 1:
             problems.append("browntls client saw no server certificate")
         if role == "server" and sc.client_auth and e.get("peer_certificates", 0) < 1:
             problems.append("browntls server saw no client certificate")
         if role == "client" and reply is not None and e.get("received") != reply:
             problems.append(f"browntls client received {e.get('received')!r}, expected {reply!r}")
-        if role == "server" and e.get("received") != MESSAGE:
+        if role == "server" and e.get("received") != (sc.message or MESSAGE):
             problems.append(f"browntls server received {e.get('received')!r}")
         if sc.async_io and e.get("io") != "async":
             problems.append(f"browntls {role} #{e.get('index')} did not use the asynchronous streams")
@@ -1123,7 +1237,9 @@ def run_scenario(run: Run, sc: Scenario, role: str, artifacts: Path | None) -> R
         # gnutls-serv keeps running; the other servers exit after the
         # expected number of connections.
         server = run.finish_server(server, wait=1 if impl == "gnutls" else 20)
-        problems += check_browntls(sc, "client", client, expected_reply(server_impl))
+        problems += check_browntls(sc, "client", client, expected_reply(server_impl, sc))
+        if impl == "gnutls":
+            problems += check_gnutls_record_size_limit(sc, server)
         if impl == "browntls":
             problems += check_browntls(sc, "server", server, None)
         negotiated = summarize(client, "client")
@@ -1136,7 +1252,9 @@ def run_scenario(run: Run, sc: Scenario, role: str, artifacts: Path | None) -> R
             client = run.run_client(run.peer, peer_client_command(sc, impl), env)
         server = run.finish_server(server, wait=20)
         problems += check_browntls(sc, "server", server, None)
-        reply = expected_reply("browntls")
+        if impl == "gnutls":
+            problems += check_gnutls_record_size_limit(sc, client)
+        reply = expected_reply("browntls", sc)
         got_reply = any(line.strip() == reply for line in client.stdout.splitlines())
         if sc.refused:
             if got_reply:
@@ -1483,6 +1601,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     env["CARGO_TARGET_DIR"] = str(target_dir)
     binary = target_dir / target / "release" / "browntls-e2e"
     cargo = ["cargo", "build", "--release", "--locked", "-p", "browntls-e2e", "--target", target]
+    features = []
+    if args.zstd:
+        features.append("browntls-e2e/zstd")
+    if args.key_log:
+        features.append("browntls-e2e/key-log")
+    if features:
+        cargo += ["--features", ",".join(features)]
     print("+", shlex.join(cargo), flush=True)
     subprocess.run(cargo, cwd=REPO_ROOT, env=env, check=True)
     tag = args.tag or image_tag(arch.name)
@@ -1646,6 +1771,8 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--arch", required=True, choices=sorted(ARCHES))
     b.add_argument("--tag", help=f"image tag (default {image_tag('<arch>')})")
     b.add_argument("--save", metavar="TAR", help="also write the image to TAR")
+    b.add_argument("--zstd", action="store_true", help="enable Zstandard certificate compression")
+    b.add_argument("--key-log", action="store_true", help="enable diagnostic key logging in the peer")
     b.set_defaults(func=cmd_build)
 
     bp = sub.add_parser("build-peer", help="build a suite's peer image")

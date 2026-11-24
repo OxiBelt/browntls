@@ -190,6 +190,48 @@ async fn both_ends_offloaded_for_every_suite() {
     }
 }
 
+#[tokio::test]
+async fn async_handoff_negotiates_each_hybrid_group_with_each_provider() {
+    if !kernel_tls() {
+        return;
+    }
+    for (expected, provider) in hybrid_providers() {
+        let suite = provider
+            .cipher_suites
+            .iter()
+            .copied()
+            .find(|suite| suite.suite() == browntls_core::CipherSuite::TLS13_AES_128_GCM_SHA256)
+            .expect("provider has a kernel-compatible TLS 1.3 suite");
+        let pki = Pki::new();
+        let client_config = pki.client_config_with_provider(suite, provider.clone());
+        let server_config = pki.server_config_with_provider(suite, provider);
+        let (client, mut server) = userspace_pair(client_config, server_config).await;
+        assert_eq!(
+            client
+                .get_ref()
+                .1
+                .negotiated_key_exchange_group()
+                .unwrap()
+                .name(),
+            expected,
+            "{expected:?} before async handoff"
+        );
+        let mut offloaded = client_kernel(client).await;
+        let server_side = async {
+            let mut request = [0; 6];
+            server.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hybrid");
+            server.write_all(b"passed").await.unwrap();
+            server.shutdown().await.unwrap();
+        };
+        let client_side = async {
+            write_all_async(&mut offloaded, b"hybrid").await;
+            assert_eq!(read_n_async(&mut offloaded, 6).await, b"passed");
+        };
+        tokio::join!(server_side, client_side);
+    }
+}
+
 /// The handover happens with data in flight in both directions: the
 /// server had written more than the client read, and the client's own
 /// records were not flushed. Nothing is lost or reordered, with a
@@ -445,15 +487,24 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
     let Some(suite) = offloadable_suites().into_iter().find(|s| tls13(*s)) else {
         return;
     };
-    for accept_early in [true, false] {
+    for (accept_early, resend) in [(true, false), (false, true), (false, false)] {
         let mut client_config = pki.client_config(suite);
         client_config.enable_early_data = true;
-        let connector = TlsConnector::from(Arc::new(client_config)).early_data(true);
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let mut connector = TlsConnector::from(Arc::new(client_config)).early_data(true);
+        if resend {
+            connector = connector.rejected_early_data_policy(
+                browntls_tokio::RejectedEarlyDataPolicy::ResendIfSameAlpn {
+                    max_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+                },
+            );
+        }
         let cache = ServerSessionMemoryCache::new(8);
         let acceptor = |max_early_data_size| {
             let mut config = pki.server_config(suite);
             config.max_early_data_size = max_early_data_size;
             config.session_storage = cache.clone();
+            config.alpn_protocols = vec![b"h2".to_vec()];
             TlsAcceptor::from(Arc::new(config))
         };
 
@@ -486,11 +537,12 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
                 assert_eq!(tls.early_data_len(), 0);
                 tls
             };
-            assert_eq!(
-                read_n_async(&mut tls, 22).await,
-                b"early request and more",
-                "accepted: {accept_early}"
-            );
+            let expected: &[u8] = if accept_early || resend {
+                b"early request and more"
+            } else {
+                b" and more"
+            };
+            assert_eq!(read_n_async(&mut tls, expected.len()).await, expected);
             write_all_async(&mut tls, b"reply").await;
             timeout(LIMIT, tls.shutdown()).await.unwrap().unwrap();
             assert!(read_to_end_async(&mut tls).await.unwrap().is_empty());
@@ -499,6 +551,25 @@ async fn a_client_in_its_early_data_phase_is_handed_over() {
             let mut client = connector.connect(localhost(), client_tcp).await.unwrap();
             assert!(client.get_ref().1.is_handshaking());
             write_all_async(&mut client, b"early request").await;
+            if !accept_early && !resend {
+                let error = timeout(LIMIT, AsyncKtlsStream::from_client(client))
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                let StreamHandoffError::Refused { stream, error, .. } = error else {
+                    panic!("expected recoverable early-data refusal");
+                };
+                assert_eq!(
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<browntls_tokio::EarlyDataNotResent>())
+                        .unwrap()
+                        .len,
+                    13
+                );
+                client = stream;
+                assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
+            }
             let mut tls = client_kernel(client).await;
             write_all_async(&mut tls, b" and more").await;
             assert_eq!(read_to_end_async(&mut tls).await.unwrap(), b"reply");
@@ -769,6 +840,97 @@ async fn a_refused_handover_returns_the_stream() {
     write_all_async(&mut server, b"world").await;
     timeout(LIMIT, server.flush()).await.unwrap().unwrap();
     assert_eq!(read_n_async(&mut client, 5).await, b"world");
+}
+
+/// The offloaded client can send more than one record's worth of data to
+/// a userspace peer that enforces its advertised limit (Linux 6.19+).
+#[tokio::test]
+async fn a_smaller_peer_record_size_limit_reaches_the_tokio_kernel() {
+    if !kernel_tls() {
+        return;
+    }
+    let pki = Pki::new();
+    let suite = offloadable_suites()
+        .into_iter()
+        .find(|s| tls13(*s))
+        .unwrap();
+    let mut server_config = pki.server_config(suite);
+    server_config.record_size_limit = Some(1000);
+    let (client, mut server) = userspace_pair(pki.client_config(suite), server_config).await;
+    let mut client = client_kernel(client).await;
+    // TLS 1.3 counts the inner content type in the advertised limit.
+    assert_eq!(client.kernel_connection().max_tx_payload_len(), Some(999));
+
+    let data = pattern(32_000, 7);
+    let ((), received) = tokio::join!(
+        write_all_async(&mut client, &data),
+        read_n_async(&mut server, data.len()),
+    );
+    assert_eq!(received, data);
+}
+
+/// A negotiated receive limit below the protocol maximum is permanent for
+/// direct and stream-based Tokio handoffs, before kTLS is installed.
+#[tokio::test]
+async fn a_smaller_receive_record_size_limit_refuses_tokio_handoff() {
+    let pki = Pki::new();
+    let suite = offloadable_suites()[0];
+
+    let mut client_config = pki.client_config(suite);
+    client_config.record_size_limit = Some(1000);
+    let (client, mut server) = userspace_pair(client_config, pki.server_config(suite)).await;
+    let (tcp, conn) = client.into_inner();
+    let Err(HandoffError::Refused {
+        conn,
+        socket,
+        received,
+        error,
+    }) = AsyncKtlsStream::new(conn, tcp, Vec::new())
+    else {
+        panic!("handed over with a smaller client receive record size limit");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert!(received.is_empty());
+    assert_eq!(
+        conn.kernel_handoff_blocker(),
+        Some(browntls_core::kernel::KernelHandoffBlocker::ReceiveRecordSizeLimit)
+    );
+    let client = tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Write};
+
+        let socket = socket.into_std().unwrap();
+        socket.set_nonblocking(false).unwrap();
+        socket.set_read_timeout(Some(LIMIT)).unwrap();
+        socket.set_write_timeout(Some(LIMIT)).unwrap();
+        let mut client = browntls_core::StreamOwned::new(conn, socket);
+        client.write_all(b"request").unwrap();
+        client.flush().unwrap();
+        let mut reply = [0; 5];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"reply");
+    });
+    assert_eq!(read_n_async(&mut server, 7).await, b"request");
+    write_all_async(&mut server, b"reply").await;
+    timeout(LIMIT, server.flush()).await.unwrap().unwrap();
+    client.await.unwrap();
+
+    let mut server_config = pki.server_config(suite);
+    server_config.record_size_limit = Some(1000);
+    let (mut client, server) = userspace_pair(pki.client_config(suite), server_config).await;
+    write_all_async(&mut client, b"queued").await;
+    timeout(LIMIT, client.flush()).await.unwrap().unwrap();
+    let Err(StreamHandoffError::Refused {
+        stream: mut server,
+        error,
+        ..
+    }) = AsyncKtlsStream::from_server(server).await
+    else {
+        panic!("handed over a server with a smaller receive record size limit");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+    assert_eq!(read_n_async(&mut server, 6).await, b"queued");
+    write_all_async(&mut server, b"userspace").await;
+    assert_eq!(read_n_async(&mut client, 9).await, b"userspace");
 }
 
 /// Without the `tls` module the stream comes back untouched (the refusal

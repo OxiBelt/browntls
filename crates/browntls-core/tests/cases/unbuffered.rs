@@ -494,7 +494,49 @@ fn big_payload() -> Vec<u8> {
 
 // ------------------------------------------------------------------ cases
 
+#[cfg(feature = "key-log")]
+#[test]
+fn unbuffered_client_and_server_emit_tls13_key_log_labels() {
+    #[derive(Debug, Default)]
+    struct Labels(std::sync::Mutex<Vec<String>>);
+
+    impl browntls_core::KeyLog for Labels {
+        fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+            self.0.lock().unwrap().push(label.to_owned());
+        }
+    }
+
+    fn assert_logged(log: &Labels) {
+        let labels = log.0.lock().unwrap();
+        for expected in ["CLIENT_HANDSHAKE_TRAFFIC_SECRET", "CLIENT_TRAFFIC_SECRET_0"] {
+            assert!(labels.iter().any(|label| label == expected));
+        }
+    }
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let client_log = Arc::new(Labels::default());
+    let server_log = Arc::new(Labels::default());
+    let mut client_config = client_config(&chain);
+    client_config.key_log = client_log.clone();
+    let mut server_config = server_config(&chain);
+    server_config.key_log = server_log.clone();
+    let client_config = Arc::new(client_config);
+    let server_config = Arc::new(server_config);
+    let mut client = ub_client(&client_config, Feed::Whole);
+    let mut server = ub_server(&server_config, Feed::Whole);
+
+    handshake(&mut client, &mut server);
+
+    assert_logged(&client_log);
+    assert_logged(&server_log);
+}
+
 include!("unbuffered/handshake_and_data.rs");
+mod service_identity {
+    use super::*;
+
+    include!("unbuffered/service_identity.rs");
+}
 include!("unbuffered/early_data.rs");
 include!("unbuffered/key_update.rs");
 include!("unbuffered/rustls_interop.rs");

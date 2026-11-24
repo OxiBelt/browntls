@@ -364,17 +364,14 @@ impl<'a> InboundOpaqueMessage<'a> {
 
     /// Treats the body as plaintext.
     pub fn into_plain_message(self) -> InboundPlainMessage<'a> {
-        InboundPlainMessage {
-            typ: self.typ,
-            version: self.version,
-            payload: self.payload.into_inner(),
-        }
+        InboundPlainMessage::new(self.typ, self.version, self.payload.into_inner())
     }
 
     /// Interprets a decrypted TLS 1.3 `TLSInnerPlaintext` (RFC 8446 §5.2):
     /// strips zero padding and extracts the real content type.
     pub fn into_tls13_unpadded_message(mut self) -> Result<InboundPlainMessage<'a>, Error> {
         let payload = &mut self.payload;
+        let inner_len = payload.len();
         let content_type_pos = payload
             .iter()
             .rposition(|b| *b != 0)
@@ -387,11 +384,12 @@ impl<'a> InboundOpaqueMessage<'a> {
         if payload.is_empty() && typ != ContentType::ApplicationData {
             return Err(crate::error::PeerMisbehaved::IllegalTlsInnerPlaintext.into());
         }
-        Ok(InboundPlainMessage {
+        Ok(InboundPlainMessage::with_record_plaintext_len(
             typ,
-            version: ProtocolVersion::TLSv1_3,
-            payload: self.payload.into_inner(),
-        })
+            ProtocolVersion::TLSv1_3,
+            self.payload.into_inner(),
+            inner_len,
+        ))
     }
 }
 
@@ -449,6 +447,37 @@ pub struct InboundPlainMessage<'a> {
     pub version: ProtocolVersion,
     /// The body.
     pub payload: &'a [u8],
+    record_plaintext_len: usize,
+}
+
+impl<'a> InboundPlainMessage<'a> {
+    /// Wraps plaintext with no inner content type or padding removed.
+    pub fn new(typ: ContentType, version: ProtocolVersion, payload: &'a [u8]) -> Self {
+        Self::with_record_plaintext_len(typ, version, payload, payload.len())
+    }
+
+    /// Wraps content with the original authenticated plaintext length.
+    ///
+    /// Providers that remove a TLS 1.3 or DTLS CID inner content type and
+    /// padding must pass the complete length before removing them.
+    pub fn with_record_plaintext_len(
+        typ: ContentType,
+        version: ProtocolVersion,
+        payload: &'a [u8],
+        record_plaintext_len: usize,
+    ) -> Self {
+        Self {
+            typ,
+            version,
+            payload,
+            record_plaintext_len: record_plaintext_len.max(payload.len()),
+        }
+    }
+
+    /// Returns the authenticated length used for record-size accounting.
+    pub fn record_plaintext_len(&self) -> usize {
+        self.record_plaintext_len
+    }
 }
 
 /// An outgoing record before encryption.
@@ -512,11 +541,7 @@ impl PlainMessage {
 
     /// Borrows as an incoming plaintext record.
     pub fn borrow_inbound(&self) -> InboundPlainMessage<'_> {
-        InboundPlainMessage {
-            version: self.version,
-            typ: self.typ,
-            payload: self.payload.bytes(),
-        }
+        InboundPlainMessage::new(self.typ, self.version, self.payload.bytes())
     }
 
     /// The body.

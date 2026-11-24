@@ -618,6 +618,7 @@ impl World {
                 client.delegated_credential().is_some(),
                 client.post_handshake_auth_responses(),
                 client.is_early_data_accepted(),
+                client.early_data_alpn(),
                 client.fips(),
                 client.ech_status(),
             );

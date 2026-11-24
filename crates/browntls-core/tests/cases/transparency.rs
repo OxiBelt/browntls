@@ -6,6 +6,9 @@
 use std::sync::Arc;
 
 use browntls_core::client::WebPkiServerVerifier;
+use browntls_core::client::danger::{
+    CertificateIdentity, ServerCertVerificationContext, ServerCertificateVerification,
+};
 use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
 use browntls_core::transparency::{
     CtV2LogConfig, CtV2Requirements, CtV2TrustedTreeHead, TransparencyStatus, TreeHead,
@@ -407,7 +410,7 @@ fn verifier_build_checks_the_logs() {
 }
 
 #[test]
-fn verifier_api_enforces_without_the_handshake() {
+fn verifier_api_requires_explicit_context() {
     use browntls_core::client::danger::ServerCertVerifier;
     use browntls_core::pki_types::UnixTime;
 
@@ -415,35 +418,59 @@ fn verifier_api_enforces_without_the_handshake() {
     let verifier = verifier(&fx.pki, Some(fx.requirements(&[&fx.log_a])));
     assert!(verifier.requests_transparency_info());
     let now = UnixTime::now();
-    // The legacy entry point has only the OCSP response.
-    let refused = verifier.verify_server_cert(&fx.chain.end_entity, &[], &server_name(), &[], now);
-    assert_eq!(
-        refused.unwrap_err(),
-        Error::InvalidCertificate(insufficient(0, 0))
-    );
     let ocsp = fx
         .pki
         .ocsp(&fx.chain.end_entity, Some(&list(&[fx.sct(&fx.log_a)])));
-    verifier
-        .verify_server_cert(&fx.chain.end_entity, &[], &server_name(), &ocsp, now)
-        .unwrap();
-    // The evidence entry point enforces too, so a wrapper that forwards
-    // only it keeps the policy.
     let evidence = [browntls_core::revocation::CertificateEvidence {
-        transparency_info: Some(&[0, 0]),
+        ocsp: Some(&ocsp),
         ..Default::default()
     }];
-    assert!(
+    let name = server_name();
+    let identity = CertificateIdentity::Name(&name);
+    let leaf = &fx.chain.end_entity;
+    let refused = Error::InvalidCertificate(CertificateError::TransparencyOfferRequired);
+    assert_eq!(
         verifier
-            .verify_server_cert_with_evidence(
-                &fx.chain.end_entity,
-                &[],
-                &server_name(),
-                &evidence,
-                now
-            )
-            .is_err()
+            .verify_server_cert(leaf, &[], &name, &ocsp, now)
+            .unwrap_err(),
+        refused
     );
+    assert_eq!(
+        verifier
+            .verify_server_cert_with_evidence(leaf, &[], &name, &evidence, now)
+            .unwrap_err(),
+        refused
+    );
+    assert_eq!(
+        verifier
+            .verify_server_cert_with_transparency(leaf, &[], &name, &evidence, now)
+            .unwrap_err(),
+        refused
+    );
+    assert_eq!(
+        verifier
+            .verify_server_cert_with_identity(leaf, &[], identity, &evidence, now, true)
+            .unwrap_err(),
+        refused
+    );
+    let check = |context| {
+        verifier.verify_server_cert_with_context(leaf, &[], identity, &evidence, now, context)
+    };
+    for offered_transparency_info in [false, true] {
+        for offered_status_request in [false, true] {
+            let result = check(ServerCertVerificationContext::TlsHandshake {
+                offered_transparency_info,
+                offered_status_request,
+            });
+            if offered_transparency_info && offered_status_request {
+                assert_eq!(result.unwrap().transparency, Some(status(1, 1, 0)));
+            } else {
+                assert_eq!(result.unwrap_err(), refused);
+            }
+        }
+    }
+    let local = check(ServerCertVerificationContext::LocalEvidence { allow_live: false }).unwrap();
+    assert_eq!(local.transparency, Some(status(1, 1, 0)));
     assert!(
         !WebPkiServerVerifier::builder_with_provider(fx.pki.roots(), provider())
             .build()
@@ -458,3 +485,33 @@ include!("transparency/unbuffered.rs");
 include!("transparency/intermediate.rs");
 include!("transparency/forged.rs");
 include!("transparency/revocation.rs");
+include!("transparency/transport.rs");
+
+#[test]
+fn exported_authenticator_evaluates_local_ct_evidence() {
+    use browntls_core::exported_authenticator::AuthenticatorRequestExtensions;
+
+    let fx = Fixture::new();
+    let embedded = fx.pki.embedded(&[fx.pki.precert_sct(&fx.log_a)]);
+    let v = &version::TLS13;
+    let client = fx.client(Some(fx.requirements(&[&fx.log_a])), v);
+    let server = server(&embedded, None, None, v);
+    let (mut client, mut server, cr, sr) = connect(&client, &server);
+    cr.unwrap();
+    sr.unwrap();
+
+    for (chain, context) in [(&embedded, b"with SCT"), (&fx.chain, b"no SCT!!")] {
+        let request = client
+            .request_authenticator(context, &AuthenticatorRequestExtensions::default())
+            .unwrap();
+        let key =
+            CertifiedKey::from_der(chain.cert_chain(), chain.private_key(), &provider()).unwrap();
+        let response = server.authenticator(Some(&request), Some(&key)).unwrap();
+        let checked = client.validate_authenticator(Some(&request), &response);
+        if context == b"with SCT" {
+            assert_eq!(checked.unwrap(), Some(embedded.cert_chain()));
+        } else {
+            assert_eq!(checked, Err(Error::InvalidCertificate(insufficient(0, 0))));
+        }
+    }
+}

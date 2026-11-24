@@ -41,17 +41,23 @@ impl State<ClientConnectionData> for ExpectServerDone {
                 )
             })?;
         let now = st.config.current_time()?;
-        let (check, transparency_status) = st
+        let identity = cx.data.certificate_identity(&st.server_name);
+        let verification = st
             .config
             .verifier()
-            .verify_server_cert_with_transparency(
+            .verify_server_cert_with_context(
                 end_entity,
                 intermediates,
-                &st.server_name,
+                identity,
                 &st.server_cert.evidence(),
                 now,
+                st.hello.verification_context(),
             )
             .map_err(|err| tls13::send_cert_path_error_alert(cx.common, err))?;
+        let matched_identity = identity
+            .matched_reference(verification.matched_reference)
+            .map_err(|err| tls13::send_cert_path_error_alert(cx.common, err))?;
+        let transparency_status = verification.transparency;
 
         // 2. Verify the signature over the key exchange parameters
         //    (RFC 5246 §7.4.3: client_random || server_random || params).
@@ -74,7 +80,8 @@ impl State<ClientConnectionData> for ExpectServerDone {
             .verify_tls12_signature(&message, end_entity, sig)
             .map_err(|err| tls13::send_cert_verify_error_alert(cx.common, err))?;
 
-        finish_or_pause(cx, check, move |cx, status| {
+        finish_or_pause(cx, verification.revocation, move |cx, status| {
+            cx.common.matched_service_identity = matched_identity;
             cx.common.peer_revocation_status = status;
             cx.data.transparency.info = st.server_cert.transparency_info.take();
             cx.data.transparency.status = transparency_status;
@@ -138,7 +145,9 @@ impl ExpectServerDone {
         })?;
         cx.common.kx_state.complete();
 
-        st.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*st.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),

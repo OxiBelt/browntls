@@ -39,6 +39,36 @@ pub fn provider() -> CryptoProvider {
     provider
 }
 
+/// One explicit provider policy for each RFC 10024 group it must implement.
+pub fn hybrid_providers() -> Vec<(browntls_core::NamedGroup, CryptoProvider)> {
+    use browntls_core::NamedGroup;
+    use browntls_core::crypto::SupportedKxGroup;
+
+    let mut cases = Vec::new();
+    let mut add = |provider: CryptoProvider, groups: &[&'static dyn SupportedKxGroup]| {
+        for name in [
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::secp256r1MLKEM768,
+            NamedGroup::secp384r1MLKEM1024,
+        ] {
+            let mut provider = provider.clone();
+            provider.kx_groups = vec![*groups.iter().find(|group| group.name() == name).unwrap()];
+            cases.push((name, provider));
+        }
+    };
+    #[cfg(feature = "native")]
+    add(
+        browntls_core::crypto::native::default_provider(),
+        browntls_core::crypto::native::ALL_KX_GROUPS,
+    );
+    #[cfg(feature = "rustcrypto")]
+    add(
+        browntls_core::crypto::rustcrypto::default_provider(),
+        browntls_core::crypto::rustcrypto::ALL_KX_GROUPS,
+    );
+    cases
+}
+
 /// The provider's suites that kernel TLS takes and an ECDSA certificate
 /// allows: AEAD suites other than TLS 1.3 AES-128-CCM-8.
 pub fn offloadable_suites() -> Vec<SupportedCipherSuite> {
@@ -274,28 +304,54 @@ impl Pki {
         Arc::new(provider)
     }
 
+    fn single_with_provider(
+        suite: SupportedCipherSuite,
+        mut provider: CryptoProvider,
+    ) -> Arc<CryptoProvider> {
+        provider.cipher_suites = vec![suite];
+        Arc::new(provider)
+    }
+
     /// A server configuration for `suite` only, secret extraction on.
     pub fn server_config(&self, suite: SupportedCipherSuite) -> ServerConfig {
+        self.server_config_with_provider(suite, provider())
+    }
+
+    pub fn server_config_with_provider(
+        &self,
+        suite: SupportedCipherSuite,
+        provider: CryptoProvider,
+    ) -> ServerConfig {
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
-        let mut config = ServerConfig::builder_with_provider(Self::single(suite))
-            .with_protocol_versions(&[suite.version()])
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(self.server_chain.clone(), key)
-            .unwrap();
+        let mut config =
+            ServerConfig::builder_with_provider(Self::single_with_provider(suite, provider))
+                .with_protocol_versions(&[suite.version()])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(self.server_chain.clone(), key)
+                .unwrap();
         config.enable_secret_extraction = true;
         config
     }
 
     /// A client configuration for `suite` only, secret extraction on.
     pub fn client_config(&self, suite: SupportedCipherSuite) -> ClientConfig {
+        self.client_config_with_provider(suite, provider())
+    }
+
+    pub fn client_config_with_provider(
+        &self,
+        suite: SupportedCipherSuite,
+        provider: CryptoProvider,
+    ) -> ClientConfig {
         let mut roots = RootCertStore::empty();
         roots.add(self.ca.clone()).unwrap();
-        let mut config = ClientConfig::builder_with_provider(Self::single(suite))
-            .with_protocol_versions(&[suite.version()])
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut config =
+            ClientConfig::builder_with_provider(Self::single_with_provider(suite, provider))
+                .with_protocol_versions(&[suite.version()])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         config.enable_secret_extraction = true;
         config
     }

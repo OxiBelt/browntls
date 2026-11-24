@@ -17,6 +17,9 @@ use crate::msgs::handshake::{
 };
 use crate::msgs::message::MessagePayload;
 
+#[cfg(feature = "native")]
+mod pem_config;
+
 fn name(n: &str) -> ServerNamePayload<'static> {
     ServerNamePayload::SingleDnsName(browntls_pki::DnsName::try_from(n).unwrap().to_owned())
 }
@@ -26,6 +29,7 @@ fn inner_hello() -> ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random::from([3; 32]),
         session_id: SessionId::from_slice(&[9; 32]).unwrap(),
+        legacy_cookie: None,
         cipher_suites: vec![
             CipherSuite::TLS13_AES_128_GCM_SHA256,
             CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -59,6 +63,7 @@ fn outer_body(exts: &ClientExtensions, session_id: SessionId) -> Vec<u8> {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random::from([4; 32]),
         session_id,
+        legacy_cookie: None,
         cipher_suites: vec![CipherSuite::TLS13_AES_128_GCM_SHA256],
         compression_methods: vec![Compression::Null],
         extensions: exts.clone(),
@@ -246,6 +251,7 @@ fn candidate_selection_and_public_name_check() {
             client_version: ProtocolVersion::TLSv1_2,
             random: Random::from([4; 32]),
             session_id: SessionId::from_slice(&[9; 32]).unwrap(),
+            legacy_cookie: None,
             cipher_suites: vec![CipherSuite::TLS13_AES_128_GCM_SHA256],
             compression_methods: vec![Compression::Null],
             extensions: exts,

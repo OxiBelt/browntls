@@ -11,15 +11,17 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 
 use browntls_core::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    CertificateIdentity, HandshakeSignatureValid, ServerCertVerificationContext,
+    ServerCertVerified, ServerCertVerifier, ServerCertificateVerification,
 };
 use browntls_core::pki_types::{CertificateDer, ServerName, UnixTime};
 use browntls_core::revocation::{
     PeerEvidence, RevocationCheck, RevocationResponse, RevocationStatus,
 };
 use browntls_core::{
-    CertificateError, ClientConfig, ClientConnection, DigitallySignedStruct, Error, ServerConfig,
-    ServerConnection, SignatureScheme, SupportedProtocolVersion,
+    CertificateError, ClientConfig, ClientConnection, ClientServerIdentity, DigitallySignedStruct,
+    Error, ReferenceIdentifier, ServerConfig, ServerConnection, ServiceIdentity, SignatureScheme,
+    SupportedProtocolVersion,
 };
 use common::{
     Chain, KeyType, PinnedServerVerifier, do_handshake, provider, server_chain, transfer,
@@ -75,6 +77,54 @@ impl ServerCertVerifier for Deferred {
         ))
     }
 
+    fn verify_server_cert_with_identity(
+        &self,
+        end: &CertificateDer<'_>,
+        chain: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<ServerCertificateVerification, Error> {
+        let (revocation, matched_reference) = match identity {
+            CertificateIdentity::Name(_) if !allow_live => {
+                return Err(Error::InvalidCertificate(
+                    CertificateError::UnknownRevocationStatus,
+                ));
+            }
+            CertificateIdentity::Name(name) => (
+                self.verify_server_cert_with_evidence(end, chain, name, evidence, now)?,
+                None,
+            ),
+            CertificateIdentity::Service(policy) => {
+                assert!(allow_live);
+                let end_entity = browntls_core::server::ParsedCertificate::try_from(end)?;
+                let matched = browntls_core::client::verify_server_identity(&end_entity, policy)?;
+                let index = policy
+                    .references()
+                    .iter()
+                    .position(|r| r == matched)
+                    .unwrap();
+                (
+                    self.verify_server_cert_with_evidence(
+                        end,
+                        chain,
+                        &common::server_name(),
+                        evidence,
+                        now,
+                    )?,
+                    Some(index),
+                )
+            }
+            _ => unreachable!(),
+        };
+        Ok(ServerCertificateVerification {
+            revocation,
+            transparency: None,
+            matched_reference,
+        })
+    }
+
     fn revocation_enabled(&self) -> bool {
         true
     }
@@ -100,6 +150,35 @@ impl ServerCertVerifier for Deferred {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+#[test]
+fn standalone_and_authenticator_checks_keep_their_verifier_dispatch() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let verifier = Deferred {
+        inner: PinnedServerVerifier::new(&chain),
+    };
+    let name = common::server_name();
+    let verify = |context| {
+        verifier.verify_server_cert_with_context(
+            &chain.end_entity,
+            &[],
+            CertificateIdentity::Name(&name),
+            &[],
+            UnixTime::now(),
+            context,
+        )
+    };
+    assert_eq!(
+        verify(ServerCertVerificationContext::LocalEvidence { allow_live: false }).unwrap_err(),
+        Error::InvalidCertificate(CertificateError::UnknownRevocationStatus)
+    );
+    assert!(matches!(
+        verify(ServerCertVerificationContext::ExportedAuthenticator)
+            .unwrap()
+            .revocation,
+        RevocationCheck::Complete(None)
+    ));
 }
 
 fn configs(
@@ -269,4 +348,27 @@ fn unavailable_status_sends_a_fatal_alert_and_exposes_no_identity() {
         server.process_new_packets(),
         Err(Error::AlertReceived(_))
     ));
+}
+
+#[test]
+fn matched_identity_waits_for_revocation_and_finished() {
+    use browntls_core::pki_types::DnsName;
+    use browntls_core::version;
+
+    let (config, server) = configs(&version::TLS13, &server_chain(KeyType::EcdsaP256));
+    let expected = ReferenceIdentifier::Dns(DnsName::try_from("localhost").unwrap());
+    let policy = ServiceIdentity::new(vec![expected.clone()]).unwrap();
+    let identity = ClientServerIdentity::new(
+        ServerName::try_from("routing-only.example").unwrap(),
+        policy,
+    );
+    let mut client = ClientConnection::new_with_identity(config, identity).unwrap();
+    let mut server = ServerConnection::new(server).unwrap();
+    let id = pause(&mut client, &mut server);
+    assert!(client.matched_service_identity().is_none());
+    client
+        .resolve_peer_revocation(id, RevocationResponse::Der(vec![1]))
+        .unwrap();
+    do_handshake(&mut client, &mut server).unwrap();
+    assert_eq!(client.matched_service_identity(), Some(&expected));
 }

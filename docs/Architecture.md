@@ -1,8 +1,9 @@
 # Architecture
 
-This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library
-written from scratch in Rust, targeting the feature level of rustls 0.23, with
-its own cryptographic primitives behind a pluggable provider interface.
+This document describes the design of browntls: a TLS 1.2 / TLS 1.3 library,
+with DTLS over datagrams, written from scratch in Rust, targeting the
+feature level of rustls 0.23, with its own cryptographic primitives behind a
+pluggable provider interface.
 Implementation status is tracked in [Status](#status); the
 [contributor guide](../CONTRIBUTING.md) and [security policy](../SECURITY.md)
 govern how changes land.
@@ -46,6 +47,10 @@ compared byte for byte except for `id-RSASSA-PSS`, whose equivalent
 parameter encodings (RFC 4055) are first mapped to one canonical constant
 (`AlgorithmIdentifier::matches_public_key` and `matches_signature`, used by
 path validation and by handshake signature verification alike).
+Certificate and CRL parsers also compare supported PSS inner and outer
+signature parameters semantically. They retain the original signed bytes.
+PSS certificate and signing-key pairing and path loop checks compare the
+actual key and its restrictions, including the exact minimum salt length.
 
 ### Facade crate (`browntls`)
 
@@ -213,6 +218,60 @@ one of them gains or loses a feature, or when another crate joins it as a
 module. Its `src/lib.rs` carries the crate documentation, the re-exports and
 the doctest hook for the README.
 
+### Certificate service identity
+
+For TLS, DTLS and QUIC, the default verifier checks the end-entity SAN
+against a caller-supplied reference under RFC 9525. DNS and IP connections
+use their existing `ServerName` as a reference. A `ClientServerIdentity`
+lets a client choose an ordered `ServiceIdentity` separately from the
+routing name. The reference order determines the validated identity when
+multiple entries match. DNS and IP identities use their respective SAN
+types. URI and SRV identities also match the scheme or service label.
+Applications choose which alternatives to include, including any DNS
+fallback for a service scoped by URI or SRV. The subject common name is
+outside identity verification.
+
+For example, the Tokio buffered client can authenticate an SRV identity
+while sending the endpoint name in SNI:
+
+```rust
+use browntls::{ClientServerIdentity, ReferenceIdentifier, ServiceIdentity, SrvId};
+use browntls::pki_types::ServerName;
+
+let route = ServerName::try_from("edge.example")?;
+let service = SrvId::try_from("_imaps.mail.example")?;
+let policy = ServiceIdentity::new(vec![ReferenceIdentifier::Srv(service)])?;
+let identity = ClientServerIdentity::new(route, policy);
+let stream = connector.connect_with_identity(identity, socket).await?;
+let matched = stream.get_ref().1.matched_service_identity();
+```
+
+The unbuffered Tokio connector and the core TLS, DTLS and QUIC APIs offer
+the same policy. Linux kTLS uses the authenticated userspace result. The
+low-level `EndEntityCert::verify_service_identity` checks the leaf SAN
+and returns the matching reference. Callers using it directly must also
+verify the certificate path and the peer's proof of possession.
+
+Existing configurations with underscores in DNS labels need valid DNS names
+and corresponding certificates. An underscore is required at the start of
+an SRV service label. Caller-supplied Unicode DNS names use nontransitional
+UTS #46 with STD3 checks. Certificate and wire identifiers use ASCII
+A-labels. Wildcard DNS SANs cover one complete leftmost label and can be
+disabled per reference set. URI and SRV DNS portions use exact matching.
+
+URI and SRV path constraints apply to the relevant SAN type throughout a
+path. An excluded or unprocessable constrained name rejects the path even
+if a different SAN would match the reference. URI constraints use the DNS
+authority host, so a bare SIP URI may satisfy identity matching on an
+unconstrained path but cannot satisfy URI name constraints.
+
+The client caches the matched identity with certificate-authenticated
+sessions and requires the original reference policy, routing name and
+configuration binding before resuming or offering early data. A custom
+certificate verifier must explicitly support the new verification hook to
+authenticate a reference set. PSK-only and raw-key authentication do not
+supply a certificate identity.
+
 ### Certificate inspection
 
 `browntls-pki` parses a certificate once, eagerly: every field and extension
@@ -372,13 +431,14 @@ empty list in the TLS extension. `verify_tls_extension` accepts an empty
 extension body or an empty list; the strict parser, the certificate
 extension and the OCSP extension reject an empty list.
 
-Not covered: the HTTP API of §5, log operation, monitoring and the final STH
-log parameter (§4.1). No public CT 2.0 log ecosystem and no second
-implementation were available, and RFC 9162 has no test vectors for its
-hashes or items. The tests check the code against independent encoders and a
-reference Merkle tree written from the RFC text in
-`crates/browntls-pki/tests/common/ct_v2.rs`: the evidence is
-self-consistency against the RFC text only, not interoperability.
+The PKI tests check the public verifier and auditor APIs against
+[Python and OpenSSL fixtures][ct-independent], including both log signature
+algorithms and proofs from an independently constructed tree. The fixtures
+cover certificates and the CT list extracted from OCSP. Public CT 2.0 log
+interoperability, the HTTP API of §5, log operation, monitoring, and the
+final STH log parameter (§4.1) remain outside this evidence.
+
+[ct-independent]: ../crates/browntls-pki/tests/data/ct_v2_independent/README.md
 
 #### CT 2.0 in TLS
 
@@ -397,10 +457,12 @@ work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
   `ClientConfig::request_transparency_info` is set, and never with a
   verifier that requires raw public keys. Whether a server's extension
   was solicited is decided by the ClientHello actually sent. A verifier
-  that wraps another must forward `requests_transparency_info`: otherwise
-  nothing is offered while the wrapped policy still runs on the
-  certificate and the staple alone, which §8.1.6 forbids but which fails
-  closed.
+  that wraps a CT-enabled WebPKI verifier forwards
+  `requests_transparency_info` and `verify_server_cert_with_context`.
+  The connection records `transparency_info` and `status_request` from the
+  effective ClientHello. A missing offer or lost context returns
+  `CertificateError::TransparencyOfferRequired` (`certificate_unknown`)
+  before evaluation, as required by §8.1.6.
 - Client policy: `ServerCertVerifierBuilder::with_certificate_transparency`
   takes `CtV2Requirements` (trusted logs as `CtV2LogConfig`, trusted tree
   heads, `min_verified_scts`, `min_distinct_logs`, `require_inclusion`,
@@ -421,16 +483,16 @@ work is in the handshake and in the WebPKI server verifier (§6.5, §8.1).
   extension. Too few SCTs or logs fail with
   `CertificateError::InsufficientTransparency` (`certificate_unknown`); an
   evidence error such as an exceeded budget with
-  `InvalidTransparencyEvidence` (`bad_certificate`). Called directly,
-  `verify_server_cert` enforces the policy with the certificate and the
-  staple only.
+  `InvalidTransparencyEvidence` (`bad_certificate`). Direct callers
+  evaluate local evidence with `verify_server_cert_with_context` and
+  `ServerCertVerificationContext::LocalEvidence`. Context-free methods
+  return `TransparencyOfferRequired` when the verifier has a CT policy.
 - What a connection reports: `peer_transparency_info` (the extension body,
   unverified, also without a policy) and `peer_transparency_status`
   (`TransparencyStatus` counts) on `ClientConnection` and
   `UnbufferedClientConnection`. A custom verifier receives the body in
   `CertificateEvidence::transparency_info` and reports a status through
-  `ServerCertVerifier::verify_server_cert_with_transparency`, whose default
-  reports none.
+  `ServerCertVerifier::verify_server_cert_with_context`.
 - Peer errors: a list that does not parse is `decode_error` in the codec (an
   empty body and an empty list are accepted, §6.5), as is a non-empty body
   in the ClientHello; an extension the client did not offer is
@@ -454,29 +516,27 @@ Interactions with other features:
   `InsufficientTransparency` rather than return its retry configurations:
   they are authenticated by that certificate, and CT is what would reveal
   a mis-issued one.
-- QUIC uses the TLS 1.3 handshake unchanged, extension and policy
-  included; it has no CT test of its own.
+- QUIC-TLS and DTLS tests check certificate authentication with both
+  offers and refusal when the CT offer is absent. DTLS tests include the
+  address-bound cookie retry in both versions.
 - Early data is sent only on resumption or with an external PSK, before
   any server certificate arrives. A resumption evaluates no certificate;
-  an RFC 8773 handshake (certificate with an external PSK) evaluates the
+  an RFC 9973 handshake (certificate with an external PSK) evaluates the
   certificate like a full handshake, after the 0-RTT data was sent.
 - Delegated credentials (RFC 9345): the policy covers the end-entity
   certificate that signs the credential; the credential is not logged.
 - `Acceptor`, `UnbufferedAcceptor` and the Tokio `LazyConfigAcceptor`: the
   configuration chosen after the ClientHello supplies the list through
   its certificate resolver, and the offer is read from that ClientHello.
-- Exported authenticators (RFC 9261) are verified through
-  `verify_server_cert` with no OCSP response, and an authenticator whose
-  entry carries `transparency_info` is refused as unsolicited. Under a CT
-  2.0 policy an authenticator therefore passes only with SCTs embedded in
-  its certificate.
+- Exported authenticators (RFC 9261) use the `ExportedAuthenticator`
+  verification context with live revocation disabled. An entry carrying
+  `transparency_info` is refused as unsolicited. Under a CT 2.0 policy an
+  authenticator therefore passes only with SCTs embedded in its certificate.
 
-The tests (`crates/browntls-core/tests/transparency*.rs`,
-`crates/browntls-tokio/tests/transparency.rs`) run browntls against itself
-on both providers, buffered and unbuffered, with run-time generated logs
-and lists encoded independently of `browntls-pki`. No other implementation
-of the extension is available in the repository's interoperability tooling,
-so there is no third-party test.
+The TLS tests run browntls against itself on both providers through
+buffered and unbuffered core and Tokio connections, including the lazy
+acceptor. A blocking Linux kTLS test checks the userspace CT decision
+before handoff and authenticated data exchange after handoff.
 
 ## Crypto provider mount point
 
@@ -544,6 +604,32 @@ records have failed authentication under the client handshake key (RFC 9147
 Appendix B.3), including the client's own early-data records.
 
 The RustCrypto provider does not implement the non-preferred tier.
+
+### Post-quantum hybrid key agreement (RFC 10024)
+
+Both the native and RustCrypto providers implement the three
+[RFC 10024](https://www.rfc-editor.org/rfc/rfc10024.html) groups. They work
+with TLS 1.3, DTLS 1.3, and TLS 1.3 over QUIC v1. The default lists include
+`X25519MLKEM768`, with its position controlled by the
+`prefer-post-quantum` feature. The P-256 and P-384 hybrids are opt-in
+through each provider's `kx_group` module or `ALL_KX_GROUPS`.
+
+Set `CryptoProvider::kx_groups` before constructing the client and server
+configurations. A list containing only hybrid groups requires a hybrid
+exchange. Include a classical group if the endpoint may negotiate one.
+Buffered and unbuffered connections, QUIC, and Tokio use those same
+configurations. kTLS uses the traffic keys derived by the userspace
+handshake. The connection's `negotiated_key_exchange_group()` exposes the
+result once the exchange completes.
+
+The protocol concatenates the ECDHE and ML-KEM components in the order
+defined for each group, then feeds the result into the existing TLS 1.3
+key schedule. First-generation Kyber draft identifiers are obsolete.
+When an initial DTLS ClientHello with a hybrid share would exceed the
+datagram budget, the client offers the group with an empty key-share
+list. The HelloRetryRequest selects the group, and the second ClientHello
+can carry the share across fragments after the cookie in its first
+fragment. This keeps the stateless acceptor's address-validation policy.
 
 ### TLS 1.2 record protection
 
@@ -940,9 +1026,10 @@ ECH ignores the extension and keeps the retry stateless. A cookie can be
 replayed during
 its lifetime by anyone who saw it; that gives no more than replaying the
 second ClientHello would, since the handshake still needs the client's key
-share and Finished. Cookies are not bound to the client's address: that
-is fine over TCP, where the handshake itself proves the address, but a
-datagram transport would need that binding to stop amplification.
+share and Finished. TLS cookies are not bound to the client's address:
+that is fine over TCP, where the handshake itself proves the address. DTLS
+1.3 cookies are, and carry a label of their own, so that neither kind opens
+as the other (see [DTLS 1.3](#dtls-13-rfc-9147)).
 
 ### Exporters
 
@@ -995,12 +1082,11 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
 - Server: the first offered external PSK usable with a suite the server
   could select narrows the suite choice to the suites it is usable with (the
   server "MUST ensure that it selects a compatible PSK (if any) and cipher
-  suite"). Of the first 16 identities (a local bound on lookups and ticket
-  decryption; later ones are ignored), the first that names a usable external
+  suite"). Of the first 16 identities, the first that names a usable external
   PSK or ticket is selected and only its binder is checked, in constant time;
   a wrong binder is `decrypt_error`. An identity whose binder length is not
-  that of the key's hash is passed over. A handshake that selects an external
-  PSK sends no certificate. When a TLS 1.3 client offered a `psk_dhe_ke` PSK
+  that of the key's hash is passed over. Ordinary external PSK authentication
+  uses the key alone. When a TLS 1.3 client offered a `psk_dhe_ke` PSK
   and none was selected, a server without a certificate fails with
   `handshake_failure`; otherwise (no PSK offered, `psk_ke` only, or TLS 1.2)
   it fails as any server without a certificate does, with `unrecognised_name`
@@ -1012,8 +1098,12 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
 - 0-RTT: off by default for external PSKs (RFC 9257). `with_early_data`
   enables it per key; the key needs a provisioned suite and must be the first
   offered, and the server checks suite and ALPN protocol against the
-  provisioned ones (RFC 9846 §4.3.10). There is no anti-replay protection
-  for external PSKs: such early data can be replayed.
+  provisioned ones (RFC 9846 §4.3.10). The server also requires a live
+  per-credential cutoff and an application-supplied atomic replay policy.
+  Missing or uncertain policy declines early data. Deployments sharing a
+  credential share the policy's authoritative state and retain its marks
+  through the last possible acceptance time. Applications still need
+  replay-safe request semantics.
 - Importer (RFC 9258): a key configured with `imported(context)` is used
   only through the importer. The client offers one `ImportedIdentity` per
   hash of its TLS 1.3 suites (target protocol TLS 1.3, target KDF
@@ -1021,20 +1111,48 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   HKDF-Extract(0, epsk), "derived psk", Hash(ImportedIdentity), L)` under the
   EPSK's hash; the server parses the identity, resolves its external identity
   and requires the same context. The EPSK's hash must be that of one of the
-  provider's TLS 1.3 suites. No published test vectors exist; the derivation
-  is checked against an independent HMAC computation and across providers.
-- Certificate authentication with an external PSK (RFC 8773,
-  `tls_cert_with_extern_psk`, 0x0021): opt-in on both sides
-  (`cert_with_extern_psk`). A client sends the extension only when it offers
-  an external PSK, and then no 0-RTT under one; a server echoes it in its
-  ServerHello only when it selected an external PSK and has a certificate,
-  and then authenticates with Certificate and CertificateVerify (and may
-  request client authentication) on top of the PSK and (EC)DHE. A client
-  rejects the extension without an external PSK (`illegal_parameter`) and,
-  with `require_cert_with_extern_psk`, a server that does not negotiate it.
-  A client that sends the extension offers no resumption ticket alongside,
-  so the server cannot skip the requested certificate by resuming instead (a
-  conservative choice, not an RFC 8773 requirement).
+  provider's TLS 1.3 suites. Stream TLS and QUIC use the TLS 1.3 target and
+  importer label. DTLS uses the DTLS 1.3 target and `dtls13` label. The
+  derivation is checked against independent HMAC computations and across
+  providers. Deployments that used browntls's earlier TLS-labelled DTLS
+  importer must upgrade both DTLS endpoints together.
+- Certificate authentication with an external PSK ([RFC 9973],
+  `tls_cert_with_extern_psk`, 0x0021) is opt-in on both sides
+  (`cert_with_extern_psk`). The client prefers a fresh handshake when it has
+  an eligible key. Its offer excludes resumption tickets and 0-RTT. The
+  server scans the full wire-bounded list for recognizable tickets, checking
+  each distinct identity once without consuming stateful tickets. A
+  recognizable ticket or a bad binder for the selected external PSK triggers
+  `illegal_parameter`. External key resolution
+  and selection remain limited to the first 16 identities. An opaque identity
+  the server cannot recognize is handled as an unknown external identity.
+  The in-memory cache reads only the stored version. Custom
+  `StoresServerSessions` implementations can override `session_version()`
+  to avoid fetching a full value for the scan.
+  The extension combines the key exchange and external PSK in the TLS key
+  schedule. Server authentication still uses Certificate and CertificateVerify
+  with a certificate or configured raw public key. The server can also request
+  client authentication. The external PSK contributes to confidentiality.
+- With ECH, the real external identity and extension are in the inner
+  ClientHello. Without ECH, an observer can associate repeated uses of the
+  same identity. Rotate identities as appropriate for the deployment. The
+  retry must repeat the extension on the effective hello or fail. Retry cookies
+  carry that decision, so an upgrade rejects old in-flight retry cookies.
+- For a client that requires fresh RFC 9973 on every connection, set
+  `cert_with_extern_psk`, `require_cert_with_extern_psk`, and
+  `require_external_psk` to `true` and use
+  `client.resumption = Resumption::disabled()`. Set
+  `server.require_cert_with_extern_psk = true` to require a fresh handshake
+  on the server too. Use a server config with a credential and an external
+  key resolver. Strict servers issue no tickets and use the configured
+  verifier for any client authentication. Both configs apply through the
+  buffered, unbuffered, Tokio, QUIC and DTLS APIs.
+- The server's resolver or acceptor can inspect the visible hello with
+  `ClientHello::offers_cert_with_extern_psk()`. Treat this as an
+  unauthenticated routing signal. On both sides
+  `CommonState::negotiated_cert_with_extern_psk()` reports fresh RFC 9973
+  after the handshake completes. A resumed connection can report the
+  inherited external identity through `external_psk_identity()`.
 - `CommonState::external_psk_identity` reports the key used, once the peer's
   Finished has verified (until then the peer has not proven it holds the
   key); such a handshake is `HandshakeKind::Full`. A peer that offers or
@@ -1056,6 +1174,8 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   key bytes or the optional generation therefore invalidates existing tickets;
   removing the key does too. Identity-only ticket records from older browntls
   revisions fail closed rather than resuming without a key binding.
+
+[RFC 9973]: https://www.rfc-editor.org/rfc/rfc9973.html
 
 RFC 9257 guidance and what browntls enforces:
 
@@ -1092,15 +1212,26 @@ RFC 9257 guidance and what browntls enforces:
   TLS 1.3, whose limit counts the content type) or `max_fragment_size` less
   the header, whichever is smaller (`MessageFragmenter`); protected records
   the peer sends that exceed our limit (TLS 1.3: the whole
-  `TLSInnerPlaintext`, padding included, derived from the ciphertext length
-  less the suite's expansion) end the connection with `record_overflow`
-  (`RecordLayer::set_inbound_record_size_limit`). A peer value below 64 is
-  `illegal_parameter`; a value above the protocol maximum is lowered, not
-  refused; a configured value below 64 fails connection creation
-  (`Error::BadRecordSizeLimit`). 0-RTT data, sent before the client could
-  see the server's limit, is exempt, and a TLS 1.3 client applies its own
-  limit from the record after EncryptedExtensions (the server's handshake
-  records already respect it).
+  `TLSInnerPlaintext`, including padding) end the connection with
+  `record_overflow`. If the server acknowledges the extension, the TLS 1.3
+  client checks all authenticated records carrying EncryptedExtensions.
+  If the server omits it, the protocol limit applies. A peer value below
+  64 is `illegal_parameter`, including when the server declines the
+  extension. Higher peer values are capped at the protocol maximum.
+  A configured value below 64 fails connection creation
+  (`Error::BadRecordSizeLimit`). The new handshake's cap applies to its
+  handshake and application keys. Stream TLS 1.3 ticket 0-RTT uses the
+  server receive cap from the ticket-issuing connection. Older server
+  sessions without the cap can resume without early data. External PSKs
+  use the cap provisioned on both peers with
+  `ExternalPsk::with_early_data_record_size_limit` (default 16385).
+  DTLS 1.2 and 1.3 support the extension through opt-in
+  `dtls::Settings::with_record_size_limit`. The effective send cap
+  composes with the datagram MTU and CID overhead. Protected handshake
+  fragments, acknowledgements and application data share the cap.
+  Application sends remain one datagram. An authenticated record over
+  the negotiated limit fails with `record_overflow`; DTLS 1.2 CID and
+  DTLS 1.3 count the entire inner plaintext.
 - `ticket_request` (RFC 9149), TLS 1.3 only: the client sends
   `ClientConfig::tls13_ticket_request` (default none) when it offers TLS
   1.3; the server sends at most `resumption_count` tickets for a resumed
@@ -1490,17 +1621,15 @@ the transport for its duration (`common::Stream`) and drives `read_tls` and
   `ServerConfig`). A refusal, from the acceptor or from
   `Accepted::into_connection`, writes and flushes the `AcceptedAlert` before
   the future fails; `take_io` returns the transport afterwards.
-- With `TlsConnector::early_data(true)` and a resumable session that
-  allows 0-RTT, `Connect` resolves before the handshake
-  (`IoSession::skip_handshake`). Writes go to `ClientConnection::early_data`
-  and are kept; the first read, flush or shutdown, or a write the allowance
-  cannot take, completes the handshake and flushes our last flight
-  (EndOfEarlyData, Finished). Declined early data is resent as 1-RTT data
-  only when the same ALPN protocol is certain (none offered, or one offered
-  and selected; RFC 9846 §4.2.10); otherwise that operation fails once with
-  `EarlyDataNotResent`. A handshake failure in this phase is kept and fails
-  every later operation. Whichever operation ends the phase wakes a read
-  waiting in it, whose transport registration it may have replaced.
+- With `TlsConnector::early_data(true)` and an eligible TLS 1.3 PSK,
+  `Connect` can resolve before the handshake (`IoSession::skip_handshake`).
+  The first read, flush, shutdown, or write beyond the allowance completes
+  the handshake and flushes the last flight. Automatic resend requires a
+  separate policy, a caller-supplied byte cap, and the same concrete ALPN
+  as the ticket-issuing connection or provisioned external PSK. The adapter
+  retains the outcome through reads and split polls. Write-side operations
+  and handoff report unresent bytes until the application acknowledges them.
+  A terminal failure remains visible to every later operation.
 - Servers read accepted early data through `server::TlsStream::early_data`
   (`EarlyDataReader`, an `AsyncRead` over `ServerConnection::early_data`);
   ordinary reads never return it. By default `Accept` resolves after the
@@ -1731,8 +1860,10 @@ nothing per record and copy plaintext at most once:
   alert, writes it and then fails; later operations fail the same way.
   Early data a server accepts is appended to a vector the stream keeps
   (`early_data`, `take_early_data`), bounded by
-  `ServerConfig::max_early_data_size`. The connector does not send early
-  data.
+  the configured allowance. By default the connector completes the
+  handshake before returning. On opt-in, the client adds early ciphertext
+  behind ClientHello using the core transmit grant. It uses the same
+  resend and acknowledgement policy as the buffered client.
 - A write encrypts at most 65 536 bytes and returns that count; the next
   write first waits for `Outgoing` to drain, so it holds the records of
   one write at most, besides the bounded answers below and `close_notify`. A
@@ -1855,6 +1986,30 @@ KeyUpdate from either side, tickets after the handover, post-handshake
 authentication, closure, the blockers, the limits and malformed records, for
 every suite with a kernel form on both providers.
 
+### Key logging
+
+Client and server configurations use `NoKeyLog` by default. The non-default
+`key-log` Cargo feature enables the shared RFC 9850 callbacks. It applies to
+buffered and unbuffered TLS, DTLS and QUIC-TLS. Tokio uses the core config,
+and a kTLS handoff logs only during the userspace handshake. Omit the Cargo
+feature for production. To check whether any dependency enables it, use
+`cargo tree -e features -i browntls-core` with the production build options.
+
+With `std` and `key-log` on Linux, `KeyLogFile::try_from_path` opens an
+explicit path, and `KeyLogFile::new()` reads `SSLKEYLOGFILE` at construction.
+The sink requires local Unix ownership, permission, and lock semantics. It
+accepts owner-only regular files under trusted directories, rejects links
+and shared destination directories, and skips writes during advisory-lock
+contention. File errors leave the TLS exchange usable. The file API stays
+available as an inactive sink on other platforms. Custom callbacks do not
+require `std`.
+
+The log contains TLS 1.2 master secrets and TLS 1.3 traffic and exporter
+secrets. Access can defeat confidentiality and integrity for recorded and
+active sessions, including applications relying on exporters. Use synthetic
+test traffic and enforce access control and retention for any sink. This
+feature is independent of the ordinary telemetry controlled by `logging`.
+
 ### Linux kernel TLS (`browntls-ktls`)
 
 `KtlsStream::new` takes a buffered `ClientConnection` or `ServerConnection`
@@ -1909,7 +2064,9 @@ counts for itself. TCP closing without `close_notify` is
 `UnexpectedEof`, as is every later call. A refused handover can be retried on
 the same socket (an attached `tls` ULP is accepted), and a peer
 `record_size_limit` the kernel cannot honour (before Linux 6.19) is refused
-before any key is installed. Linux pauses reception whenever a handshake record
+before any key is installed. A reduced negotiated receive limit keeps the
+connection in userspace because Linux kTLS cannot enforce that limit.
+Linux pauses reception whenever a handshake record
 starts with the KeyUpdate type byte or holds only part of a KeyUpdate; browntls
 then has no keys to install, so the stream fails on `EKEYEXPIRED` instead of
 hanging. A close_notify followed by more data before the handover, a whole
@@ -2153,12 +2310,21 @@ ECDSA (P-256/384/521), Ed25519 or Ed448 credential key and has the
 certificate's key sign the credential. A credential is issued for the side
 that authenticates with it (the signed context string differs, §4) and
 attached to a `CertifiedKey` for that side: `with_delegated_credential` for a
-server, `with_client_delegated_credential` for a client. Both check that the
-certificate carries the `DelegationUsage` extension
-(1.3.6.1.4.1.44363.44, parsed by `browntls-pki`) and the
-`digitalSignature` key usage, and, when the key exposes its public key, that
-it matches the credential's public key. A side only presents credentials
-attached for it, so one `CertifiedKey` can serve both roles. Credential keys
+server, `with_client_delegated_credential` for a client. Pass the configured
+`CryptoProvider` to either attachment method or a
+`DelegatedCredentialKey` constructor. The provider verifies the issuer
+signature against the exact leaf and role; the leaf must carry
+`DelegationUsage` and the `digitalSignature` key usage. Key association
+uses the delegated signer's SPKI or a one-time signature when the signer
+cannot export it. Attachment checks that the credential expires strictly
+inside its parent's validity period and accepts staged credentials.
+`check_usable_at` checks activation at a caller-supplied time, and
+presentation uses the connection clock. `DelegatedCredential::to_bytes`
+returns a `Result` and checks the enclosing extension length. Use the
+fixed-identity config builders `with_single_certified_key` and
+`with_client_auth_certified_key` to install a prepared key, or return it
+from a certificate resolver. A side only presents credentials attached for
+it, so one `CertifiedKey` can serve both roles. Credential keys
 may not be `rsaEncryption` keys (§4): the
 `rsa_pss_rsae_*` schemes are never issued, attached, offered or accepted
 (`rsa_pss_pss_*` is allowed). `CertifiedKey` keeps its credentials in a
@@ -2217,7 +2383,7 @@ be built with a struct literal; `CertifiedKey::new` remains.
   Finished so a handshake that crossed the deadline cannot complete. Every
   descendant ticket carries the original deadline unchanged; the server also
   caps its advertised ticket lifetime to the remaining credential lifetime
-  and sends no ticket when none remains. This is independent of an RFC 8773
+  and sends no ticket when none remains. This is independent of an RFC 9973
   external-PSK binding; both properties are retained when both authenticated
   the session. A server keeps the deadline of a client's credential the same
   way, next to its own: a ticket is passed over at or after either deadline,
@@ -2435,6 +2601,32 @@ Not implemented: ECH with DTLS or QUIC, and a client-facing server that
 inspects anything after the back-end server's ServerHello (by design: it
 relays the encrypted handshake unmodified).
 
+### ECH configuration files (RFC 9934)
+
+`ech::pem::EchPem` reads an ordered ECHConfigList with an optional matching
+PKCS #8 key. Use `to_public_pem` or `ech_config_list` for material shared with
+clients or published in DNS. Protect private files and any copy of their
+contents like the TLS server's certificate private key. The native key codec
+supports X25519, X448, P-256, P-384 and P-521. It reads BER and DER and writes
+DER. NIST keys with the ECDH-only PKCS #8 algorithm identifier retain that
+restriction on export. Applications without the native provider may supply
+a PKCS #8 codec, and public-only parsing requires only the allocator.
+
+For a shared server, put an `EchServerConfig::from_pems` result in
+`ServerConfig::ech`. A split-mode client-facing server uses the same
+configuration for decryption and for its local TLS fallback. Pass decryption
+bundles and advertised retry lists separately. This allows a retiring key to
+continue decrypting existing client offers while the retry list advertises
+only current configs. A public-only retry config may identify a key on
+another instance if clients can reach it using the original deployment's
+retry routing. Clients with a public file select a config using
+`EchConfig::from_pem`.
+
+Tokio's buffered and unbuffered connectors and acceptors also accept parsed
+PEM inputs through `from_ech_pem`. Linux kTLS helpers prepare the userspace
+connection. The existing handoff APIs still manage kernel offload and fallback
+with explicit opt-in to traffic secret extraction.
+
 ### QUIC-TLS (RFC 9001)
 
 `browntls_core::quic` is the TLS half of QUIC, shaped like `rustls::quic`: a
@@ -2504,6 +2696,222 @@ supported.
   the §5.8 tag with a provider's TLS_AES_128_GCM_SHA256 suite (any other
   suite is refused).
 
+### DTLS 1.3 (RFC 9147)
+
+`browntls_core::dtls` runs the TLS 1.3 handshake over datagrams. It is a
+low-level, sans-I/O API: `dtls::ClientConnection` and
+`dtls::ServerConnection` take each received datagram with `read_datagram`
+(which decrypts application data in place and returns its ranges), produce
+whole datagrams with `write_datagram`, and leave the socket and the clock to
+the caller, who passes a monotonic time to every call and fires
+`handle_timeout` once `next_timeout` has passed. DTLS 1.3 is the default.
+Explicit endpoint policy can enable DTLS 1.2 certificate handshakes and
+separately configured session ID or RFC 5077 ticket resumption with the
+`tls12` feature; see [DTLS 1.2](DTLS12.md) for the APIs, policy and transport
+separation, protocol boundaries and outstanding qualification. The following
+record and handshake details describe DTLS 1.3.
+
+- Handshake: the TLS 1.3 state machines with the DTLS hello encoding
+  (`legacy_cookie`, DTLS version numbers, an empty session ID that is never
+  echoed), no ChangeCipherSpec and no EndOfEarlyData. A configuration must
+  allow TLS 1.3 and hold a suite with DTLS record protection: every TLS 1.3
+  suite but TLS_AES_128_CCM_8_SHA256 (§4.5.3), which is never offered.
+  Tickets are kept apart from TLS ones, so a DTLS connection never resumes
+  a TLS session or the reverse; resumption with a ticket works as in TLS.
+- Records: unified headers with encrypted record numbers (§4.2.3), a
+  replay window of 128 records per epoch, and at most four keyed receiving
+  epochs kept for reordered records. Records that do not authenticate, are
+  replayed or cannot be delimited are dropped silently (§4.5.2).
+  Unprotected input, which anyone who knows an address can forge, counts
+  for little: unprotected ACKs are ignored; unprotected alerts end the
+  handshake only before the peer has authenticated, and only fatal error
+  alerts (not close_notify or user_canceled); unprotected handshake
+  fragments are buffered only as the peer's hello at the next expected
+  message sequence, while no handshake read keys are installed, and
+  otherwise only signal a retransmission, which they earn at most once per
+  timeout.
+  When failed decryptions in an epoch exceed the suite's integrity limit
+  the connection fails (§4.5.3), and the confidentiality limit triggers a
+  KeyUpdate. Connection IDs require explicit DTLS settings (below).
+- Handshake messages are fragmented to the datagram size (`set_mtu`: 256 to
+  65507 bytes, 1200 by default), reassembled out of order within bounded
+  windows, acknowledged per §7 and retransmitted on a timer that starts at
+  one second, doubles up to 60 seconds and gives up after nine
+  retransmissions. The keys of a KeyUpdate are used only once it is
+  acknowledged (§8), and no second KeyUpdate is sent meanwhile. Nothing
+  sent after a close_notify is read (RFC 9846 §6.1). A close_notify of
+  ours is sent after everything queued before it, and nothing is
+  retransmitted after it, except a client's last flight: it is
+  retransmitted with close_notify after it until acknowledged, or
+  quietly given up after nine retransmissions, so that the server
+  completes its handshake. Once the peer's close_notify arrives nothing
+  more is retransmitted, but a client whose last flight is not
+  completely sent yet sends it once; an ACK still owed and our own
+  close_notify are sent, and application data can still be, under the
+  current keys. Closing before our Finished is queued cancels the
+  handshake: the peer, which ignores an unprotected close_notify, gives
+  up on its own timer. A server that closes before its handshake
+  completes may never complete it, with no timer left, so nothing should
+  wait for the handshake after `send_close_notify`.
+- Application data is never fragmented: `send` seals one record into one
+  datagram and refuses data longer than `max_application_data`.
+- Cookies: `ServerConnection::new` answers a ClientHello without a valid
+  cookie with a HelloRetryRequest whose cookie is bound to the
+  caller-provided address of the client (opaque bytes, §5.1), so that a
+  spoofed address costs the server one small datagram and one connection
+  object; `dtls::Acceptor` (below) keeps no state at all. It needs
+  `ServerConfig::hello_retry_cookies`; the exchange is on by default and
+  `new_without_cookie_exchange` turns it off for paths whose address is
+  already verified. `dtls::Acceptor` answers first ClientHellos without
+  keeping any state and returns a connection only for a ClientHello that
+  comes back with a valid cookie for its address. A second ClientHello
+  that spans several datagrams must carry the cookie in its first
+  fragment (browntls clients send it first), which is checked before
+  anything is kept.
+- Connection IDs: opt-in through `dtls::Settings::with_connection_ids` and
+  the low-level client/server `new_with_settings` constructors.
+  Servers on already verified paths can instead use
+  `new_without_cookie_exchange_with_settings`.
+  `ConnectionIdPolicy::new(receive_len, allow_sending)` selects a fixed
+  local receiving length of 8 to 32 bytes, or zero for the empty receiving
+  direction, independently of permission to send nonempty peer IDs. A server
+  declines an offer that requires forbidden sending; a client fails a
+  selection forbidden by its policy. Local IDs come from the configured
+  provider's random source; peer IDs may have any wire length, including
+  zero. A selected CID that leaves no room for handshake fragments or a
+  one-record ACK at the configured MTU makes output fail explicitly until
+  the MTU is raised.
+  Negotiation uses ClientHello and ServerHello (RFC 9146), never
+  EncryptedExtensions, stream TLS or QUIC. All protected records carry the
+  selected nonempty CID in their authenticated unified header. A missing
+  or wrong receiving CID discards the rest of the datagram (RFC 9147 §4).
+  `Received::authenticated_records` reports only records that passed
+  association, traffic-key authentication and replay checks. Path
+  migration also requires an independent return-routability check.
+  `local_connection_ids` supplies wrapper lookup IDs,
+  including those in pending updates, after negotiation.
+  Wrappers must detect collisions when registering IDs across associations;
+  local generation checks uniqueness only within its own association.
+  `issue_connection_ids` and `request_connection_ids` implement RFC 9147 §9
+  only after the handshake. Each message type permits one outstanding
+  transmission until ACK; a request also waits for a response, which may
+  contain no IDs. Requests receive spare IDs, with one coalesced response
+  while an earlier update awaits ACK; excess requests fail with
+  `too_many_cids_requested`. At most 16 local IDs are ever issued per
+  association, including its initial ID, with four generation attempts per
+  ID to avoid reuse. All issued IDs remain valid until the association
+  ends. Peer spare
+  storage is capped at 16 and duplicates are coalesced. Immediate updates
+  select the first provided ID; spare updates retain the current one.
+  When the local quota is exhausted, spare responses contain no IDs and
+  local immediate issuance fails. DTLS 1.2 uses the RFC 9146 type-25
+  header and AEAD authentication data, without connection ID rotation.
+  Both built-in providers support either CID direction for DTLS 1.2.
+- Path validation: `Settings::with_return_routability_checks` opts into
+  RFC 9853 with CID. A new address can become active after a fresh,
+  authenticated record advances the receiving sequence and the peer
+  answers a protected challenge on that address. Enhanced validation
+  probes the existing path first. Candidate responses and probes share a
+  three-times received-byte limit. Transport adapters keep ordinary output
+  on the validated address and discard candidate application input while
+  validation is pending. Blocking and Tokio clients can replace a
+  connected local UDP socket while retaining the association and clock.
+  A single-socket server responds to a valid probe on its preferred
+  local socket independently of validation of the peer's address.
+  A server handle stays bound to the originally admitted address and its
+  current validated address is reported separately. See
+  [Tokio DTLS](../crates/browntls-tokio/README.md#dtls-over-udp).
+- DTLS currently omits 0-RTT, Encrypted Client Hello, and post-handshake
+  client authentication.
+
+With the `std` feature, `dtls::UdpClient` and `dtls::UdpServer` run these
+connections over `std::net::UdpSocket` with blocking calls. While a call
+blocks it retransmits and acknowledges as the connections ask, on a clock
+that starts when the object is made, unless a client retains an existing
+clock origin.
+
+- `UdpClient` holds one connection over a socket connected to its server.
+  `connect` returns once the handshake completes (`from_connection` pairs a
+  connection configured beforehand, for example its MTU, with a socket, and
+  `complete_handshake` runs the handshake). Each `send` is one datagram of
+  application data and each `recv` returns one; `recv` skips empty
+  datagrams and returns 0 once the server sent close_notify. `connection_mut`
+  reaches the connection, for example to refresh its keys, and
+  `into_parts` returns it with the socket, dropping what was received and
+  not yet returned. `from_connection` starts a clock at zero and is for a
+  connection not yet driven. To rewrap an in-progress connection, use
+  `into_parts_with_clock` and `from_connection_with_clock`: they transfer
+  the original `Instant`, so retained retransmission and acknowledgement
+  deadlines include time spent outside the wrapper. Low-level I/O between
+  wrappers must use durations measured as `start.elapsed()`. Neither parts
+  method transfers the read timeout or buffered application data.
+- `UdpServer` holds many clients on one socket and tells them apart by their
+  address only. `next_event` returns the next `ServerEvent`, and only for
+  clients that completed a handshake: `Connected`, `Received` (one datagram of
+  application data, empty ones included), `Closed` (the client's close_notify;
+  the connection is gone) or `Failed` (likewise). `send_to`, `close`
+  (close_notify, then the connection is forgotten), `remove` (forgotten without
+  a word) and `connection_mut` act on a connected client. A ClientHello from the
+  address of an existing connection, such as a client restarted on the same
+  port, is ignored until that connection is removed. Queued events precede
+  further socket or timer work. If Finished, data and close_notify arrive
+  together, the connection remains available through `Connected` and
+  `Received`, and is removed when `Closed` is returned. Closing a retained
+  connection discards its queued events. `remove` also discards queued
+  events for an address whose connection has already been removed.
+- Cookies: every datagram from an address without a connection goes to a
+  `dtls::Acceptor`, so the server configuration needs
+  `hello_retry_cookies`, and a client costs nothing but one
+  HelloRetryRequest until it answers from the same address with a valid
+  cookie.
+- Bounds: at most 256 handshakes run at once (`set_max_handshakes`), and a
+  new one replaces the oldest; lowering the limit drops nothing until the
+  next handshake starts. The limit counts addresses, so one host using many
+  ports can displace other hosts' handshakes. A handshake that does not
+  complete within 30 seconds (`set_handshake_timeout`, from the next
+  handshake on) is dropped; a timeout shorter than the gap between the
+  datagrams of a client's second flight drops every handshake (a second
+  ClientHello often takes two datagrams). Connected clients are not
+  bounded: they stay until they close or fail, or the application closes
+  or removes them. The timers of all connections share one queue, rebuilt
+  from the connections once it holds more than twice as many entries
+  as there are connections, plus 64.
+- Read timeouts: none by default, so `connect`, `complete_handshake`,
+  `recv` and `next_event` wait as long as the connection does (a handshake
+  the server never answers fails once its retransmissions run out, after
+  about five minutes). With `set_read_timeout` they fail with
+  `io::ErrorKind::TimedOut` once it passes, but still read what arrives
+  within a millisecond of each look, up to 64 datagrams: even a zero
+  timeout takes a datagram that is waiting, and a stream of junk cannot
+  hold the timeout off. A handshake that timed out continues with the next
+  call.
+- Live OCSP checks (`browntls_core::revocation`) are not supported: a
+  client's handshake that would wait for one fails with
+  `io::ErrorKind::Unsupported`, and a server's is dropped.
+
+Evidence: in-memory handshakes between browntls endpoints over a simulated
+network with loss, duplication, reordering, corruption and small datagrams
+on both providers (`crates/browntls-core/tests/cases/dtls.rs`), unit tests
+of the record, reassembly, replay and hello codecs, and the `tls_dtls` fuzz
+target ([`fuzz/`](../fuzz/README.md)). The blocking API has tests over IPv4
+and IPv6 loopback sockets on both providers
+(`crates/browntls-core/tests/cases/dtls_udp.rs`). The `tls_dtls_udp` fuzz
+target drives a server and several clients over loopback through fuzz-chosen
+calls and junk datagrams. Targeted blocking regressions
+cover combined Finished/data/close events, explicit peer removal and a
+retained overdue retransmission after client rewrapping; the IPv6 test
+asserts the cookie contains the source address and port. Scoped IPv6
+addresses are not covered. Loopback neither loses nor reorders datagrams;
+broader loss recovery is exercised by the simulated network of the
+sans-I/O tests. The
+[Docker DTLS suite](../tests/e2e/README.md#dtls-13-interoperability)
+covers mutually authenticated full DTLS 1.3 handshakes against wolfSSL in
+both roles, with ECDSA P-256, application data and `close_notify`.
+The opt-in Pion suite checks RFC 9853 rebind after mutual authentication and
+an application exchange on one association. The simulated network checks
+ACK loss and ordering, timeout, epoch rollover and replay independently
+of peer support for those scenarios.
+
 ### Cargo features (`browntls-core`)
 
 | Feature | Default | Effect |
@@ -2514,6 +2922,7 @@ supported.
 | `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
 | `tls12` | yes | TLS 1.2 support |
 | `logging` | yes | `log` crate diagnostics |
+| `key-log` | no | RFC 9850 key-log callbacks and, on Linux, the explicit-path file sink |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
 | `zlib` | no | zlib certificate compression (RFC 8879), `miniz_oxide` |
 | `brotli` | no | Brotli certificate compression (RFC 8879), `brotli`; enables `std` |
@@ -2532,7 +2941,8 @@ pair per RFC 8879 algorithm (`compress::ZLIB`, `BROTLI`, `ZSTD`). Enabled
 built-ins are the default compressor and decompressor lists of new client and
 server configurations, in the order Brotli, zlib, Zstandard; without those
 features the lists are empty and the extension is neither offered nor
-accepted. Compression applies to TLS 1.3 only, in both directions: a server
+accepted. Compression applies in both directions in TLS 1.3, DTLS 1.3,
+and QUIC-TLS: a server
 compresses its Certificate with its first compressor the ClientHello offered,
 a client its own with the first one the CertificateRequest offered, and a
 built-in compressor sends uncompressed a message that compression would not
@@ -2544,9 +2954,9 @@ On receipt (`compress::receive_compressed_certificate`, used by both sides):
 
 - an algorithm that was not offered is `illegal_parameter`;
 - `uncompressed_length` must be non-zero and at most the configuration's
-  `cert_decompression_limit`, itself capped at 64 KiB
-  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the limit for an
-  uncompressed Certificate message); the codec already rejects a length above
+  `cert_decompression_limit`, itself capped at 65,535 bytes
+  (`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`, the same handshake body
+  limit as for an uncompressed Certificate); the codec rejects a length above
   that cap with `decode_error`, anything else over a limit is
   `bad_certificate`, in both cases before any decompression;
 - the output buffer is allocated once at the declared length and the
@@ -2565,18 +2975,25 @@ length and the format, never by what the stream declares:
 |---|---|---|
 | zlib | Fixed decoder state (about 11 KiB); the output buffer is the window | |
 | Brotli | A window of at most the expected length rounded up to a power of two (the decoder's byte allocator refuses larger requests, so a stream announcing more fails without the allocation), context maps up to 16 KiB, prefix code tables (at most 256 per category) | Large-window streams |
-| Zstandard | The declared window, at most 128 KiB, plus one block (128 KiB) and entropy tables | Skippable frames, dictionaries, a declared content size other than the expected length, a window above 128 KiB |
+| Zstandard | At most 128 KiB of retained history and bounded block scratch, including temporary growth during a rejected block | Skippable frames, a nonzero dictionary ID, and windows or blocks outside the limits |
 
-The Zstandard window limit is below the 8 MiB that RFC 8878 §3.1.1.1.2
-recommends decoders accept. One-shot encoders, which know the size of a
-Certificate message, write single-segment frames whose window is the content
-size, and the built-in encoder declares 128 KiB; a frame from a streaming
-encoder that was not told the size (libzstd then declares at least 512 KiB)
-is refused. `tests/cert_compression_memory.rs` checks, on Linux, that
-refusing streams of at most about 52 KB (a few hundred bytes for Brotli and
-Zstandard) which announce 8 to 16 MiB does not raise the process's peak
-resident memory by more than 1 MiB. Zstandard
-compression uses the single level `ruzstd` implements.
+With `zstd` enabled, `ClientConfig::cert_zstd_decompression_limits` and
+`ServerConfig::cert_zstd_decompression_limits` govern the built-in decoder
+independently of the expanded body limit. The defaults accept advertised
+windows up to 8 MiB and cap decoder history at 128 KiB. For a large
+advertised window the decoder uses at most 128 KiB when the longest
+acceptable frame output fits in that history. The decoder handles up to
+64 concatenated data frames and verifies any checksum. Each declared
+content size and the aggregate expanded length must match exactly.
+
+Callers can set stricter limits with `ZstdDecompressionLimits::new`, or
+pass them to `ZSTD.decompress_with_limits` for direct use. Both configs flow
+through the buffered, unbuffered, Tokio, DTLS and QUIC-TLS entry points.
+Stream post-handshake client authentication uses the same receiving
+policy. Linux kTLS inherits the authenticated connection after the userspace
+handshake. Zstandard compression uses the single level implemented by
+`ruzstd`.
+
 
 ## Primitive backends
 
@@ -3048,7 +3465,7 @@ entropy from the optional `getrandom` crate feature.
 | Primitives | RFC/NIST known-answer tests, Wycheproof vectors, differential tests against RustCrypto, and every available backend compared with the portable one |
 | Platforms | Native x86-64 and aarch64 on GitHub-hosted Ubuntu 26.04 runners (each with dispatch and portable-only builds; the Arm runner implements every Armv8 extension the backends use) and riscv64 on the RISE runner, plus QEMU user-mode profiles for the x86-64 SHA-NI/VAES tier and every RISC-V tier (static musl binaries, since the Ubuntu 26.04 riscv64 glibc requires RVA23) (scalar, Zk, RVV with VLEN 128 with and without vector crypto, and VLEN 256 and 1024 with vector crypto) |
 | PKI | Run-time generated certificate chains, curated public test certificates, malformed-input robustness |
-| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
+| TLS | Codec round trips and rejection tests, in-memory handshakes across suites, groups, signature schemes and versions (Encrypted Client Hello: accepted, after a HelloRetryRequest, with resumption, rejected with retry configurations, GREASE, and tampered second ClientHellos, `crates/browntls-core/tests/ech_native.rs`), DTLS 1.3 handshakes between browntls endpoints over a simulated lossy, reordering and corrupting network (`crates/browntls-core/tests/cases/dtls.rs` and the Docker wolfSSL peer), interoperability with rustls in both directions (TLS and QUIC-TLS; asynchronous streams against tokio-rustls over loopback TCP, `crates/browntls-tokio/tests/interop.rs`), RFC 9001 Appendix A packet protection vectors, and with the OpenSSL 3 command-line tool over loopback TCP in both directions, with and without client authentication, plus `s_client` answering post-handshake authentication and following a stateless HelloRetryRequest onto a fresh connection (`crates/browntls-core/tests/openssl_interop.rs`, required in the native x86-64 and aarch64 CI jobs) |
 | Entropy | Millions of samples per public generator (OS entropy and both providers' `secure_random`, every key-generation function, HPKE, key-exchange groups, ticket keys and nonces, and full TLS 1.3 and 1.2 handshakes for randoms, session IDs, key shares and traffic secrets), each checked for duplicates, bit and byte bias with per-byte min-entropy and Shannon floors, window collision entropy, repeated blocks and serial correlation at a 10^-9 false-alarm level, on x86-64, and at smoke size on aarch64 and riscv64 ([`crates/browntls-entropy/`](../crates/browntls-entropy/README.md)); detects visible low entropy only, not a well-hashed small seed |
 | Fuzzing | cargo-fuzz targets for the message codecs, deframer, certificate decompression, PKI parsers and path validation, both connection state machines, and API-sequence targets grouped by topic that together reach every public function of `browntls-crypto`, `browntls-pki`, `browntls-core` and `browntls-tokio` (`browntls-ktls` is not fuzzed; `browntls` defines no function of its own) ([`fuzz/`](../fuzz/README.md)); CI runs generated seeds on the stable toolchain, checks public API coverage, and fuzzes the targets as a GitHub Actions matrix on one x86-64 runner on pull requests and weekly |
 | Facade | `browntls` adds paths and features, no behaviour: a handshake through each of its three paths (the root, `browntls::tokio`, and `browntls::ktls` against the running kernel), probes that the forwarded features reach the crates behind it, the feature sets an application picks in their own CI job, and a manifest check of the feature tables (`crates/browntls/tests/`, `tests/scripts/check_facade_features.py`; see [Facade crate](#facade-tests)) |
@@ -3057,6 +3474,10 @@ entropy from the optional `getrandom` crate feature.
 Test certificates and keys are generated at run time; no private keys are
 committed. Successful CI is evidence for the tested configurations only and
 is not a security assessment.
+
+The [RFC hardening integration report](RFC-Hardening-Integration.md) maps
+the Phase 0–5 requirements to public APIs, the tested provider and feature
+configurations, and native Linux peer and Service runs.
 
 ## Status
 

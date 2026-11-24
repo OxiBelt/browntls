@@ -9,6 +9,8 @@ mod prov;
 
 mod common;
 
+#[path = "ech_native/pem_config.rs"]
+mod pem_config;
 #[path = "ech_native/shared_mode.rs"]
 mod shared_mode;
 #[path = "ech_native/split_backend.rs"]
@@ -145,6 +147,36 @@ fn assert_accepted(client: &mut ClientConnection, server: &mut ServerConnection)
         b"hidden hello"
     );
     assert_eq!(send_and_receive(server, client, b"reply"), b"reply");
+}
+
+#[test]
+fn rfc9973_offer_and_identity_are_inner_only() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+    use hello_wire::{give, hello_extension_types, take_flight};
+
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(19)]).unwrap());
+    let mut config = client_config(&certs, enable(ech.ech_config_list()));
+    let identity = b"private identity for RFC 9973";
+    let key =
+        Arc::new(ExternalPsk::new(identity.to_vec(), vec![42; 32], HashAlgorithm::SHA256).unwrap());
+    config.external_psks = vec![key.clone()];
+    config.cert_with_extern_psk = true;
+    let mut server_config = server_config(&certs, Some(&ech), None);
+    server_config.external_psks = Some(Arc::new(vec![key]));
+    server_config.require_cert_with_extern_psk = true;
+    let (mut client, mut server) = connect(config, server_config);
+    let outer = take_flight(&mut client);
+    assert!(!hello_extension_types(&outer, true).contains(&0x0021));
+    assert!(!outer.windows(identity.len()).any(|bytes| bytes == identity));
+
+    give(&mut server, &outer);
+    server.process_new_packets().unwrap();
+    assert_accepted(&mut client, &mut server);
+    assert!(client.negotiated_cert_with_extern_psk());
+    assert!(server.negotiated_cert_with_extern_psk());
+    assert_eq!(server.external_psk_identity(), Some(identity.as_slice()));
 }
 
 /// Runs a handshake the server rejects ECH in; returns the client's error.
@@ -430,5 +462,70 @@ impl Split {
         assert_eq!(backend.server_name(), Some(SECRET));
         assert_eq!(self.client.alpn_protocol(), Some(&b"h2"[..]));
         self.exchange();
+    }
+}
+
+#[cfg(feature = "key-log")]
+#[test]
+fn key_log_uses_the_effective_client_random() {
+    use std::sync::Mutex;
+
+    use browntls_core::KeyLog;
+    use hello_wire::{give, take_flight};
+
+    #[derive(Debug, Default)]
+    struct Randoms(Mutex<Vec<[u8; 32]>>);
+
+    impl KeyLog for Randoms {
+        fn log(&self, _: &str, client_random: &[u8], _: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(client_random.try_into().unwrap());
+        }
+    }
+
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(19)]).unwrap());
+    let grease = EchGreaseConfig::generate(DH_KEM_X25519_HKDF_SHA256_AES_128).unwrap();
+    for (mode, server_ech, expected) in [
+        (
+            enable(ech.ech_config_list()),
+            Some(&ech),
+            EchStatus::Accepted,
+        ),
+        (enable(ech.ech_config_list()), None, EchStatus::Rejected),
+        (Some(EchMode::Grease(grease)), None, EchStatus::Grease),
+    ] {
+        let client_log = Arc::new(Randoms::default());
+        let server_log = Arc::new(Randoms::default());
+        let mut client_config = client_config(&certs, mode);
+        client_config.key_log = client_log.clone();
+        let mut server_config = server_config(&certs, server_ech, None);
+        server_config.key_log = server_log.clone();
+        let (mut client, mut server) = connect(client_config, server_config);
+
+        let flight = take_flight(&mut client);
+        let outer: [u8; 32] = flight[11..43].try_into().unwrap();
+        give(&mut server, &flight);
+        server.process_new_packets().unwrap();
+        if expected == EchStatus::Rejected {
+            expect_rejected(&mut client, &mut server);
+        } else {
+            do_handshake(&mut client, &mut server).unwrap();
+        }
+        assert_eq!(client.ech_status(), expected);
+
+        let client_entries = client_log.0.lock().unwrap();
+        let server_entries = server_log.0.lock().unwrap();
+        let first = *client_entries.first().expect("client did not log");
+        assert!(!server_entries.is_empty(), "server did not log");
+        assert!(
+            client_entries
+                .iter()
+                .chain(server_entries.iter())
+                .all(|r| *r == first)
+        );
+        assert_eq!(first != outer, expected == EchStatus::Accepted);
     }
 }

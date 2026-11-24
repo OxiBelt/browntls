@@ -14,7 +14,7 @@ fn handshake_with_delegated_credential() {
         ] {
             let (dc, key) = issue(&chain, dc_scheme, shifted(24 * 3600));
             let ck = certified_key(&chain)
-                .with_delegated_credential(dc.clone(), key)
+                .with_delegated_credential(dc.clone(), key, &provider())
                 .unwrap();
             let verifier = SchemeRecordingServerVerifier::new(
                 PinnedServerVerifier::new(&chain),
@@ -54,7 +54,7 @@ fn not_used_unless_both_sides_opt_in() {
     let chain = delegation_server_chain(KeyType::EcdsaP256);
     let (dc, key) = issue(&chain, SignatureScheme::ED25519, shifted(3600));
     let ck = certified_key(&chain)
-        .with_delegated_credential(dc, key)
+        .with_delegated_credential(dc, key, &provider())
         .unwrap();
 
     // The client did not offer the extension: the certificate key signs.
@@ -112,11 +112,11 @@ fn server_skips_unusable_credentials() {
         shifted(3600),
     );
     let ck = certified_key(&chain)
-        .with_delegated_credential(expired, k1)
+        .with_delegated_credential(expired, k1, &provider())
         .unwrap()
-        .with_delegated_credential(too_long, k2)
+        .with_delegated_credential(too_long, k2, &provider())
         .unwrap()
-        .with_delegated_credential(good.clone(), k3)
+        .with_delegated_credential(good.clone(), k3, &provider())
         .unwrap();
     let (mut client, mut server) = connect(dc_client(&chain), server_with(ck));
     do_handshake(&mut client, &mut server).unwrap();
@@ -132,7 +132,7 @@ fn rejected_by_client(
     let chain = delegation_server_chain(KeyType::EcdsaP256);
     let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
     let ck = certified_key(&chain)
-        .with_delegated_credential(dc, key)
+        .with_delegated_credential(dc, key, &provider())
         .unwrap();
     let mut server = server_with(ck);
     server.time_provider = Arc::new(FixedTime(shifted(server_skew)));
@@ -172,26 +172,30 @@ fn credential_valid_too_long_is_illegal_parameter() {
 }
 
 #[test]
-fn tampered_credential_is_illegal_parameter() {
+fn tampered_credential_is_rejected_at_attachment() {
     let chain = delegation_server_chain(KeyType::EcdsaP256);
     let (mut dc, key) = issue(&chain, SignatureScheme::ED25519, shifted(3600));
     // Moving the expiry by a second invalidates the signature.
     dc.credential.valid_time -= 1;
-    let ck = certified_key(&chain)
-        .with_delegated_credential(dc, key)
-        .unwrap();
-    let (mut client, mut server) = connect(dc_client(&chain), server_with(ck));
-    let (client, server) = do_handshake_until_error(&mut client, &mut server);
-    assert_eq!(
-        client,
-        Err(Error::PeerMisbehaved(
-            PeerMisbehaved::DelegatedCredentialBadSignature
+    assert!(matches!(
+        certified_key(&chain).with_delegated_credential(dc, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
         ))
-    );
-    assert_eq!(
-        server,
-        Err(Error::AlertReceived(AlertDescription::IllegalParameter))
-    );
+    ));
+}
+
+#[test]
+fn a_valid_credential_for_a_different_leaf_is_rejected_at_attachment() {
+    let issuing_leaf = delegation_server_chain(KeyType::EcdsaP256);
+    let different_leaf = delegation_server_chain(KeyType::Ed25519);
+    let (dc, key) = issue(&issuing_leaf, SignatureScheme::ED25519, shifted(3600));
+    assert!(matches!(
+        certified_key(&different_leaf).with_delegated_credential(dc, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::BadIssuerSignature
+        ))
+    ));
 }
 
 #[test]
@@ -205,14 +209,14 @@ fn credential_key_must_match() {
     let (other_key, _) = dc_key(&rcgen::PKCS_ECDSA_P256_SHA256);
     assert!(
         certified_key(&chain)
-            .with_delegated_credential(dc.clone(), other_key)
+            .with_delegated_credential(dc.clone(), other_key, &provider())
             .is_err()
     );
     // A key that cannot sign with the credential's scheme.
     let (ed_key, _) = dc_key(&rcgen::PKCS_ED25519);
     assert!(
         certified_key(&chain)
-            .with_delegated_credential(dc, ed_key)
+            .with_delegated_credential(dc, ed_key, &provider())
             .is_err()
     );
 }
@@ -238,7 +242,7 @@ fn certificate_must_permit_delegation() {
             &chain.end_entity,
             &*cert_key,
             chain.key_type.schemes(),
-            credential.clone(),
+            credential.clone()
         )
         .is_err()
     );
@@ -247,7 +251,7 @@ fn certificate_must_permit_delegation() {
     let (dc, key) = issue(&delegation, SignatureScheme::ED25519, shifted(3600));
     assert!(
         certified_key(&chain)
-            .with_delegated_credential(dc, key)
+            .with_delegated_credential(dc, key, &provider())
             .is_err()
     );
 }
@@ -260,7 +264,7 @@ fn wire_round_trip() {
         SignatureScheme::ECDSA_NISTP256_SHA256,
         shifted(3600),
     );
-    let bytes = dc.to_bytes();
+    let bytes = dc.to_bytes().unwrap();
     assert_eq!(DelegatedCredential::from_bytes(&bytes).unwrap(), dc);
     let expiry = dc.expiry(&chain.end_entity).unwrap().as_secs();
     assert!(expiry.abs_diff(shifted(3600).as_secs()) <= 1);
@@ -339,7 +343,7 @@ fn hand_made_client_certificate(
     for (cert, dc) in entries {
         let mut extensions = Vec::new();
         if let Some(dc) = dc {
-            let dc = dc.to_bytes();
+            let dc = dc.to_bytes().unwrap();
             extensions.extend([0x00, 0x22]);
             extensions.extend(u16(dc.len()));
             extensions.extend(&dc);

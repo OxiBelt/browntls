@@ -348,6 +348,7 @@ fn handshake(input: &mut Input) -> bool {
             .expect("a valid ClientHello")
             .expect("a complete ClientHello");
         let view = accepted.client_hello();
+        assert!(!view.offers_cert_with_extern_psk());
         assert_eq!(view.external_id_hash(), client_sent.id_hash.as_ref());
         assert_eq!(view.external_session_id(), client_sent.session_id.as_ref());
         match accepted.into_connection(server_config) {

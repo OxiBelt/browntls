@@ -3,6 +3,7 @@
 
 mod certificate_url;
 mod client_auth;
+pub(crate) mod resumption;
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -106,6 +107,13 @@ impl CompleteClientHelloHandling {
             &client_hello.extensions,
             false,
         )?;
+        if let Some(dtls) = cx.common.dtls.as_deref_mut() {
+            let peer = client_hello.extensions.connection_id.as_ref();
+            if dtls.cid.supports_v12_selection(peer, self.suite.record) {
+                dtls.cid.select(peer, true)?;
+            }
+            dtls.select_rrc(client_hello.extensions.return_routability_check.is_some());
+        }
         let client_supports_secure_renegotiation = client_hello
             .cipher_suites
             .contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV)
@@ -119,22 +127,43 @@ impl CompleteClientHelloHandling {
             ));
         }
 
-        self.transcript.add_message(chm);
+        if let Some(dtls) = &cx.common.dtls {
+            if let MessagePayload::Handshake { encoded, .. } = &chm.payload {
+                self.transcript.add(&crate::dtls::canonical12(
+                    encoded.bytes(),
+                    dtls.received_seq,
+                ));
+            }
+        } else {
+            self.transcript.add_message(chm);
+        }
 
         let ticket_requested = client_hello.extensions.session_ticket.is_some();
 
         // RFC 8844 §5: a bound connection neither resumes nor is resumed.
-        let resumable =
-            !client_revocation_enabled(&self.config) && self.config.external_binding.is_none();
+        let resumable = resumption::bind(
+            cx,
+            &self.config,
+            self.suite,
+            server_key.get_cert(),
+            &self.cert_types,
+        ) && !client_revocation_enabled(&self.config)
+            && self.config.external_binding.is_none();
         // RFC 5077 §3.4: a ticket takes precedence over a session ID.
         if resumable
             && let Some(ClientSessionTicket::Offer(ticket)) =
                 &client_hello.extensions.session_ticket
-            && let Some(resume) = self
-                .config
-                .ticketer
+            && (!cx.common.is_dtls() || resumption::ticketer(&self.config, cx.common).enabled())
+            && let Some(resume) = resumption::ticketer(&self.config, cx.common)
                 .decrypt(ticket.bytes())
-                .and_then(|plain| ServerSessionValue::read_bytes(&plain).ok())
+                .and_then(|plain| {
+                    resumption::decode(
+                        cx,
+                        &self.config,
+                        &plain,
+                        Some(resumption::ticketer(&self.config, cx.common).lifetime()),
+                    )
+                })
             && hs::can_resume(self.suite.into(), &cx.data.sni, self.using_ems, &resume)
         {
             return self.start_resumption(
@@ -147,19 +176,27 @@ impl CompleteClientHelloHandling {
         }
 
         if resumable
+            && (!cx.common.is_dtls()
+                || !matches!(
+                    &client_hello.extensions.session_ticket,
+                    Some(ClientSessionTicket::Offer(_))
+                ))
             && !client_hello.session_id.is_empty()
             && let Some(resume) = self
                 .config
                 .session_storage
-                .get(client_hello.session_id.as_ref())
-                .and_then(|plain| ServerSessionValue::read_bytes(&plain).ok())
+                .get(&resumption::key(
+                    cx.common,
+                    client_hello.session_id.as_ref(),
+                ))
+                .and_then(|plain| resumption::decode(cx, &self.config, &plain, None))
             && hs::can_resume(self.suite.into(), &cx.data.sni, self.using_ems, &resume)
         {
             // The entry stays in the cache for later resumptions unless this
             // connection fails (RFC 5246 §7.2.2).
             cx.data.tls12_session = Some((
                 self.config.session_storage.clone(),
-                client_hello.session_id.as_ref().to_vec(),
+                resumption::key(cx.common, client_hello.session_id.as_ref()).into_owned(),
             ));
             return self.start_resumption(
                 cx,
@@ -172,7 +209,9 @@ impl CompleteClientHelloHandling {
 
         // A session created without client authentication would also
         // bypass a verifier that requires fresh authentication later.
-        self.send_ticket = resumable && ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket = resumable
+            && ticket_requested
+            && resumption::ticketer(&self.config, cx.common).enabled();
         self.session_id =
             if resumable && !self.send_ticket && self.config.session_storage.can_cache() {
                 SessionId::random(self.config.provider.secure_random)?
@@ -205,7 +244,11 @@ impl CompleteClientHelloHandling {
         let cached = ServerCachedInfo::new(
             &self.config.cached_info,
             &self.config.provider,
-            client_hello.extensions.cached_info.as_ref(),
+            if cx.common.is_dtls() {
+                None
+            } else {
+                client_hello.extensions.cached_info.as_ref()
+            },
             certificate_message(server_key.get_cert()),
             certificate_request(&self.config)?.map(|request| {
                 HandshakeMessagePayload(HandshakePayload::CertificateRequest(request))
@@ -296,7 +339,8 @@ impl CompleteClientHelloHandling {
             || client_hello.extensions.renegotiation_info.is_some();
 
         self.session_id = *id;
-        self.send_ticket = ticket_requested && self.config.ticketer.enabled();
+        self.send_ticket =
+            ticket_requested && resumption::ticketer(&self.config, cx.common).enabled();
         self.emit_server_hello(
             cx,
             client_hello,
@@ -313,7 +357,9 @@ impl CompleteClientHelloHandling {
             &resumedata.master_secret.0,
             resumedata.extended_ms,
         );
-        self.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*self.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),
@@ -323,10 +369,13 @@ impl CompleteClientHelloHandling {
         cx.common.peer_certificates = resumedata.client_cert_chain.clone();
         cx.data.received_resumption_data = Some(resumedata.application_data.0.clone());
         cx.common.handshake_kind = Some(HandshakeKind::Resumed);
+        if let Some(dtls) = &mut cx.common.dtls {
+            dtls.set_v12_resuming();
+        }
 
         if self.send_ticket {
             let value = make_session_value(cx, &self.config, &secrets, self.suite, self.using_ems)?;
-            emit_ticket(&mut self.transcript, cx.common, &self.config, value)?;
+            emit_ticket(&mut self.transcript, cx, &self.config, value)?;
         }
         cx.common.send_change_cipher_spec();
         emit_finished(&secrets, &mut self.transcript, cx.common);
@@ -355,6 +404,16 @@ impl CompleteClientHelloHandling {
         cached_info: Option<ServerHelloCachedInfo>,
     ) {
         let mut extensions = ServerExtensions {
+            connection_id: cx
+                .common
+                .dtls
+                .as_deref()
+                .and_then(|dtls| dtls.cid.response()),
+            return_routability_check: cx
+                .common
+                .dtls
+                .as_deref()
+                .and_then(|dtls| dtls.rrc_negotiated.then_some(())),
             // RFC 5746 §3.6: echo an empty renegotiation_info to a capable
             // client.
             renegotiation_info: secure_renegotiation.then(PayloadU8::empty),
@@ -375,6 +434,7 @@ impl CompleteClientHelloHandling {
             server_certificate_type: self.cert_types.server,
             // RFC 6066 §5: never on resumption, which sends no certificate.
             client_certificate_url: (!resuming
+                && !cx.common.is_dtls()
                 && certificate_url::acknowledged(&self.config, client_hello, &self.cert_types))
             .then_some(()),
             alpn: cx
@@ -394,6 +454,7 @@ impl CompleteClientHelloHandling {
             .then_some(()),
             // RFC 8449 §4: answered in the TLS 1.2 ServerHello.
             record_size_limit: hs::record_size_limit_ack(
+                cx.common,
                 &self.config,
                 client_hello,
                 ProtocolVersion::TLSv1_2,
@@ -418,11 +479,12 @@ impl CompleteClientHelloHandling {
                     cipher_suite: self.suite.common.suite,
                     compression_method: Compression::Null,
                     extensions,
+                    dtls: cx.common.is_dtls(),
                 }),
             )),
         };
         trace!("sending server hello {:?}", sh);
-        self.transcript.add_message(&sh);
+        cx.common.hash_tls12(&mut self.transcript, &sh);
         cx.common.send_msg(sh, false);
     }
 }
@@ -450,7 +512,7 @@ fn emit_handshake(
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(payload),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -461,7 +523,7 @@ fn emit_cert_status(transcript: &mut HandshakeHash, common: &mut CommonState, oc
             HandshakePayload::CertificateStatus(CertificateStatus::new(ocsp)),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -499,7 +561,7 @@ fn emit_server_kx(
             HandshakePayload::ServerKeyExchange(ServerKeyExchangePayload::Known(skx)),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(kx)
 }
@@ -534,7 +596,7 @@ fn emit_server_hello_done(transcript: &mut HandshakeHash, common: &mut CommonSta
             HandshakePayload::ServerHelloDone,
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
 }
 
@@ -551,7 +613,7 @@ fn emit_finished(
             Payload::new(verify_data),
         ))),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, true);
 }
 
@@ -565,7 +627,11 @@ fn make_session_value(
     let now = config.current_time()?;
     let mut value = ServerSessionValue::new(
         cx.data.sni.as_ref(),
-        ProtocolVersion::TLSv1_2,
+        if cx.common.is_dtls() {
+            ProtocolVersion::DTLSv1_2
+        } else {
+            ProtocolVersion::TLSv1_2
+        },
         suite.common.suite,
         secrets.master_secret(),
         cx.common.peer_certificates.clone(),
@@ -583,25 +649,32 @@ fn make_session_value(
 /// Sends a NewSessionTicket (RFC 5077 §3.3) holding `value`.
 fn emit_ticket(
     transcript: &mut HandshakeHash,
-    common: &mut CommonState,
+    cx: &mut ServerContext<'_>,
     config: &ServerConfig,
     value: ServerSessionValue,
 ) -> Result<(), Error> {
-    let Some(ticket) = config.ticketer.encrypt(&value.get_encoding()) else {
+    let ticketer = resumption::ticketer(config, cx.common);
+    let Some(ticket) = ticketer.encrypt(&resumption::encode(cx, &value)?) else {
         // A failed encryption yields an empty ticket, which the client ignores.
-        return emit_empty_ticket(transcript, common);
+        return emit_empty_ticket(transcript, cx.common);
     };
     let m = Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::NewSessionTicket(NewSessionTicketPayload::new(
-                config.ticketer.lifetime(),
+                if cx.common.is_dtls() {
+                    ticketer
+                        .lifetime()
+                        .min(crate::msgs::persist::MAX_TICKET_LIFETIME)
+                } else {
+                    ticketer.lifetime()
+                },
                 ticket,
             )),
         )),
     };
-    transcript.add_message(&m);
-    common.send_msg(m, false);
+    cx.common.hash_tls12(transcript, &m);
+    cx.common.send_msg(m, false);
     Ok(())
 }
 
@@ -615,7 +688,7 @@ fn emit_empty_ticket(
             HandshakePayload::NewSessionTicket(NewSessionTicketPayload::new(0, Vec::new())),
         )),
     };
-    transcript.add_message(&m);
+    common.hash_tls12(transcript, &m);
     common.send_msg(m, false);
     Ok(())
 }
@@ -666,7 +739,9 @@ impl State<ServerConnectionData> for ExpectClientKx {
         })?;
         cx.common.kx_state.complete();
 
-        st.config.key_log.log(
+        #[cfg(feature = "key-log")]
+        crate::key_log::emit(
+            &*st.config.key_log,
             "CLIENT_RANDOM",
             &secrets.randoms.client,
             secrets.master_secret(),
@@ -708,6 +783,10 @@ struct ExpectCcs {
 }
 
 impl State<ServerConnectionData> for ExpectCcs {
+    fn expects_dtls12_ccs(&self) -> bool {
+        true
+    }
+
     fn handle(self: Box<Self>, cx: &mut ServerContext<'_>, m: Message<'_>) -> NextStateOrError {
         match m.payload {
             MessagePayload::ChangeCipherSpec(..) => {}
@@ -718,7 +797,7 @@ impl State<ServerConnectionData> for ExpectCcs {
                 ));
             }
         }
-        cx.common.record_layer.start_decrypting();
+        cx.common.start_decrypting_tls12();
         Ok(Box::new(ExpectFinished {
             config: self.config,
             secrets: self.secrets,
@@ -767,7 +846,7 @@ impl State<ServerConnectionData> for ExpectFinished {
                     st.secrets.suite(),
                     st.using_ems,
                 )?;
-                emit_ticket(&mut st.transcript, cx.common, &st.config, value)?;
+                emit_ticket(&mut st.transcript, cx, &st.config, value)?;
             } else if !st.session_id.is_empty() {
                 let value = make_session_value(
                     cx,
@@ -776,11 +855,11 @@ impl State<ServerConnectionData> for ExpectFinished {
                     st.secrets.suite(),
                     st.using_ems,
                 )?;
-                let id = st.session_id.as_ref().to_vec();
+                let id = resumption::key(cx.common, st.session_id.as_ref()).into_owned();
                 if st
                     .config
                     .session_storage
-                    .put(id.clone(), value.get_encoding())
+                    .put(id.clone(), resumption::encode(cx, &value)?)
                 {
                     cx.data.tls12_session = Some((st.config.session_storage.clone(), id));
                 } else {

@@ -102,12 +102,8 @@ impl<'a> From<DnsName<'a>> for ServerName<'a> {
 
 /// A syntactically valid DNS name in A-label (ASCII) form.
 ///
-/// Validation follows RFC 1035 label syntax relaxed to permit underscores (as
-/// seen in practice), with these rules: total length 1..=253 (an optional
-/// trailing dot is accepted and preserved), labels 1..=63 bytes of
-/// `[A-Za-z0-9_-]` not starting or ending with `-`, and the final label not
-/// entirely numeric (so dotted-quad strings are never DNS names). Comparison
-/// is ASCII case-insensitive.
+/// Names use strict IDNA hostname validation. An optional trailing dot is
+/// accepted and preserved, and comparison is ASCII case-insensitive.
 #[derive(Clone, Debug)]
 pub struct DnsName<'a>(Cow<'a, str>);
 
@@ -156,8 +152,29 @@ impl core::hash::Hash for DnsName<'_> {
 impl<'a> TryFrom<&'a str> for DnsName<'a> {
     type Error = InvalidDnsNameError;
 
+    /// Validates a DNS name, converting Unicode labels to strict IDNA A-labels.
     fn try_from(s: &'a str) -> Result<Self, Self::Error> {
-        validate_dns_name(s.as_bytes())?;
+        if s.is_ascii() {
+            validate_strict_dns_name(s)?;
+            Ok(Self(Cow::Borrowed(s)))
+        } else {
+            normalize_dns_name(s).map(|ascii| Self(Cow::Owned(ascii)))
+        }
+    }
+}
+
+impl<'a> DnsName<'a> {
+    /// Parses a strict ASCII DNS host name in A-label form.
+    ///
+    /// This rejects Unicode, malformed A-labels, underscores, and names that
+    /// do not satisfy IDNA's strict hostname checks. [`TryFrom<&str>`](TryFrom)
+    /// also accepts U-labels and converts them to A-labels. A trailing dot is
+    /// accepted and preserved. Use this method for untrusted wire fields.
+    pub fn try_from_ascii(s: &'a str) -> Result<Self, InvalidDnsNameError> {
+        if !s.is_ascii() {
+            return Err(InvalidDnsNameError);
+        }
+        validate_strict_dns_name(s)?;
         Ok(Self(Cow::Borrowed(s)))
     }
 }
@@ -165,32 +182,70 @@ impl<'a> TryFrom<&'a str> for DnsName<'a> {
 impl TryFrom<String> for DnsName<'static> {
     type Error = InvalidDnsNameError;
 
+    /// Validates a DNS name, converting Unicode labels to strict IDNA A-labels.
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        validate_dns_name(s.as_bytes())?;
-        Ok(Self(Cow::Owned(s)))
+        if s.is_ascii() {
+            validate_strict_dns_name(&s)?;
+            Ok(Self(Cow::Owned(s)))
+        } else {
+            normalize_dns_name(&s).map(|ascii| Self(Cow::Owned(ascii)))
+        }
     }
 }
 
-fn validate_dns_name(name: &[u8]) -> Result<(), InvalidDnsNameError> {
-    let name = name.strip_suffix(b".").unwrap_or(name);
+fn validate_strict_dns_name(name: &str) -> Result<(), InvalidDnsNameError> {
+    let relative = name.strip_suffix('.').unwrap_or(name);
+    validate_ascii_dns_name(relative)?;
+    // Ordinary LDH labels already satisfy the ASCII rules. The IDNA validator
+    // also checks A-labels, reserved hyphens, and the decoded label context.
+    if relative
+        .split('.')
+        .any(|label| label.as_bytes().get(2..4) == Some(b"--"))
+    {
+        idna_ascii(relative, idna::uts46::DnsLength::Verify)?;
+    }
+    Ok(())
+}
+
+fn normalize_dns_name(name: &str) -> Result<String, InvalidDnsNameError> {
+    if name.is_empty() || name.len() > 1024 {
+        return Err(InvalidDnsNameError);
+    }
+    let ascii = idna_ascii(name, idna::uts46::DnsLength::VerifyAllowRootDot)?;
+    validate_ascii_dns_name(ascii.strip_suffix('.').unwrap_or(&ascii))?;
+    Ok(ascii.into_owned())
+}
+
+fn idna_ascii(
+    name: &str,
+    length: idna::uts46::DnsLength,
+) -> Result<Cow<'_, str>, InvalidDnsNameError> {
+    use idna::uts46::{AsciiDenyList, Hyphens, Uts46};
+
+    Uts46::new()
+        .to_ascii(name.as_bytes(), AsciiDenyList::STD3, Hyphens::Check, length)
+        .map_err(|_| InvalidDnsNameError)
+}
+
+fn validate_ascii_dns_name(name: &str) -> Result<(), InvalidDnsNameError> {
     if name.is_empty() || name.len() > 253 {
         return Err(InvalidDnsNameError);
     }
     let mut last_all_numeric = false;
-    for label in name.split(|&b| b == b'.') {
+    for label in name.split('.') {
         if label.is_empty() || label.len() > 63 {
             return Err(InvalidDnsNameError);
         }
-        if label[0] == b'-' || label[label.len() - 1] == b'-' {
+        if label.starts_with('-') || label.ends_with('-') {
             return Err(InvalidDnsNameError);
         }
         if !label
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         {
             return Err(InvalidDnsNameError);
         }
-        last_all_numeric = label.iter().all(u8::is_ascii_digit);
+        last_all_numeric = label.bytes().all(|b| b.is_ascii_digit());
     }
     if last_all_numeric {
         return Err(InvalidDnsNameError);
@@ -396,13 +451,7 @@ mod tests {
 
     #[test]
     fn dns_names() {
-        for ok in [
-            "example.com",
-            "a",
-            "EXAMPLE.com.",
-            "_srv.x-y.example",
-            "xn--bcher-kva.de",
-        ] {
+        for ok in ["example.com", "a", "EXAMPLE.com.", "xn--bcher-kva.de"] {
             assert!(DnsName::try_from(ok).is_ok(), "{ok}");
         }
         for bad in [
@@ -421,6 +470,11 @@ mod tests {
             DnsName::try_from("Example.COM").unwrap(),
             DnsName::try_from("example.com").unwrap()
         );
+        assert_eq!(
+            DnsName::try_from("bücher.de").unwrap().as_ref(),
+            "xn--bcher-kva.de"
+        );
+        assert!(DnsName::try_from("_srv.x-y.example").is_err());
     }
 
     #[test]

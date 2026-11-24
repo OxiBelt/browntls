@@ -28,6 +28,74 @@ fn handshake_every_quic_suite() {
 }
 
 #[test]
+fn quic_rfc9973_uses_certificate_authentication_with_an_external_psk() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let key = Arc::new(
+        ExternalPsk::new(
+            b"quic-rfc9973".to_vec(),
+            vec![42; 32],
+            HashAlgorithm::SHA256,
+        )
+        .unwrap()
+        .imported(b"quic-test".to_vec())
+        .unwrap(),
+    );
+    let mut client_config = b_client_config(&chain);
+    client_config.external_psks = vec![key.clone()];
+    client_config.cert_with_extern_psk = true;
+    client_config.require_cert_with_extern_psk = true;
+    client_config.require_external_psk = true;
+    client_config.enable_early_data = true;
+    let mut server_config = b_server_config(&chain);
+    server_config.external_psks = Some(Arc::new(vec![key]));
+    server_config.require_cert_with_extern_psk = true;
+    server_config.max_early_data_size = u32::MAX;
+
+    let mut client = b_client(&Arc::new(client_config));
+    let mut server = b_server(&Arc::new(server_config));
+    assert!(!client.conn.cert_with_extern_psk());
+    assert!(!server.conn.cert_with_extern_psk());
+    handshake(&mut client, &mut server).unwrap();
+    assert!(client.conn.cert_with_extern_psk());
+    assert!(server.conn.cert_with_extern_psk());
+    assert!(client.conn.peer_certified());
+    assert!(client.conn.zero_rtt().is_none());
+    assert!(server.conn.zero_rtt().is_none());
+    assert_full_handshake(&mut client, &mut server);
+}
+
+#[test]
+fn quic_v1_negotiates_each_rfc10024_hybrid() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    for group in [
+        prov::kx_group::X25519MLKEM768,
+        prov::kx_group::SECP256R1MLKEM768,
+        prov::kx_group::SECP384R1MLKEM1024,
+    ] {
+        let mut provider = prov::default_provider();
+        provider.kx_groups = vec![group];
+        let client_config = Arc::new(b_client_config_with(&chain, provider.clone()));
+        let mut server_config =
+            browntls_core::ServerConfig::builder_with_provider(Arc::new(provider))
+                .with_protocol_versions(&[&version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(chain.cert_chain(), chain.private_key())
+                .unwrap();
+        server_config.alpn_protocols = vec![ALPN.to_vec()];
+        let mut client = b_client(&client_config);
+        let mut server = b_server(&Arc::new(server_config));
+        handshake(&mut client, &mut server).unwrap();
+        assert_full_handshake(&mut client, &mut server);
+        assert_eq!(client.conn.negotiated_group(), Some(group.name()));
+        assert_eq!(server.conn.negotiated_group(), Some(group.name()));
+    }
+}
+
+#[test]
 fn handshake_with_hello_retry_request() {
     let chain = server_chain(KeyType::Ed25519);
     let mut client_provider = prov::default_provider();

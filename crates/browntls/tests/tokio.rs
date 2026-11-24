@@ -42,6 +42,225 @@ async fn handshake_and_data_through_the_tokio_module() {
     tokio::join!(server, client);
 }
 
+#[cfg(feature = "zstd")]
+#[tokio::test]
+async fn zstd_policy_reaches_buffered_and_unbuffered_lazy_acceptors() {
+    use browntls::server::{Acceptor, UnbufferedAcceptor};
+    use browntls::tokio::{LazyConfigAcceptor, unbuffered};
+
+    let pki = Pki::new();
+    let mut client = pki.client_config();
+    let (server, probe) = zstd_server(pki.server_config(), &mut client);
+    let client = Arc::new(client);
+    let server = Arc::new(server);
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let connector = TlsConnector::from(client.clone());
+    let (client_result, server_result) =
+        tokio::join!(connector.connect(localhost(), client_io), async {
+            LazyConfigAcceptor::new(Acceptor::default(), server_io)
+                .await?
+                .into_stream(server.clone())
+                .await
+        },);
+    client_result.unwrap();
+    server_result.unwrap();
+    assert_eq!(probe.count(), 1);
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let connector = unbuffered::TlsConnector::from(client);
+    let (client_result, server_result) =
+        tokio::join!(connector.connect(localhost(), client_io), async {
+            unbuffered::LazyConfigAcceptor::new(UnbufferedAcceptor::new(), server_io)
+                .await?
+                .into_stream(server)
+                .await
+        },);
+    client_result.unwrap();
+    server_result.unwrap();
+    assert_eq!(probe.count(), 2);
+}
+
+#[tokio::test]
+async fn hybrid_groups_negotiate_through_the_tokio_facade_adapter() {
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let acceptor =
+            TlsAcceptor::from(Arc::new(pki.server_config_with_provider(provider.clone())));
+        let connector = TlsConnector::from(Arc::new(pki.client_config_with_provider(provider)));
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = async {
+            let mut tls = acceptor.accept(server_io).await.unwrap();
+            let mut request = [0; 6];
+            tls.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hybrid");
+            assert_eq!(
+                tls.get_ref()
+                    .1
+                    .negotiated_key_exchange_group()
+                    .unwrap()
+                    .name(),
+                expected,
+                "{expected:?} server"
+            );
+            tls.write_all(b"passed").await.unwrap();
+            tls.shutdown().await.unwrap();
+        };
+        let client = async {
+            let mut tls = connector.connect(localhost(), client_io).await.unwrap();
+            tls.write_all(b"hybrid").await.unwrap();
+            let mut reply = [0; 6];
+            tls.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"passed");
+            assert_eq!(
+                tls.get_ref()
+                    .1
+                    .negotiated_key_exchange_group()
+                    .unwrap()
+                    .name(),
+                expected,
+                "{expected:?} client"
+            );
+        };
+        tokio::join!(server, client);
+    }
+}
+
+#[cfg(all(feature = "ktls", target_os = "linux"))]
+#[tokio::test]
+async fn hybrid_groups_handoff_through_the_facade_async_ktls_adapter() {
+    use browntls::ktls::AsyncKtlsStream;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let available = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_ulp")
+        .is_ok_and(|ulps| ulps.split_whitespace().any(|ulp| ulp == "tls"));
+    if !available {
+        assert!(std::env::var_os("BROWNTLS_KTLS_REQUIRED").is_none_or(|v| v != "1"));
+        return;
+    }
+
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let mut client_config = pki.client_config_with_provider(provider.clone());
+        client_config.enable_secret_extraction = true;
+        let server_config = pki.server_config_with_provider(provider);
+        #[cfg(feature = "zstd")]
+        let (server_config, probe) = zstd_server(server_config, &mut client_config);
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(socket).await.unwrap();
+            let mut request = [0; 6];
+            tls.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"hybrid");
+            tls.write_all(b"passed").await.unwrap();
+            tls.shutdown().await.unwrap();
+        };
+        let client = async {
+            let socket = TcpStream::connect(address).await.unwrap();
+            let tls = connector.connect(localhost(), socket).await.unwrap();
+            assert_eq!(
+                tls.get_ref()
+                    .1
+                    .negotiated_key_exchange_group()
+                    .unwrap()
+                    .name(),
+                expected,
+                "{expected:?} facade async peer before handoff"
+            );
+            let mut offloaded = AsyncKtlsStream::from_client(tls).await.unwrap();
+            #[cfg(feature = "zstd")]
+            assert_eq!(probe.count(), 1);
+            offloaded.write_all(b"hybrid").await.unwrap();
+            let mut reply = [0; 6];
+            offloaded.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"passed");
+        };
+        tokio::join!(server, client);
+    }
+}
+
+fn localhost_identity(reference: &str) -> browntls::ClientServerIdentity {
+    use browntls::pki_types::{DnsName, ServerName};
+    use browntls::{ReferenceIdentifier, ServiceIdentity};
+
+    browntls::ClientServerIdentity::new(
+        ServerName::try_from("localhost").unwrap(),
+        ServiceIdentity::new(vec![ReferenceIdentifier::Dns(
+            DnsName::try_from(reference).unwrap().to_owned(),
+        )])
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn rfc9525_identity_matches_and_is_reported_through_facade_tokio() {
+    let pki = Pki::new();
+    let acceptor = TlsAcceptor::from(Arc::new(pki.server_config()));
+    let connector = TlsConnector::from(Arc::new(pki.client_config()));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let server = async {
+        let mut tls = acceptor.accept(server_io).await.unwrap();
+        let mut request = [0u8; 5];
+        tls.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"hello");
+        tls.write_all(b"world").await.unwrap();
+        tls.flush().await.unwrap();
+    };
+    let client = async {
+        let mut tls = connector
+            .connect_with_identity(localhost_identity("localhost"), client_io)
+            .await
+            .unwrap();
+        tls.write_all(b"hello").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut reply = [0u8; 5];
+        tls.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"world");
+        let (_, conn) = tls.get_ref();
+        assert_eq!(
+            conn.matched_service_identity(),
+            Some(&browntls::ReferenceIdentifier::Dns(
+                browntls::pki_types::DnsName::try_from("localhost")
+                    .unwrap()
+                    .to_owned()
+            ))
+        );
+    };
+    tokio::join!(server, client);
+}
+
+#[tokio::test]
+async fn rfc9525_identity_mismatch_fails_through_facade_tokio() {
+    let pki = Pki::new();
+    let acceptor = TlsAcceptor::from(Arc::new(pki.server_config()));
+    let connector = TlsConnector::from(Arc::new(pki.client_config()));
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+
+    let server = async {
+        if let Ok(mut tls) = acceptor.accept(server_io).await {
+            let _ = tokio::io::copy(&mut tls, &mut tokio::io::sink()).await;
+        }
+    };
+    let client = async {
+        let error = connector
+            .connect_with_identity_and_callback(
+                localhost_identity("other.example"),
+                client_io,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    };
+    tokio::join!(server, client);
+}
+
 /// An acceptor whose configuration turns on `enable_grease` (RFC 8701
 /// §4.1) authenticates a client certificate through `browntls::tokio`.
 #[tokio::test]
@@ -104,7 +323,11 @@ async fn client_delegated_credential_through_the_tokio_module() {
     )
     .unwrap();
     let certified = CertifiedKey::new(pki.client_chain.clone(), cert_key)
-        .with_client_delegated_credential(issued.credential.clone(), issued.signing_key)
+        .with_client_delegated_credential(
+            issued.credential.clone(),
+            issued.signing_key,
+            &provider(),
+        )
         .unwrap();
     let client = ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()

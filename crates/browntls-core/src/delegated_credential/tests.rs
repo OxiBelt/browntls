@@ -17,7 +17,7 @@ fn sample() -> DelegatedCredential {
 #[test]
 fn wire_format() {
     let dc = sample();
-    let bytes = dc.to_bytes();
+    let bytes = dc.to_bytes().unwrap();
     assert_eq!(
         bytes,
         [
@@ -33,7 +33,7 @@ fn wire_format() {
 
 #[test]
 fn rejects_malformed() {
-    let bytes = sample().to_bytes();
+    let bytes = sample().to_bytes().unwrap();
     // Truncated anywhere.
     for len in 0..bytes.len() {
         assert!(
@@ -61,6 +61,26 @@ fn rejects_malformed() {
     assert_eq!(
         DelegatedCredential::from_bytes(&huge),
         Err(InvalidMessage::MessageTooLarge)
+    );
+}
+
+#[test]
+fn encoding_checks_the_enclosing_extension_limit() {
+    let mut dc = sample();
+    let max_sig = usize::from(u16::MAX)
+        - EXTENSION_HEADER_LEN
+        - CREDENTIAL_OVERHEAD
+        - dc.credential.public_key.as_ref().len();
+    dc.signature.resize(max_sig, 1);
+    assert_eq!(dc.encoded_extension_len(), Ok(usize::from(u16::MAX)));
+    let encoded = dc.to_bytes().unwrap();
+    assert_eq!(DelegatedCredential::from_bytes(&encoded), Ok(dc.clone()));
+    dc.signature.push(1);
+    assert_eq!(
+        dc.to_bytes(),
+        Err(Error::InvalidDelegatedCredential(
+            AttachmentError::InvalidEncoding
+        ))
     );
 }
 

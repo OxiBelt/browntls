@@ -31,7 +31,7 @@ fn common_groups() -> Vec<(&'static dyn SupportedKxGroup, &'static dyn Supported
             (*n, *r)
         })
         .collect();
-    assert_eq!(pairs.len(), 7);
+    assert_eq!(pairs.len(), 8);
     pairs
 }
 
@@ -58,6 +58,106 @@ fn every_common_group_interoperates_both_ways() {
             agree(n, r);
             agree(r, n);
             agree(n, n);
+            agree(r, r);
+        }
+    }
+}
+
+#[test]
+fn rfc10024_wire_and_combiner_match_component_exchanges() {
+    use native::kx_group as n;
+    use rustcrypto::kx_group as r;
+
+    for (groups, classical, kem, layout, lengths) in [
+        (
+            [n::X25519MLKEM768, r::X25519MLKEM768],
+            n::X25519,
+            n::MLKEM768,
+            (0x11ec, 1184, 1088, true),
+            (1216, 1120, 64),
+        ),
+        (
+            [n::SECP256R1MLKEM768, r::SECP256R1MLKEM768],
+            n::SECP256R1,
+            n::MLKEM768,
+            (0x11eb, 65, 65, false),
+            (1249, 1153, 64),
+        ),
+        (
+            [n::SECP384R1MLKEM1024, r::SECP384R1MLKEM1024],
+            n::SECP384R1,
+            n::MLKEM1024,
+            (0x11ed, 97, 97, false),
+            (1665, 1665, 80),
+        ),
+    ] {
+        let (code_point, client_boundary, server_boundary, kem_first) = layout;
+        let (client_len, server_len, secret_len) = lengths;
+        let (first, second) = if kem_first {
+            (kem, classical)
+        } else {
+            (classical, kem)
+        };
+        for group in groups {
+            assert_eq!(u16::from(group.name()), code_point);
+            assert!(group.usable_for_version(ProtocolVersion::TLSv1_3));
+            assert!(group.usable_for_version(ProtocolVersion::DTLSv1_3));
+            assert!(!group.usable_for_version(ProtocolVersion::TLSv1_2));
+            assert!(!group.usable_for_version(ProtocolVersion::DTLSv1_2));
+
+            let client = group.start().unwrap();
+            assert_eq!(client.pub_key().len(), client_len);
+            let (a, b) = client.pub_key().split_at(client_boundary);
+            let a = first.start_and_complete(a).unwrap();
+            let b = second.start_and_complete(b).unwrap();
+            let reply = [&a.pub_key[..], &b.pub_key].concat();
+            let expected = [a.secret.secret_bytes(), b.secret.secret_bytes()].concat();
+            assert_eq!(reply.len(), server_len);
+            assert_eq!(expected.len(), secret_len);
+            assert_eq!(client.complete(&reply).unwrap().secret_bytes(), expected);
+
+            let first_client = first.start().unwrap();
+            let second_client = second.start().unwrap();
+            let offer = [first_client.pub_key(), second_client.pub_key()].concat();
+            let server = group.start_and_complete(&offer).unwrap();
+            let (a, b) = server.pub_key.split_at(server_boundary);
+            let a = first_client.complete(a).unwrap();
+            let b = second_client.complete(b).unwrap();
+            assert_eq!(
+                server.secret.secret_bytes(),
+                [a.secret_bytes(), b.secret_bytes()].concat(),
+            );
+
+            // Distinct server and client exchanges draw fresh randomness.
+            let another_server = group.start_and_complete(&offer).unwrap();
+            assert_ne!(server.pub_key, another_server.pub_key);
+            assert_ne!(
+                group.start().unwrap().pub_key(),
+                group.start().unwrap().pub_key()
+            );
+        }
+    }
+}
+
+#[test]
+fn rfc10024_uses_implicit_rejection_in_each_hybrid() {
+    for (native, rustcrypto) in common_groups() {
+        let ciphertext_octet = match native.name() {
+            NamedGroup::X25519MLKEM768 => 0,
+            NamedGroup::secp256r1MLKEM768 => 65,
+            NamedGroup::secp384r1MLKEM1024 => 97,
+            _ => continue,
+        };
+        for group in [native, rustcrypto] {
+            let client = group.start().unwrap();
+            let mut server = group.start_and_complete(client.pub_key()).unwrap();
+            server.pub_key[ciphertext_octet] ^= 1;
+            let fallback = client.complete(&server.pub_key).unwrap();
+            assert_eq!(
+                fallback.secret_bytes().len(),
+                server.secret.secret_bytes().len()
+            );
+            assert_ne!(fallback.secret_bytes(), server.secret.secret_bytes());
         }
     }
 }
@@ -156,7 +256,7 @@ fn mlkem1024_interoperates_with_ml_kem_crate() {
 
 #[test]
 fn secp384r1mlkem1024_interoperates_with_composed_oracle() {
-    // draft-ietf-tls-ecdhe-mlkem: client share = P-384 point (97) ||
+    // RFC 10024: client share = P-384 point (97) ||
     // ML-KEM-1024 encapsulation key (1568); server share = P-384 point ||
     // ciphertext (1568); secret = ECDH secret (48) || ML-KEM secret (32).
     let group = native::kx_group::SECP384R1MLKEM1024;

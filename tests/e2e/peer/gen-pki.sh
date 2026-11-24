@@ -1,14 +1,20 @@
 #!/bin/sh
 # Generate a throwaway CA with server and client certificates for each key
-# type into the directory given as the only argument (a per-run Docker
-# volume). The server certificate names the network alias `tls-server`; the
+# type into the directory given as the first argument (a per-run Docker
+# volume). The optional second argument names the server (`tls-server`); the
 # `public` certificate names `ech-public.test`, the public name of the
 # Encrypted Client Hello scenarios, which a server rejecting ECH presents.
 # Keys are world-readable because the browntls image runs as an unprivileged
 # user; they live only as long as the test run's volume.
 set -eu
 
-out="${1:?usage: gen-pki.sh <directory>}"
+out="${1:?usage: gen-pki.sh <directory> [server-name]}"
+server_name="${2:-tls-server}"
+delegated_credentials="${3:-}"
+if [ -n "${delegated_credentials}" ] && [ "${delegated_credentials}" != "--delegated-credentials" ]; then
+  echo "unknown option: ${delegated_credentials}" >&2
+  exit 2
+fi
 
 gen_key() {
   case "$1" in
@@ -30,12 +36,15 @@ for kt in ecdsa-p256 rsa-2048 ed25519; do
   serial=2
   for who in server client public; do
     case "${who}" in
-      server) eku=serverAuth; san="subjectAltName=DNS:tls-server" ;;
+      server) eku=serverAuth; san="subjectAltName=DNS:${server_name}" ;;
       client) eku=clientAuth; san="subjectAltName=DNS:tls-client" ;;
       public) eku=serverAuth; san="subjectAltName=DNS:ech-public.test" ;;
     esac
     printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=%s\n%s\n' \
       "${eku}" "${san}" > "${d}/${who}.ext"
+    if [ "${delegated_credentials}" = "--delegated-credentials" ] && [ "${who}" != "public" ]; then
+      printf '%s\n' '1.3.6.1.4.1.44363.44=DER:05:00' >> "${d}/${who}.ext"
+    fi
     gen_key "${kt}" "${d}/${who}.key"
     openssl req -new -key "${d}/${who}.key" -subj "/CN=tls-${who}" -out "${d}/${who}.csr"
     openssl x509 -req -in "${d}/${who}.csr" -CA "${d}/ca.pem" -CAkey "${d}/ca.key" \

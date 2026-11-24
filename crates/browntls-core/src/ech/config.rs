@@ -1,5 +1,6 @@
 //! `ECHConfig` and `ECHConfigList` (RFC 9849 §4).
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use browntls_pki::DnsName;
@@ -58,6 +59,17 @@ pub(crate) struct EchConfigContents {
     pub(crate) extensions: Vec<EchConfigExtension>,
 }
 
+impl EchConfigContents {
+    /// The public name of a configuration with no unknown mandatory
+    /// extensions, if that name is valid for ECH.
+    pub(super) fn usable_public_name(&self) -> Option<DnsName<'static>> {
+        if self.extensions.iter().any(|e| e.is_mandatory()) {
+            return None;
+        }
+        valid_public_name(&self.public_name)
+    }
+}
+
 impl Codec<'_> for EchConfigContents {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let kc = &self.key_config;
@@ -110,12 +122,13 @@ impl Codec<'_> for EchConfigContents {
             .to_vec();
         let len = usize::from(u16::read(r)?);
         let mut sub = r.sub(len)?;
-        let mut extensions: Vec<EchConfigExtension> = Vec::new();
+        let mut extensions = Vec::new();
+        let mut seen = BTreeSet::new();
         while sub.any_left() {
             let typ = u16::read(&mut sub)?;
             let data = PayloadU16::read(&mut sub)?;
             // §4.2: no two extensions of the same type.
-            if extensions.iter().any(|e| e.typ == typ) {
+            if !seen.insert(typ) {
                 return Err(InvalidMessage::InvalidEchConfig);
             }
             extensions.push(EchConfigExtension { typ, data });
@@ -246,7 +259,7 @@ pub(crate) fn valid_public_name(name: &[u8]) -> Option<DnsName<'static>> {
     {
         return None;
     }
-    DnsName::try_from(alloc::string::String::from(s)).ok()
+    DnsName::try_from_ascii(s).ok().map(|dns| dns.to_owned())
 }
 
 #[cfg(test)]
@@ -305,6 +318,34 @@ mod tests {
         let list = read_config_list(&other).unwrap();
         assert!(list[0].contents.is_none());
         assert_eq!(list[0].encoded, other[2..]);
+    }
+
+    #[test]
+    fn duplicate_extensions_are_rejected_without_reordering_unique_entries() {
+        let bytes = browntls_pki::pem::base64_decode(RFC9848_EXAMPLE.as_bytes()).unwrap();
+        let mut contents = read_config_list(&bytes)
+            .unwrap()
+            .remove(0)
+            .contents
+            .unwrap();
+        contents.extensions = (0..4096)
+            .rev()
+            .map(|typ| EchConfigExtension {
+                typ,
+                data: PayloadU16::new(Vec::new()),
+            })
+            .collect();
+        let encoded = contents.get_encoding();
+        assert_eq!(
+            EchConfigContents::read(&mut Reader::init(&encoded)),
+            Ok(contents.clone())
+        );
+        contents.extensions.push(contents.extensions[0].clone());
+        let encoded = contents.get_encoding();
+        assert_eq!(
+            EchConfigContents::read(&mut Reader::init(&encoded)),
+            Err(InvalidMessage::InvalidEchConfig),
+        );
     }
 
     #[test]

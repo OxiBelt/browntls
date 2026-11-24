@@ -40,7 +40,7 @@ use crate::suites::PartiallyExtractedSecrets;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::extensions::{Tls13Message, first_disallowed};
-use crate::tls13::key_schedule::{KeyScheduleHandshake, KeyScheduleTraffic};
+use crate::tls13::key_schedule::{KeyScheduleHandshake, KeyScheduleTraffic, Protocol};
 use crate::verify::{
     DigitallySignedStruct, FinishedMessageVerified, HandshakeSignatureValid, ServerCertVerified,
 };
@@ -65,7 +65,7 @@ fn emit_certificate_tls13(
     compression: &[CertificateCompressionAlgorithm],
     extensions: &ClientCertificateExtensions,
     common: &mut CommonState,
-) {
+) -> Result<(), Error> {
     let mut cert_payload = match certkey {
         Some(key) => {
             CertificatePayloadTls13::from_certified_key(key, extensions.ocsp, extensions.sct)
@@ -73,7 +73,9 @@ fn emit_certificate_tls13(
         None => CertificatePayloadTls13::new(core::iter::empty(), None),
     };
     if let (Some(dc), Some(first)) = (delegated, cert_payload.entries.first_mut()) {
-        first.delegated_credential = Some(dc.credential().clone());
+        first
+            .set_delegated_credential(dc.credential())
+            .map_err(|err| common.send_fatal_alert(AlertDescription::InternalError, err))?;
     }
     cert_payload.context = PayloadU8::new(auth_context.unwrap_or_default());
 
@@ -93,7 +95,7 @@ fn emit_certificate_tls13(
         };
         transcript.add_message(&m);
         common.send_msg(m, true);
-        return;
+        return Ok(());
     }
 
     let m = Message {
@@ -104,6 +106,7 @@ fn emit_certificate_tls13(
     };
     transcript.add_message(&m);
     common.send_msg(m, true);
+    Ok(())
 }
 
 fn emit_certverify_tls13(
@@ -200,8 +203,9 @@ impl State<ClientConnectionData> for ExpectFinished {
 
         // RFC 8446 §4.5: EndOfEarlyData is still protected by the early
         // traffic key but follows the server Finished in the transcript.
-        // QUIC clients MUST NOT send it (RFC 9001 §8.3).
-        if cx.common.early_traffic && cx.common.is_quic() {
+        // QUIC clients MUST NOT send it (RFC 9001 §8.3), nor does DTLS 1.3
+        // have it (RFC 9147 §5.6).
+        if cx.common.early_traffic && (cx.common.is_quic() || cx.common.is_dtls()) {
             cx.common.early_traffic = false;
             cx.data.early_data.finished();
         } else if cx.common.early_traffic {
@@ -234,7 +238,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
                         cx.common,
-                    );
+                    )?;
                 }
                 ClientAuthDetails::Verify {
                     certkey,
@@ -251,7 +255,7 @@ impl State<ClientConnectionData> for ExpectFinished {
                         &st.client_cert_compression,
                         &st.client_cert_extensions,
                         cx.common,
-                    );
+                    )?;
                     emit_certverify_tls13(&mut st.transcript, &*signer, cx.common)?;
                 }
             }
@@ -404,7 +408,15 @@ impl ExpectTraffic {
             cx.common
                 .external_psk_binding(&self.config.provider.cipher_suites, &secret)?,
         )
-        .with_delegated_credential_expiry(cx.data.delegated_credential_expiry);
+        .with_delegated_credential_expiry(cx.data.delegated_credential_expiry)
+        .with_early_data_alpn(cx.common.alpn_protocol.as_deref())
+        .with_early_data_record_size_limit(cx.common.peer_tls13_record_size_limit())
+        .with_protocol(Protocol::of(cx.common));
+        value.common.bind_server_identity(
+            &self.server_name,
+            cx.data.service_identity.as_ref(),
+            cx.common.matched_service_identity.as_ref(),
+        );
         if let Some(params) = cx.common.quic.as_ref().and_then(|q| q.peer_params.as_ref()) {
             value.set_quic_params(params);
         }
@@ -496,7 +508,7 @@ impl ExpectTraffic {
                     &compression,
                     &extensions,
                     cx.common,
-                );
+                )?;
             }
             ClientAuthDetails::Verify {
                 certkey,
@@ -513,7 +525,7 @@ impl ExpectTraffic {
                     &compression,
                     &extensions,
                     cx.common,
-                );
+                )?;
                 emit_certverify_tls13(&mut transcript, &*signer, cx.common)?;
             }
         }

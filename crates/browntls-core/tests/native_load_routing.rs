@@ -185,13 +185,21 @@ fn connections_under_load_aware_routing() {
     assert_eq!(load::config(), None);
     native_handshakes("routing disabled");
 
-    // Enabled and steady.
+    // Automatic routing uses wall-clock timings, so its phase can vary.
+    // The controller unit tests check exact transitions with synthetic costs.
     load::enable(Config::DEFAULT).unwrap();
     native_handshakes("routing enabled");
     cross_provider_handshakes("routing enabled");
     for s in load::status_all() {
         println!("{s}");
-        assert_eq!(s.phase, Phase::Steady, "{s}");
+        assert!(
+            matches!(s.phase, Phase::Steady | Phase::Probing | Phase::Shifting),
+            "{s}"
+        );
+        assert!(
+            s.shifted_percent <= Config::DEFAULT.max_shift_percent,
+            "{s}"
+        );
     }
     // Every key exchange is timed, so the handshakes above left their costs.
     for alg in [Algorithm::X25519, Algorithm::P256, Algorithm::MlKem] {

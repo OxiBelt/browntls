@@ -168,7 +168,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
         },
     )
     .expect("issue")
-    .to_bytes();
+    .to_bytes()
+    .expect("encodable credential");
     let mut seed = vec![0];
     put_field(&mut seed, &dc);
     seed.push(0);

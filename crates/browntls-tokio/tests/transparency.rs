@@ -14,13 +14,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use browntls_core::client::WebPkiServerVerifier;
-use browntls_core::pki_types::Cert;
-use browntls_core::revocation::RevocationDigests;
+use browntls_core::client::danger::{
+    CertificateIdentity, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    ServerCertificateVerification,
+};
+use browntls_core::pki_types::{Cert, CertificateDer, ServerName, UnixTime};
+use browntls_core::revocation::{PeerEvidence, RevocationDigests};
 use browntls_core::server::Acceptor;
 use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
 use browntls_core::transparency::{CtV2LogConfig, CtV2Requirements, TransparencyStatus};
 use browntls_core::{
-    CertificateError, ClientConfig, Error, ServerConfig, SupportedProtocolVersion,
+    CertificateError, ClientConfig, DigitallySignedStruct, Error, ServerConfig, SignatureScheme,
+    SupportedProtocolVersion,
 };
 use browntls_tokio::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
 use common::*;
@@ -100,15 +105,18 @@ impl Log {
     }
 }
 
-fn ct_client(pki: &Pki, log: &Log, version: &'static SupportedProtocolVersion) -> ClientConfig {
-    let verifier = WebPkiServerVerifier::builder_with_provider(Arc::new(pki.roots()), provider())
+fn ct_verifier(pki: &Pki, log: &Log) -> Arc<WebPkiServerVerifier> {
+    WebPkiServerVerifier::builder_with_provider(Arc::new(pki.roots()), provider())
         .with_certificate_transparency(log.requirements())
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+fn ct_client(pki: &Pki, log: &Log, version: &'static SupportedProtocolVersion) -> ClientConfig {
     ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[version])
         .unwrap()
-        .with_webpki_verifier(verifier)
+        .with_webpki_verifier(ct_verifier(pki, log))
         .with_no_client_auth()
 }
 
@@ -223,5 +231,114 @@ async fn failed_policy_is_an_io_error() {
         let (client, _server) = tokio::join!(connector.connect(localhost(), c), acceptor.accept(s));
         let err = client.unwrap_err();
         assert_eq!(tls_error(&err), Some(&expected));
+    }
+}
+
+/// A wrapper that requests CT, but uses the legacy verification entry point.
+#[derive(Debug)]
+struct LegacyVerifier(Arc<WebPkiServerVerifier>);
+
+impl ServerCertVerifier for LegacyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        self.0
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_server_cert_with_identity(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        identity: CertificateIdentity<'_>,
+        evidence: PeerEvidence<'_>,
+        now: UnixTime,
+        allow_live: bool,
+    ) -> Result<ServerCertificateVerification, Error> {
+        self.0.verify_server_cert_with_identity(
+            end_entity,
+            intermediates,
+            identity,
+            evidence,
+            now,
+            allow_live,
+        )
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
+
+    fn requests_transparency_info(&self) -> bool {
+        self.0.requests_transparency_info()
+    }
+}
+
+#[tokio::test]
+async fn unknown_offer_context_is_an_io_error_on_each_stream_path() {
+    use browntls_tokio::unbuffered;
+
+    let pki = Pki::new();
+    let log = Log::new();
+    let list = log.list(&pki);
+    let expected = Error::InvalidCertificate(CertificateError::TransparencyOfferRequired);
+    for version in versions() {
+        let verifier = Arc::new(LegacyVerifier(ct_verifier(&pki, &log)));
+        let client_config = Arc::new(
+            ClientConfig::builder_with_provider(provider())
+                .with_protocol_versions(&[version])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth(),
+        );
+        let server_config = Arc::new(ct_server(&pki, Some(list.clone()), version));
+        let connector = TlsConnector::from(client_config.clone());
+        let acceptor = TlsAcceptor::from(server_config.clone());
+        let (c, s) = duplex(64 * 1024);
+        let (buffered, _) = tokio::join!(connector.connect(localhost(), c), acceptor.accept(s));
+
+        let (c, s) = duplex(64 * 1024);
+        let (lazy, _) = tokio::join!(connector.connect(localhost(), c), async {
+            let start = LazyConfigAcceptor::new(Acceptor::default(), s).await?;
+            start.into_stream(server_config.clone()).await
+        });
+
+        let connector = unbuffered::TlsConnector::from(client_config);
+        let acceptor = unbuffered::TlsAcceptor::from(server_config);
+        let (c, s) = duplex(64 * 1024);
+        let (unbuffered, _) = tokio::join!(connector.connect(localhost(), c), acceptor.accept(s));
+
+        for err in [
+            buffered.unwrap_err(),
+            lazy.unwrap_err(),
+            unbuffered.unwrap_err(),
+        ] {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(tls_error(&err), Some(&expected));
+        }
     }
 }

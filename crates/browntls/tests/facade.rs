@@ -20,6 +20,21 @@ use browntls::{ClientConnection, HandshakeKind, ServerConnection, StreamOwned};
 use common::*;
 
 #[test]
+fn rfc9525_identity_types_are_reexported_at_the_root() {
+    fn takes_client_identity(_: browntls::ClientServerIdentity) {}
+    fn takes_service_identity(_: browntls::ServiceIdentity) {}
+    fn takes_reference(_: Option<&browntls::ReferenceIdentifier>) {}
+    fn takes_uri_id(_: Option<browntls::UriId>) {}
+    fn takes_srv_id(_: Option<browntls::SrvId>) {}
+
+    let _ = takes_client_identity;
+    let _ = takes_service_identity;
+    let _ = takes_reference;
+    let _ = takes_uri_id;
+    let _ = takes_srv_id;
+}
+
+#[test]
 fn handshake_and_data_through_the_root() {
     let pki = Pki::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -56,6 +71,93 @@ fn handshake_and_data_through_the_root() {
         );
         assert_eq!(server.join().unwrap(), tls.conn.protocol_version());
     });
+}
+
+#[test]
+fn rfc9973_through_the_facade() {
+    let pki = Pki::new();
+    let key = Arc::new(
+        browntls::psk::ExternalPsk::new(
+            b"facade-rfc9973".to_vec(),
+            vec![42; 32],
+            browntls::crypto::hash::HashAlgorithm::SHA256,
+        )
+        .unwrap(),
+    );
+    let mut client = pki.client_config();
+    client.cert_with_extern_psk = true;
+    client.external_psks = vec![key.clone()];
+    let mut server = pki.server_config();
+    server.require_cert_with_extern_psk = true;
+    server.external_psks = Some(Arc::new(vec![key]));
+    let mut client = ClientConnection::new(Arc::new(client), localhost()).unwrap();
+    let mut acceptor = browntls::server::Acceptor::default();
+    let mut hello = Vec::new();
+    client.write_tls(&mut hello).unwrap();
+    acceptor.read_tls(&mut hello.as_slice()).unwrap();
+    let accepted = acceptor.accept().unwrap().unwrap();
+    assert!(accepted.client_hello().offers_cert_with_extern_psk());
+    let mut server = accepted.into_connection(Arc::new(server)).unwrap();
+
+    let mut flight = Vec::new();
+    for _ in 0..8 {
+        server.write_tls(&mut flight).unwrap();
+        client.read_tls(&mut flight.as_slice()).unwrap();
+        client.process_new_packets().unwrap();
+        flight.clear();
+        client.write_tls(&mut flight).unwrap();
+        server.read_tls(&mut flight.as_slice()).unwrap();
+        server.process_new_packets().unwrap();
+        flight.clear();
+        if !client.is_handshaking() && !server.is_handshaking() {
+            break;
+        }
+    }
+    assert!(client.negotiated_cert_with_extern_psk());
+    assert!(server.negotiated_cert_with_extern_psk());
+}
+
+#[test]
+fn hybrid_key_exchange_groups_negotiate_through_the_facade_root() {
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let client_config = Arc::new(pki.client_config_with_provider(provider.clone()));
+        let server_config = Arc::new(pki.server_config_with_provider(provider));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                let connection = ServerConnection::new(server_config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = [0; 6];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hybrid");
+                assert_eq!(
+                    stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                    expected,
+                    "{expected:?} server"
+                );
+                stream.write_all(b"passed").unwrap();
+                stream.conn.send_close_notify();
+                stream.flush().unwrap();
+            });
+            let connection = ClientConnection::new(client_config, localhost()).unwrap();
+            let mut stream = StreamOwned::new(connection, tcp);
+            stream.write_all(b"hybrid").unwrap();
+            let mut reply = [0; 6];
+            stream.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"passed");
+            assert_eq!(
+                stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                expected,
+                "{expected:?} client"
+            );
+            server.join().unwrap();
+        });
+    }
 }
 
 /// `ServerConfig::enable_grease` (RFC 8701 §4.1) is reachable through the

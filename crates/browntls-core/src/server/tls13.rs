@@ -25,7 +25,7 @@ use ticket::tls13_ticket_lifetime;
 use traffic::ExpectFinished;
 
 use super::common::{ActiveCertifiedKey, client_revocation_enabled};
-use super::cookie::RetryCookie;
+use super::cookie::{DtlsRetry, RetryCookie};
 use super::hs::{self, HandshakeHashOrBuffer, NextStateOrError, ServerContext};
 use super::server_conn::ServerConfig;
 use crate::common_state::{ConnectionRandoms, HandshakeKind};
@@ -45,7 +45,9 @@ use crate::msgs::persist::ServerSessionValue;
 use crate::psk::{ExternalPskCandidate, MAX_PSK_IDENTITIES_CONSIDERED, PskSecret};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake};
+use crate::tls13::key_schedule::{
+    BinderLabel, KeyScheduleEarly, KeySchedulePreHandshake, Protocol,
+};
 
 pub(super) struct CompleteClientHelloHandling {
     pub(super) config: Arc<ServerConfig>,
@@ -64,6 +66,7 @@ impl CompleteClientHelloHandling {
     /// plus the ClientHello without its binders, in constant time.
     fn check_binder(
         &self,
+        protocol: Protocol,
         suite: &'static Tls13CipherSuite,
         client_hello: &Message<'_>,
         psk: &[u8],
@@ -80,7 +83,7 @@ impl CompleteClientHelloHandling {
             _ => return false,
         };
         let handshake_hash = self.transcript.hash_with(binder_plaintext);
-        let key_schedule = KeyScheduleEarly::new(suite, psk);
+        let key_schedule = KeyScheduleEarly::new(suite, psk, protocol);
         let real_binder = key_schedule.psk_binder(label, handshake_hash.as_ref());
         constant_time_eq(real_binder.as_ref(), binder)
     }
@@ -150,11 +153,22 @@ impl CompleteClientHelloHandling {
             ));
         }
 
-        let Some(chosen_share) = shares_ext
+        // RFC 9147 §5.1: a DTLS server that requires a cookie answers a
+        // first ClientHello without one with a HelloRetryRequest carrying
+        // it, whatever the key shares.
+        let cookie_required = !self.done_retry
+            && cx
+                .common
+                .dtls
+                .as_deref()
+                .is_some_and(|d| d.require_cookie());
+        let share_for_group = shares_ext
             .iter()
-            .find(|share| share.group == selected_kxg.name())
-        else {
-            // RFC 8446 §4.1.4: ask for a share in the group we want.
+            .find(|share| share.group == selected_kxg.name());
+        let Some(chosen_share) = share_for_group.filter(|_| !cookie_required) else {
+            // RFC 8446 §4.1.4: ask for a share in the group we want, unless
+            // the client sent one (and only the cookie is missing).
+            let group_named = share_for_group.is_none();
             if self.done_retry {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::IllegalParameter,
@@ -177,9 +191,17 @@ impl CompleteClientHelloHandling {
             // ClientHello, so that handshake stays with this connection. Nor
             // when the client offered ECH (RFC 9849): the HPKE context and
             // the HelloRetryRequest's ECH extension cannot be rebuilt from a
-            // cookie.
+            // cookie. Over DTLS 0-RTT records are never read (no 0-RTT in
+            // this version), so they do not stand in the way.
+            let dtls_retry = cx.common.dtls.as_deref().map(|d| DtlsRetry {
+                peer_address: d.peer_address().to_vec(),
+                group_named,
+            });
             let cookie = match &self.config.hello_retry_cookies {
-                Some(sealer) if !early_data_requested && matches!(ech, HrrEch::None) => {
+                Some(sealer)
+                    if (!early_data_requested || dtls_retry.is_some())
+                        && matches!(ech, HrrEch::None) =>
+                {
                     RetryCookie {
                         issued_at: match self.config.current_time() {
                             Ok(now) => now.as_secs(),
@@ -199,18 +221,30 @@ impl CompleteClientHelloHandling {
                             .as_ref()
                             .map(|name| name.as_ref().as_bytes().to_vec())
                             .unwrap_or_default(),
+                        cert_with_extern_psk: client_hello
+                            .extensions
+                            .cert_with_extern_psk
+                            .is_some(),
+                        dtls: dtls_retry,
                     }
                     .seal(&**sealer)
                 }
                 _ => None,
             };
+            if cookie_required && cookie.is_none() {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::InternalError,
+                    Error::General("could not seal a DTLS HelloRetryRequest cookie".into()),
+                ));
+            }
             emit_hello_retry_request(
                 &mut self.transcript,
                 hello_retry_request(
                     self.suite,
                     client_hello.session_id,
-                    selected_kxg.name(),
+                    group_named.then(|| selected_kxg.name()),
                     cookie.clone(),
+                    cx.common.is_dtls(),
                 ),
                 self.suite,
                 ech,
@@ -225,16 +259,19 @@ impl CompleteClientHelloHandling {
                 transcript: HandshakeHashOrBuffer::Hash(self.transcript),
                 session_id: SessionId::empty(),
                 done_retry: true,
+                retry_cert_with_extern_psk: client_hello.extensions.cert_with_extern_psk.is_some(),
                 retry_choice: Some(hs::RetryChoice {
                     suite: self.suite,
                     group: selected_kxg,
+                    group_named,
                 }),
                 sent_cookie: cookie,
                 send_tickets: self.send_tickets,
             });
             // Early data sent behind that first ClientHello is unreadable
-            // (no PSK was taken); skip it up to the announced limit.
-            return Ok(if early_data_requested {
+            // (no PSK was taken); skip it up to the announced limit. A DTLS
+            // record layer drops such records itself.
+            return Ok(if early_data_requested && !cx.common.is_dtls() {
                 Box::new(ExpectAndSkipRejectedEarlyData {
                     skip_data_left,
                     next,
@@ -252,6 +289,7 @@ impl CompleteClientHelloHandling {
         let mut chosen_psk_index = None;
         let mut resumedata = None;
         let mut external: Option<(ExternalPskCandidate, PskSecret)> = None;
+        let cert_with_extern_psk_offered = client_hello.extensions.cert_with_extern_psk.is_some();
         if let Some(psk_offer) = &client_hello.extensions.preshared_key {
             let dhe_allowed = client_hello
                 .extensions
@@ -281,6 +319,7 @@ impl CompleteClientHelloHandling {
                             continue;
                         };
                         if !self.check_binder(
+                            Protocol::of(cx.common),
                             self.suite,
                             chm,
                             secret.as_ref(),
@@ -288,7 +327,11 @@ impl CompleteClientHelloHandling {
                             psk_offer.binders[i].as_ref(),
                         ) {
                             return Err(cx.common.send_fatal_alert(
-                                AlertDescription::DecryptError,
+                                if cert_with_extern_psk_offered {
+                                    AlertDescription::IllegalParameter
+                                } else {
+                                    AlertDescription::DecryptError
+                                },
                                 PeerMisbehaved::IncorrectBinder,
                             ));
                         }
@@ -296,10 +339,19 @@ impl CompleteClientHelloHandling {
                         external = Some((external_psks.swap_remove(pos), secret));
                         break;
                     }
+                    if cert_with_extern_psk_offered {
+                        continue;
+                    }
                     let Some(resume) = self.attempt_tls13_ticket_decryption(&psk_id.identity.0)
                     else {
                         continue;
                     };
+                    // A ticket issued over the other protocol (TLS or DTLS)
+                    // is not resumed: its binder would take the other label
+                    // prefix (RFC 9147 §5.9).
+                    if resume.version != ticket::ticket_version(cx.common) {
+                        continue;
+                    }
                     // Even a previous connection without a client
                     // certificate could bypass client authentication now.
                     if client_revocation_enabled(&self.config) && !resume.certificate_free {
@@ -377,6 +429,7 @@ impl CompleteClientHelloHandling {
                         continue;
                     }
                     if !self.check_binder(
+                        Protocol::of(cx.common),
                         self.suite,
                         chm,
                         &resume.master_secret.0,
@@ -410,22 +463,28 @@ impl CompleteClientHelloHandling {
             // Reported once the client's Finished verifies.
             cx.common.external_psk = Some(candidate.psk.clone());
         }
+        // RFC 9973: certificate authentication on top of an external PSK,
+        // when the client asked and we have a certificate to show.
+        let cert_with_extern_psk = external.is_some()
+            && (self.config.cert_with_extern_psk || self.config.require_cert_with_extern_psk)
+            && cert_with_extern_psk_offered
+            && server_key.is_some()
+            && !sigschemes.is_empty();
+        if self.config.require_cert_with_extern_psk && !cert_with_extern_psk {
+            return Err(cx.common.send_fatal_alert(
+                AlertDescription::HandshakeFailure,
+                PeerIncompatible::CertWithExternPskRequired,
+            ));
+        }
         if self.config.require_external_psk && cx.common.external_psk.is_none() {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::HandshakeFailure,
                 PeerIncompatible::ExternalPskRequired,
             ));
         }
+        cx.common.cert_with_extern_psk = cert_with_extern_psk;
 
-        // RFC 8773: certificate authentication on top of an external PSK,
-        // when the client asked and we have a certificate to show.
-        let cert_with_extern_psk = external.is_some()
-            && self.config.cert_with_extern_psk
-            && client_hello.extensions.cert_with_extern_psk.is_some()
-            && server_key.is_some()
-            && !sigschemes.is_empty();
-
-        // Without a PSK (or with RFC 8773) we authenticate with our
+        // Without a PSK (or with RFC 9973) we authenticate with our
         // certificate, which needs one and a signature scheme for it.
         let psk_selected = resumedata.is_some() || external.is_some();
         let server_key = match server_key {
@@ -479,6 +538,13 @@ impl CompleteClientHelloHandling {
                 candidate,
                 self.suite,
                 cert_with_extern_psk,
+                &self.config,
+                client_hello
+                    .extensions
+                    .preshared_key
+                    .as_ref()
+                    .and_then(|offer| offer.binders.get(candidate.index))
+                    .map(|binder| binder.as_ref()),
             ),
             None => decide_if_early_data_allowed(
                 cx,
@@ -488,6 +554,15 @@ impl CompleteClientHelloHandling {
                 &self.config,
             ),
         };
+        // No 0-RTT over DTLS in this version: an offer is rejected, and the
+        // DTLS record layer, which never gets an early key, drops its
+        // records (RFC 9147 §5.6 has no EndOfEarlyData to wait for).
+        let early_data = match early_data {
+            EarlyDataDecision::Accepted if cx.common.is_dtls() => {
+                EarlyDataDecision::RequestedButRejected
+            }
+            other => other,
+        };
         // How much 0-RTT data we read, or skip when we reject it.
         let early_data_limit = match &external {
             Some((candidate, _)) => candidate.psk.max_early_data_size(),
@@ -495,6 +570,13 @@ impl CompleteClientHelloHandling {
         };
         let skip_early_data_limit =
             max_early_data_size(self.config.max_early_data_size).max(early_data_limit as usize);
+        let early_record_size_limit = match &external {
+            Some((candidate, _)) => candidate.psk.early_data_record_size_limit(),
+            None => resumedata
+                .as_ref()
+                .and_then(|session| session.early_data_record_size_limit)
+                .unwrap_or(crate::common_state::max_record_size_limit(true)),
+        };
 
         let client_hello_hash = self.transcript.current_hash();
         let psk_secret: Option<&[u8]> = match (&resumedata, &external) {
@@ -504,15 +586,26 @@ impl CompleteClientHelloHandling {
         };
         let key_schedule_pre = match psk_secret {
             Some(psk) => {
-                let early = KeyScheduleEarly::new(self.suite, psk);
+                let early = KeyScheduleEarly::new(self.suite, psk, Protocol::of(cx.common));
                 // Start reading under the early traffic key: it carries any
                 // 0-RTT data, and is replaced below when we do not accept it.
-                early.client_early_traffic_secret(
-                    client_hello_hash.as_ref(),
-                    &*self.config.key_log,
-                    &self.randoms.client,
-                    cx.common,
-                );
+                // DTLS has no 0-RTT here, so no early key either.
+                if !cx.common.is_dtls() && !cert_with_extern_psk {
+                    // RFC 9850 §2.1: trial decryption may use this key
+                    // even when the server must omit it from the key log.
+                    let sink: &dyn crate::KeyLog = if early_data == EarlyDataDecision::Accepted {
+                        &*self.config.key_log
+                    } else {
+                        &crate::NoKeyLog
+                    };
+                    early.client_early_traffic_secret(
+                        client_hello_hash.as_ref(),
+                        sink,
+                        &self.randoms.client,
+                        cx.common,
+                        early_record_size_limit,
+                    );
+                }
                 // RFC 9846 §7.5: the early exporter, for use with the 0-RTT
                 // data we accepted.
                 if early_data == EarlyDataDecision::Accepted {
@@ -524,11 +617,16 @@ impl CompleteClientHelloHandling {
                 }
                 early.into_pre_handshake()
             }
-            None => KeySchedulePreHandshake::new(self.suite),
+            None => KeySchedulePreHandshake::new(self.suite, Protocol::of(cx.common)),
         };
         let key_schedule = key_schedule_pre.into_handshake_with_shared_secret(&kx.secret);
 
         let ech_accepted = cx.data.ech.is_accepted();
+        if let Some(dtls) = cx.common.dtls.as_deref_mut() {
+            dtls.cid
+                .select(client_hello.extensions.connection_id.as_ref(), true)?;
+            dtls.select_rrc(client_hello.extensions.return_routability_check.is_some());
+        }
         emit_server_hello(
             &mut self.transcript,
             &mut self.randoms,
@@ -601,9 +699,10 @@ impl CompleteClientHelloHandling {
         // RFC 9846 §4.3.6: the client is willing to authenticate later.
         // RFC 9001 §4.4: QUIC has no post-handshake client authentication,
         // so an offer over QUIC is ignored and client auth stays in the
-        // handshake.
-        cx.data.post_handshake_auth_offered =
-            client_hello.extensions.post_handshake_auth.is_some() && !cx.common.is_quic();
+        // handshake. Nor is it supported over DTLS yet.
+        cx.data.post_handshake_auth_offered = client_hello.extensions.post_handshake_auth.is_some()
+            && !cx.common.is_quic()
+            && !cx.common.is_dtls();
         let defer_client_auth =
             self.config.request_client_auth_after_handshake && cx.data.post_handshake_auth_offered;
 
@@ -614,6 +713,7 @@ impl CompleteClientHelloHandling {
         // RFC 8844 §5: no session of a bound connection is kept for later.
         if (client_revocation_enabled(&self.config) && !cx.data.certificate_free)
             || self.config.external_binding.is_some()
+            || self.config.require_cert_with_extern_psk
         {
             send_tickets = 0;
             expected_tickets = expected_tickets.map(|_| 0);
@@ -636,7 +736,7 @@ impl CompleteClientHelloHandling {
             supported_groups,
             retry_configs,
             expected_tickets,
-        );
+        )?;
 
         let client_auth = if let Some(server_key) = server_key {
             let offer = if defer_client_auth {
@@ -660,7 +760,7 @@ impl CompleteClientHelloHandling {
                 client_hello,
                 delegated,
                 self.cert_types.server,
-            );
+            )?;
             emit_certificate_verify_tls13(
                 &mut self.transcript,
                 cx.common,

@@ -38,10 +38,22 @@ fn client_hands_its_connection_to_the_kernel() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     // Built before either side blocks on the socket.
-    let server_config = Arc::new(pki.server_config());
+    let server_config = pki.server_config();
     let mut client_config = pki.client_config();
+    #[cfg(feature = "zstd")]
+    let (server_config, probe) = zstd_server(server_config, &mut client_config);
+    let server_config = Arc::new(server_config);
     client_config.enable_secret_extraction = true;
-    let conn = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    let identity = browntls::ClientServerIdentity::new(
+        browntls::pki_types::ServerName::try_from("localhost").unwrap(),
+        browntls::ServiceIdentity::new(vec![browntls::ReferenceIdentifier::Dns(
+            browntls::pki_types::DnsName::try_from("localhost")
+                .unwrap()
+                .to_owned(),
+        )])
+        .unwrap(),
+    );
+    let conn = ClientConnection::new_with_identity(Arc::new(client_config), identity).unwrap();
     // The listener's backlog takes the connection before `accept` runs.
     let tcp = TcpStream::connect(addr).unwrap();
 
@@ -64,6 +76,14 @@ fn client_hands_its_connection_to_the_kernel() {
             // An accepted handover is itself the proof of kernel TLS (the
             // probe below cannot see it from every network namespace).
             Ok(mut tls) => {
+                assert_eq!(
+                    tls.kernel_connection().matched_service_identity(),
+                    Some(&browntls::ReferenceIdentifier::Dns(
+                        browntls::pki_types::DnsName::try_from("localhost")
+                            .unwrap()
+                            .to_owned()
+                    ))
+                );
                 tls.write_all(b"hello").unwrap();
                 tls.read_to_end(&mut reply).unwrap();
             }
@@ -83,7 +103,52 @@ fn client_hands_its_connection_to_the_kernel() {
             Err(HandoffError::Failed(error)) => panic!("handover failed: {error}"),
         }
         assert_eq!(reply, b"world");
+        #[cfg(feature = "zstd")]
+        assert_eq!(probe.count(), 1);
     });
+}
+
+#[test]
+fn facade_blocking_adapter_hands_off_each_hybrid_group() {
+    if !kernel_tls() {
+        return;
+    }
+    for (expected, provider) in hybrid_providers() {
+        let pki = Pki::new();
+        let provider = Arc::new(provider);
+        let mut client_config = pki.client_config_with_provider(provider.clone());
+        client_config.enable_secret_extraction = true;
+        let client_config = Arc::new(client_config);
+        let server_config = Arc::new(pki.server_config_with_provider(provider));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (socket, _) = listener.accept().unwrap();
+                let connection = ServerConnection::new(server_config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = [0; 6];
+                stream.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"hybrid");
+                assert_eq!(
+                    stream.conn.negotiated_key_exchange_group().unwrap().name(),
+                    expected,
+                    "{expected:?} facade kTLS peer"
+                );
+                stream.write_all(b"passed").unwrap();
+                stream.conn.send_close_notify();
+                stream.flush().unwrap();
+            });
+            let connection = ClientConnection::new(client_config, localhost()).unwrap();
+            let mut tls = KtlsStream::new(connection, tcp).unwrap();
+            tls.write_all(b"hybrid").unwrap();
+            let mut reply = [0; 6];
+            tls.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, b"passed");
+            server.join().unwrap();
+        });
+    }
 }
 
 /// `native` reaches `browntls-ktls`: its load-aware routing exists.

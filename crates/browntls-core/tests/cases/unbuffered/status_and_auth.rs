@@ -314,7 +314,7 @@ fn unbuffered_client_reports_its_delegated_credential() {
     .unwrap();
     let ck = CertifiedKey::from_der(chain.cert_chain(), chain.private_key(), &provider())
         .unwrap()
-        .with_delegated_credential(dc.clone(), dc_key)
+        .with_delegated_credential(dc.clone(), dc_key, &provider())
         .unwrap();
     let sc = Arc::new(
         ServerConfig::builder_with_provider(provider())
@@ -401,7 +401,7 @@ fn unbuffered_server_reports_the_client_delegated_credential() {
     .unwrap();
     let ck = CertifiedKey::from_der(chain.cert_chain(), chain.private_key(), &provider())
         .unwrap()
-        .with_client_delegated_credential(dc.clone(), dc_key)
+        .with_client_delegated_credential(dc.clone(), dc_key, &provider())
         .unwrap();
     let mut cc = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&version::TLS13])

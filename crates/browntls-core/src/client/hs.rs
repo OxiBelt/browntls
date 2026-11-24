@@ -124,6 +124,38 @@ pub(super) struct ClientHelloInput {
 }
 
 impl ClientHelloInput {
+    /// RFC 9846 §4.2.2: carry the original offer across a retry.
+    fn offers_transparency_info(&self, retry: bool) -> bool {
+        if retry {
+            self.hello
+                .sent_extensions
+                .contains(&ExtensionType::TransparencyInfo)
+        } else {
+            self.config.offers_transparency_info()
+        }
+    }
+
+    /// RFC 9973 §5: repeat the offer on retry or abort. ECH rejection has
+    /// already switched the comparison to the original outer ClientHello.
+    fn check_cert_with_extern_psk_retry(
+        &self,
+        common: &mut CommonState,
+        offered: bool,
+    ) -> Result<(), Error> {
+        if self
+            .hello
+            .sent_extensions
+            .contains(&ExtensionType::TlsCertWithExternPsk)
+            != offered
+        {
+            return Err(common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::CertWithExternPskChangedOnRetry,
+            ));
+        }
+        Ok(())
+    }
+
     /// Continues with the outer ClientHello after the server rejected ECH
     /// (RFC 9849 §6.1.6): its random, the public name (which the server
     /// certificate is checked against), its extensions, no ALPN and no
@@ -148,7 +180,14 @@ pub(super) fn process_record_size_limit(
 ) -> Result<(), Error> {
     match (hello.sent_record_size_limit, servers) {
         (Some(ours), Some(servers)) => common.apply_record_size_limits(ours, servers, tls13),
-        _ => Ok(()),
+        _ => {
+            if let Some(dtls) = &mut common.dtls {
+                dtls.clear_record_size_limit_observation();
+            } else {
+                common.record_layer.clear_record_size_limit_observation();
+            }
+            Ok(())
+        }
     }
 }
 
@@ -235,7 +274,12 @@ impl State<ClientConnectionData> for ExpectServerHello {
         trace!("We got ServerHello {:#?}", server_hello);
 
         let config = &self.input.config;
-        let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3);
+        let tls13_supported = config.supports_version(ProtocolVersion::TLSv1_3)
+            && cx
+                .common
+                .dtls
+                .as_ref()
+                .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
 
         // RFC 9846 §4.3.1: version negotiation. A supported_versions value
         // we did not offer, or one below TLS 1.3, is illegal_parameter.
@@ -274,6 +318,7 @@ impl State<ClientConnectionData> for ExpectServerHello {
 
         // RFC 9001 §4.2: QUIC requires TLS 1.3; we offered nothing else.
         crate::quic::tls::require_tls13(cx.common, version)?;
+        crate::tls13::dtls::require_enabled_version(cx.common, version)?;
 
         // RFC 8446 §4.2.10: a server that answers a 0-RTT offer with TLS 1.2
         // cannot have read the early data; fail rather than fall back.
@@ -350,6 +395,16 @@ impl State<ClientConnectionData> for ExpectServerHello {
             ));
         }
 
+        crate::dtls::cid::select_server_hello(
+            cx.common,
+            server_hello.extensions.connection_id.as_ref(),
+        )?;
+
+        crate::dtls::rrc_engine::select_server_hello(
+            cx.common,
+            server_hello.extensions.return_routability_check.is_some(),
+        )?;
+
         let suite = config
             .find_cipher_suite(server_hello.cipher_suite)
             .ok_or_else(|| {
@@ -360,8 +415,11 @@ impl State<ClientConnectionData> for ExpectServerHello {
                 )
             })?;
         // RFC 9001 §5.3: on QUIC only the suites we offered, those with a
-        // header protection scheme, may be selected.
-        if cx.common.is_quic() && !suite.usable_for_quic() {
+        // header protection scheme, may be selected; on DTLS only those
+        // usable there (RFC 9147 §4.5.3), which we offered.
+        if (cx.common.is_quic() && !suite.usable_for_quic())
+            || (cx.common.is_dtls() && !suite.usable_for_dtls())
+        {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::SelectedUnofferedCipherSuite,
@@ -431,15 +489,35 @@ impl State<ClientConnectionData> for ExpectServerHello {
             other => self.input.ech = other,
         }
 
+        #[cfg(feature = "tls12")]
+        if version == ProtocolVersion::TLSv1_2
+            && let Some(dtls) = &mut cx.common.dtls
+        {
+            dtls.select_version(version);
+            self.transcript_buffer = self.transcript_buffer.for_dtls12(dtls.outgoing_hello_seq());
+        }
         let mut transcript = self.transcript_buffer.start_hash(suite.hash_provider());
+        #[cfg(feature = "tls12")]
+        if version == ProtocolVersion::TLSv1_2 && cx.common.is_dtls() {
+            let seq = cx.common.dtls.as_ref().map_or(0, |d| d.received_seq);
+            transcript.add(&crate::dtls::canonical12(handshake_bytes(&m), seq));
+        } else {
+            transcript.add_message(&m);
+        }
+        #[cfg(not(feature = "tls12"))]
         transcript.add_message(&m);
 
         let randoms = ConnectionRandoms::new(self.input.random, server_hello.random);
 
         match suite {
             SupportedCipherSuite::Tls13(suite) => {
-                // RFC 8446 §4.1.3: the session ID must be echoed exactly.
-                if server_hello.session_id != self.input.session_id {
+                // RFC 9147 section 5: DTLS 1.3 never echoes an old ID.
+                let expected_id = if cx.common.is_dtls() {
+                    SessionId::empty()
+                } else {
+                    self.input.session_id
+                };
+                if server_hello.session_id != expected_id {
                     return Err(cx.common.send_fatal_alert(
                         AlertDescription::IllegalParameter,
                         PeerMisbehaved::ServerEchoedCompatibilitySessionId,
@@ -554,7 +632,12 @@ impl ExpectServerHelloOrHelloRetryRequest {
                 PeerMisbehaved::IllegalServerHelloLegacyVersion,
             ));
         }
-        if hrr.session_id != self.next.input.session_id {
+        let expected_id = if cx.common.is_dtls() {
+            SessionId::empty()
+        } else {
+            self.next.input.session_id
+        };
+        if hrr.session_id != expected_id {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::IllegalHelloRetryRequestWithWrongSessionId,
@@ -568,7 +651,11 @@ impl ExpectServerHelloOrHelloRetryRequest {
         }
 
         let suite = match config.find_cipher_suite(hrr.cipher_suite) {
-            Some(suite @ SupportedCipherSuite::Tls13(_)) => suite,
+            Some(suite @ SupportedCipherSuite::Tls13(_))
+                if !cx.common.is_dtls() || suite.usable_for_dtls() =>
+            {
+                suite
+            }
             _ => {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::IllegalParameter,
@@ -691,7 +778,30 @@ impl ExpectServerHelloOrHelloRetryRequest {
 }
 
 impl State<ClientConnectionData> for ExpectServerHelloOrHelloRetryRequest {
-    fn handle(self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+    #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
+    fn handle(mut self: Box<Self>, cx: &mut ClientContext<'_>, m: Message<'_>) -> NextStateOrError {
+        #[cfg(feature = "tls12")]
+        if let MessagePayload::Handshake {
+            parsed:
+                HandshakeMessagePayload(HandshakePayload::Unknown((
+                    crate::enums::HandshakeType::HelloVerifyRequest,
+                    body,
+                ))),
+            ..
+        } = &m.payload
+        {
+            self.next.transcript_buffer = crate::dtls::retry_client_hello(cx.common, body.bytes())?;
+            // The repeated hello still offers its DTLS 1.2 session.
+            // TLS 1.3 binders, however, do not survive a legacy retry.
+            if matches!(
+                self.next.input.resuming.as_ref().map(|r| &r.value),
+                Some(ClientSessionValue::Tls13(_))
+            ) {
+                self.next.input.resuming = None;
+            }
+            self.next.offered_psks.clear();
+            return Ok(Box::new(self.next));
+        }
         match &m.payload {
             MessagePayload::Handshake {
                 parsed: HandshakeMessagePayload(HandshakePayload::ServerHello(..)),

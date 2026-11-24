@@ -10,17 +10,19 @@ publish.workspace = true
 
 [features]
 default = ["std", "native", "tls12", "logging", "prefer-post-quantum"]
-std = ["alloc", "browntls-pki/std", "browntls-crypto?/std", "ruzstd?/std"]
+std = ["alloc", "browntls-pki/std", "browntls-crypto?/std", "ruzstd?/std", "rustix?/std"]
 alloc = []
 tls12 = []
 logging = ["dep:log"]
+# Session-secret diagnostics. Omit this feature from production builds.
+key-log = ["alloc", "dep:rustix"]
 # Orders X25519MLKEM768 first in the default key-exchange group list.
 prefer-post-quantum = []
 # Built-in certificate compression (RFC 8879), one feature per algorithm.
 # Each enabled algorithm joins the default compressor and decompressor lists.
 zlib = ["dep:miniz_oxide"]
 brotli = ["std", "dep:brotli"]
-zstd = ["dep:ruzstd"]
+zstd = ["dep:ruzstd", "dep:twox-hash"]
 # Unstable entry points for the fuzz targets in `fuzz/`; not a supported API.
 fuzzing = ["std"]
 # The built-in provider backed by `browntls-crypto`, whose `alloc` feature it
@@ -57,6 +59,7 @@ aes = { version = "0.9", default-features = false, features = ["zeroize"], optio
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"], optional = true }
 brotli = { version = "9", default-features = false, features = ["std"], optional = true }
 ruzstd = { version = "0.9", default-features = false, optional = true }
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"], optional = true }
 
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "zeroize"], optional = true }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"], optional = true }
@@ -76,6 +79,9 @@ rsa = { version = "0.10.0", default-features = false, features = ["encoding", "p
 getrandom = { version = "0.4", default-features = false, optional = true }
 signature = { version = "3", default-features = false, optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "process"], optional = true }
 
 [dev-dependencies]
 hex = "0.4"

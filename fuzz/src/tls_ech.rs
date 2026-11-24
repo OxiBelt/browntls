@@ -50,6 +50,7 @@ use crate::input::{Input, put_field, put_short_field};
 
 mod config;
 mod handshake;
+mod pem;
 mod seeds;
 mod split;
 
@@ -355,7 +356,7 @@ fn pick_fields(input: &mut Input) -> (Fields, Option<usize>) {
     };
     let count = input.choose(5);
     let suites = (0..count)
-        .map(|_| match input.choose(8) {
+        .map(|_| match input.choose(9) {
             0 => (input.u16(), input.u16()),
             1 => (1, 0xffff),
             _ => (1 + input.choose(3) as u16, 1 + input.choose(3) as u16),
@@ -412,7 +413,7 @@ impl State {
 
 /// The `tls_ech` fuzz target.
 ///
-/// Operations (first byte modulo 8):
+/// Operations (first byte modulo 9):
 ///
 /// 0. list: suite selector, then a 16-bit-prefixed `ECHConfigList` for
 ///    [`EchConfig::new`] and the SVCB helpers;
@@ -429,7 +430,8 @@ impl State {
 ///    GREASE; split mode: accepted, stale or GREASE, and accepted with
 ///    random identifiers), HelloRetryRequest flag, stale configuration
 ///    fields, an optional edit of the client's first flight, and for split
-///    mode the variant and the size of the pieces.
+///    mode the variant and the size of the pieces;
+/// 8. PEM: arbitrary RFC 9934 bytes or PKCS #8, or a fixture-key round trip.
 ///
 /// [`EchConfig::new`]: browntls_core::ech::EchConfig::new
 /// [`EchServerConfig::new`]: browntls_core::ech::EchServerConfig::new
@@ -441,7 +443,7 @@ pub fn run(data: &[u8]) {
         if input.is_empty() {
             break;
         }
-        match input.choose(8) {
+        match input.choose(9) {
             0 => list(&mut input),
             1 => config(&mut input, &mut state),
             2 => generate(&mut input, &mut state),
@@ -449,6 +451,7 @@ pub fn run(data: &[u8]) {
             4 => svcb(&mut input),
             5 => presentation(&mut input),
             6 => grease(&mut input, &mut state),
+            8 => pem::run(&mut input),
             _ => {
                 if state.handshakes < MAX_HANDSHAKES {
                     state.handshakes += 1;

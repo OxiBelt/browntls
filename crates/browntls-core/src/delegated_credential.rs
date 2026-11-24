@@ -32,11 +32,13 @@
 //! exercised.
 
 use alloc::vec::Vec;
+use core::fmt;
 use core::time::Duration;
 
 use browntls_pki::{CertificateDer, EndEntityCert, SubjectPublicKeyInfoDer, UnixTime};
 
 use crate::common_state::Side;
+use crate::crypto::CryptoProvider;
 use crate::crypto::signer::SigningKey;
 use crate::enums::SignatureScheme;
 use crate::error::{Error, InconsistentKeys, InvalidMessage, PeerMisbehaved};
@@ -53,8 +55,56 @@ pub const MAX_VALIDITY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// handshake message size anyway; this is a much smaller local bound.
 const MAX_SPKI_LEN: usize = 0x4000;
 
+/// The sizes of valid_time, both schemes, and the SPKI and signature
+/// length prefixes. The enclosing TLS extension header is four more bytes.
+const CREDENTIAL_OVERHEAD: usize = 4 + 2 + 3 + 2 + 2;
+pub(crate) const EXTENSION_HEADER_LEN: usize = 4;
+
 const SERVER_CONTEXT: &[u8] = b"TLS, server delegated credentials";
 const CLIENT_CONTEXT: &[u8] = b"TLS, client delegated credentials";
+
+/// Why a locally configured delegated credential could not be used.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentError {
+    /// The leaf has no valid delegation authorization.
+    UnauthorizedCertificate,
+    /// The credential or its certificate extensions cannot be encoded.
+    InvalidEncoding,
+    /// A required signature scheme is unavailable or disallowed.
+    UnsupportedScheme,
+    /// The signature does not authenticate the configured leaf and role.
+    BadIssuerSignature,
+    /// The delegated signer did not produce a signature for key association.
+    KeyProofFailed,
+    /// The expiry is outside the parent certificate's validity interval.
+    InvalidExpiry,
+    /// The credential has expired.
+    Expired,
+    /// The staged credential is outside its usable window at the time supplied.
+    NotYetUsable,
+}
+
+impl fmt::Display for AttachmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnauthorizedCertificate => "the leaf does not authorize delegation",
+            Self::InvalidEncoding => "invalid credential encoding",
+            Self::UnsupportedScheme => "unavailable or disallowed signature scheme",
+            Self::BadIssuerSignature => "the signature does not match the leaf and role",
+            Self::KeyProofFailed => "the delegated signer could not prove key possession",
+            Self::InvalidExpiry => "expiry outside the parent certificate validity interval",
+            Self::Expired => "the credential has expired",
+            Self::NotYetUsable => "the credential is outside its activation window",
+        })
+    }
+}
+
+impl From<AttachmentError> for Error {
+    fn from(value: AttachmentError) -> Self {
+        Self::InvalidDelegatedCredential(value)
+    }
+}
 
 /// Whether `scheme` may be a credential's `dc_cert_verify_algorithm`: a
 /// TLS 1.3 scheme whose key is not an `rsaEncryption` key. RFC 9345 §4
@@ -101,7 +151,6 @@ impl Codec<'_> for Credential {
                 bytes.extend_from_slice(spki);
             }
             None => {
-                debug_assert!(false, "delegated public key longer than 2^24 - 1 bytes");
                 u24(0).encode(bytes);
             }
         }
@@ -167,12 +216,29 @@ impl DelegatedCredential {
     /// Decodes the wire form (the body of the `delegated_credential`
     /// extension in a CertificateEntry). Trailing bytes are an error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, InvalidMessage> {
+        if bytes.len() > usize::from(u16::MAX) - EXTENSION_HEADER_LEN {
+            return Err(InvalidMessage::MessageTooLarge);
+        }
         Self::read_bytes(bytes)
     }
 
-    /// The wire form.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.get_encoding()
+    /// Encodes the wire form after checking its length fields.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.encoded_extension_len()?;
+        Ok(self.get_encoding())
+    }
+
+    pub(crate) fn encoded_extension_len(&self) -> Result<usize, Error> {
+        let spki_len = self.credential.public_key.as_ref().len();
+        let sig_len = self.signature.len();
+        if !(1..=MAX_SPKI_LEN).contains(&spki_len) || sig_len == 0 {
+            return Err(AttachmentError::InvalidEncoding.into());
+        }
+        CREDENTIAL_OVERHEAD
+            .checked_add(EXTENSION_HEADER_LEN + spki_len)
+            .and_then(|len| len.checked_add(sig_len))
+            .filter(|len| *len <= usize::from(u16::MAX))
+            .ok_or_else(|| AttachmentError::InvalidEncoding.into())
     }
 
     /// The bytes the certificate key signs (RFC 9345 §4): 64 octets of
@@ -227,17 +293,22 @@ impl DelegatedCredential {
             Error::General("the certificate key cannot sign with any of the given schemes".into())
         })?;
         let algorithm = signer.scheme();
+        if !schemes.contains(&algorithm) {
+            return Err(AttachmentError::UnsupportedScheme.into());
+        }
         let signature = signer.sign(&Self::signed_message(
             side,
             end_entity,
             &credential,
             algorithm,
         ))?;
-        Ok(Self {
+        let issued = Self {
             credential,
             algorithm,
             signature,
-        })
+        };
+        issued.encoded_extension_len()?;
+        Ok(issued)
     }
 
     /// When the credential expires: the delegation certificate's
@@ -271,17 +342,11 @@ fn expiry_from(not_before: UnixTime, valid_time: u32) -> UnixTime {
 /// decoding would accept.
 fn check_credential(credential: &Credential) -> Result<(), Error> {
     if !credential_scheme_allowed(credential.dc_cert_verify_algorithm) {
-        return Err(Error::General(
-            "a delegated credential's scheme must be a TLS 1.3 scheme without an \
-             rsaEncryption key (RFC 9345 §4)"
-                .into(),
-        ));
+        return Err(AttachmentError::UnsupportedScheme.into());
     }
     let len = credential.public_key.as_ref().len();
     if len == 0 || len > MAX_SPKI_LEN {
-        return Err(Error::General(
-            "a delegated credential's public key must be 1 to 16384 bytes".into(),
-        ));
+        return Err(AttachmentError::InvalidEncoding.into());
     }
     Ok(())
 }
@@ -289,16 +354,15 @@ fn check_credential(credential: &Credential) -> Result<(), Error> {
 /// Checks that `end_entity` may sign delegated credentials (RFC 9345
 /// §4.2): it has the `DelegationUsage` extension and the `digitalSignature`
 /// key usage.
-fn check_delegation_certificate(end_entity: &CertificateDer<'_>) -> Result<(), Error> {
-    let cert = EndEntityCert::try_from(end_entity).map_err(crate::webpki::pki_error)?;
+fn check_delegation_certificate<'a>(
+    end_entity: &'a CertificateDer<'a>,
+) -> Result<EndEntityCert<'a>, Error> {
+    let cert = EndEntityCert::try_from(end_entity)
+        .map_err(|_| AttachmentError::UnauthorizedCertificate)?;
     if cert.has_delegation_usage() && cert.has_digital_signature_key_usage() {
-        Ok(())
+        Ok(cert)
     } else {
-        Err(Error::General(
-            "the certificate lacks the DelegationUsage extension or the digitalSignature \
-             key usage (RFC 9345 §4.2)"
-                .into(),
-        ))
+        Err(AttachmentError::UnauthorizedCertificate.into())
     }
 }
 
@@ -315,8 +379,8 @@ pub struct DelegatedCredentialKey {
     key: Arc<dyn SigningKey>,
     end_entity: CertificateDer<'static>,
     expiry: UnixTime,
-    /// The delegation certificate's `notAfter`.
-    not_after: UnixTime,
+    /// The delegation certificate's `notBefore`.
+    not_before: UnixTime,
 }
 
 impl DelegatedCredentialKey {
@@ -326,8 +390,9 @@ impl DelegatedCredentialKey {
         end_entity: &CertificateDer<'_>,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
+        provider: &CryptoProvider,
     ) -> Result<Self, Error> {
-        Self::new_for(Side::Server, end_entity, credential, key)
+        Self::new_for(Side::Server, end_entity, credential, key, provider)
     }
 
     /// Pairs `credential` with its private `key` for `end_entity`. `side`
@@ -335,40 +400,57 @@ impl DelegatedCredentialKey {
     /// [`DelegatedCredential::issue`]: the credential's signature covers
     /// it, so a credential is only ever presented by that side.
     ///
-    /// Checks that the certificate permits delegation, that the key can
-    /// sign with the credential's scheme (a TLS 1.3 scheme other than
-    /// `rsa_pss_rsae_*`, RFC 9345 §4) and, when the
-    /// key exposes its public half, that it matches the credential. The
-    /// credential's signature is the issuer's responsibility and is not
-    /// checked here (so neither is `side`); peers check it.
+    /// Checks the authorization, signature and absolute expiry against
+    /// the leaf certificate, and verifies the delegated key association.
+    /// Check staged activation against an explicit time with
+    /// [`Self::check_usable_at`].
     pub fn new_for(
         side: Side,
         end_entity: &CertificateDer<'_>,
         credential: DelegatedCredential,
         key: Arc<dyn SigningKey>,
+        provider: &CryptoProvider,
     ) -> Result<Self, Error> {
-        check_delegation_certificate(end_entity)?;
+        let cert = check_delegation_certificate(end_entity)?;
         check_credential(&credential.credential)?;
+        credential.encoded_extension_len()?;
+        let not_before = cert.not_before();
+        let expiry = expiry_from(not_before, credential.credential.valid_time);
+        if expiry <= not_before || expiry >= cert.not_after() {
+            return Err(AttachmentError::InvalidExpiry.into());
+        }
         let scheme = credential.credential.dc_cert_verify_algorithm;
-        if key.choose_scheme(&[scheme]).is_none() {
-            return Err(Error::General(
-                "the delegated credential key cannot sign with the credential's scheme".into(),
-            ));
-        }
-        if let Some(spki) = key.public_key()
-            && spki.as_ref() != credential.credential.public_key.as_ref()
+        let algorithms = provider
+            .signature_verification_algorithms
+            .supported_schemes();
+        if !credential.algorithm.supported_in_tls13()
+            || !algorithms.contains(&credential.algorithm)
+            || !algorithms.contains(&scheme)
         {
-            return Err(InconsistentKeys::KeyMismatch.into());
+            return Err(AttachmentError::UnsupportedScheme.into());
         }
-        let cert = EndEntityCert::try_from(end_entity).map_err(crate::webpki::pki_error)?;
-        let expiry = expiry_from(cert.not_before(), credential.credential.valid_time);
+        let spki = &credential.credential.public_key;
+        browntls_pki::RawPublicKeyEntity::try_from(spki)
+            .map_err(|_| AttachmentError::InvalidEncoding)?;
+        verify_issuer_signature(&credential, side, end_entity, provider)?;
+        let signer = key
+            .choose_scheme(&[scheme])
+            .filter(|signer| signer.scheme() == scheme)
+            .ok_or(AttachmentError::UnsupportedScheme)?;
+        match key.public_key() {
+            Some(key_spki) if key_spki.as_ref() != spki.as_ref() => {
+                return Err(InconsistentKeys::KeyMismatch.into());
+            }
+            Some(_) => {}
+            None => prove_opaque_key(&*signer, spki, provider)?,
+        }
         Ok(Self {
             side,
             credential,
             key,
             end_entity: end_entity.clone().into_owned(),
             expiry,
-            not_after: cert.not_after(),
+            not_before,
         })
     }
 
@@ -390,6 +472,22 @@ impl DelegatedCredentialKey {
     /// When the credential expires.
     pub fn expiry(&self) -> UnixTime {
         self.expiry
+    }
+
+    /// Checks whether this staged credential is usable at `now`.
+    ///
+    /// The validity must be positive, at most seven days from `now`, and
+    /// strictly earlier than the parent certificate's expiry.
+    pub fn check_usable_at(&self, now: UnixTime) -> Result<(), Error> {
+        let now = now.as_secs();
+        let expiry = self.expiry.as_secs();
+        if now >= expiry {
+            return Err(AttachmentError::Expired.into());
+        }
+        if now < self.not_before.as_secs() || expiry > now.saturating_add(MAX_VALIDITY.as_secs()) {
+            return Err(AttachmentError::NotYetUsable.into());
+        }
+        Ok(())
     }
 
     /// Whether this credential lets `side` authenticate `end_entity` at
@@ -414,10 +512,55 @@ impl DelegatedCredentialKey {
             && dc_schemes.contains(&scheme)
             && sig_schemes.contains(&scheme)
             && sig_schemes.contains(&self.credential.algorithm)
-            && now.as_secs() < self.expiry.as_secs()
-            && self.expiry.as_secs() <= now.as_secs().saturating_add(MAX_VALIDITY.as_secs())
-            && self.expiry.as_secs() <= self.not_after.as_secs()
+            && self.check_usable_at(now).is_ok()
     }
+}
+
+fn verify_issuer_signature(
+    dc: &DelegatedCredential,
+    side: Side,
+    end_entity: &CertificateDer<'_>,
+    provider: &CryptoProvider,
+) -> Result<(), Error> {
+    let message =
+        DelegatedCredential::signed_message(side, end_entity, &dc.credential, dc.algorithm);
+    let dss = DigitallySignedStruct::new(dc.algorithm, dc.signature.clone());
+    crate::webpki::verify_tls13_signature(
+        &message,
+        end_entity,
+        &dss,
+        &provider.signature_verification_algorithms,
+    )
+    .map_err(|_| AttachmentError::BadIssuerSignature)?;
+    Ok(())
+}
+
+fn prove_opaque_key(
+    signer: &dyn crate::sign::Signer,
+    spki: &SubjectPublicKeyInfoDer<'_>,
+    provider: &CryptoProvider,
+) -> Result<(), Error> {
+    const DOMAIN: &[u8] = b"browntls delegated credential key proof v1\0";
+    let mut nonce = [0u8; 32];
+    provider
+        .secure_random
+        .fill(&mut nonce)
+        .map_err(|_| Error::FailedToGetRandomBytes)?;
+    let mut message = Vec::with_capacity(DOMAIN.len() + nonce.len());
+    message.extend_from_slice(DOMAIN);
+    message.extend_from_slice(&nonce);
+    let signature = signer
+        .sign(&message)
+        .map_err(|_| AttachmentError::KeyProofFailed)?;
+    let dss = DigitallySignedStruct::new(signer.scheme(), signature);
+    crate::webpki::verify_tls13_signature_with_raw_key(
+        &message,
+        spki,
+        &dss,
+        &provider.signature_verification_algorithms,
+    )
+    .map_err(|_| InconsistentKeys::KeyMismatch)?;
+    Ok(())
 }
 
 /// What we offered and the peer presented, for [`validate`].
@@ -486,7 +629,7 @@ pub fn validate(
     }
     // Check 2: at most seven days left, and not beyond the certificate.
     if expiry_secs > now.saturating_add(MAX_VALIDITY.as_secs())
-        || expiry_secs > cert.not_after().as_secs()
+        || expiry_secs >= cert.not_after().as_secs()
     {
         return Err(PeerMisbehaved::DelegatedCredentialValidityTooLong.into());
     }

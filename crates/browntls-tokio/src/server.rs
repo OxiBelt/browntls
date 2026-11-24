@@ -7,6 +7,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use browntls_core::crypto::hpke::Hpke;
+use browntls_core::ech::EchServerConfig;
+use browntls_core::ech::pem::{EchPem, EchPemError};
 use browntls_core::{ServerConfig, ServerConnection};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
@@ -31,6 +34,24 @@ pub struct TlsAcceptor {
 }
 
 impl TlsAcceptor {
+    /// Replaces the shared-mode ECH configuration in `config` with
+    /// `decryption` keys and `retry` configurations, using the caller's
+    /// HPKE `suites`.
+    ///
+    /// All other server settings are preserved. Shared mode requires
+    /// `config.ech_backend` to be false.
+    pub fn from_ech_pem(
+        mut config: ServerConfig,
+        decryption: &[EchPem],
+        retry: &[EchPem],
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        config.ech = Some(Arc::new(EchServerConfig::from_pems(
+            decryption, retry, suites,
+        )?));
+        Ok(Self::from(Arc::new(config)))
+    }
+
     /// Answers the certificate status (OCSP) queries of this acceptor's
     /// connections (about client certificates) with `fetcher`: during the
     /// handshake, and in reads after it (post-handshake authentication).

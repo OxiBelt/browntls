@@ -1,5 +1,4 @@
-//! Key exchange: X25519, NIST curves, ML-KEM-768 and the hybrid groups of
-//! draft-ietf-tls-ecdhe-mlkem.
+//! Key exchange: X25519, NIST curves, ML-KEM and the RFC 10024 hybrids.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -7,7 +6,9 @@ use core::fmt;
 
 use ml_kem::{Decapsulate, KeyExport};
 
-use crate::crypto::{ActiveKeyExchange, CompletedKeyExchange, SharedSecret, SupportedKxGroup};
+use crate::crypto::{
+    ActiveKeyExchange, CompletedKeyExchange, SharedSecret, SupportedKxGroup, zeroize_slice,
+};
 use crate::enums::ProtocolVersion;
 use crate::error::{Error, PeerMisbehaved};
 use crate::msgs::enums::NamedGroup;
@@ -33,7 +34,7 @@ impl SupportedKxGroup for X25519Group {
         let mut bytes = [0u8; 32];
         random_bytes(&mut bytes)?;
         let secret = x25519_dalek::StaticSecret::from(bytes);
-        crate::crypto::zeroize_slice(&mut bytes);
+        zeroize_slice(&mut bytes);
         let pub_key = x25519_dalek::PublicKey::from(&secret).to_bytes();
         Ok(Box::new(X25519Kx { secret, pub_key }))
     }
@@ -104,7 +105,7 @@ macro_rules! nist_group {
                     }
                     if let Ok(secret) = $krate::SecretKey::from_slice(&bytes) {
                         use $krate::elliptic_curve::sec1::ToSec1Point;
-                        crate::crypto::zeroize_slice(&mut bytes);
+                        zeroize_slice(&mut bytes);
                         let pub_key = secret.public_key().to_sec1_point(false).as_bytes().to_vec();
                         return Ok(Box::new($kx { secret, pub_key }));
                     }
@@ -182,89 +183,97 @@ nist_group!(
 );
 
 // ---------------------------------------------------------------------------
-// ML-KEM-768
-
-type MlKemDk = ml_kem::ml_kem_768::DecapsulationKey;
-type MlKemEk = ml_kem::ml_kem_768::EncapsulationKey;
+// ML-KEM
 
 const MLKEM768_EK_LEN: usize = 1184;
 const MLKEM768_CT_LEN: usize = 1088;
-const MLKEM768_SS_LEN: usize = 32;
-
-/// ML-KEM-768 (FIPS 203) used alone as a key exchange.
-pub(crate) struct MlKem768Group;
-
-static MLKEM768_GROUP: MlKem768Group = MlKem768Group;
+const MLKEM1024_EK_LEN: usize = 1568;
+const MLKEM1024_CT_LEN: usize = 1568;
 
 /// ML-KEM-768 key exchange (TLS 1.3 only).
 pub static MLKEM768: &dyn SupportedKxGroup = &MLKEM768_GROUP;
 
-impl SupportedKxGroup for MlKem768Group {
-    /// The client role: generate a decapsulation key and offer the
-    /// encapsulation key.
-    fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-        let mut seed = ml_kem::Seed::default();
-        random_bytes(&mut seed)?;
-        let dk = MlKemDk::from_seed(seed);
-        let pub_key = dk.encapsulation_key().to_bytes().to_vec();
-        Ok(Box::new(MlKemKx { dk, pub_key }))
-    }
+macro_rules! mlkem_group {
+    ($group:ident, $static_name:ident, $params:ident, $name:ident) => {
+        struct $group;
 
-    /// The server role: encapsulate to the client's key.
-    fn start_and_complete(&self, client_share: &[u8]) -> Result<CompletedKeyExchange, Error> {
-        let (ct, ss) = mlkem_encapsulate(client_share)?;
-        Ok(CompletedKeyExchange {
-            group: self.name(),
-            pub_key: ct,
-            secret: ss,
-        })
-    }
+        static $static_name: $group = $group;
 
-    fn name(&self) -> NamedGroup {
-        NamedGroup::MLKEM768
-    }
+        impl SupportedKxGroup for $group {
+            fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
+                let mut seed = ml_kem::Seed::default();
+                random_bytes(&mut seed).inspect_err(|_| zeroize_slice(&mut seed))?;
+                let dk = ml_kem::$params::DecapsulationKey::from_seed(seed);
+                zeroize_slice(&mut seed);
+                let pub_key = dk.encapsulation_key().to_bytes().to_vec();
+                Ok(Box::new(MlKemKx {
+                    dk,
+                    pub_key,
+                    name: self.name(),
+                }))
+            }
 
-    fn usable_for_version(&self, version: ProtocolVersion) -> bool {
-        version == ProtocolVersion::TLSv1_3
-    }
-}
+            fn start_and_complete(
+                &self,
+                client_share: &[u8],
+            ) -> Result<CompletedKeyExchange, Error> {
+                type Ek = ml_kem::$params::EncapsulationKey;
+                let ek_bytes: ml_kem::Key<Ek> = client_share
+                    .try_into()
+                    .map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
+                // Apply the FIPS 203 encapsulation-key check.
+                let ek =
+                    Ek::new(&ek_bytes).map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
+                let mut m = ml_kem::B32::default();
+                random_bytes(&mut m).inspect_err(|_| zeroize_slice(&mut m))?;
+                let (ct, mut ss) = ek.encapsulate_deterministic(&m);
+                zeroize_slice(&mut m);
+                let secret = SharedSecret::from(ss.as_slice());
+                zeroize_slice(&mut ss);
+                Ok(CompletedKeyExchange {
+                    group: self.name(),
+                    pub_key: ct.to_vec(),
+                    secret,
+                })
+            }
 
-impl fmt::Debug for MlKem768Group {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("MLKEM768")
-    }
-}
+            fn name(&self) -> NamedGroup {
+                NamedGroup::$name
+            }
 
-fn mlkem_encapsulate(client_share: &[u8]) -> Result<(Vec<u8>, SharedSecret), Error> {
-    if client_share.len() != MLKEM768_EK_LEN {
-        return Err(PeerMisbehaved::InvalidKeyShare.into());
-    }
-    let ek_bytes: ml_kem::Key<MlKemEk> = client_share
-        .try_into()
-        .map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
-    let ek = MlKemEk::new(&ek_bytes).map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
-    let mut m = ml_kem::B32::default();
-    random_bytes(&mut m)?;
-    let (ct, ss) = ek.encapsulate_deterministic(&m);
-    crate::crypto::zeroize_slice(&mut m);
-    Ok((ct.to_vec(), SharedSecret::from(ss.as_slice())))
-}
-
-struct MlKemKx {
-    dk: MlKemDk,
-    pub_key: Vec<u8>,
-}
-
-impl ActiveKeyExchange for MlKemKx {
-    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
-        if peer_pub_key.len() != MLKEM768_CT_LEN {
-            return Err(PeerMisbehaved::InvalidKeyShare.into());
+            fn usable_for_version(&self, version: ProtocolVersion) -> bool {
+                version == ProtocolVersion::TLSv1_3
+            }
         }
-        let ss = self
+
+        impl fmt::Debug for $group {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{:?}", NamedGroup::$name)
+            }
+        }
+    };
+}
+
+mlkem_group!(MlKem768Group, MLKEM768_GROUP, ml_kem_768, MLKEM768);
+mlkem_group!(MlKem1024Group, MLKEM1024_GROUP, ml_kem_1024, MLKEM1024);
+
+struct MlKemKx<D> {
+    dk: D,
+    pub_key: Vec<u8>,
+    name: NamedGroup,
+}
+
+impl<D: Decapsulate + Send + Sync> ActiveKeyExchange for MlKemKx<D> {
+    fn complete(self: Box<Self>, peer_pub_key: &[u8]) -> Result<SharedSecret, Error> {
+        // A correctly sized ciphertext always yields a secret via implicit
+        // rejection. The slice conversion can only fail on length.
+        let mut ss = self
             .dk
             .decapsulate_slice(peer_pub_key)
             .map_err(|_| Error::from(PeerMisbehaved::InvalidKeyShare))?;
-        Ok(SharedSecret::from(ss.as_slice()))
+        let secret = SharedSecret::from(ss.as_slice());
+        zeroize_slice(&mut ss);
+        Ok(secret)
     }
 
     fn pub_key(&self) -> &[u8] {
@@ -272,15 +281,15 @@ impl ActiveKeyExchange for MlKemKx {
     }
 
     fn group(&self) -> NamedGroup {
-        NamedGroup::MLKEM768
+        self.name
     }
 }
 
 // ---------------------------------------------------------------------------
 // Hybrid groups
 
-/// How a hybrid share is laid out: the post-quantum part first (X25519MLKEM768)
-/// or the classical part first (SecP256r1MLKEM768).
+/// The RFC 10024 share layout, with ML-KEM first for X25519MLKEM768
+/// and ECDHE first for the NIST hybrids.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     classical_share_len: usize,
@@ -315,15 +324,17 @@ impl Layout {
     }
 }
 
-/// A classical group combined with ML-KEM-768.
-pub(crate) struct Hybrid {
+/// A classical group combined with ML-KEM (RFC 10024).
+struct Hybrid {
     classical: &'static dyn SupportedKxGroup,
+    pq: &'static dyn SupportedKxGroup,
     name: NamedGroup,
     layout: Layout,
 }
 
 static X25519MLKEM768_GROUP: Hybrid = Hybrid {
     classical: &X25519_GROUP,
+    pq: &MLKEM768_GROUP,
     name: NamedGroup::X25519MLKEM768,
     layout: Layout {
         classical_share_len: 32,
@@ -338,6 +349,7 @@ pub static X25519MLKEM768: &dyn SupportedKxGroup = &X25519MLKEM768_GROUP;
 
 static SECP256R1MLKEM768_GROUP: Hybrid = Hybrid {
     classical: &SECP256R1_GROUP,
+    pq: &MLKEM768_GROUP,
     name: NamedGroup::secp256r1MLKEM768,
     layout: Layout {
         classical_share_len: 65,
@@ -350,10 +362,25 @@ static SECP256R1MLKEM768_GROUP: Hybrid = Hybrid {
 /// secp256r1 combined with ML-KEM-768 (TLS 1.3 only).
 pub static SECP256R1MLKEM768: &dyn SupportedKxGroup = &SECP256R1MLKEM768_GROUP;
 
+static SECP384R1MLKEM1024_GROUP: Hybrid = Hybrid {
+    classical: &SECP384R1_GROUP,
+    pq: &MLKEM1024_GROUP,
+    name: NamedGroup::secp384r1MLKEM1024,
+    layout: Layout {
+        classical_share_len: 97,
+        pq_client_share_len: MLKEM1024_EK_LEN,
+        pq_server_share_len: MLKEM1024_CT_LEN,
+        pq_first: false,
+    },
+};
+
+/// secp384r1 combined with ML-KEM-1024 (TLS 1.3 only).
+pub static SECP384R1MLKEM1024: &dyn SupportedKxGroup = &SECP384R1MLKEM1024_GROUP;
+
 impl SupportedKxGroup for Hybrid {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
         let classical = self.classical.start()?;
-        let pq = MLKEM768_GROUP.start()?;
+        let pq = self.pq.start()?;
         let pub_key = self.layout.concat(pq.pub_key(), classical.pub_key());
         Ok(Box::new(ActiveHybrid {
             classical,
@@ -369,23 +396,13 @@ impl SupportedKxGroup for Hybrid {
             .layout
             .split(client_share, self.layout.pq_client_share_len)?;
         let classical = self.classical.start_and_complete(classical_share)?;
-        let (ct, pq_secret) = mlkem_encapsulate(pq_share)?;
-        let mut secret =
-            Vec::with_capacity(MLKEM768_SS_LEN + classical.secret.secret_bytes().len());
-        secret.extend_from_slice(pq_secret.secret_bytes());
-        secret.extend_from_slice(classical.secret.secret_bytes());
-        let secret = if self.layout.pq_first {
-            secret
-        } else {
-            let mut s = Vec::with_capacity(secret.len());
-            s.extend_from_slice(classical.secret.secret_bytes());
-            s.extend_from_slice(pq_secret.secret_bytes());
-            crate::crypto::zeroize_vec(&mut secret);
-            s
-        };
+        let pq = self.pq.start_and_complete(pq_share)?;
+        let secret = self
+            .layout
+            .concat(pq.secret.secret_bytes(), classical.secret.secret_bytes());
         Ok(CompletedKeyExchange {
             group: self.name,
-            pub_key: self.layout.concat(&ct, &classical.pub_key),
+            pub_key: self.layout.concat(&pq.pub_key, &classical.pub_key),
             secret: SharedSecret::from(secret),
         })
     }
@@ -395,7 +412,10 @@ impl SupportedKxGroup for Hybrid {
     }
 
     fn usable_for_version(&self, version: ProtocolVersion) -> bool {
-        version == ProtocolVersion::TLSv1_3
+        matches!(
+            version,
+            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
+        )
     }
 }
 

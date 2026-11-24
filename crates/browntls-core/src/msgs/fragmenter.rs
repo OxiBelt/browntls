@@ -20,6 +20,8 @@ pub(crate) struct MessageFragmenter {
     local_max: usize,
     /// From the peer's `record_size_limit`.
     peer_max: usize,
+    /// From the ticket or external PSK while the write key protects 0-RTT.
+    early_data_max: Option<usize>,
 }
 
 impl Default for MessageFragmenter {
@@ -28,6 +30,7 @@ impl Default for MessageFragmenter {
             max_frag: MAX_PLAINTEXT_LEN,
             local_max: MAX_PLAINTEXT_LEN,
             peer_max: MAX_PLAINTEXT_LEN,
+            early_data_max: None,
         }
     }
 }
@@ -69,7 +72,7 @@ impl MessageFragmenter {
             }
             None => MAX_PLAINTEXT_LEN,
         };
-        self.max_frag = self.local_max.min(self.peer_max);
+        self.update_max_fragment_len();
         Ok(())
     }
 
@@ -77,7 +80,22 @@ impl MessageFragmenter {
     /// peer's `record_size_limit` allows (RFC 8449 §4); at most 2^14.
     pub(crate) fn set_peer_record_size_limit(&mut self, max_plaintext: usize) {
         self.peer_max = max_plaintext.clamp(1, MAX_PLAINTEXT_LEN);
-        self.max_frag = self.local_max.min(self.peer_max);
+        self.update_max_fragment_len();
+    }
+
+    pub(crate) fn peer_max_fragment_len(&self) -> usize {
+        self.peer_max
+    }
+
+    pub(crate) fn set_early_data_max_fragment_len(&mut self, len: Option<usize>) {
+        self.early_data_max = len;
+        self.update_max_fragment_len();
+    }
+
+    fn update_max_fragment_len(&mut self) {
+        self.max_frag = self
+            .local_max
+            .min(self.early_data_max.unwrap_or(self.peer_max));
     }
 
     pub(crate) fn max_fragment_len(&self) -> usize {

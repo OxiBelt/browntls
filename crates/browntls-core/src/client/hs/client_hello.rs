@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use browntls_pki::ServerName;
 
 use super::super::common::ClientHelloDetails;
-use super::super::{ClientConfig, ClientHelloPadding, tls13};
+use super::super::{ClientConfig, ClientHelloPadding, ClientSessionStore, tls13};
 use super::{
     ClientContext, ClientHelloInput, ClientSessionValue, ExpectServerHello,
     ExpectServerHelloOrHelloRetryRequest, NextStateOrError, OfferedKeyShare,
@@ -21,6 +21,7 @@ use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureSchem
 use crate::error::Error;
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
+use crate::msgs::base::PayloadU8;
 use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, ECPointFormat, NamedGroup, PskKeyExchangeMode};
 use crate::msgs::grease::GreaseValues;
@@ -33,11 +34,11 @@ use crate::msgs::handshake::{
     Random, ServerNamePayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
-use crate::msgs::persist::Retrieved;
+use crate::msgs::persist::{Retrieved, Tls13ClientSessionValue};
 use crate::psk::{OfferedPsk, PskSecret};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
-use crate::tls13::key_schedule::{BinderLabel, KeyScheduleEarly};
+use crate::tls13::key_schedule::{BinderLabel, Protocol};
 
 /// Looks up and validates a session to offer for `server_name`.
 fn find_session(
@@ -50,8 +51,14 @@ fn find_session(
         return None;
     }
     let now = config.current_time().ok()?;
-    // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume.
-    let quic = cx.common.is_quic();
+    // RFC 9001 §4.2: QUIC uses TLS 1.3 only, so only its tickets resume;
+    // so does DTLS 1.3, with its own tickets.
+    let tls13_only = cx.common.is_quic()
+        || cx
+            .common
+            .dtls
+            .as_ref()
+            .is_some_and(|d| !d.allows(ProtocolVersion::TLSv1_2));
     // RFC 9849 §6.1: an ECH offer is TLS 1.3 only and may not resume a
     // TLS 1.2 session. Such a session is not even looked up: its session
     // ID went out in the clear next to the hidden server name, so any use
@@ -59,54 +66,67 @@ fn find_session(
     #[cfg(feature = "tls12")]
     let ech_offer = matches!(config.ech_mode, Some(EchMode::Enable(_)));
 
-    let found = config
-        .resumption
-        .store
-        .take_tls13_ticket(server_name)
-        .filter(|ticket| {
-            !config.revocation_enabled()
-                || (ticket.server_cert_chain().0.is_empty() && ticket.external_psk().is_some())
-        })
-        .map(ClientSessionValue::Tls13)
-        .or_else(|| {
-            #[cfg(feature = "tls12")]
+    let found = (if cx
+        .common
+        .dtls
+        .as_ref()
+        .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
+    {
+        take_tls13_ticket(
+            &*config.resumption.store,
+            server_name,
+            Protocol::of(cx.common),
+        )
+    } else {
+        None
+    })
+    .filter(|ticket| {
+        !config.revocation_enabled()
+            || (ticket.server_cert_chain().0.is_empty() && ticket.external_psk().is_some())
+    })
+    .map(ClientSessionValue::Tls13)
+    .or_else(|| {
+        #[cfg(feature = "tls12")]
+        {
+            if tls13_only
+                || ech_offer
+                || config.revocation_enabled()
+                || config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled
             {
-                if quic
-                    || ech_offer
-                    || config.revocation_enabled()
-                    || config.resumption.tls12_resumption == super::super::Tls12Resumption::Disabled
-                {
-                    return None;
-                }
-                config
-                    .resumption
-                    .store
-                    .tls12_session(server_name)
-                    .map(ClientSessionValue::Tls12)
+                return None;
             }
-            #[cfg(not(feature = "tls12"))]
-            {
-                let _ = quic;
-                None
-            }
-        })
-        .map(|value| Retrieved::new(value, now))?;
+            let store = &config.resumption.store;
+            let (session, version) = if cx.common.is_dtls() {
+                (store.dtls12_session(server_name), ProtocolVersion::DTLSv1_2)
+            } else {
+                (store.tls12_session(server_name), ProtocolVersion::TLSv1_2)
+            };
+            session
+                .filter(|s| s.protocol_version() == version)
+                .map(ClientSessionValue::Tls12)
+        }
+        #[cfg(not(feature = "tls12"))]
+        {
+            let _ = tls13_only;
+            None
+        }
+    })
+    .map(|value| Retrieved::new(value, now))?;
 
     if found.has_expired() {
         debug!("Not resuming expired session");
         return None;
     }
 
-    // The session was authenticated under another configuration's server
-    // certificate verifier or client credentials (a shared store): resuming
-    // would skip this configuration's verifier entirely.
-    let compatible = match &found.value {
-        ClientSessionValue::Tls13(inner) => inner.compatible_config(&config.session_binding()),
+    let session = match &found.value {
+        ClientSessionValue::Tls13(inner) => &inner.common,
         #[cfg(feature = "tls12")]
-        ClientSessionValue::Tls12(inner) => inner.compatible_config(&config.session_binding()),
+        ClientSessionValue::Tls12(inner) => &inner.common,
     };
-    if !compatible {
-        debug!("Not resuming session: established under another verifier or client credentials");
+    if !session.compatible_config(&config.session_binding())
+        || !session.compatible_server_identity(server_name, cx.data.service_identity.as_deref())
+    {
+        debug!("Not resuming session: authentication policy differs");
         return None;
     }
 
@@ -143,7 +163,9 @@ fn find_session(
                 && config
                     .find_cipher_suite(inner.suite().common.suite)
                     .is_some()
-                && (!config.require_ems || inner.extended_ms())
+                && (!(config.require_ems || cx.common.is_dtls()) || inner.extended_ms())
+                && (!cx.common.is_dtls()
+                    || SupportedCipherSuite::from(inner.suite()).usable_for_dtls())
         }
     };
     if !usable {
@@ -151,6 +173,42 @@ fn find_session(
         return None;
     }
     Some(found)
+}
+
+/// How many tickets of the other protocol [`take_tls13_ticket`] passes
+/// over before giving up.
+const MAX_SKIPPED_TICKETS: usize = 8;
+
+/// Takes the newest TLS 1.3 ticket for `server_name` that was issued over
+/// `protocol`.
+///
+/// TLS and DTLS connections may share a store, but a ticket is only offered
+/// over the protocol it came from: its binder would take the other label
+/// prefix (RFC 9147 §5.9) and fail the handshake. Tickets of the other
+/// protocol taken on the way, up to [`MAX_SKIPPED_TICKETS`], are put back
+/// in their order for later connections of their own.
+fn take_tls13_ticket(
+    store: &dyn ClientSessionStore,
+    server_name: &ServerName<'static>,
+    protocol: Protocol,
+) -> Option<Tls13ClientSessionValue> {
+    let mut skipped = Vec::new();
+    let mut found = None;
+    while skipped.len() < MAX_SKIPPED_TICKETS {
+        let Some(ticket) = store.take_tls13_ticket(server_name) else {
+            break;
+        };
+        if ticket.protocol() == protocol {
+            found = Some(ticket);
+            break;
+        }
+        skipped.push(ticket);
+    }
+    // The newest was taken first, so it goes back last.
+    for ticket in skipped.into_iter().rev() {
+        store.insert_tls13_ticket(server_name.clone(), ticket);
+    }
+    found
 }
 
 /// Picks the group for the initial key share: the one the server accepted
@@ -190,7 +248,12 @@ pub(in crate::client) fn start_handshake(
         transcript_buffer.set_client_auth_enabled();
     }
 
-    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
     #[cfg_attr(not(feature = "tls12"), allow(unused_mut))]
     let mut resuming = find_session(&server_name, &config, cx);
 
@@ -211,8 +274,14 @@ pub(in crate::client) fn start_handshake(
             ..
         }) if !inner.session_id.is_empty() => inner.session_id,
         // RFC 9001 §8.4: a QUIC client MUST NOT request the middlebox
-        // compatibility mode, so its legacy_session_id is empty.
-        _ if cx.common.is_quic() => SessionId::empty(),
+        // compatibility mode, so its legacy_session_id is empty. Nor has
+        // DTLS 1.3 that mode (RFC 9147 §5, §5.3). With no ID, DTLS
+        // ticket resumption is distinguished by the next server message.
+        _ if cx.common.is_quic()
+            || (cx.common.is_dtls() && (supports_tls13 || resuming.is_none())) =>
+        {
+            SessionId::empty()
+        }
         // RFC 8446 §4.1.2: a non-empty legacy_session_id helps middleboxes;
         // for TLS 1.2 ticket resumption a random ID lets us detect acceptance.
         _ if supports_tls13 || resuming.is_some() => {
@@ -300,7 +369,7 @@ pub(in crate::client) fn start_handshake(
 pub(super) fn emit_client_hello_for_retry(
     mut transcript_buffer: HandshakeHashBuffer,
     retryreq: Option<&HelloRetryRequest>,
-    key_share: Option<OfferedKeyShare>,
+    mut key_share: Option<OfferedKeyShare>,
     committed_suite: Option<SupportedCipherSuite>,
     mut input: ClientHelloInput,
     cx: &mut ClientContext<'_>,
@@ -308,16 +377,33 @@ pub(super) fn emit_client_hello_for_retry(
     let config = &input.config;
     // RFC 9001 §4.2: a QUIC client MUST NOT offer TLS versions older than 1.3.
     let quic = cx.common.is_quic();
-    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3);
+    // Endpoint version policy is independent of the shared TLS config.
+    // No middlebox compatibility, 0-RTT, record size limit extension or
+    // post-handshake authentication over DTLS.
+    let dtls = cx.common.is_dtls();
+    let supports_tls13 = config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3));
     // RFC 9849 §6.1: with ECH, both ClientHellos offer TLS 1.3 only.
     let ech_tls13_only = input
         .ech
         .as_ref()
         .is_some_and(ClientEch::restricts_to_tls13);
-    let supports_tls12 =
-        !quic && config.supports_version(ProtocolVersion::TLSv1_2) && !ech_tls13_only;
+    let supports_tls12 = !quic
+        && config.supports_version(ProtocolVersion::TLSv1_2)
+        && !ech_tls13_only
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_2));
     let offers_version = |v: ProtocolVersion| {
-        config.supports_version(v) && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+        config.supports_version(v)
+            && (v != ProtocolVersion::TLSv1_2 || supports_tls12)
+            && cx.common.dtls.as_ref().is_none_or(|d| d.allows(v))
     };
 
     let supported_versions: Vec<ProtocolVersion> =
@@ -405,7 +491,9 @@ pub(super) fn emit_client_hello_for_retry(
         }),
         certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
         sct_request: config.revocation_enabled().then_some(()),
-        transparency_info: config.offers_transparency_info().then_some(()),
+        transparency_info: input
+            .offers_transparency_info(retryreq.is_some())
+            .then_some(()),
         extended_master_secret: supports_tls12.then_some(()),
         encrypt_then_mac: offers_block_cipher.then_some(()),
         supported_versions: Some(supported_versions),
@@ -416,6 +504,7 @@ pub(super) fn emit_client_hello_for_retry(
         // RFC 9001 §4.4: never in QUIC.
         post_handshake_auth: (supports_tls13
             && !quic
+            && !dtls
             && config.enable_post_handshake_auth
             && config.client_auth_cert_resolver.has_certs())
         .then_some(()),
@@ -455,6 +544,7 @@ pub(super) fn emit_client_hello_for_retry(
     // or in an ECH inner hello, which offer TLS 1.3 alone).
     #[cfg(feature = "tls12")]
     if supports_tls12
+        && !dtls
         && config.enable_client_certificate_url
         && config.client_auth_cert_resolver.has_certs()
     {
@@ -496,19 +586,23 @@ pub(super) fn emit_client_hello_for_retry(
     // clear after the server rejected ECH at the HelloRetryRequest (RFC
     // 9849 §6.1.5): their identities belong to the inner hello.
     let ech_rejected_at_retry = matches!(input.ech, Some(ClientEch::RejectedAtRetry { .. }));
-    let external_offers =
-        if supports_tls13 && !config.external_psks.is_empty() && !ech_rejected_at_retry {
-            crate::psk::client_external_offers(
-                &config.external_psks,
-                &config.provider.cipher_suites,
-                committed_suite.and_then(|s| s.tls13()),
-                &input.server_name,
-                &input.alpn_protocols,
-            )
-        } else {
-            Vec::new()
-        };
-    // RFC 8773: ask for certificate authentication on top of an external PSK.
+    let can_offer_external = cx.data.service_identity.is_none() || config.cert_with_extern_psk;
+    let external_offers = if supports_tls13
+        && !config.external_psks.is_empty()
+        && !ech_rejected_at_retry
+        && can_offer_external
+    {
+        crate::psk::client_external_offers(
+            &config.external_psks,
+            &config.provider.cipher_suites,
+            committed_suite.and_then(|s| s.tls13()),
+            &input.server_name,
+            &input.alpn_protocols,
+            Protocol::of(cx.common),
+        )
+    } else {
+        Vec::new()
+    };
     let cert_with_extern_psk = config.cert_with_extern_psk && !external_offers.is_empty();
     if cert_with_extern_psk {
         exts.cert_with_extern_psk = Some(());
@@ -530,10 +624,7 @@ pub(super) fn emit_client_hello_for_retry(
             }),
             None => !config.require_external_psk,
         };
-        // RFC 8773 asks for certificate authentication with an external PSK;
-        // a server that resumed the ticket instead would skip it. Rather
-        // than let the server choose, the ticket is not offered alongside
-        // (a conservative choice; RFC 8773 does not require it).
+        // RFC 9973 §5.1: all PSKs in this offer must be external.
         if !ticket_usable || cert_with_extern_psk {
             input.resuming = None;
         }
@@ -567,7 +658,7 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 9846 §4.3.10: offer 0-RTT with the first PSK when it and the
     // configuration allow it, but never in the second ClientHello of a
     // retry. An external PSK needs a provisioned suite, and is not used for
-    // 0-RTT when we ask for certificate authentication (RFC 8773). Nor with
+    // 0-RTT when we ask for certificate authentication (RFC 9973). Nor with
     // an RFC 8844 binding: the server would read the data before we check
     // its answer in EncryptedExtensions.
     if let Some(first) = offered_psks.first()
@@ -575,17 +666,17 @@ pub(super) fn emit_client_hello_for_retry(
         && config.external_binding.is_none()
         && retryreq.is_none()
         && !ech_tls13_only
+        && !dtls
     {
-        let max_early_data_size = match (&first.external, &tls13_session) {
-            (Some(psk), _) => {
-                if psk.cipher_suite() == Some(first.suite.common.suite) && !cert_with_extern_psk {
-                    psk.max_early_data_size()
-                } else {
-                    0
-                }
+        let (max_early_data_size, alpn) = match (&first.external, &tls13_session) {
+            (Some(psk), _)
+                if psk.cipher_suite() == Some(first.suite.common.suite)
+                    && !cert_with_extern_psk =>
+            {
+                (psk.max_early_data_size(), psk.alpn_protocol())
             }
-            (None, Some(resuming)) => resuming.max_early_data_size(),
-            (None, None) => 0,
+            (None, Some(resuming)) => (resuming.max_early_data_size(), resuming.early_data_alpn()),
+            _ => (0, None),
         };
         // RFC 9001 §4.6.1: in QUIC a ticket allows 0-RTT only with the
         // sentinel size, and 0-RTT needs the server's remembered transport
@@ -596,7 +687,9 @@ pub(super) fn emit_client_hello_for_retry(
             (true, _) => 0,
         };
         if max_early_data_size > 0 {
-            cx.data.early_data.enable(max_early_data_size as usize);
+            cx.data
+                .early_data
+                .enable(max_early_data_size as usize, alpn);
             exts.early_data = Some(());
             // RFC 9000 §7.4.1: 0-RTT runs under the server's remembered
             // transport parameters until EncryptedExtensions brings new ones.
@@ -621,14 +714,15 @@ pub(super) fn emit_client_hello_for_retry(
         });
     }
 
+    exts.connection_id = cx.common.dtls.as_deref().and_then(|dtls| dtls.cid.offer());
+    exts.return_routability_check = cx.common.dtls.as_deref().and_then(|dtls| dtls.rrc_offer());
+
     // RFC 8449: the largest record we accept. The protocol maximum is that
     // of the highest version offered; a TLS 1.2 server does not enforce a
     // larger value (RFC 8449 §4) and we clamp what we enforce.
-    // QUIC has no TLS records, so no limit is offered there.
-    exts.record_size_limit = config
-        .record_size_limit
-        .filter(|_| !quic)
-        .map(|limit| limit.min(crate::common_state::max_record_size_limit(supports_tls13)));
+    exts.record_size_limit = cx
+        .common
+        .local_record_size_limit(config.record_size_limit, supports_tls13);
     // RFC 6066 §6: a TLS 1.2 extension only; `supports_tls12` is false
     // over QUIC and with an ECH offer (RFC 9849 §6.1).
     exts.trusted_ca_keys = config.trusted_ca_keys.clone().filter(|_| supports_tls12);
@@ -651,8 +745,14 @@ pub(super) fn emit_client_hello_for_retry(
         .filter(|cs| offers_version(cs.version().version))
         // RFC 9001 §5.3: only suites with a QUIC header protection scheme.
         .filter(|cs| !quic || cs.usable_for_quic())
+        // RFC 9147 §4.2.3, §4.5.3: only suites that encrypt DTLS record
+        // numbers, and no CCM_8.
+        .filter(|cs| !dtls || cs.usable_for_dtls())
         .map(|cs| cs.suite())
         .collect();
+    if retryreq.is_some() {
+        input.check_cert_with_extern_psk_retry(cx.common, cert_with_extern_psk)?;
+    }
     // RFC 5746 §3.3: signal secure renegotiation support (we never
     // renegotiate); a TLS 1.3-only hello has nothing to signal.
     if supports_tls12 || !ech_tls13_only {
@@ -667,7 +767,7 @@ pub(super) fn emit_client_hello_for_retry(
             input.hello.cached_info = crate::cached_info::client::ClientCachedInfo::offer(
                 config,
                 &input.server_name,
-                supports_tls12,
+                supports_tls12 && !dtls,
             );
         }
         exts.cached_info = input.hello.cached_info.as_ref().and_then(|c| c.extension());
@@ -695,6 +795,9 @@ pub(super) fn emit_client_hello_for_retry(
         client_version: ProtocolVersion::TLSv1_2,
         random: input.random,
         session_id: input.session_id,
+        // RFC 9147 §5.3: an empty legacy_cookie, which selects the DTLS
+        // encoding.
+        legacy_cookie: dtls.then(PayloadU8::empty),
         cipher_suites,
         compression_methods: vec![Compression::Null],
         extensions: exts,
@@ -702,12 +805,32 @@ pub(super) fn emit_client_hello_for_retry(
     // RFC 7685: the length is final here, binders included (they are
     // zero-filled placeholders of the right size until computed below).
     // With a real ECH offer this is the inner hello, which RFC 9849 §6.1.3
-    // pads instead; the outer hello is padded when it is sealed.
-    if !matches!(input.ech, Some(ClientEch::Offer(_))) {
+    // pads instead; the outer hello is padded when it is sealed. The
+    // middlebox workaround has no place in DTLS.
+    if !matches!(input.ech, Some(ClientEch::Offer(_))) && !dtls {
         chp.extensions.padding = padding_len(
             config.client_hello_padding,
             HANDSHAKE_HEADER_LEN + chp.get_encoding().len(),
         );
+    }
+    // RFC 9147 §5.1: a first ClientHello that fits one datagram lets the
+    // server answer it without keeping state. If our key shares make it
+    // too large, it goes without any: the server's HelloRetryRequest
+    // (which a DTLS server sends for its cookie anyway) then names the
+    // group it wants.
+    if retryreq.is_none()
+        && let Some(engine) = cx.common.dtls.as_deref()
+        && chp
+            .extensions
+            .key_shares
+            .as_ref()
+            .is_some_and(|shares| !shares.is_empty())
+        && HANDSHAKE_HEADER_LEN + chp.get_encoding().len() > engine.max_unfragmented_handshake()
+    {
+        debug!("ClientHello too large for one datagram: offering no key share");
+        chp.extensions.key_shares = Some(Vec::new());
+        key_share = None;
+        cx.common.kx_state = KxState::Start;
     }
     // A ClientHello must fit in a handshake message, and its extension
     // block in a two-byte length; a large `trusted_ca_keys` list or ALPN
@@ -721,7 +844,12 @@ pub(super) fn emit_client_hello_for_retry(
     }
     let mut hmp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp));
 
-    tls13::fill_in_psk_binders(&offered_psks, &transcript_buffer, &mut hmp);
+    tls13::fill_in_psk_binders(
+        Protocol::of(cx.common),
+        &offered_psks,
+        &transcript_buffer,
+        &mut hmp,
+    );
 
     let ch = Message {
         // RFC 8446 §5.1: the first ClientHello's record may use the lowest
@@ -771,12 +899,11 @@ pub(super) fn emit_client_hello_for_retry(
     if let Some(first) = offered_psks.first()
         && cx.data.early_data.is_enabled()
     {
-        let schedule = KeyScheduleEarly::new(first.suite, first.secret.as_ref());
         tls13::derive_early_traffic_secret(
             &*config.key_log,
             cx,
-            first.suite.common.hash_provider,
-            &schedule,
+            first,
+            tls13_session.as_ref().map(|session| session.value),
             &mut input.sent_tls13_fake_ccs,
             &transcript_buffer,
             &input.random.0,
@@ -863,3 +990,6 @@ fn padding_len(policy: ClientHelloPadding, unpadded: usize) -> Option<usize> {
     }
     body
 }
+
+#[cfg(test)]
+mod tests;

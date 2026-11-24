@@ -177,9 +177,51 @@ impl ClientConnection {
         params: Vec<u8>,
         alpn_protocols: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
+        Self::start(config, version, name, None, params, alpn_protocols)
+    }
+
+    /// Starts a QUIC handshake with an explicit service identity.
+    pub fn new_with_identity(
+        config: Arc<crate::ClientConfig>,
+        version: Version,
+        identity: crate::ClientServerIdentity,
+        params: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_identity_and_alpn(config, version, identity, params, alpn)
+    }
+
+    /// Starts a QUIC handshake with an explicit identity and ALPN override.
+    pub fn new_with_identity_and_alpn(
+        config: Arc<crate::ClientConfig>,
+        version: Version,
+        identity: crate::ClientServerIdentity,
+        params: Vec<u8>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let (name, identity) = identity.into_parts();
+        Self::start(
+            config,
+            version,
+            name,
+            Some(identity),
+            params,
+            alpn_protocols,
+        )
+    }
+
+    fn start(
+        config: Arc<crate::ClientConfig>,
+        version: Version,
+        name: ServerName<'static>,
+        identity: Option<crate::ServiceIdentity>,
+        params: Vec<u8>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
         let core = ConnectionCore::for_quic_client(
             config,
             name,
+            identity,
             alpn_protocols,
             Quic::new(version, params),
         )?;

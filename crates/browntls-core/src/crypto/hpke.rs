@@ -90,24 +90,37 @@ pub struct HpkePublicKey(pub Vec<u8>);
 
 /// A serialized HPKE private key (`SerializePrivateKey`), zeroised on drop.
 #[derive(Clone, PartialEq, Eq)]
-pub struct HpkePrivateKey(Vec<u8>);
+pub struct HpkePrivateKey {
+    bytes: Vec<u8>,
+    #[cfg(feature = "native")]
+    pub(crate) pkcs8_ecdh_oid: bool,
+}
 
 impl HpkePrivateKey {
     /// The serialized key.
     pub fn secret_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn secret_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
     }
 }
 
 impl From<Vec<u8>> for HpkePrivateKey {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self {
+            bytes,
+            #[cfg(feature = "native")]
+            pkcs8_ecdh_oid: false,
+        }
     }
 }
 
 impl Drop for HpkePrivateKey {
     fn drop(&mut self) {
-        super::zeroize_vec(&mut self.0);
+        super::zeroize_vec(&mut self.bytes);
     }
 }
 

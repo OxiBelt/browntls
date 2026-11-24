@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use browntls_core::server::{PostHandshakeAuthStatus, ServerSessionMemoryCache};
 use browntls_core::{HandshakeKind, NamedGroup};
+use browntls_tokio::EarlyDataOutcome;
 use browntls_tokio::unbuffered::{TlsAcceptor, TlsConnector};
 use common::*;
 use rustls_pki_types as rpki;
@@ -453,6 +454,10 @@ async fn an_unbuffered_server_collects_accepted_early_data() {
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"reply");
         assert!(client.get_ref().1.is_early_data_accepted());
+        assert_eq!(
+            client.early_data_outcome(),
+            EarlyDataOutcome::Accepted { early_bytes: 13 },
+        );
         client.write_all(b"after").await.unwrap();
         client.shutdown().await.unwrap();
     };

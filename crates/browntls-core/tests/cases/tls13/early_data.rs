@@ -33,6 +33,36 @@ fn prime_ticket(client_config: &Arc<ClientConfig>, server_config: &Arc<ServerCon
 }
 
 #[test]
+fn early_data_alpn_belongs_to_the_ticket_not_the_new_offer() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = Arc::unwrap_or_clone(early_data_client(&chain));
+    client_config.alpn_protocols = vec![b"first".to_vec(), b"ticket".to_vec()];
+    let client_config = Arc::new(client_config);
+    let mut server_config = server_config(&chain);
+    server_config.alpn_protocols = vec![b"ticket".to_vec()];
+    server_config.max_early_data_size = 1024;
+    let mut next_server_config = server_config.clone();
+    next_server_config.alpn_protocols = vec![b"first".to_vec()];
+    let server_config = Arc::new(server_config);
+    prime_ticket(&client_config, &server_config);
+
+    let mut client = ClientConnection::new(client_config.clone(), server_name()).unwrap();
+    let mut server = ServerConnection::new(Arc::new(next_server_config)).unwrap();
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+    do_handshake(&mut client, &mut server).unwrap();
+    assert!(!client.is_early_data_accepted());
+    assert_eq!(client.alpn_protocol(), Some(&b"first"[..]));
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+
+    prime_ticket(&client_config, &server_config);
+    let client =
+        browntls_core::client::UnbufferedClientConnection::new(client_config, server_name())
+            .unwrap();
+    assert_eq!(client.early_data_alpn(), Some(&b"ticket"[..]));
+    assert_eq!(client.early_data_bytes_left(), 1024);
+}
+
+#[test]
 fn early_data_is_accepted_and_readable() {
     use std::io::{Read, Write};
     init_logging();
@@ -108,6 +138,61 @@ fn early_data_respects_the_ticket_limit() {
     let mut got = Vec::new();
     std::io::Read::read_to_end(&mut server.early_data().unwrap(), &mut got).unwrap();
     assert_eq!(got, [7u8; 100]);
+}
+
+#[test]
+fn early_records_use_the_ticket_issuing_server_limit() {
+    use std::io::{Read, Write};
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    for (issued_limit, fresh_limit) in [(64, 256), (256, 64)] {
+        let client_config = early_data_client(&chain);
+        let cache: Arc<dyn browntls_core::server::StoresServerSessions> =
+            browntls_core::server::ServerSessionMemoryCache::new(8);
+        let mut issued = Arc::unwrap_or_clone(early_data_server(&chain, 1024, &cache));
+        issued.record_size_limit = Some(issued_limit);
+        let mut fresh = issued.clone();
+        fresh.record_size_limit = Some(fresh_limit);
+        prime_ticket(&client_config, &Arc::new(issued));
+
+        let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(fresh)).unwrap();
+        let plaintext = [0x61; 512];
+        client.early_data().unwrap().write_all(&plaintext).unwrap();
+        let mut wire = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut wire).unwrap();
+        }
+        let mut records = wire.as_slice();
+        let mut early_records = 0;
+        while !records.is_empty() {
+            let len = usize::from(u16::from_be_bytes([records[3], records[4]]));
+            if records[0] == 23 {
+                early_records += 1;
+                assert!(len <= usize::from(issued_limit) + 16);
+            }
+            records = &records[5 + len..];
+        }
+        assert_eq!(
+            early_records,
+            plaintext.len().div_ceil(usize::from(issued_limit) - 1)
+        );
+        server.read_tls(&mut wire.as_slice()).unwrap();
+        server.process_new_packets().unwrap();
+        do_handshake(&mut client, &mut server).unwrap();
+        assert!(client.is_early_data_accepted());
+        let mut received = Vec::new();
+        server
+            .early_data()
+            .unwrap()
+            .read_to_end(&mut received)
+            .unwrap();
+        assert_eq!(received, plaintext);
+        assert_eq!(
+            send_and_receive(&mut client, &mut server, &plaintext),
+            plaintext
+        );
+    }
 }
 
 #[test]

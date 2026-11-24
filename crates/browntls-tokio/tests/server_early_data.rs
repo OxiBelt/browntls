@@ -300,7 +300,7 @@ async fn a_flush_or_a_shutdown_completes_the_handshake() {
 }
 
 #[tokio::test]
-async fn declined_early_data_is_accepted_after_the_handshake() {
+async fn the_application_can_send_declined_early_data_after_the_handshake() {
     let setup = Setup::new();
     setup.first_connection().await;
 
@@ -308,8 +308,10 @@ async fn declined_early_data_is_accepted_after_the_handshake() {
     let client_side = async {
         let mut client = setup.connector.connect(localhost(), c).await.unwrap();
         client.write_all(b"early request").await.unwrap();
-        client.flush().await.unwrap();
+        assert!(client.flush().await.is_err());
         assert!(!client.get_ref().1.is_early_data_accepted());
+        assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
+        client.write_all(b"early request").await.unwrap();
         client.shutdown().await.unwrap();
         client
     };

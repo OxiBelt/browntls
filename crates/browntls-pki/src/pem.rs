@@ -145,6 +145,20 @@ impl Iterator for Sections<'_> {
 ///
 /// Returns [`Error::Base64`] for invalid characters, bad padding or length.
 pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    base64_decode_to(input, |bytes| out.extend_from_slice(bytes))?;
+    Ok(out)
+}
+
+/// Decodes standard padded Base64 into a caller-provided sink.
+///
+/// Ignores ASCII whitespace. The sink may receive partial output before an
+/// error, so a sink holding private data must wipe it even on failure.
+///
+/// # Errors
+///
+/// Returns [`Error::Base64`] for invalid characters, padding or length.
+pub fn base64_decode_to(input: &[u8], mut emit: impl FnMut(&[u8])) -> Result<(), Error> {
     fn val(c: u8) -> Option<u32> {
         Some(u32::from(match c {
             b'A'..=b'Z' => c - b'A',
@@ -155,7 +169,6 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Error> {
             _ => return None,
         }))
     }
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
     let mut acc = 0u32;
     let mut n = 0usize;
     let mut pad = 0usize;
@@ -179,7 +192,6 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Error> {
         }
         if n == 4 {
             let bytes = acc.to_be_bytes();
-            out.extend_from_slice(&bytes[1..4 - pad]);
             // Non-canonical encodings (non-zero discarded bits) are rejected.
             let discarded = match pad {
                 1 => acc & 0xff,
@@ -189,6 +201,7 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Error> {
             if discarded != 0 {
                 return Err(Error::Base64);
             }
+            emit(&bytes[1..4 - pad]);
             acc = 0;
             n = 0;
             if pad > 0 {
@@ -200,7 +213,7 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Error> {
     if n != 0 {
         return Err(Error::Base64);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Types that can be decoded from PEM.

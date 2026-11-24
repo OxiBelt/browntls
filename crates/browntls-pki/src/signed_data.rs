@@ -178,11 +178,13 @@ pub(crate) struct Spki<'a> {
 impl<'a> Spki<'a> {
     /// Parses the contents of a `SubjectPublicKeyInfo` `SEQUENCE`.
     pub(crate) fn from_contents(contents: &'a [u8]) -> Result<Self, Error> {
-        der::read_all(contents, |r| {
-            let algorithm = r.expect(tag::SEQUENCE)?;
-            let key = r.bit_string_no_unused_bits()?;
-            Ok(Spki { algorithm, key })
-        })
+        der::read_all(contents, Self::from_reader)
+    }
+
+    fn from_reader(r: &mut Reader<'a>) -> Result<Self, Error> {
+        let algorithm = r.expect(tag::SEQUENCE)?;
+        let key = r.bit_string_no_unused_bits()?;
+        Ok(Spki { algorithm, key })
     }
 
     /// Parses either a complete `SubjectPublicKeyInfo` `SEQUENCE` or its
@@ -194,6 +196,37 @@ impl<'a> Spki<'a> {
             Err(_) => Self::from_contents(bytes),
         }
     }
+
+    pub(crate) fn equivalent(self, other: Self) -> bool {
+        self == other
+            || (self.key == other.key
+                && crate::rsassa_pss::equivalent_key_restrictions(self.algorithm, other.algorithm)
+                && der::read_all(self.key, |r| {
+                    r.nested(tag::SEQUENCE, |r| {
+                        let modulus = r.nonnegative_integer()?;
+                        let exponent = r.nonnegative_integer()?;
+                        if modulus == [0] || exponent == [0] {
+                            return Err(Error::BadDer);
+                        }
+                        Ok(())
+                    })
+                })
+                .is_ok())
+    }
+}
+
+/// Compares two complete DER-encoded `SubjectPublicKeyInfo` values.
+///
+/// Distinct encodings agree only for supported RSASSA-PSS parameters
+/// that impose the same restrictions on the same DER-encoded RSA key.
+/// The comparison does not establish that a key or certificate is trusted.
+///
+/// # Errors
+///
+/// Returns a DER error if either input lacks the enclosing SPKI structure.
+pub fn subject_public_keys_match(left: &[u8], right: &[u8]) -> Result<bool, Error> {
+    let parse = |spki| der::read_all(spki, |r| r.nested(tag::SEQUENCE, Spki::from_reader));
+    Ok(parse(left)?.equivalent(parse(right)?))
 }
 
 /// Verifies `signed` with the key in `spki` using an algorithm from `algs`

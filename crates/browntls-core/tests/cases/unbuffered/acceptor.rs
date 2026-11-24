@@ -15,6 +15,101 @@ mod acceptor {
     /// Chooses the configuration for a ClientHello.
     type Chooser = Box<dyn FnMut(&ClientHello<'_>) -> Arc<ServerConfig>>;
 
+    #[test]
+    fn rfc9973_offer_drives_unbuffered_config_selection() {
+        use browntls_core::crypto::hash::HashAlgorithm;
+        use browntls_core::psk::ExternalPsk;
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let version = ProtocolVersion::TLSv1_3;
+        let key = Arc::new(
+            ExternalPsk::new(
+                b"lazy-rfc9973".to_vec(),
+                vec![42; 32],
+                HashAlgorithm::SHA256,
+            )
+            .unwrap(),
+        );
+        let mut client = versioned_client(&chain, version);
+        client.external_psks = vec![key.clone()];
+        client.cert_with_extern_psk = true;
+        let mut server = versioned_server(&chain, version);
+        server.external_psks = Some(Arc::new(vec![key]));
+        server.require_cert_with_extern_psk = true;
+        let config = Arc::new(server);
+        let mut server = Accepting::new(Feed::Whole, move |hello| {
+            assert!(hello.offers_cert_with_extern_psk());
+            config.clone()
+        });
+
+        let mut client = ub_client(&Arc::new(client), Feed::Whole);
+        handshake(&mut client, &mut server);
+        assert!(client.conn.negotiated_cert_with_extern_psk());
+        assert!(server.server().conn.negotiated_cert_with_extern_psk());
+        exchange(&mut client, &mut server, b"lazy RFC 9973");
+    }
+
+    #[test]
+    fn rfc10024_hybrids_through_direct_and_acceptor_paths() {
+        let chain = server_chain(KeyType::EcdsaP256);
+        for group in [
+            prov::kx_group::X25519MLKEM768,
+            prov::kx_group::SECP256R1MLKEM768,
+            prov::kx_group::SECP384R1MLKEM1024,
+        ] {
+            let mut provider = prov::default_provider();
+            provider.kx_groups = vec![group];
+            let provider = Arc::new(provider);
+            let cc = Arc::new(
+                ClientConfig::builder_with_provider(provider.clone())
+                    .with_protocol_versions(&[&version::TLS13])
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+                    .with_no_client_auth(),
+            );
+            let sc = Arc::new(
+                ServerConfig::builder_with_provider(provider)
+                    .with_protocol_versions(&[&version::TLS13])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(chain.cert_chain(), chain.private_key())
+                    .unwrap(),
+            );
+
+            let mut client = ub_client(&cc, Feed::Whole);
+            let mut server = ub_server(&sc, Feed::Whole);
+            handshake(&mut client, &mut server);
+            assert_eq!(
+                client.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            assert_eq!(
+                server.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            exchange(&mut client, &mut server, b"direct RFC 10024");
+
+            let mut client = ub_client(&cc, Feed::Whole);
+            let mut server = Accepting::with(Feed::Whole, &sc);
+            handshake(&mut client, &mut server);
+            assert_eq!(
+                client.conn.negotiated_key_exchange_group().unwrap().name(),
+                group.name()
+            );
+            assert_eq!(
+                server
+                    .server()
+                    .conn
+                    .negotiated_key_exchange_group()
+                    .unwrap()
+                    .name(),
+                group.name()
+            );
+            exchange(&mut client, &mut server, b"acceptor RFC 10024");
+        }
+    }
+
     /// An unbuffered server that reads the ClientHello with an
     /// `UnbufferedAcceptor`, chooses its configuration from it, then goes on
     /// as an `UnbufferedServerConnection` with the bytes not discarded.
@@ -394,6 +489,70 @@ mod acceptor {
             assert!(c.conn.is_early_data_accepted());
             assert_eq!(s.server().received_early, b"early to the acceptor");
             exchange(&mut c, &mut s, b"after");
+        }
+    }
+
+    #[test]
+    fn external_psk_early_data_policy_applies_to_deferred_accept() {
+        use browntls_core::CipherSuite;
+        use browntls_core::crypto::hash::HashAlgorithm;
+        use browntls_core::pki_types::UnixTime;
+        use browntls_core::psk::{
+            ExternalPsk, ExternalPskReplayDecision, ExternalPskReplayKey, ExternalPskReplayPolicy,
+        };
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        #[derive(Debug, Default)]
+        struct OneMark(Mutex<Option<Vec<u8>>>);
+
+        impl ExternalPskReplayPolicy for OneMark {
+            fn check_and_mark(
+                &self,
+                key: &ExternalPskReplayKey,
+                _expires_at: UnixTime,
+            ) -> ExternalPskReplayDecision {
+                let mut mark = self.0.lock().unwrap();
+                if mark.is_some() {
+                    return ExternalPskReplayDecision::Unavailable;
+                }
+                *mark = Some(key.as_ref().to_vec());
+                ExternalPskReplayDecision::FirstUse
+            }
+        }
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let psk = Arc::new(
+            ExternalPsk::new(b"external".to_vec(), vec![0x73; 32], HashAlgorithm::SHA256)
+                .unwrap()
+                .with_cipher_suite(CipherSuite::TLS13_AES_128_GCM_SHA256)
+                .with_early_data(1024)
+                .with_early_data_expiry(UnixTime::since_unix_epoch(Duration::from_secs(u64::MAX)))
+                .imported(b"unit-test".to_vec())
+                .unwrap(),
+        );
+        let mut cc = versioned_client(&chain, ProtocolVersion::TLSv1_3);
+        cc.external_psks.push(psk.clone());
+        cc.enable_early_data = true;
+        let cc = Arc::new(cc);
+        for (accept, feed) in [(true, Feed::Whole), (false, Feed::ByteByByte)] {
+            let mut sc = versioned_server(&chain, ProtocolVersion::TLSv1_3);
+            sc.external_psks = Some(Arc::new(vec![psk.clone()]));
+            sc.send_tls13_tickets = 0;
+            let policy = Arc::new(OneMark::default());
+            if accept {
+                sc.external_psk_replay_policy = Some(policy.clone());
+            }
+            let sc = Arc::new(sc);
+            let mut client = ub_client(&cc, feed);
+            let mut server = Accepting::with(feed, &sc);
+            client.early_to_send = b"early".to_vec();
+            handshake(&mut client, &mut server);
+            assert_eq!(client.conn.is_early_data_accepted(), accept);
+            assert_eq!(policy.0.lock().unwrap().is_some(), accept);
+            let expected: &[u8] = if accept { b"early" } else { &[] };
+            assert_eq!(server.server().received_early, expected);
+            exchange(&mut client, &mut server, b"ordinary");
         }
     }
 

@@ -181,6 +181,25 @@ fn equivalent_identifiers_in_certificate_chains_validate() {
     }
 }
 
+#[test]
+fn certificate_signature_identifiers_can_use_distinct_der_encodings() {
+    let root = TestKey::root(RSAE_KEY);
+    let key = TestKey::server(UNRESTRICTED);
+    let pss = PssParams::canonical(Sha256);
+    let mut server = direct_chain(&root, &key, Role::Server, pss);
+    server.chain[0] = issue_with_identifiers(
+        "end entity",
+        &key,
+        Role::Server,
+        "PSS root",
+        &root,
+        (pss.absent_hash_params(), pss),
+    );
+    for v in VERSIONS {
+        webpki_client_result(v, &server).unwrap();
+    }
+}
+
 /// The client's result of a handshake against `server`, validated with
 /// web-PKI verifiers.
 fn webpki_client_result(v: ProtocolVersion, server: &PssChain) -> Result<(), Error> {
@@ -314,22 +333,38 @@ fn unsupported_and_non_der_key_parameters_stay_rejected() {
 }
 
 #[test]
-fn key_file_and_certificate_must_encode_the_key_alike() {
+fn key_file_and_certificate_must_impose_the_same_restrictions() {
     init_logging();
-    // The loaded key's SPKI is its key file's, byte for byte, and the
-    // certificate/key consistency check compares bytes: equivalent but
-    // differently written identifiers are reported as a mismatch.
     let canonical = TestKey::server(restricted(Sha256));
+    let equivalent = canonical
+        .clone()
+        .encoded(PssParams::canonical(Sha256).absent_hash_params());
     let omitted = canonical
         .clone()
         .encoded(PssParams::canonical(Sha256).salt(Salt::Omitted));
+    let omitted_equivalent = canonical.clone().encoded(
+        PssParams::canonical(Sha256)
+            .salt(Salt::Omitted)
+            .absent_hash_params(),
+    );
+    let different_key = TestKey::client(restricted(Sha256));
+    let unrestricted = TestKey::server(UNRESTRICTED);
+    let rsae = TestKey::server(RSAE_KEY);
     let root = TestKey::root(RSAE_KEY);
     for (cert_key, file_key, ok) in [
-        (&omitted, &omitted, true),
-        (&canonical, &canonical, true),
+        (&omitted, &omitted_equivalent, true),
+        (&canonical, &equivalent, true),
+        (&equivalent, &canonical, true),
         (&omitted, &canonical, false),
         (&canonical, &omitted, false),
+        (&canonical, &different_key, false),
+        (&canonical, &unrestricted, false),
+        (&canonical, &rsae, false),
     ] {
+        assert_eq!(
+            browntls_core::pki_types::subject_public_keys_match(&cert_key.spki(), &file_key.spki()),
+            Ok(ok)
+        );
         let chain = direct_chain(&root, cert_key, Role::Server, PssParams::canonical(Sha256));
         let result = ServerConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()
@@ -345,6 +380,25 @@ fn key_file_and_certificate_must_encode_the_key_alike() {
                 Error::InconsistentKeys(browntls_core::InconsistentKeys::KeyMismatch)
             );
         }
+    }
+}
+
+#[test]
+fn equivalent_configured_pss_keys_work_for_both_authentication_roles() {
+    let params = PssParams::canonical(Sha256);
+    let root = TestKey::root(RSAE_KEY);
+    let chain = |key: TestKey, role| {
+        let mut chain = direct_chain(&root, &key, role, params);
+        chain.key = key.encoded(params.absent_hash_params());
+        chain
+    };
+    let server = chain(TestKey::server(restricted(Sha256)), Role::Server);
+    let client = chain(TestKey::client(restricted(Sha256)), Role::Client);
+    for version in VERSIONS {
+        let (client_config, server_config) = webpki_configs(version, &server, &client);
+        let (mut client, mut server) = connect(client_config, server_config);
+        do_handshake(&mut client, &mut server).unwrap();
+        round_trip(&mut client, &mut server);
     }
 }
 

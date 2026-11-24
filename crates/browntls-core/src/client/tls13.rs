@@ -29,7 +29,9 @@ use crate::psk::{ExternalPsk, OfferedPsk};
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
 use crate::tls13::extensions::{Tls13Message, first_disallowed};
-use crate::tls13::key_schedule::{KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake};
+use crate::tls13::key_schedule::{
+    KeyScheduleEarly, KeyScheduleHandshake, KeySchedulePreHandshake, Protocol,
+};
 use crate::verify::{HandshakeSignatureValid, ServerCertVerified};
 
 mod finished;
@@ -42,6 +44,7 @@ use server_auth::ExpectCertificateOrCertReq;
 /// with its own hash and label, over the ClientHello up to the binders, and
 /// writes them into the ClientHello.
 pub(super) fn fill_in_psk_binders(
+    protocol: Protocol,
     offered: &[OfferedPsk],
     transcript: &HandshakeHashBuffer,
     hmp: &mut HandshakeMessagePayload<'_>,
@@ -55,7 +58,7 @@ pub(super) fn fill_in_psk_binders(
         .map(|psk| {
             let handshake_hash =
                 transcript.hash_given(psk.suite.common.hash_provider, &binder_plaintext);
-            let binder = KeyScheduleEarly::new(psk.suite, psk.secret.as_ref())
+            let binder = KeyScheduleEarly::new(psk.suite, psk.secret.as_ref(), protocol)
                 .psk_binder(psk.label, handshake_hash.as_ref());
             PresharedKeyBinder::new(binder.as_ref().to_vec())
         })
@@ -73,8 +76,8 @@ pub(super) fn fill_in_psk_binders(
 pub(super) fn derive_early_traffic_secret(
     key_log: &dyn crate::key_log::KeyLog,
     cx: &mut ClientContext<'_>,
-    hash_provider: &'static dyn crate::crypto::hash::Hash,
-    early_key_schedule: &KeyScheduleEarly,
+    first_psk: &OfferedPsk,
+    resuming: Option<&persist::Tls13ClientSessionValue>,
     sent_tls13_fake_ccs: &mut bool,
     transcript_buffer: &HandshakeHashBuffer,
     client_random: &[u8; 32],
@@ -82,12 +85,23 @@ pub(super) fn derive_early_traffic_secret(
     // The compatibility ChangeCipherSpec must precede our first ciphertext.
     emit_fake_ccs(sent_tls13_fake_ccs, cx.common);
 
-    let client_hello_hash = transcript_buffer.hash_given(hash_provider, &[]);
+    let record_size_limit = match (&first_psk.external, resuming) {
+        (Some(psk), _) => psk.early_data_record_size_limit(),
+        (None, Some(session)) => session.early_data_record_size_limit(),
+        (None, None) => crate::common_state::max_record_size_limit(true),
+    };
+    let early_key_schedule = KeyScheduleEarly::new(
+        first_psk.suite,
+        first_psk.secret.as_ref(),
+        Protocol::of(cx.common),
+    );
+    let client_hello_hash = transcript_buffer.hash_given(first_psk.suite.common.hash_provider, &[]);
     early_key_schedule.client_early_traffic_secret(
         client_hello_hash.as_ref(),
         key_log,
         client_random,
         cx.common,
+        record_size_limit,
     );
     cx.common.early_exporter =
         Some(early_key_schedule.early_exporter(client_hello_hash.as_ref(), key_log, client_random));
@@ -98,9 +112,10 @@ pub(super) fn derive_early_traffic_secret(
 /// Sends the middlebox-compatibility ChangeCipherSpec once (RFC 8446
 /// appendix D.4).
 ///
-/// Never on QUIC, which has no such record (RFC 9001 §8.4).
+/// Never on QUIC, which has no such record (RFC 9001 §8.4), nor on DTLS
+/// (RFC 9147 §5).
 pub(super) fn emit_fake_ccs(sent: &mut bool, common: &mut CommonState) {
-    if *sent || common.is_quic() {
+    if *sent || common.is_quic() || common.is_dtls() {
         return;
     }
     let m = Message {
@@ -118,7 +133,17 @@ pub(super) fn validate_server_hello(
     // RFC 9846 §4.3: a recognised extension that Table 1 does not allow in
     // a ServerHello is illegal_parameter.
     if first_disallowed(
-        server_hello.extensions.present_types(),
+        server_hello
+            .extensions
+            .present_types()
+            .into_iter()
+            .filter(|ext| {
+                !common.is_dtls()
+                    || !matches!(
+                        ext,
+                        ExtensionType::ConnectionId | ExtensionType::ReturnRoutabilityCheck
+                    )
+            }),
         Tls13Message::ServerHello,
     )
     .is_some()
@@ -152,6 +177,13 @@ pub(super) fn handle_server_hello(
         .key_share
         .as_ref()
         .ok_or_else(|| cx.common.missing_extension(PeerMisbehaved::MissingKeyShare))?;
+    if server_hello.extensions.cert_with_extern_psk.is_some()
+        && server_hello.extensions.pre_shared_key.is_none()
+    {
+        return Err(cx
+            .common
+            .missing_extension(PeerMisbehaved::CertWithExternPskWithoutExternalPsk));
+    }
 
     // The server may answer our hybrid share with its classical half, which we
     // also offered (when the provider supports that group on its own).
@@ -257,7 +289,8 @@ pub(super) fn handle_server_hello(
             }
             // The schedule continues with the negotiated suite, which may
             // differ from the binder's in everything but the hash.
-            KeyScheduleEarly::new(suite, offered.secret.as_ref()).into_pre_handshake()
+            KeyScheduleEarly::new(suite, offered.secret.as_ref(), Protocol::of(cx.common))
+                .into_pre_handshake()
         }
         None => {
             debug!("Not resuming");
@@ -271,11 +304,11 @@ pub(super) fn handle_server_hello(
             }
             cx.common.early_exporter = None;
             resuming_session = None;
-            KeySchedulePreHandshake::new(suite)
+            KeySchedulePreHandshake::new(suite, Protocol::of(cx.common))
         }
     };
 
-    // RFC 8773: the server authenticates with its certificate on top of an
+    // RFC 9973: the server authenticates with its certificate on top of an
     // external PSK. It may only say so when it selected one.
     let cert_with_extern_psk = server_hello.extensions.cert_with_extern_psk.is_some();
     if cert_with_extern_psk && external_psk.is_none() {
@@ -292,6 +325,11 @@ pub(super) fn handle_server_hello(
                 Error::PeerMisbehaved(_) => cx
                     .common
                     .send_fatal_alert(AlertDescription::IllegalParameter, err),
+                // RFC 10024 §4.2 distinguishes invalid peer input from
+                // a local ML-KEM decapsulation failure.
+                other if their_key_share.group.is_rfc10024_hybrid() => cx
+                    .common
+                    .send_fatal_alert(AlertDescription::InternalError, other),
                 other => other,
             })?;
     cx.common.kx_state.complete();
@@ -305,6 +343,13 @@ pub(super) fn handle_server_hello(
     // While early data may still be in flight our encrypter stays on the
     // early key; the handshake key is installed once that question settles.
     let hash_at_server_hello = transcript.current_hash();
+    if hello.sent_record_size_limit.is_some() {
+        if let Some(dtls) = &mut cx.common.dtls {
+            dtls.start_record_size_limit_observation();
+        } else {
+            cx.common.record_layer.start_record_size_limit_observation();
+        }
+    }
     let key_schedule = key_schedule.derive_client_handshake_secrets(
         cx.data.early_data.is_enabled(),
         hash_at_server_hello.as_ref(),
@@ -316,7 +361,7 @@ pub(super) fn handle_server_hello(
     // Refusals of what the server selected, sent once our alert can be
     // protected under the handshake key the server now reads with: no 0-RTT
     // is in flight (none was accepted without a PSK, and none is sent with
-    // RFC 8773).
+    // RFC 9973).
     if config.require_external_psk && cx.common.external_psk.is_none() {
         return Err(cx.common.send_fatal_alert(
             AlertDescription::HandshakeFailure,
@@ -329,6 +374,13 @@ pub(super) fn handle_server_hello(
             PeerIncompatible::CertWithExternPskRequired,
         ));
     }
+    if external_psk.is_some() && cx.data.service_identity.is_some() && !cert_with_extern_psk {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::HandshakeFailure,
+            Error::NoCertificatesPresented,
+        ));
+    }
+    cx.common.cert_with_extern_psk = cert_with_extern_psk;
 
     Ok(Box::new(ExpectEncryptedExtensions {
         config,
@@ -350,7 +402,7 @@ struct ExpectEncryptedExtensions {
     resuming_session: Option<persist::Tls13ClientSessionValue>,
     /// The external PSK the server selected, if it did.
     external_psk: Option<Arc<ExternalPsk>>,
-    /// Whether RFC 8773 certificate authentication was negotiated.
+    /// Whether RFC 9973 certificate authentication was negotiated.
     cert_with_extern_psk: bool,
     server_name: ServerName<'static>,
     randoms: ConnectionRandoms,
@@ -435,9 +487,6 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             exts.client_certificate_type,
             exts.server_certificate_type,
         )?;
-        // RFC 8449 §4: in TLS 1.3 the server's limit comes here. RFC 9149's
-        // `expected_count` is a hint only and needs no action.
-        hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
         crate::external_binding::handshake::client_check(
             cx.common,
             self.config.external_binding.as_ref(),
@@ -503,6 +552,11 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
             }
         }
 
+        // On rejection the handshake key is now available for the alert.
+        // RFC 8449 §4 covers the authenticated records that carried this
+        // message when the server acknowledges the extension.
+        hs::process_record_size_limit(cx.common, &self.hello, exts.record_size_limit, true)?;
+
         match (self.resuming_session, self.external_psk) {
             (Some(resuming), _) => {
                 // The server authenticated through the PSK; reinstate the
@@ -510,6 +564,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 // for a session authenticated by an external PSK alone).
                 let chain = resuming.server_cert_chain();
                 cx.common.peer_certificates = (!chain.0.is_empty()).then(|| chain.clone());
+                cx.common.matched_service_identity = resuming.matched_service_identity.clone();
                 cx.data.delegated_credential_expiry = resuming.delegated_credential_expiry();
                 Ok(Box::new(ExpectFinished {
                     config: self.config,
@@ -542,7 +597,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                     sig_verified: HandshakeSignatureValid::assertion(),
                 }))
             }
-            // A full handshake, or RFC 8773 certificate authentication on
+            // A full handshake, or RFC 9973 certificate authentication on
             // top of an external PSK.
             _ => Ok(Box::new(ExpectCertificateOrCertReq {
                 config: self.config,
@@ -551,10 +606,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
                 suite: self.suite,
                 transcript: self.transcript,
                 key_schedule: self.key_schedule,
-                offered_transparency_info: self
-                    .hello
-                    .sent_extensions
-                    .contains(&ExtensionType::TransparencyInfo),
+                verification_context: self.hello.verification_context(),
                 offered_sigschemes: self.hello.offered_sigschemes,
             })),
         }

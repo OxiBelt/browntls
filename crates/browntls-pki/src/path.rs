@@ -161,8 +161,14 @@ impl<'p> PartialPath<'p> {
     /// Loop prevention (RFC 4158 §5.2): a certificate with the same subject
     /// and key as one already in the path adds nothing.
     fn contains_equivalent(&self, cert: &Cert<'_>) -> bool {
-        self.nodes_from_head()
-            .any(|(_, c)| c.subject == cert.subject && c.spki == cert.spki)
+        let candidate = Spki::from_contents(cert.spki).ok();
+        self.nodes_from_head().any(|(_, c)| {
+            c.subject == cert.subject
+                && (c.spki == cert.spki
+                    || candidate.is_some_and(|candidate| {
+                        Spki::from_contents(c.spki).is_ok_and(|key| key.equivalent(candidate))
+                    }))
+        })
     }
 
     fn intermediate_ders(&self, all: &'p [CertificateDer<'p>]) -> Vec<&'p CertificateDer<'p>> {

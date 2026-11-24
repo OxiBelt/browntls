@@ -4,6 +4,7 @@
 //! ```text
 //! browntls-e2e info
 //! browntls-e2e ech-keygen --out DIR --public-name NAME [--config-id N]
+//!                        [--ech-pem [--ech-kem KEM]]
 //! browntls-e2e server --listen ADDR --cert FILE --key FILE [--client-ca FILE]
 //!                     [--accept N] [--sni-cert NAME,CERT,KEY]...
 //!                     [ECH-SERVER...] [COMMON...]
@@ -12,29 +13,46 @@
 //!                     --backend NAME=HOST:PORT... [--accept N]
 //!                     [ECH-SERVER...] [COMMON...]
 //! browntls-e2e client --connect HOST:PORT --server-name NAME --ca FILE
+//!                     [--reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID]...
 //!                     [--cert FILE --key FILE] [--message TEXT]
 //!                     [--expect-reply TEXT] [--connections N] [--wait SECS]
 //!                     [ECH-CLIENT...] [COMMON...]
 //!
 //! COMMON: --tls 1.2|1.3 (repeatable), --suite NAME (repeatable),
 //!         --group NAME (repeatable), --allow-mac-then-encrypt,
-//!         --record-size-limit N|none, --grease, --async
+//!         --record-size-limit N|none, --delegated-credentials, --grease,
+//!         --async (buffered Tokio), --unbuffered (unbuffered Tokio),
+//!         --key-log (logs only in diagnostic builds with SSLKEYLOGFILE),
+//!         --zstd-cert-compression (only when built with browntls/zstd)
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
+//!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
 //!         --ech-trial-decryption, --ech-public-name-check
 //! ECH-CLIENT: --ech-config-list FILE, --ech-grease, --ech-random-config-id,
 //!         --ech-retry
 //! ```
 //!
+//! `dtls-client` and `dtls-server` use UDP with the same credentials and
+//! `--tls` options: `1.2` selects DTLS 1.2, `1.3` selects DTLS 1.3, and
+//! repeating both permits either. With no `--tls`, DTLS remains 1.3 only.
+//! By default DTLS performs one full certificate handshake and a
+//! request/reversed reply exchange, then checks both close alerts.
+//! `--dtls-cid` opts into nonempty bidirectional connection IDs.
+//! `--dtls12-resumption session-id|ticket` with `--tls 1.2` performs a full
+//! then a resumed exchange; use `--connections 2` or `--accept 2`.
+//! `--dtls-rebind basic|enhanced` selects the Kubernetes rebind scenario,
+//! with two exchanges on one CID/RRC association.
+//!
 //! `--record-size-limit` sets the RFC 8449 limit to announce (`none`: no
 //! extension); `--grease` sends RFC 8701 GREASE values (a client in its
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
 //! NewSessionTicket messages); `--ticket-request` sends the RFC 9149
 //! extension; `--padding` pads the ClientHello to at least N bytes (RFC
-//! 7685). `--async` runs the client's or server's connections through
-//! `browntls-tokio` on a single-threaded Tokio runtime instead of the
-//! blocking `StreamOwned` (same exchange and output, with `"io":"async"`; a
-//! client then does not retry after an ECH rejection).
+//! 7685). `--async` runs TLS connections through the buffered `browntls-tokio`
+//! adapters and `--unbuffered` through its unbuffered adapters, both on a
+//! single-threaded Tokio runtime. For DTLS, `--async` selects the Tokio
+//! UDP client and server and reports `"io":"tokio-dtls"`. It cannot be
+//! combined with `--dtls-rebind`.
 //!
 //! Encrypted Client Hello (RFC 9849): `ech-keygen` writes an X25519 key for
 //! every native HPKE suite with that KEM to `DIR/ech-config` (one
@@ -47,7 +65,11 @@
 //! name, or completes the handshake itself (with the public name's
 //! certificate and the retry configurations) when ECH is not accepted.
 //! `--sni-cert` adds a certificate for one server name, such as the public
-//! name. A client with `--ech-config-list` offers ECH (`--ech-grease` sends
+//! name. For RFC 9934, `ech-keygen --ech-pem` writes `ech.pem` and
+//! `ech-public.pem`. Shared and client-facing servers take repeatable
+//! `--ech-pem FILE` decryption bundles and ordered `--ech-retry-pem FILE`
+//! retry lists. Clients can use one public-only `--ech-pem FILE`.
+//! A client with `--ech-config-list` offers ECH (`--ech-grease` sends
 //! GREASE instead); with `--ech-retry` it retries once with the server's
 //! retry configurations after a rejection.
 //!
@@ -73,10 +95,18 @@
 //!
 //! This is test tooling: it loads keys from files given on the command line
 //! and has no hardening beyond the library defaults it configures.
+//! The `--key-log` flag installs the diagnostic sink. The sink can emit
+//! traffic secrets only in builds that enable the `key-log` feature.
 
 mod async_io;
 mod client_facing;
+mod dtls;
+mod early_data;
+mod ech_options;
+#[cfg(feature = "zstd")]
+mod observed_zstd;
 mod output;
+mod unbuffered_io;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -85,11 +115,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use browntls::client::{ClientHelloPadding, TicketRequest};
-use browntls::crypto::hpke::{HpkeKem, HpkePrivateKey};
+use browntls::crypto::hash::HashAlgorithm;
+use browntls::crypto::hpke::HpkeKem;
+use browntls::crypto::native::delegated_credential;
 use browntls::crypto::{CryptoProvider, SupportedKxGroup, native};
-use browntls::ech::{EchConfig, EchGreaseConfig, EchMode, EchServerConfig, EchServerKey};
+use browntls::ech::EchServerConfig;
 use browntls::pki_types::pem::PemObject;
 use browntls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use browntls::psk::ExternalPsk;
 use browntls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
 use browntls::sign::CertifiedKey;
 use browntls::{
@@ -109,25 +142,92 @@ const MAX_LINE: usize = 16 * 1024;
 
 type Result<T, E = String> = std::result::Result<T, E>;
 
+fn certified_key_with_credential(
+    side: browntls::Side,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    provider: &CryptoProvider,
+) -> Result<CertifiedKey> {
+    let mut certified =
+        CertifiedKey::from_der(chain, key, provider).map_err(|error| error.to_string())?;
+    let cert = certified
+        .end_entity_cert()
+        .map_err(|error| error.to_string())?;
+    let issued = delegated_credential::generate(
+        side,
+        cert,
+        certified.key.as_ref(),
+        &[browntls::SignatureScheme::ECDSA_NISTP256_SHA256],
+        browntls::SignatureScheme::ECDSA_NISTP256_SHA256,
+        24 * 60 * 60,
+    )
+    .map_err(|error| error.to_string())?;
+    certified = match side {
+        browntls::Side::Server => {
+            certified.with_delegated_credential(issued.credential, issued.signing_key, provider)
+        }
+        browntls::Side::Client => certified.with_client_delegated_credential(
+            issued.credential,
+            issued.signing_key,
+            provider,
+        ),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(certified)
+}
+
+fn configured_record_size_limit(options: &Options) -> Value {
+    match options.record_size_limit {
+        None => "default".into(),
+        Some(None) => "none".into(),
+        Some(Some(limit)) => limit.to_string().into(),
+    }
+}
+
+fn zstd_compression_diagnostic(options: &Options) -> Option<(&'static str, Value)> {
+    if !options.zstd_cert_compression {
+        return None;
+    }
+    #[cfg(feature = "zstd")]
+    {
+        Some((
+            "zstd_certificate_messages_received",
+            Value::Num(observed_zstd::received()),
+        ))
+    }
+    #[cfg(not(feature = "zstd"))]
+    None
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.split_first() {
-        Some((cmd, rest)) if cmd == "server" => Options::parse(rest).and_then(|o| server(&o)),
-        Some((cmd, rest)) if cmd == "client" => Options::parse(rest).and_then(|o| client(&o)),
+        Some((cmd, rest)) if cmd == "server" => Options::parse(rest, cmd).and_then(|o| server(&o)),
+        Some((cmd, rest)) if cmd == "client" => Options::parse(rest, cmd).and_then(|o| client(&o)),
+        Some((cmd, rest)) if cmd == "dtls-server" => {
+            Options::parse(rest, cmd).and_then(|o| dtls::server(&o))
+        }
+        Some((cmd, rest)) if cmd == "dtls-client" => {
+            Options::parse(rest, cmd).and_then(|o| dtls::client(&o))
+        }
         Some((cmd, rest)) if cmd == "client-facing" => {
-            Options::parse(rest).and_then(|o| client_facing(&o))
+            Options::parse(rest, cmd).and_then(|o| client_facing(&o))
         }
         Some((cmd, rest)) if cmd == "ech-keygen" => {
-            Options::parse(rest).and_then(|o| ech_keygen(&o))
+            Options::parse(rest, cmd).and_then(|o| ech_options::keygen(&o))
+        }
+        Some((cmd, rest)) if matches!(cmd.as_str(), "early-data-server" | "early-data-client") => {
+            early_data::run(cmd, rest)
         }
         Some((cmd, rest)) if cmd == "info" && rest.is_empty() => {
             info();
             Ok(())
         }
-        _ => Err(
-            "usage: browntls-e2e info | ech-keygen | server | client-facing | client [OPTIONS]"
-                .into(),
-        ),
+        _ => Err(concat!(
+            "usage: browntls-e2e info | ech-keygen | server | client-facing | client",
+            " | dtls-server | dtls-client | early-data-server | early-data-client [OPTIONS]"
+        )
+        .into()),
     };
     if let Err(e) = result {
         emit(&[("event", "error".into()), ("message", e.into())]);
@@ -142,14 +242,17 @@ struct Options {
     listen: Option<String>,
     connect: Option<String>,
     server_name: Option<String>,
+    reference_ids: Vec<String>,
     ca: Option<String>,
     client_ca: Option<String>,
     cert: Option<String>,
     key: Option<String>,
     message: Option<String>,
+    dtls_rebind: Option<String>,
     expect_reply: Option<String>,
     accept: usize,
     connections: usize,
+    dtls12_resumption: Option<String>,
     wait: Duration,
     versions: Vec<&'static SupportedProtocolVersion>,
     suites: Vec<SupportedCipherSuite>,
@@ -158,6 +261,7 @@ struct Options {
     /// `None`: the library default; `Some(None)`: no extension.
     record_size_limit: Option<Option<u16>>,
     grease: bool,
+    delegated_credentials: bool,
     ticket_request: Option<TicketRequest>,
     padding: Option<u16>,
     /// Certificates for particular server names: (name, chain, key).
@@ -168,6 +272,10 @@ struct Options {
     ech_config: Option<String>,
     ech_key: Option<String>,
     ech_config_list: Option<String>,
+    ech_pems: Vec<String>,
+    ech_retry_pems: Vec<String>,
+    ech_keygen_pem: bool,
+    ech_kem: Option<HpkeKem>,
     ech_backend: bool,
     ech_grease: bool,
     ech_random_config_id: bool,
@@ -179,10 +287,17 @@ struct Options {
     backends: Vec<(String, String)>,
     /// Client and server I/O through `browntls-tokio` (`--async`).
     async_io: bool,
+    /// Client and server I/O through `browntls-tokio::unbuffered`.
+    unbuffered_io: bool,
+    dtls_cid: bool,
+    external_psk_file: Option<String>,
+    external_psk_identity: Option<String>,
+    zstd_cert_compression: bool,
+    key_log: bool,
 }
 
 impl Options {
-    fn parse(args: &[String]) -> Result<Self> {
+    fn parse(args: &[String], command: &str) -> Result<Self> {
         let mut o = Self {
             accept: 1,
             connections: 1,
@@ -197,13 +312,19 @@ impl Options {
             }
             let switch = match flag.as_str() {
                 "--grease" => Some(&mut o.grease),
+                "--delegated-credentials" => Some(&mut o.delegated_credentials),
                 "--ech-backend" => Some(&mut o.ech_backend),
                 "--ech-grease" => Some(&mut o.ech_grease),
                 "--ech-random-config-id" => Some(&mut o.ech_random_config_id),
                 "--ech-retry" => Some(&mut o.ech_retry),
+                "--ech-pem" if command == "ech-keygen" => Some(&mut o.ech_keygen_pem),
                 "--ech-trial-decryption" => Some(&mut o.ech_trial_decryption),
                 "--ech-public-name-check" => Some(&mut o.ech_public_name_check),
                 "--async" => Some(&mut o.async_io),
+                "--unbuffered" => Some(&mut o.unbuffered_io),
+                "--dtls-cid" => Some(&mut o.dtls_cid),
+                "--zstd-cert-compression" => Some(&mut o.zstd_cert_compression),
+                "--key-log" => Some(&mut o.key_log),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -218,14 +339,24 @@ impl Options {
                 "--listen" => o.listen = Some(value),
                 "--connect" => o.connect = Some(value),
                 "--server-name" => o.server_name = Some(value),
+                "--reference-id" => o.reference_ids.push(value),
                 "--ca" => o.ca = Some(value),
                 "--client-ca" => o.client_ca = Some(value),
                 "--cert" => o.cert = Some(value),
                 "--key" => o.key = Some(value),
+                "--external-psk-file" => o.external_psk_file = Some(value),
+                "--external-psk-identity" => o.external_psk_identity = Some(value),
                 "--message" => o.message = Some(value),
+                "--dtls-rebind" => {
+                    if !matches!(value.as_str(), "basic" | "enhanced") {
+                        return Err(format!("unknown DTLS rebind mode {value:?}"));
+                    }
+                    o.dtls_rebind = Some(value);
+                }
                 "--expect-reply" => o.expect_reply = Some(value),
                 "--accept" => o.accept = parse_count(flag, &value)?,
                 "--connections" => o.connections = parse_count(flag, &value)?,
+                "--dtls12-resumption" => o.dtls12_resumption = Some(value),
                 "--wait" => o.wait = Duration::from_secs(parse_count(flag, &value)? as u64),
                 "--tls" => o.versions.push(match value.as_str() {
                     "1.2" => &version::TLS12,
@@ -280,6 +411,9 @@ impl Options {
                 "--ech-config" => o.ech_config = Some(value),
                 "--ech-key" => o.ech_key = Some(value),
                 "--ech-config-list" => o.ech_config_list = Some(value),
+                "--ech-pem" => o.ech_pems.push(value),
+                "--ech-retry-pem" => o.ech_retry_pems.push(value),
+                "--ech-kem" => o.ech_kem = Some(ech_options::parse_kem(&value)?),
                 "--backend" => {
                     let (name, addr) = value
                         .split_once('=')
@@ -288,6 +422,10 @@ impl Options {
                 }
                 _ => return Err(format!("unknown option {flag}")),
             }
+        }
+        o.validate_ech_options(command)?;
+        if o.zstd_cert_compression && !cfg!(feature = "zstd") {
+            return Err("--zstd-cert-compression requires a build with the zstd feature".into());
         }
         Ok(o)
     }
@@ -312,6 +450,24 @@ impl Options {
         }
     }
 
+    fn dtls_versions(&self) -> browntls::dtls::Versions {
+        use browntls::dtls::Versions;
+
+        let tls12 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS12.version);
+        let tls13 = self
+            .versions
+            .iter()
+            .any(|v| v.version == version::TLS13.version);
+        match (tls12, tls13) {
+            (true, true) => Versions::V1_2And1_3,
+            (true, false) => Versions::V1_2,
+            _ => Versions::V1_3,
+        }
+    }
+
     fn chain(&self) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
         match (&self.cert, &self.key) {
             (Some(cert), Some(key)) => {
@@ -321,6 +477,23 @@ impl Options {
             }
             (None, None) => Ok(None),
             _ => Err("--cert and --key go together".into()),
+        }
+    }
+
+    /// Loads the per-run PSK from a file. Its bytes are never accepted on the
+    /// command line or included in peer output.
+    fn external_psk(&self) -> Result<Option<Arc<ExternalPsk>>> {
+        match (&self.external_psk_file, &self.external_psk_identity) {
+            (Some(path), Some(identity)) => ExternalPsk::new(
+                identity.as_bytes().to_vec(),
+                read_file(path)?,
+                HashAlgorithm::SHA256,
+            )
+            .map(Arc::new)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+            (None, None) => Ok(None),
+            _ => Err("--external-psk-file and --external-psk-identity go together".into()),
         }
     }
 }
@@ -360,59 +533,6 @@ fn roots(path: &str) -> Result<Arc<RootCertStore>> {
 
 fn read_file(path: &str) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
-}
-
-/// The native HPKE suites with the X25519 KEM (the one every ECH
-/// implementation supports).
-fn x25519_hpke_suites() -> Vec<&'static dyn browntls::crypto::hpke::Hpke> {
-    native::hpke::ALL_SUPPORTED_SUITES
-        .iter()
-        .copied()
-        .filter(|s| s.suite().kem == HpkeKem::DHKEM_X25519_HKDF_SHA256)
-        .collect()
-}
-
-impl Options {
-    /// The ECH keys of `--ech-config` and `--ech-key`, if given.
-    fn ech_server(&self) -> Result<Option<Arc<EchServerConfig>>> {
-        let (config, key) = match (&self.ech_config, &self.ech_key) {
-            (Some(config), Some(key)) => (read_file(config)?, read_file(key)?),
-            (None, None) => return Ok(None),
-            _ => return Err("--ech-config and --ech-key go together".into()),
-        };
-        let suites = x25519_hpke_suites();
-        let key = EchServerKey::new(&config, HpkePrivateKey::from(key), &suites)
-            .map_err(|e| format!("ECH key: {e}"))?;
-        let mut ech = EchServerConfig::new(vec![key]).map_err(|e| e.to_string())?;
-        if self.ech_trial_decryption {
-            ech = ech.with_trial_decryption();
-        }
-        if self.ech_public_name_check {
-            ech = ech.with_public_name_check();
-        }
-        Ok(Some(Arc::new(ech)))
-    }
-
-    /// The client's ECH mode, if any; `list` replaces `--ech-config-list`
-    /// on a retry.
-    fn ech_client(&self, list: Option<&[u8]>) -> Result<Option<EchMode>> {
-        let suites = native::hpke::ALL_SUPPORTED_SUITES;
-        if self.ech_grease {
-            let grease =
-                EchGreaseConfig::generate(x25519_hpke_suites()[0]).map_err(|e| e.to_string())?;
-            return Ok(Some(EchMode::Grease(grease)));
-        }
-        let list = match (list, &self.ech_config_list) {
-            (Some(list), _) => list.to_vec(),
-            (None, Some(path)) => read_file(path)?,
-            (None, None) => return Ok(None),
-        };
-        let mut config = EchConfig::new(&list, suites).map_err(|e| format!("ECH: {e}"))?;
-        if self.ech_random_config_id {
-            config = config.with_random_config_id();
-        }
-        Ok(Some(EchMode::Enable(config)))
-    }
 }
 
 /// Picks the certificate for the ClientHello's server name, falling back to
@@ -497,14 +617,23 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
         None => builder.with_no_client_auth(),
     };
     let mut config = if o.sni_certs.is_empty() {
-        builder
-            .with_single_cert(chain, key)
-            .map_err(|e| e.to_string())?
+        if o.delegated_credentials {
+            let certified =
+                certified_key_with_credential(browntls::Side::Server, chain, key, &provider)?;
+            builder.with_cert_resolver(Arc::new(browntls::sign::SingleCertAndKey::from(certified)))
+        } else {
+            builder
+                .with_single_cert(chain, key)
+                .map_err(|e| e.to_string())?
+        }
     } else {
         let certified = |chain, key: PrivateKeyDer<'static>| {
-            CertifiedKey::from_der(chain, key, &provider)
-                .map(Arc::new)
-                .map_err(|e| e.to_string())
+            let certified = if o.delegated_credentials {
+                certified_key_with_credential(browntls::Side::Server, chain, key, &provider)?
+            } else {
+                CertifiedKey::from_der(chain, key, &provider).map_err(|e| e.to_string())?
+            };
+            Ok::<Arc<CertifiedKey>, String>(Arc::new(certified))
         };
         let mut by_name = Vec::new();
         for (name, cert, key) in &o.sni_certs {
@@ -521,6 +650,23 @@ fn server_config(o: &Options, ech: Option<Arc<EchServerConfig>>) -> Result<Arc<S
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    config.enable_delegated_credentials = o.delegated_credentials;
+    if o.key_log {
+        config.key_log = Arc::new(browntls::KeyLogFile::new());
+    }
+    if o.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            config.cert_compressors = vec![&browntls::compress::ZSTD];
+            config.cert_decompressors = vec![&observed_zstd::OBSERVED_ZSTD];
+        }
+    }
+    if let Some(psk) = o.external_psk()? {
+        config.external_psks = Some(Arc::new(vec![psk]));
+        config.cert_with_extern_psk = true;
+        config.require_cert_with_extern_psk = true;
+        config.require_external_psk = true;
+    }
     config.ech = ech;
     config.ech_backend = o.ech_backend;
     Ok(Arc::new(config))
@@ -539,6 +685,12 @@ fn listen(o: &Options) -> Result<TcpListener> {
 
 fn server(o: &Options) -> Result<()> {
     let config = server_config(o, o.ech_server()?)?;
+    if o.async_io && o.unbuffered_io {
+        return Err("--async and --unbuffered are mutually exclusive".into());
+    }
+    if o.unbuffered_io {
+        return unbuffered_io::server(o, config);
+    }
     if o.async_io {
         return async_io::server(o, config);
     }
@@ -548,7 +700,7 @@ fn server(o: &Options) -> Result<()> {
         let (sock, peer) = listener.accept().map_err(|e| format!("accept: {e}"))?;
         let result = set_timeouts(&sock).and_then(|()| {
             let conn = ServerConnection::new(config.clone()).map_err(|e| e.to_string())?;
-            serve(StreamOwned::new(conn, sock), index)
+            serve(StreamOwned::new(conn, sock), index, o)
         });
         if let Err(e) = result {
             emit(&[
@@ -567,7 +719,13 @@ fn server(o: &Options) -> Result<()> {
 
 /// Answers one line on `tls`. A client refusing our ECH rejection
 /// (`ech_required`) is reported as such, not as an error.
-fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Result<()> {
+fn serve(
+    mut tls: StreamOwned<ServerConnection, TcpStream>,
+    index: usize,
+    o: &Options,
+) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    observed_zstd::reset();
     let line = match read_line(&mut tls) {
         Ok(line) => line,
         Err(e) => {
@@ -596,7 +754,18 @@ fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Res
         ("index", Value::Num(index)),
     ];
     fields.extend(negotiated(&tls.conn));
+    if let Some(field) = zstd_compression_diagnostic(o) {
+        fields.push(field);
+    }
     fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
+    fields.push((
+        "delegated_credential",
+        Value::Bool(tls.conn.client_delegated_credential().is_some()),
+    ));
+    fields.push((
+        "record_size_limit_configured",
+        configured_record_size_limit(o),
+    ));
     fields.push((
         "server_name",
         tls.conn.server_name().unwrap_or("none").to_owned().into(),
@@ -605,31 +774,6 @@ fn serve(mut tls: StreamOwned<ServerConnection, TcpStream>, index: usize) -> Res
     fields.push(("sent", reply.into()));
     emit(&fields);
     close(&mut tls);
-    Ok(())
-}
-
-// ------------------------------------------------------------------ ech-keygen
-
-fn ech_keygen(o: &Options) -> Result<()> {
-    let out = std::path::PathBuf::from(required(o.out.as_ref(), "--out")?);
-    let public_name = required(o.public_name.as_ref(), "--public-name")?;
-    let key = EchServerKey::generate(o.config_id, public_name, 0, &x25519_hpke_suites())
-        .map_err(|e| e.to_string())?;
-    let list = EchServerConfig::new(vec![key.clone()]).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    for (name, bytes) in [
-        ("ech-config", key.ech_config()),
-        ("ech-config-list", list.ech_config_list()),
-        ("ech-key", key.private_key().secret_bytes()),
-    ] {
-        let path = out.join(name);
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    emit(&[
-        ("event", "ech-key".into()),
-        ("config_id", Value::Num(usize::from(o.config_id))),
-        ("public_name", public_name.into()),
-    ]);
     Ok(())
 }
 
@@ -645,6 +789,18 @@ fn client(o: &Options) -> Result<()> {
         .map_err(|e| e.to_string())?
         .with_root_certificates(roots(ca)?);
     let mut config = match o.chain()? {
+        Some((chain, key)) if o.delegated_credentials => {
+            let provider = o.provider();
+            let certified = certified_key_with_credential(
+                browntls::Side::Client,
+                chain,
+                key,
+                provider.as_ref(),
+            )?;
+            builder.with_client_cert_resolver(Arc::new(browntls::sign::SingleCertAndKey::from(
+                certified,
+            )))
+        }
         Some((chain, key)) => builder
             .with_client_auth_cert(chain, key)
             .map_err(|e| e.to_string())?,
@@ -655,6 +811,23 @@ fn client(o: &Options) -> Result<()> {
         config.record_size_limit = limit;
     }
     config.enable_grease = o.grease;
+    config.enable_delegated_credentials = o.delegated_credentials;
+    if o.key_log {
+        config.key_log = Arc::new(browntls::KeyLogFile::new());
+    }
+    if o.zstd_cert_compression {
+        #[cfg(feature = "zstd")]
+        {
+            config.cert_compressors = vec![&browntls::compress::ZSTD];
+            config.cert_decompressors = vec![&observed_zstd::OBSERVED_ZSTD];
+        }
+    }
+    if let Some(psk) = o.external_psk()? {
+        config.external_psks.push(psk);
+        config.cert_with_extern_psk = true;
+        config.require_cert_with_extern_psk = true;
+        config.require_external_psk = true;
+    }
     config.tls13_ticket_request = o.ticket_request;
     if let Some(n) = o.padding {
         config.client_hello_padding = ClientHelloPadding::AtLeast(n);
@@ -662,17 +835,32 @@ fn client(o: &Options) -> Result<()> {
     config.ech_mode = o.ech_client(None)?;
     let mut config = Arc::new(config);
     let server_name = ServerName::try_from(name.to_owned()).map_err(|e| e.to_string())?;
+    let identity = service_identity(&o.reference_ids)?;
+    if o.async_io && o.unbuffered_io {
+        return Err("--async and --unbuffered are mutually exclusive".into());
+    }
+    if o.unbuffered_io {
+        return unbuffered_io::client(o, config, server_name, identity, message);
+    }
     if o.async_io {
-        return async_io::client(o, config, server_name, message);
+        return async_io::client(o, config, server_name, identity, message);
     }
 
     let mut retried = false;
     let mut index = 0;
     while index < o.connections {
+        #[cfg(feature = "zstd")]
+        observed_zstd::reset();
         let sock = connect_with_retry(connect, o.wait)?;
         set_timeouts(&sock)?;
-        let conn = ClientConnection::new(config.clone(), server_name.clone())
-            .map_err(|e| e.to_string())?;
+        let conn = match &identity {
+            Some(identity) => ClientConnection::new_with_identity(
+                config.clone(),
+                browntls::ClientServerIdentity::new(server_name.clone(), identity.clone()),
+            ),
+            None => ClientConnection::new(config.clone(), server_name.clone()),
+        }
+        .map_err(|e| e.to_string())?;
         let mut tls = StreamOwned::new(conn, sock);
         let reply = tls
             .write_all(format!("{message}\n").as_bytes())
@@ -711,9 +899,24 @@ fn client(o: &Options) -> Result<()> {
             ("index", Value::Num(index)),
         ];
         fields.extend(negotiated(&tls.conn));
+        if let Some(field) = zstd_compression_diagnostic(o) {
+            fields.push(field);
+        }
+        fields.push((
+            "delegated_credential",
+            Value::Bool(tls.conn.delegated_credential().is_some()),
+        ));
+        fields.push((
+            "record_size_limit_configured",
+            configured_record_size_limit(o),
+        ));
         fields.push(("ech", format!("{:?}", tls.conn.ech_status()).into()));
         fields.push(("sent", message.into()));
         fields.push(("received", reply.clone().into()));
+        fields.push((
+            "service_identity_matched",
+            Value::Bool(tls.conn.matched_service_identity().is_some()),
+        ));
         emit(&fields);
         close(&mut tls);
         if let Some(expected) = o.expect_reply.as_ref().filter(|e| **e != reply) {
@@ -724,6 +927,41 @@ fn client(o: &Options) -> Result<()> {
         index += 1;
     }
     Ok(())
+}
+
+fn service_identity(references: &[String]) -> Result<Option<browntls::ServiceIdentity>> {
+    use browntls::{ReferenceIdentifier as RefId, SrvId, UriId};
+    if references.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed = Vec::with_capacity(references.len());
+    for reference in references {
+        let (kind, value) = reference
+            .split_once(':')
+            .ok_or_else(|| format!("invalid --reference-id {reference:?}; expected TYPE:VALUE"))?;
+        parsed.push(match kind {
+            "dns" => RefId::Dns(
+                browntls::pki_types::DnsName::try_from(value.to_owned())
+                    .map_err(|e| format!("invalid DNS reference {value:?}: {e}"))?,
+            ),
+            "ip" => RefId::Ip(
+                browntls::pki_types::IpAddr::try_from(value)
+                    .map_err(|e| format!("invalid IP reference {value:?}: {e:?}"))?,
+            ),
+            "uri" => RefId::Uri(
+                UriId::try_from(value)
+                    .map_err(|e| format!("invalid URI reference {value:?}: {e}"))?,
+            ),
+            "srv" => RefId::Srv(
+                SrvId::try_from(value)
+                    .map_err(|e| format!("invalid SRV reference {value:?}: {e}"))?,
+            ),
+            _ => return Err(format!("unknown --reference-id type {kind:?}")),
+        });
+    }
+    browntls::ServiceIdentity::new(parsed)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// Connects to `addr`, retrying while the server is starting up.

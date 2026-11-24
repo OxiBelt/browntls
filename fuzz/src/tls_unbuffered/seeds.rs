@@ -2,6 +2,47 @@
 
 use super::{Op, RETRY, StepArgs};
 
+#[test]
+fn resumed_client_reports_early_data_alpn_and_remaining_budget() {
+    use super::{CLIENT, Knobs, World};
+    use crate::input::Input;
+
+    crate::init();
+    let knobs = Knobs::read(&mut Input::new(&[0x41, 0x40, 0, 0, 0]));
+    let mut world = World::new(knobs).expect("world");
+    world.connect(&mut Input::new(&[0]));
+    world.pump();
+    assert!(world.healthy());
+    let client = world.client.as_ref().expect("client");
+    assert_eq!(client.alpn_protocol(), Some(b"fuzz".as_slice()));
+    assert!(client.tls13_tickets_received() > 0);
+    assert_eq!(client.early_data_alpn(), None);
+    assert_eq!(client.early_data_bytes_left(), 0);
+
+    world.connect(&mut Input::new(&[0]));
+    let client = world.client.as_ref().expect("resuming client");
+    assert_eq!(client.early_data_alpn(), Some(b"fuzz".as_slice()));
+    assert_eq!(client.early_data_bytes_left(), 1024);
+    world.drive(
+        CLIENT,
+        &StepArgs {
+            flags: RETRY | 8,
+            data: b"early",
+            ..StepArgs::default()
+        },
+    );
+    assert_eq!(world.early_sent, b"early");
+    let client = world.client.as_ref().expect("resuming client");
+    assert_eq!(client.early_data_bytes_left(), 1019);
+    world.pump();
+    assert!(world.healthy());
+    let client = world.client.as_ref().expect("resumed client");
+    assert!(client.is_early_data_accepted());
+    assert_eq!(client.early_data_alpn(), Some(b"fuzz".as_slice()));
+    assert_eq!(client.early_data_bytes_left(), 0);
+    assert_eq!(world.early_recv, b"early");
+}
+
 pub(super) struct Seed(pub(super) Vec<u8>);
 
 impl Seed {
@@ -93,7 +134,9 @@ pub fn seeds() -> Vec<Vec<u8>> {
             Op::Reconnect,
             &[1 | 2, 5, 4, b'f', b'u', b'z', b'z', 1, b'x'],
         )
+        .op(Op::Accessors, &[])
         .step(Op::Drive, 0, RETRY | 8, 0, b"early")
+        .op(Op::Accessors, &[])
         .op(Op::Export, &[2, b'e', b'x', 0, 0, 0, 32])
         .op(Op::Deliver, &[0, 0, 0, 0, 0, 0])
         .step(Op::Drive, 1, RETRY | 0x80, 0, b"")

@@ -1,6 +1,6 @@
 //! Key exchange: X25519 and X448 (RFC 7748), the NIST curves (RFC 8422),
 //! ML-KEM (FIPS 203, draft-ietf-tls-mlkem), the hybrid groups of
-//! draft-ietf-tls-ecdhe-mlkem and the RFC 7919 finite-field groups (TLS 1.3
+//! RFC 10024 and the RFC 7919 finite-field groups (TLS 1.3
 //! only).
 //!
 //! Every peer share is validated before use: exact lengths, the uncompressed
@@ -347,7 +347,7 @@ where
         let ss = self
             .dk
             .decapsulate(peer_pub_key)
-            .map_err(|_| invalid_share())?;
+            .map_err(|_| Error::general("ML-KEM decapsulation failed"))?;
         Ok(shared_secret(ss))
     }
 
@@ -363,11 +363,7 @@ where
 // ---------------------------------------------------------------------------
 // Hybrid groups
 
-/// The draft-ietf-tls-ecdhe-mlkem code point of `SecP384r1MLKEM1024`.
-///
-/// [`NamedGroup`] has no named variant for it yet; it is resolved through
-/// `NamedGroup::from` so that it compares equal to a named variant if one is
-/// added later.
+/// The RFC 10024 code point of `SecP384r1MLKEM1024`.
 pub const SECP384R1MLKEM1024_CODEPOINT: u16 = 0x11ed;
 
 /// X25519 combined with ML-KEM-768 (TLS 1.3 only).
@@ -414,7 +410,7 @@ impl PqComponent for Pq<mlkem::MlKem1024> {
     }
 }
 
-/// A classical group combined with ML-KEM (draft-ietf-tls-ecdhe-mlkem §3).
+/// A classical group combined with ML-KEM (RFC 10024 §4).
 ///
 /// Shares and the shared secret are the concatenation of both components;
 /// X25519MLKEM768 puts the ML-KEM part first, the NIST hybrids put the ECDH
@@ -423,7 +419,7 @@ pub(crate) struct Hybrid<Q> {
     classical: &'static dyn SupportedKxGroup,
     classical_share_len: usize,
     pq: Q,
-    code_point: u16,
+    name: NamedGroup,
     pq_first: bool,
 }
 
@@ -431,7 +427,7 @@ pub(crate) static X25519MLKEM768_GROUP: Hybrid<Pq<mlkem::MlKem768>> = Hybrid {
     classical: &X25519_GROUP,
     classical_share_len: 32,
     pq: Pq(PhantomData),
-    code_point: 0x11ec,
+    name: NamedGroup::X25519MLKEM768,
     pq_first: true,
 };
 
@@ -439,7 +435,7 @@ pub(crate) static SECP256R1MLKEM768_GROUP: Hybrid<Pq<mlkem::MlKem768>> = Hybrid 
     classical: &SECP256R1_GROUP,
     classical_share_len: p256::UNCOMPRESSED_LEN,
     pq: Pq(PhantomData),
-    code_point: 0x11eb,
+    name: NamedGroup::secp256r1MLKEM768,
     pq_first: false,
 };
 
@@ -447,7 +443,7 @@ pub(crate) static SECP384R1MLKEM1024_GROUP: Hybrid<Pq<mlkem::MlKem1024>> = Hybri
     classical: &SECP384R1_GROUP,
     classical_share_len: p384::UNCOMPRESSED_LEN,
     pq: Pq(PhantomData),
-    code_point: SECP384R1MLKEM1024_CODEPOINT,
+    name: NamedGroup::secp384r1MLKEM1024,
     pq_first: false,
 };
 
@@ -510,22 +506,20 @@ impl<Q: PqComponent> SupportedKxGroup for Hybrid<Q> {
     }
 
     fn name(&self) -> NamedGroup {
-        NamedGroup::from(self.code_point)
+        self.name
     }
 
     fn usable_for_version(&self, version: ProtocolVersion) -> bool {
-        version == ProtocolVersion::TLSv1_3
+        matches!(
+            version,
+            ProtocolVersion::TLSv1_3 | ProtocolVersion::DTLSv1_3
+        )
     }
 }
 
 impl<Q> fmt::Debug for Hybrid<Q> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match NamedGroup::from(self.code_point) {
-            NamedGroup::Unknown(_) if self.code_point == SECP384R1MLKEM1024_CODEPOINT => {
-                f.write_str("SecP384r1MLKEM1024")
-            }
-            name => write!(f, "{name:?}"),
-        }
+        write!(f, "{:?}", self.name)
     }
 }
 

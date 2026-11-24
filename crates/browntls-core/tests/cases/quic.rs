@@ -155,9 +155,23 @@ trait Endpoint {
     fn exporter(&self) -> [u8; 32];
     fn tls_records_pending(&self) -> bool;
     fn peer_certified(&self) -> bool;
+    fn cert_with_extern_psk(&self) -> bool {
+        false
+    }
+    fn negotiated_group(&self) -> Option<browntls_core::NamedGroup> {
+        None
+    }
 }
 
 impl Endpoint for bq::Connection {
+    fn negotiated_group(&self) -> Option<browntls_core::NamedGroup> {
+        Some(self.negotiated_key_exchange_group()?.name())
+    }
+
+    fn cert_with_extern_psk(&self) -> bool {
+        self.negotiated_cert_with_extern_psk()
+    }
+
     fn write_hs(&mut self, buf: &mut Vec<u8>) -> Option<Change> {
         Some(match bq::Connection::write_hs(self, buf)? {
             bq::KeyChange::Handshake { keys } => Change::Handshake(keys.into()),
@@ -454,8 +468,46 @@ fn assert_full_handshake(client: &mut Peer, server: &mut Peer) {
     assert_keys_match(client, server);
 }
 
+#[cfg(feature = "key-log")]
+#[test]
+fn quic_client_and_server_emit_tls13_key_log_labels() {
+    #[derive(Debug, Default)]
+    struct Labels(std::sync::Mutex<Vec<String>>);
+
+    impl browntls_core::KeyLog for Labels {
+        fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+            self.0.lock().unwrap().push(label.to_owned());
+        }
+    }
+
+    fn assert_logged(log: &Labels) {
+        let labels = log.0.lock().unwrap();
+        for expected in ["CLIENT_HANDSHAKE_TRAFFIC_SECRET", "CLIENT_TRAFFIC_SECRET_0"] {
+            assert!(labels.iter().any(|label| label == expected));
+        }
+    }
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let client_log = Arc::new(Labels::default());
+    let server_log = Arc::new(Labels::default());
+    let mut client_config = b_client_config(&chain);
+    client_config.key_log = client_log.clone();
+    let mut server_config = b_server_config(&chain);
+    server_config.key_log = server_log.clone();
+    let client_config = Arc::new(client_config);
+    let server_config = Arc::new(server_config);
+    let mut client = b_client(&client_config);
+    let mut server = b_server(&server_config);
+
+    handshake(&mut client, &mut server).unwrap();
+
+    assert_logged(&client_log);
+    assert_logged(&server_log);
+}
+
 include!("quic/vectors.rs");
 include!("quic/handshakes.rs");
+include!("quic/service_identity.rs");
 include!("quic/rules.rs");
 include!("quic/interop.rs");
 include!("quic/grease.rs");

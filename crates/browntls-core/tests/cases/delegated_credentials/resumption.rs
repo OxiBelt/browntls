@@ -13,7 +13,7 @@ fn resumption_and_descendants_keep_the_original_expiry() {
         let server_clock = AdjustableTime::new(base);
         let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
         let dc_key = certified_key(&chain)
-            .with_delegated_credential(dc.clone(), key)
+            .with_delegated_credential(dc.clone(), key, &provider())
             .unwrap();
 
         let mut client_config = dc_client(&chain);
@@ -88,7 +88,7 @@ fn server_rejects_expired_ticket_and_early_data() {
 
     let mut delegated_server = server_with(
         certified_key(&chain)
-            .with_delegated_credential(dc, key)
+            .with_delegated_credential(dc, key, &provider())
             .unwrap(),
     );
     delegated_server.time_provider = server_clock.clone();
@@ -132,7 +132,7 @@ fn resumption_expiring_before_server_finished_is_aborted() {
     let client_config = Arc::new(client_config);
     let mut server_config = server_with(
         certified_key(&chain)
-            .with_delegated_credential(dc, key)
+            .with_delegated_credential(dc, key, &provider())
             .unwrap(),
     );
     server_config.time_provider = server_clock;
@@ -172,7 +172,7 @@ fn expired_ticket_cannot_extend_an_attacker_only_delegated_key() {
     // The certificate key is deliberately absent: only the delegated key can
     // authenticate. A full fallback after expiry must therefore fail.
     let attacker_key = CertifiedKey::new(chain.cert_chain(), key.clone())
-        .with_delegated_credential(dc, key)
+        .with_delegated_credential(dc, key, &provider())
         .unwrap();
 
     let mut client_config = dc_client(&chain);
@@ -216,7 +216,7 @@ fn external_psk_session_keeps_delegated_credential_expiry() {
         || ExternalPsk::new(b"combined".to_vec(), vec![0x42; 32], HashAlgorithm::SHA256).unwrap();
     let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
     let certified = certified_key(&chain)
-        .with_delegated_credential(dc.clone(), key)
+        .with_delegated_credential(dc.clone(), key, &provider())
         .unwrap();
 
     let mut first_client = dc_client(&chain);
@@ -277,7 +277,7 @@ fn server_rejects_descendant_ticket_at_deadline() {
         let server_clock = AdjustableTime::new(base);
         let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
         let dc_key = certified_key(&chain)
-            .with_delegated_credential(dc, key)
+            .with_delegated_credential(dc, key, &provider())
             .unwrap();
 
         let mut client_config = dc_client(&chain);
@@ -348,7 +348,7 @@ fn server_sends_no_ticket_after_delegated_credential_deadline() {
     client_config.time_provider = AdjustableTime::new(base);
     let mut server_config = server_with(
         certified_key(&chain)
-            .with_delegated_credential(dc.clone(), key)
+            .with_delegated_credential(dc.clone(), key, &provider())
             .unwrap(),
     );
     server_config.time_provider = server_clock.clone();
@@ -381,7 +381,7 @@ fn client_discards_ticket_received_at_delegated_credential_deadline() {
     let client_config = Arc::new(client_config);
     let mut server_config = server_with(
         certified_key(&chain)
-            .with_delegated_credential(dc, key)
+            .with_delegated_credential(dc, key, &provider())
             .unwrap(),
     );
     server_config.time_provider = AdjustableTime::new(base);
@@ -423,7 +423,7 @@ fn server_rejects_external_psk_ticket_at_delegated_credential_deadline() {
         || ExternalPsk::new(b"combined".to_vec(), vec![0x42; 32], HashAlgorithm::SHA256).unwrap();
     let (dc, key) = issue(&chain, SignatureScheme::ED25519, expiry);
     let certified = certified_key(&chain)
-        .with_delegated_credential(dc.clone(), key)
+        .with_delegated_credential(dc.clone(), key, &provider())
         .unwrap();
 
     let mut first_client = dc_client(&chain);
@@ -476,7 +476,7 @@ fn session_from_delegated_credential_needs_delegated_credentials_enabled() {
     let chain = delegation_server_chain(KeyType::EcdsaP256);
     let (dc, key) = issue(&chain, SignatureScheme::ED25519, seconds_after(now(), 60));
     let dc_key = certified_key(&chain)
-        .with_delegated_credential(dc.clone(), key)
+        .with_delegated_credential(dc.clone(), key, &provider())
         .unwrap();
     let server_config = Arc::new(server_with(dc_key));
     let with_dc = Arc::new(dc_client(&chain));

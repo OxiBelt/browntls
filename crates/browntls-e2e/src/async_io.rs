@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use browntls::pki_types::ServerName;
 use browntls::tokio::{TlsAcceptor, TlsConnector};
-use browntls::{ClientConfig, ServerConfig};
+use browntls::{ClientConfig, ClientServerIdentity, ServerConfig, ServiceIdentity};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -23,7 +23,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 /// Bounds `fut` by [`IO_TIMEOUT`], naming `what` on expiry.
-async fn bounded<T>(what: &str, fut: impl Future<Output = std::io::Result<T>>) -> Result<T> {
+pub(super) async fn bounded<T>(
+    what: &str,
+    fut: impl Future<Output = std::io::Result<T>>,
+) -> Result<T> {
     match timeout(IO_TIMEOUT, fut).await {
         Ok(Ok(value)) => Ok(value),
         // A TLS failure carries the `browntls::Error` (already in `e`'s
@@ -77,7 +80,7 @@ pub(super) fn server(o: &Options, config: Arc<ServerConfig>) -> Result<()> {
                 .accept()
                 .await
                 .map_err(|e| format!("accept: {e}"))?;
-            if let Err(e) = serve(&acceptor, sock, index).await {
+            if let Err(e) = serve(&acceptor, sock, index, o).await {
                 emit(&[
                     ("event", "error".into()),
                     ("index", Value::Num(index)),
@@ -93,7 +96,9 @@ pub(super) fn server(o: &Options, config: Arc<ServerConfig>) -> Result<()> {
     })
 }
 
-async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize) -> Result<()> {
+async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize, o: &Options) -> Result<()> {
+    #[cfg(feature = "zstd")]
+    super::observed_zstd::reset();
     let mut tls = bounded("handshake", acceptor.accept(sock)).await?;
     let line = read_line(&mut tls).await?;
     let reply: String = line.chars().rev().collect();
@@ -107,7 +112,18 @@ async fn serve(acceptor: &TlsAcceptor, sock: TcpStream, index: usize) -> Result<
         ("io", "async".into()),
     ];
     fields.extend(negotiated(conn));
+    if let Some(field) = super::zstd_compression_diagnostic(o) {
+        fields.push(field);
+    }
     fields.push(("ech", format!("{:?}", conn.ech_status()).into()));
+    fields.push((
+        "delegated_credential",
+        Value::Bool(conn.client_delegated_credential().is_some()),
+    ));
+    fields.push((
+        "record_size_limit_configured",
+        super::configured_record_size_limit(o),
+    ));
     fields.push((
         "server_name",
         conn.server_name().unwrap_or("none").to_owned().into(),
@@ -123,15 +139,24 @@ pub(super) fn client(
     o: &Options,
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
+    identity: Option<ServiceIdentity>,
     message: &str,
 ) -> Result<()> {
     let connect = required(o.connect.as_ref(), "--connect")?;
     runtime()?.block_on(async {
         let connector = TlsConnector::from(config);
         for index in 0..o.connections {
+            #[cfg(feature = "zstd")]
+            super::observed_zstd::reset();
             let sock = connect_with_retry(connect, o.wait).await?;
-            let mut tls =
-                bounded("handshake", connector.connect(server_name.clone(), sock)).await?;
+            let handshake = match &identity {
+                Some(identity) => connector.connect_with_identity(
+                    ClientServerIdentity::new(server_name.clone(), identity.clone()),
+                    sock,
+                ),
+                None => connector.connect(server_name.clone(), sock),
+            };
+            let mut tls = bounded("handshake", handshake).await?;
             bounded("write", tls.write_all(format!("{message}\n").as_bytes())).await?;
             bounded("write", tls.flush()).await?;
             let reply = read_line(&mut tls)
@@ -145,9 +170,24 @@ pub(super) fn client(
                 ("io", "async".into()),
             ];
             fields.extend(negotiated(conn));
+            if let Some(field) = super::zstd_compression_diagnostic(o) {
+                fields.push(field);
+            }
+            fields.push((
+                "delegated_credential",
+                Value::Bool(conn.delegated_credential().is_some()),
+            ));
+            fields.push((
+                "record_size_limit_configured",
+                super::configured_record_size_limit(o),
+            ));
             fields.push(("ech", format!("{:?}", conn.ech_status()).into()));
             fields.push(("sent", message.into()));
             fields.push(("received", reply.clone().into()));
+            fields.push((
+                "service_identity_matched",
+                Value::Bool(conn.matched_service_identity().is_some()),
+            ));
             emit(&fields);
             close(&mut tls).await;
             if let Some(expected) = o.expect_reply.as_ref().filter(|e| **e != reply) {

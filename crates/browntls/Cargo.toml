@@ -38,9 +38,10 @@ tokio = ["std", "dep:browntls-tokio", "browntls-ktls?/tokio"]
 ktls = ["std", "dep:browntls-ktls"]
 
 # Features of `browntls-tokio`. `coop` takes effect once `tokio` is enabled;
-# `ocsp` enables `tokio`.
+# `ocsp` and `dtls` enable `tokio`.
 coop = ["browntls-tokio?/coop"]
 ocsp = ["tokio", "browntls-tokio/ocsp"]
+dtls = ["tokio", "browntls-tokio/dtls"]
 
 # Features of `browntls-core`, passed on to the optional crates that have a
 # feature of the same name; see the `browntls-core` manifest for what each
@@ -49,6 +50,7 @@ std = ["alloc", "browntls-core/std"]
 alloc = ["browntls-core/alloc"]
 tls12 = ["browntls-core/tls12", "browntls-tokio?/tls12", "browntls-ktls?/tls12"]
 logging = ["browntls-core/logging", "browntls-tokio?/logging", "browntls-ktls?/logging"]
+key-log = ["browntls-core/key-log", "browntls-tokio?/key-log", "browntls-ktls?/key-log"]
 prefer-post-quantum = ["browntls-core/prefer-post-quantum", "browntls-tokio?/prefer-post-quantum"]
 zlib = ["browntls-core/zlib", "browntls-tokio?/zlib"]
 brotli = ["browntls-core/brotli", "browntls-tokio?/brotli"]

@@ -8,9 +8,11 @@ asynchronous Tokio streams and its Linux kernel TLS offload behind features.
 > reviewed or audited, and has no published release.
 
 The crate has no code of its own. Its root is
-`browntls-core` (the protocol, the crypto provider mount
-point and the built-in providers), and two features add the project's other
-library crates as modules:
+`browntls-core` (the protocol, DTLS 1.3 in `browntls::dtls` as a low-level
+datagram API and blocking `UdpClient` and `UdpServer` over
+`std::net::UdpSocket`, the crypto provider mount point and the built-in
+providers), and two features add the project's other library crates as
+modules:
 
 | Feature | Module | Crate |
 |---|---|---|
@@ -29,6 +31,34 @@ The items are the ones those crates define, not copies:
 `browntls::ClientConfig` and `browntls_core::ClientConfig` are one type, so a
 library written against `browntls-core` or `browntls-tokio` works with an
 application that depends on `browntls`.
+
+## Key logging
+
+Configurations discard key-log events by default. For test traffic, enable
+the non-default `key-log` feature and install a sink. Omit `key-log` from the
+resolved Cargo feature graph in production. Another dependency can enable it
+through Cargo feature unification.
+
+On Linux, `KeyLogFile::try_from_path` opens an explicit path. The directory
+must already exist and prevent writes by other users. `KeyLogFile::new()`
+is the best-effort constructor that reads `SSLKEYLOGFILE`. Custom `KeyLog`
+implementations also work on other platforms and with `alloc` alone.
+
+```rust,no_run
+use std::sync::Arc;
+
+use browntls::{ClientConfig, KeyLogFile};
+
+# fn configure(mut config: ClientConfig) -> std::io::Result<ClientConfig> {
+// Use an existing private directory controlled by your diagnostic program.
+config.key_log = Arc::new(KeyLogFile::try_from_path("private/session.keys")?);
+# Ok(config)
+# }
+```
+
+The same configuration applies to core and Tokio TLS, QUIC-TLS, DTLS, and
+the userspace handshake before kTLS handoff. Treat the diagnostic file as
+secret material. Access can compromise both old and active connections.
 
 ## Tokio
 
@@ -64,6 +94,34 @@ tls.read_to_end(&mut response).await?;
 # Ok(())
 # }
 ```
+
+
+## Choosing a post-quantum hybrid group
+
+Both built-in providers support the three RFC 10024 groups. To require
+`SecP384r1MLKEM1024`, set the provider's group list before building each
+endpoint's configuration. This example uses the native provider.
+
+```rust
+use std::sync::Arc;
+use browntls::{ClientConfig, ServerConfig, crypto::native, version::TLS13};
+
+let mut provider = native::default_provider();
+provider.kx_groups = vec![native::kx_group::SECP384R1MLKEM1024];
+let provider = Arc::new(provider);
+
+let client = ClientConfig::builder_with_provider(provider.clone())
+    .with_protocol_versions(&[&TLS13]).unwrap();
+let server = ServerConfig::builder_with_provider(provider)
+    .with_protocol_versions(&[&TLS13]).unwrap();
+// Complete the builders with the usual verifier and certificate settings.
+```
+
+The same group policy applies through the core, Tokio and DTLS APIs, the
+QUIC v1 handshake, and the handshake that precedes a kTLS handoff. Use
+`negotiated_key_exchange_group()` on the connection to inspect the result.
+The matching RustCrypto provider and group are in `crypto::rustcrypto`.
+
 
 ## Kernel TLS (Linux)
 
@@ -102,6 +160,7 @@ this one that have it. The default set is `browntls-core`'s plus `coop`.
 | `rustcrypto` | no | A provider backed by the RustCrypto crates. Together with `native` there is no implicit process default: install or pass a provider |
 | `tls12` | yes | TLS 1.2 |
 | `logging` | yes | Debug logging through the `log` crate |
+| `key-log` | no | Opt-in RFC 9850 traffic-secret callbacks and supported file sink |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default key exchange groups |
 | `zlib`, `brotli`, `zstd` | no | Built-in certificate compression (RFC 8879); `brotli` enables `std` |
 | `tokio` | no | `browntls::tokio`; enables `std` |

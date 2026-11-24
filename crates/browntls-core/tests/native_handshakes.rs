@@ -9,9 +9,8 @@
 //! * ECDSA P-521 handshake signatures in both directions, with keys from
 //!   `browntls-crypto` presented as raw public keys (rcgen with ring cannot
 //!   make P-521 keys or certificates).
-//! * The ML-KEM-1024 and SecP384r1MLKEM1024 groups, which neither the
-//!   RustCrypto provider nor rustls/ring implements, so they are exercised
-//!   native to native here.
+//! * The standalone ML-KEM-1024 group and the native provider's
+//!   SecP384r1MLKEM1024 handshakes across all TLS 1.3 suites.
 //!
 //! The shared suites (`tls13_native.rs`, `tls12_native.rs`, ...) already run
 //! every suite and group, these groups included, with the native provider;
@@ -483,7 +482,7 @@ fn p521_raw_public_keys_sign_in_both_directions() {
 
 // ------------------------------------------------- ML-KEM-1024 key exchange
 
-/// The groups only the native provider implements.
+/// The native provider's two groups based on ML-KEM-1024.
 fn mlkem1024_groups() -> [&'static dyn SupportedKxGroup; 2] {
     [
         prov::kx_group::MLKEM1024,

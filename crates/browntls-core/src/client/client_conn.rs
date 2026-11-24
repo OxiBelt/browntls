@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
-use browntls_pki::{ServerName, UnixTime};
+use browntls_pki::{ServerName, ServiceIdentity, UnixTime};
 
 #[cfg(feature = "std")]
 mod buffered;
@@ -13,9 +13,7 @@ mod buffered;
 pub use buffered::{ClientConnection, WriteEarlyData};
 
 use super::handy::NoClientSessionStorage;
-use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
-use crate::common_state::{CommonState, Side};
 use crate::compress;
 use crate::conn::{ConnectionCore, SideData};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
@@ -26,9 +24,6 @@ use crate::key_log::KeyLog;
 use crate::log::trace;
 use crate::msgs::enums::NamedGroup;
 use crate::msgs::persist::ClientConfigBinding;
-#[cfg(feature = "tls12")]
-use crate::msgs::persist::Tls12ClientSessionValue;
-use crate::msgs::persist::Tls13ClientSessionValue;
 use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
@@ -36,35 +31,10 @@ use crate::time_provider::TimeProvider;
 use crate::verify::ServerCertVerifier;
 use crate::versions::EnabledVersions;
 
-/// Stores session state for resumption, keyed by server name.
-pub trait ClientSessionStore: fmt::Debug + Send + Sync {
-    /// Remembers which key exchange group `server_name` accepted.
-    fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup);
+mod session;
+pub use session::ClientSessionStore;
 
-    /// The group `server_name` last accepted, if remembered.
-    fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup>;
-
-    /// Stores a TLS 1.2 session for `server_name`.
-    #[cfg(feature = "tls12")]
-    fn set_tls12_session(&self, server_name: ServerName<'static>, value: Tls12ClientSessionValue);
-
-    /// The stored TLS 1.2 session for `server_name`, if any.
-    #[cfg(feature = "tls12")]
-    fn tls12_session(&self, server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue>;
-
-    /// Forgets the TLS 1.2 session for `server_name`.
-    #[cfg(feature = "tls12")]
-    fn remove_tls12_session(&self, server_name: &ServerName<'static>);
-
-    /// Stores a TLS 1.3 ticket for `server_name`.
-    fn insert_tls13_ticket(&self, server_name: ServerName<'static>, value: Tls13ClientSessionValue);
-
-    /// Removes and returns a TLS 1.3 ticket for `server_name`.
-    fn take_tls13_ticket(
-        &self,
-        server_name: &ServerName<'static>,
-    ) -> Option<Tls13ClientSessionValue>;
-}
+mod construct;
 
 /// Chooses the client certificate to present.
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
@@ -184,14 +154,19 @@ pub struct ClientConfig {
     pub ech_mode: Option<crate::ech::EchMode>,
     /// The largest `uncompressed_length` accepted in a peer's
     /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
-    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
-    /// applies to larger values: a message declaring more than 64 KiB does
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (65,535 bytes), which
+    /// also applies to larger values: a message declaring more than that does
     /// not parse and ends the connection with `decode_error`. A message
     /// declaring more than this limit is refused with `bad_certificate`
     /// before anything is decompressed. Zero turns reception off: the
     /// `compress_certificate` extension is then not sent, whatever
     /// `cert_decompressors` holds.
     pub cert_decompression_limit: usize,
+
+    /// Window and history policy for the built-in Zstandard certificate
+    /// decompressor, independent of the expanded Certificate body limit.
+    #[cfg(feature = "zstd")]
+    pub cert_zstd_decompression_limits: compress::ZstdDecompressionLimits,
 
     /// Whether to accept a TLS 1.3 server authenticating with a delegated
     /// credential (RFC 9345). When set, the ClientHello carries the
@@ -283,13 +258,13 @@ pub struct ClientConfig {
     /// order, after any resumption ticket. Empty by default. See
     /// [`crate::psk`].
     ///
-    /// A server that selects one authenticates through it and sends no
-    /// certificate; a server that selects none is authenticated with its
-    /// certificate as usual, through the configured verifier.
+    /// Ordinary external PSKs authenticate the server through the key.
+    /// Certificate verification is used for certificate-based handshakes
+    /// and when RFC 9973 is negotiated.
     pub external_psks: Vec<Arc<crate::psk::ExternalPsk>>,
 
     /// Whether to ask a server that selects an external PSK to authenticate
-    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 8773).
+    /// with its certificate as well (`tls_cert_with_extern_psk`, RFC 9973).
     /// Off by default. The server may decline; set
     /// [`Self::require_cert_with_extern_psk`] to refuse a server that does.
     pub cert_with_extern_psk: bool,
@@ -297,6 +272,10 @@ pub struct ClientConfig {
     /// With [`Self::cert_with_extern_psk`], whether a server that selects an
     /// external PSK without also authenticating with its certificate is
     /// refused. Off by default.
+    ///
+    /// To require fresh RFC 9973 on every connection, enable this field,
+    /// [`Self::cert_with_extern_psk`] and [`Self::require_external_psk`],
+    /// and use [`Resumption::disabled`].
     pub require_cert_with_extern_psk: bool,
 
     /// Whether to refuse a server that does not authenticate through one of
@@ -517,7 +496,7 @@ impl Resumption {
         }
     }
 
-    /// Sets how TLS 1.2 sessions may be resumed.
+    /// Sets how stream TLS 1.2 and DTLS 1.2 sessions may be resumed.
     pub fn tls12_resumption(mut self, tls12: Tls12Resumption) -> Self {
         self.tls12_resumption = tls12;
         self
@@ -538,7 +517,7 @@ impl Default for Resumption {
     }
 }
 
-/// How TLS 1.2 sessions may be resumed.
+/// How stream TLS 1.2 and DTLS 1.2 sessions may be resumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tls12Resumption {
     /// Never resume TLS 1.2 sessions.
@@ -591,6 +570,7 @@ pub(super) struct EarlyData {
     state: EarlyDataState,
     /// How many more bytes the server's `max_early_data_size` allows.
     left: usize,
+    alpn: Option<Vec<u8>>,
 }
 
 impl EarlyData {
@@ -598,6 +578,7 @@ impl EarlyData {
         Self {
             state: EarlyDataState::Disabled,
             left: 0,
+            alpn: None,
         }
     }
 
@@ -613,10 +594,11 @@ impl EarlyData {
         )
     }
 
-    pub(super) fn enable(&mut self, max_data: usize) {
+    pub(super) fn enable(&mut self, max_data: usize, alpn: Option<&[u8]>) {
         debug_assert_eq!(self.state, EarlyDataState::Disabled);
         self.state = EarlyDataState::Ready;
         self.left = max_data;
+        self.alpn = alpn.map(<[u8]>::to_vec);
     }
 
     pub(super) fn rejected(&mut self) {
@@ -672,6 +654,7 @@ pub struct ClientConnectionData {
     /// can forget it.
     session_store: Arc<dyn ClientSessionStore>,
     pub(crate) server_name: ServerName<'static>,
+    pub(crate) service_identity: Option<Arc<ServiceIdentity>>,
     /// The delegated credential the server authenticated with (RFC 9345).
     pub(super) delegated_credential: Option<DelegatedCredential>,
     /// The absolute expiry of the delegated credential that authenticated
@@ -685,7 +668,11 @@ pub struct ClientConnectionData {
 }
 
 impl ClientConnectionData {
-    fn new(config: Arc<ClientConfig>, server_name: ServerName<'static>) -> Self {
+    fn new(
+        config: Arc<ClientConfig>,
+        server_name: ServerName<'static>,
+        service_identity: Option<ServiceIdentity>,
+    ) -> Self {
         Self {
             tls13_tickets_received: 0,
             early_data: EarlyData::new(),
@@ -696,6 +683,7 @@ impl ClientConnectionData {
             ech_retry_configs: None,
             session_store: config.resumption.store.clone(),
             server_name,
+            service_identity: service_identity.map(Arc::new),
             delegated_credential: None,
             delegated_credential_expiry: None,
             transparency: Default::default(),
@@ -732,6 +720,10 @@ impl SideData for ClientConnectionData {
         if negotiated_version == Some(ProtocolVersion::TLSv1_2) {
             self.session_store.remove_tls12_session(&self.server_name);
         }
+        #[cfg(feature = "tls12")]
+        if negotiated_version == Some(ProtocolVersion::DTLSv1_2) {
+            self.session_store.remove_dtls12_session(&self.server_name);
+        }
         #[cfg(not(feature = "tls12"))]
         let _ = negotiated_version;
     }
@@ -741,75 +733,6 @@ impl ClientConnectionData {
     /// Whether the server accepted 0-RTT.
     pub(crate) fn early_data_accepted(&self) -> bool {
         self.early_data.is_accepted()
-    }
-}
-
-impl ConnectionCore<ClientConnectionData> {
-    pub(crate) fn for_client(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-    ) -> Result<Self, Error> {
-        Self::for_client_with(config, name, alpn_protocols, None)
-    }
-
-    /// A QUIC client (RFC 9001): TLS 1.3 only, with a QUIC-capable suite.
-    pub(crate) fn for_quic_client(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-        quic: crate::quic::Quic,
-    ) -> Result<Self, Error> {
-        if !config.supports_version(ProtocolVersion::TLSv1_3) {
-            return Err(Error::General(
-                "TLS 1.3 support is required for QUIC".into(),
-            ));
-        }
-        if !config
-            .provider
-            .cipher_suites
-            .iter()
-            .any(|cs| cs.usable_for_quic())
-        {
-            return Err(Error::General(
-                "no cipher suite of the configuration is usable with QUIC".into(),
-            ));
-        }
-        // ECH over QUIC is not supported yet: the outer ClientHello carries
-        // no ALPN, so a QUIC server rejecting ECH could not complete the
-        // handshake that delivers retry configurations (RFC 9001 §8.1).
-        if config.ech_mode.is_some() {
-            return Err(Error::General(
-                "Encrypted Client Hello is not supported over QUIC".into(),
-            ));
-        }
-        Self::for_client_with(config, name, alpn_protocols, Some(quic))
-    }
-
-    fn for_client_with(
-        config: Arc<ClientConfig>,
-        name: ServerName<'static>,
-        alpn_protocols: Vec<Vec<u8>>,
-        quic: Option<crate::quic::Quic>,
-    ) -> Result<Self, Error> {
-        if config.max_tls13_tickets_per_connection > 255 {
-            return Err(Error::BadTls13TicketLimit);
-        }
-        crate::external_binding::handshake::check_client_config(config.external_binding.as_ref())?;
-        let mut common_state = CommonState::new(Side::Client);
-        common_state.quic = quic.map(alloc::boxed::Box::new);
-        common_state.set_max_fragment_size(config.max_fragment_size)?;
-        crate::common_state::check_record_size_limit_config(config.record_size_limit)?;
-        crate::trusted_ca_keys::check_config(config.trusted_ca_keys.as_deref())?;
-        common_state.enable_secret_extraction = config.enable_secret_extraction;
-        common_state.fips = config.fips();
-        let mut data = ClientConnectionData::new(config.clone(), name.clone());
-        let mut cx = crate::conn::Context {
-            common: &mut common_state,
-            data: &mut data,
-        };
-        let state = hs::start_handshake(name, alpn_protocols, config, &mut cx)?;
-        Ok(Self::new(state, data, common_state))
     }
 }
 
@@ -839,6 +762,33 @@ impl UnbufferedClientConnection {
             inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
                 config,
                 name,
+                None,
+                alpn_protocols,
+            )?),
+        })
+    }
+
+    /// Starts a connection for an explicit service identity.
+    pub fn new_with_identity(
+        config: Arc<ClientConfig>,
+        identity: super::ClientServerIdentity,
+    ) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_identity_and_alpn(config, identity, alpn)
+    }
+
+    /// Starts a connection for an explicit identity and per-connection ALPN.
+    pub fn new_with_identity_and_alpn(
+        config: Arc<ClientConfig>,
+        identity: super::ClientServerIdentity,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let (name, identity) = identity.into_parts();
+        Ok(Self {
+            inner: crate::unbuffered::UnbufferedConnectionCommon::new(ConnectionCore::for_client(
+                config,
+                name,
+                Some(identity),
                 alpn_protocols,
             )?),
         })
@@ -888,6 +838,22 @@ impl UnbufferedClientConnection {
     /// Meaningful once the handshake has finished.
     pub fn is_early_data_accepted(&self) -> bool {
         self.inner.core.data.early_data.is_accepted()
+    }
+
+    /// The ALPN protocol from the ticket-issuing handshake or provisioned
+    /// external PSK, if known. Available even after early data is declined.
+    pub fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.inner.core.data.early_data.alpn.as_deref()
+    }
+
+    /// How much 0-RTT plaintext the connection can still encrypt.
+    pub fn early_data_bytes_left(&self) -> usize {
+        let data = &self.inner.core.data;
+        if data.early_data_writable() {
+            data.early_data_left()
+        } else {
+            0
+        }
     }
 
     /// Whether the connection only uses FIPS-validated components.

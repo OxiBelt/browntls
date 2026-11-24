@@ -108,3 +108,4 @@ fn take_tickets(client: &mut ClientConnection, server: &mut ServerConnection) {
 include!("external_psk/negotiation.rs");
 include!("external_psk/importer_and_certificates.rs");
 include!("external_psk/tickets_and_early_data.rs");
+include!("external_psk/rfc9973.rs");

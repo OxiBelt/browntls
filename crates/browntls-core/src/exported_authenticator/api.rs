@@ -20,6 +20,7 @@ use crate::conn::ConnectionCore;
 use crate::error::Error;
 use crate::server::ServerConnectionData;
 use crate::sign::CertifiedKey;
+use crate::verify::ServerCertVerificationContext;
 
 // ------------------------------------------------------------------ client
 
@@ -73,9 +74,17 @@ fn client_validate(
             &offered,
             &data.authenticators,
             |ee, intermediates| {
-                verifier
-                    .verify_server_cert(ee, intermediates, &data.server_name, &[], now)
-                    .map(|_| ())
+                let identity = data.certificate_identity(&data.server_name);
+                let verification = verifier.verify_server_cert_with_context(
+                    ee,
+                    intermediates,
+                    identity,
+                    &[],
+                    now,
+                    ServerCertVerificationContext::ExportedAuthenticator,
+                )?;
+                identity.matched_reference(verification.matched_reference)?;
+                crate::revocation::require_local(verification.revocation).map(|_| ())
             },
             |msg, ee, dss| verifier.verify_tls13_signature(msg, ee, dss),
         )?

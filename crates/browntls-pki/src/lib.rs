@@ -7,8 +7,10 @@
 //!   validation time; [`pem`]: PEM decoding; [`alg_id`]: standard
 //!   `AlgorithmIdentifier`s.
 //! * [`EndEntityCert`]: certificate parsing, path building to a
-//!   [`TrustAnchor`] (RFC 5280 §6), server name matching (RFC 6125) and
-//!   handshake signature verification; [`crl`]: certificate revocation lists.
+//!   [`TrustAnchor`] (RFC 5280 §6), server name matching ([`ServerName`]) and
+//!   handshake signature verification. Use [`ServiceIdentity`] and
+//!   [`EndEntityCert::verify_service_identity`] for RFC 9525 DNS-ID, IP-ID,
+//!   URI-ID and SRV-ID verification. [`crl`]: certificate revocation lists.
 //! * Inspection of any certificate with the same strict parser: [`Cert`]
 //!   (which `EndEntityCert` dereferences to) with its [`extensions`] and
 //!   subject alternative names ([`GeneralName`]); [`Name`]: X.501
@@ -49,6 +51,7 @@ mod revocation;
 mod rsassa_pss;
 pub mod sct;
 pub mod server_name;
+mod service_identity;
 mod signed_data;
 pub mod time;
 pub mod transparency;
@@ -67,7 +70,10 @@ pub use error::Error;
 pub use extensions::Extension;
 pub use name::{AttributeTypeAndValue, GeneralName, Name, RelativeDistinguishedName};
 pub use server_name::{DnsName, InvalidDnsNameError, IpAddr, ServerName};
-pub use signed_data::SignedData;
+pub use service_identity::{
+    InvalidServiceIdentity, ReferenceIdentifier, ServiceIdentity, SrvId, UriId, WildcardPolicy,
+};
+pub use signed_data::{SignedData, subject_public_keys_match};
 pub use time::UnixTime;
 pub use types::{
     CertificateDer, CertificateRevocationListDer, CertificateSigningRequestDer, Der,

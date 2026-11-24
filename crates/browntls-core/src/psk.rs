@@ -30,7 +30,10 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use browntls_pki::{DnsName, ServerName};
+use browntls_pki::{DnsName, ServerName, UnixTime};
+
+mod replay;
+pub use replay::{ExternalPskReplayDecision, ExternalPskReplayKey, ExternalPskReplayPolicy};
 
 use crate::crypto::hash::HashAlgorithm;
 use crate::ct::constant_time_eq;
@@ -41,7 +44,9 @@ use crate::msgs::codec::{Codec, Reader};
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::tls13::Tls13CipherSuite;
-use crate::tls13::key_schedule::{BinderLabel, derive_imported_psk, hkdf_expand_label_block};
+use crate::tls13::key_schedule::{
+    BinderLabel, Protocol, derive_imported_psk, hkdf_expand_label_block,
+};
 
 /// An external pre-shared key and the parameters provisioned with it.
 ///
@@ -54,6 +59,8 @@ pub struct ExternalPsk {
     server_name: Option<DnsName<'static>>,
     alpn_protocol: Option<Vec<u8>>,
     max_early_data_size: u32,
+    early_data_record_size_limit: u16,
+    early_data_expiry: Option<UnixTime>,
     import_context: Option<Vec<u8>>,
     key_generation: Option<Vec<u8>>,
 }
@@ -100,6 +107,8 @@ impl ExternalPsk {
             server_name: None,
             alpn_protocol: None,
             max_early_data_size: 0,
+            early_data_record_size_limit: crate::common_state::max_record_size_limit(true),
+            early_data_expiry: None,
             import_context: None,
             key_generation: None,
         })
@@ -135,16 +144,52 @@ impl ExternalPsk {
     /// Allows 0-RTT data of up to `max_early_data_size` bytes under this
     /// key. Off (zero) by default.
     ///
-    /// Early data under an external PSK can be replayed by an attacker:
-    /// browntls keeps no anti-replay state for external PSKs (RFC 9846 §8,
-    /// RFC 9257), so enable this only for idempotent requests. 0-RTT also
-    /// needs a provisioned cipher suite ([`Self::with_cipher_suite`]), the key
-    /// must be the first one the client offers, and both peers must enable it
-    /// (the client with `ClientConfig::enable_early_data` too). The server
-    /// reads at most its own limit; provision the same value on both sides.
+    /// Enable this only for replay-safe application traffic. Both peers need
+    /// the same provisioned cipher suite and a nonzero allowance, and the key
+    /// must be the first offered. Clients also need
+    /// [`ClientConfig::enable_early_data`](crate::ClientConfig::enable_early_data).
+    /// Servers require [`Self::with_early_data_expiry`] and
+    /// [`ServerConfig::external_psk_replay_policy`](crate::ServerConfig::external_psk_replay_policy).
     pub fn with_early_data(mut self, max_early_data_size: u32) -> Self {
         self.max_early_data_size = max_early_data_size;
         self
+    }
+
+    /// Sets the largest TLS 1.3 inner plaintext allowed in one 0-RTT
+    /// record under this PSK, including its type byte and padding.
+    ///
+    /// Provision the same value on both peers. The range is 64 through
+    /// 16385, with 16385 used by default. This is independent of the
+    /// total early-data allowance and the new handshake's record limit.
+    pub fn with_early_data_record_size_limit(mut self, limit: u16) -> Result<Self, Error> {
+        if !(crate::common_state::MIN_RECORD_SIZE_LIMIT
+            ..=crate::common_state::max_record_size_limit(true))
+            .contains(&limit)
+        {
+            return Err(Error::general(
+                "invalid external PSK early-data record size limit",
+            ));
+        }
+        self.early_data_record_size_limit = limit;
+        Ok(self)
+    }
+
+    pub(crate) fn early_data_record_size_limit(&self) -> u16 {
+        self.early_data_record_size_limit
+    }
+
+    /// Sets the exclusive server-side cutoff for 0-RTT under this key.
+    ///
+    /// Set the same cutoff on servers sharing the credential, and rotate to
+    /// fresh key material to extend its early-data lifetime. Ordinary 1-RTT
+    /// authentication with this key is independent of the cutoff.
+    pub fn with_early_data_expiry(mut self, expiry: UnixTime) -> Self {
+        self.early_data_expiry = Some(expiry);
+        self
+    }
+
+    pub(crate) fn early_data_expiry(&self) -> Option<UnixTime> {
+        self.early_data_expiry
     }
 
     /// Uses this key only through the external PSK importer (RFC 9258) with
@@ -298,6 +343,10 @@ impl fmt::Debug for ExternalPsk {
             .field("cipher_suite", &self.cipher_suite)
             .field("server_name", &self.server_name)
             .field("max_early_data_size", &self.max_early_data_size)
+            .field(
+                "early_data_record_size_limit",
+                &self.early_data_record_size_limit,
+            )
             .field("imported", &self.import_context.is_some())
             .field("has_key_generation", &self.key_generation.is_some())
             .finish_non_exhaustive()
@@ -390,7 +439,7 @@ pub struct ImportedIdentity {
     pub external_identity: Vec<u8>,
     /// Application context bound into the imported key.
     pub context: Vec<u8>,
-    /// The protocol the key is imported for: `TLSv1_3`.
+    /// The protocol the key is imported for: `TLSv1_3` or `DTLSv1_3`.
     pub target_protocol: ProtocolVersion,
     /// The KDF the key is imported for, from the IANA "TLS KDF
     /// Identifiers" registry ([`Self::HKDF_SHA256`], [`Self::HKDF_SHA384`]).
@@ -495,6 +544,7 @@ fn import(
     psk: &ExternalPsk,
     identity: &ImportedIdentity,
     suites: &[SupportedCipherSuite],
+    protocol: Protocol,
 ) -> Option<PskSecret> {
     let epsk_suite = tls13_suite_for_hash(suites, psk.hash)?;
     let target_suite = tls13_suite_for_hash(suites, identity.target_hash()?)?;
@@ -502,6 +552,7 @@ fn import(
         epsk_suite,
         psk.key(),
         &identity.encode(),
+        protocol,
         target_suite.common.hash_provider.output_len(),
     )))
 }
@@ -522,6 +573,7 @@ pub(crate) struct ExternalPskCandidate {
     pub(crate) psk: Arc<ExternalPsk>,
     /// The importer parameters, when the identity is an imported one.
     pub(crate) imported: Option<ImportedIdentity>,
+    protocol: Protocol,
 }
 
 impl ExternalPskCandidate {
@@ -551,7 +603,7 @@ impl ExternalPskCandidate {
     pub(crate) fn secret(&self, suites: &[SupportedCipherSuite]) -> Option<PskSecret> {
         match &self.imported {
             None => Some(PskSecret::new(self.psk.key())),
-            Some(identity) => import(&self.psk, identity, suites),
+            Some(identity) => import(&self.psk, identity, suites, self.protocol),
         }
     }
 }
@@ -569,6 +621,7 @@ pub(crate) fn external_psk_candidates<'a>(
     offered: impl Iterator<Item = (&'a [u8], usize)>,
     sni: Option<&DnsName<'static>>,
     alpn: Option<&[u8]>,
+    protocol: Protocol,
 ) -> Vec<ExternalPskCandidate> {
     let mut out = Vec::new();
     for (index, (identity, binder_len)) in offered.take(MAX_PSK_IDENTITIES_CONSIDERED).enumerate() {
@@ -578,7 +631,11 @@ pub(crate) fn external_psk_candidates<'a>(
             .map(|psk| (psk, None));
         let found = direct.or_else(|| {
             let imported = ImportedIdentity::decode(identity)?;
-            if imported.target_protocol != ProtocolVersion::TLSv1_3 {
+            let target_protocol = match protocol {
+                Protocol::Tls13 => ProtocolVersion::TLSv1_3,
+                Protocol::Dtls13 => ProtocolVersion::DTLSv1_3,
+            };
+            if imported.target_protocol != target_protocol {
                 return None;
             }
             imported.target_hash()?;
@@ -599,6 +656,7 @@ pub(crate) fn external_psk_candidates<'a>(
                 index,
                 psk,
                 imported,
+                protocol,
             });
         }
     }
@@ -632,6 +690,7 @@ pub(crate) fn client_external_offers(
     committed: Option<&'static Tls13CipherSuite>,
     server_name: &ServerName<'_>,
     alpn: &[Vec<u8>],
+    protocol: Protocol,
 ) -> Vec<OfferedPsk> {
     let offered: Vec<&'static Tls13CipherSuite> = suites
         .iter()
@@ -678,10 +737,13 @@ pub(crate) fn client_external_offers(
                     let identity = ImportedIdentity {
                         external_identity: psk.identity.clone(),
                         context: context.clone(),
-                        target_protocol: ProtocolVersion::TLSv1_3,
+                        target_protocol: match protocol {
+                            Protocol::Tls13 => ProtocolVersion::TLSv1_3,
+                            Protocol::Dtls13 => ProtocolVersion::DTLSv1_3,
+                        },
                         target_kdf,
                     };
-                    if let Some(secret) = import(psk, &identity, suites) {
+                    if let Some(secret) = import(psk, &identity, suites, protocol) {
                         out.push(OfferedPsk {
                             identity: identity.encode(),
                             obfuscated_ticket_age: 0,
@@ -699,240 +761,4 @@ pub(crate) fn client_external_offers(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_length_bounds() {
-        assert!(
-            ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 15], HashAlgorithm::SHA256).is_err()
-        );
-        assert!(
-            ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 16], HashAlgorithm::SHA256).is_ok()
-        );
-        assert!(ExternalPsk::new(Vec::new(), alloc::vec![0; 16], HashAlgorithm::SHA256).is_err());
-        assert!(ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 16], HashAlgorithm::SHA1).is_err());
-        assert!(
-            ExternalPsk::new(b"id".to_vec(), alloc::vec![0; 1025], HashAlgorithm::SHA384).is_err()
-        );
-    }
-
-    #[test]
-    fn key_generation_bounds() {
-        let psk = || {
-            ExternalPsk::new(b"id".to_vec(), alloc::vec![0x42; 32], HashAlgorithm::SHA256).unwrap()
-        };
-        assert_eq!(psk().key_generation(), None);
-        assert!(psk().with_key_generation(Vec::new()).is_err());
-        assert!(
-            psk()
-                .with_key_generation(alloc::vec![0; ExternalPsk::MAX_KEY_GENERATION_LEN + 1])
-                .is_err()
-        );
-        let generation = alloc::vec![0x5a; ExternalPsk::MAX_KEY_GENERATION_LEN];
-        assert_eq!(
-            psk()
-                .with_key_generation(generation.clone())
-                .unwrap()
-                .key_generation(),
-            Some(generation.as_slice())
-        );
-    }
-
-    #[test]
-    fn ticket_binding_covers_key_generation_and_ticket_secret() {
-        fn key(byte: u8, generation: Option<&[u8]>) -> ExternalPsk {
-            let psk = ExternalPsk::new(
-                b"identity".to_vec(),
-                alloc::vec![byte; 32],
-                HashAlgorithm::SHA256,
-            )
-            .unwrap();
-            match generation {
-                Some(generation) => psk.with_key_generation(generation.to_vec()).unwrap(),
-                None => psk,
-            }
-        }
-
-        #[cfg(feature = "native")]
-        let suites = crate::crypto::native::default_provider().cipher_suites;
-        #[cfg(all(not(feature = "native"), feature = "rustcrypto"))]
-        let suites = crate::crypto::rustcrypto::default_provider().cipher_suites;
-
-        let secret = [0x11; 32];
-        let original = key(0x42, None);
-        let binding = ExternalPskBinding::of(&original, &suites, &secret).unwrap();
-        assert_eq!(binding.key_tag.len(), 32);
-        assert!(binding.matches(&key(0x42, None), &suites, &secret));
-        assert!(!binding.matches(&key(0x43, None), &suites, &secret));
-        assert!(!binding.matches(&key(0x42, Some(b"one")), &suites, &secret));
-        assert!(!binding.matches(&key(0x42, None), &suites, &[0x12; 32]));
-
-        #[cfg(feature = "rustcrypto")]
-        {
-            use ::hmac::{Hmac, KeyInit, Mac};
-            use sha2::Digest;
-
-            let hmac = |key: &[u8], parts: &[&[u8]]| {
-                let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).unwrap();
-                for part in parts {
-                    mac.update(part);
-                }
-                mac.finalize().into_bytes().to_vec()
-            };
-            let context = sha2::Sha256::digest([&[0, 32][..], &secret, &[0], &[0, 0]].concat());
-            let prk = hmac(&[0; 32], &[&[0x42; 32]]);
-            let mut info = Vec::from(&[0, 32, 18][..]);
-            info.extend_from_slice(b"tls13 ext psk bind");
-            info.push(32);
-            info.extend_from_slice(&context);
-            assert_eq!(binding.key_tag, hmac(&prk, &[&info, &[1]]));
-        }
-
-        #[cfg(all(feature = "native", feature = "rustcrypto"))]
-        {
-            let rustcrypto = crate::crypto::rustcrypto::default_provider().cipher_suites;
-            assert_eq!(
-                binding.key_tag,
-                ExternalPskBinding::of(&original, &rustcrypto, &secret)
-                    .unwrap()
-                    .key_tag
-            );
-        }
-
-        let generated = key(0x42, Some(b"one"));
-        let binding = ExternalPskBinding::of(&generated, &suites, &secret).unwrap();
-        assert!(binding.matches(&key(0x42, Some(b"one")), &suites, &secret));
-        assert!(!binding.matches(&key(0x42, Some(b"two")), &suites, &secret));
-        assert!(!binding.matches(&key(0x43, Some(b"one")), &suites, &secret));
-
-        let sha384 = ExternalPsk::new(
-            b"identity-384".to_vec(),
-            alloc::vec![0x42; 48],
-            HashAlgorithm::SHA384,
-        )
-        .unwrap();
-        assert_eq!(
-            ExternalPskBinding::of(&sha384, &suites, &[0x22; 48])
-                .unwrap()
-                .key_tag
-                .len(),
-            48
-        );
-    }
-
-    #[test]
-    fn imported_identity_round_trip() {
-        let id = ImportedIdentity {
-            external_identity: b"client-1".to_vec(),
-            context: b"ctx".to_vec(),
-            target_protocol: ProtocolVersion::TLSv1_3,
-            target_kdf: ImportedIdentity::HKDF_SHA384,
-        };
-        let enc = id.encode();
-        assert_eq!(
-            enc,
-            [
-                &[0, 8][..],
-                b"client-1",
-                &[0, 3],
-                b"ctx",
-                &[0x03, 0x04, 0x00, 0x02]
-            ]
-            .concat()
-        );
-        assert_eq!(ImportedIdentity::decode(&enc), Some(id));
-        // Trailing data, truncation and an empty external identity are refused.
-        assert_eq!(
-            ImportedIdentity::decode(&[enc.as_slice(), &[0]].concat()),
-            None
-        );
-        assert_eq!(ImportedIdentity::decode(&enc[..enc.len() - 1]), None);
-        assert_eq!(ImportedIdentity::decode(&[0, 0, 0, 0, 3, 4, 0, 1]), None);
-    }
-
-    /// RFC 9258 `ipskx`, recomputed with the RustCrypto HMAC directly:
-    /// `epskx = HMAC(0^HashLen, epsk)`, then one HKDF-Expand block of
-    /// `HkdfLabel(L, "tls13 derived psk", Hash(ImportedIdentity))`. No
-    /// published test vectors exist for RFC 9258; this checks the
-    /// construction against an independent HMAC and both providers against
-    /// each other.
-    #[cfg(feature = "rustcrypto")]
-    #[test]
-    fn imported_psk_derivation() {
-        use ::hmac::{Hmac, KeyInit, Mac};
-        use sha2::Digest;
-
-        fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-            let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).unwrap();
-            for part in parts {
-                mac.update(part);
-            }
-            mac.finalize().into_bytes().to_vec()
-        }
-
-        let epsk = [0x5au8; 32];
-        for (target_kdf, target_len) in [
-            (ImportedIdentity::HKDF_SHA256, 32usize),
-            (ImportedIdentity::HKDF_SHA384, 48),
-        ] {
-            let identity = ImportedIdentity {
-                external_identity: b"external".to_vec(),
-                context: b"context".to_vec(),
-                target_protocol: ProtocolVersion::TLSv1_3,
-                target_kdf,
-            }
-            .encode();
-
-            // The EPSK's hash is SHA-256 here, whatever the target.
-            let epskx = hmac_sha256(&[0u8; 32], &[&epsk]);
-            let identity_hash = sha2::Sha256::digest(&identity);
-            let label = b"tls13 derived psk";
-            let mut info = Vec::new();
-            info.extend_from_slice(&(target_len as u16).to_be_bytes());
-            info.push(label.len() as u8);
-            info.extend_from_slice(label);
-            info.push(identity_hash.len() as u8);
-            info.extend_from_slice(&identity_hash);
-            let mut expected = hmac_sha256(&epskx, &[&info, &[1]]);
-            expected.extend(hmac_sha256(&epskx, &[&expected, &info, &[2]]));
-            expected.truncate(target_len);
-
-            let rustcrypto = crate::crypto::rustcrypto::cipher_suite::TLS13_AES_128_GCM_SHA256
-                .tls13()
-                .unwrap();
-            assert_eq!(
-                derive_imported_psk(rustcrypto, &epsk, &identity, target_len),
-                expected
-            );
-            #[cfg(feature = "native")]
-            {
-                let native = crate::crypto::native::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256
-                    .tls13()
-                    .unwrap();
-                assert_eq!(
-                    derive_imported_psk(native, &epsk, &identity, target_len),
-                    expected
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn imported_identity_length_bound() {
-        let psk = ExternalPsk::new(
-            alloc::vec![1; 60000],
-            alloc::vec![0; 16],
-            HashAlgorithm::SHA256,
-        )
-        .unwrap();
-        assert!(psk.imported(alloc::vec![0; 5528]).is_err());
-        let psk = ExternalPsk::new(
-            alloc::vec![1; 60000],
-            alloc::vec![0; 16],
-            HashAlgorithm::SHA256,
-        )
-        .unwrap();
-        assert!(psk.imported(alloc::vec![0; 5527]).is_ok());
-    }
-}
+mod tests;

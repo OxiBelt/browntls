@@ -21,13 +21,17 @@
 //! arguments (see [`run`]); at most four handshakes per input.
 
 use std::io::{Read, Write};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use browntls_core::crypto::hash::HashAlgorithm;
 use browntls_core::pki_types::{
-    CertificateDer, DnsName, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
+    CertificateDer, DnsName, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
-use browntls_core::psk::{ExternalPsk, ImportedIdentity, ResolvesExternalPsk};
+use browntls_core::psk::{
+    ExternalPsk, ExternalPskReplayDecision, ExternalPskReplayKey, ExternalPskReplayPolicy,
+    ImportedIdentity, ResolvesExternalPsk,
+};
 use browntls_core::{
     CipherSuite, ClientConfig, ClientConnection, Error, HandshakeKind, ProtocolVersion,
     RootCertStore, ServerConfig, ServerConnection, version,
@@ -412,7 +416,11 @@ impl Spec {
             psk = psk.with_cipher_suite(suite);
         }
         if self.early != 0 {
-            psk = psk.with_early_data(self.early);
+            psk = psk
+                .with_early_data(self.early)
+                .with_early_data_record_size_limit(64 + (self.early % 1024) as u16)
+                .expect("record size limit in range")
+                .with_early_data_expiry(UnixTime::since_unix_epoch(Duration::from_secs(u64::MAX)));
         }
         if self.server_name {
             psk = psk.with_server_name(DnsName::try_from("localhost").expect("name").to_owned());
@@ -421,6 +429,28 @@ impl Spec {
             psk = psk.imported(context.clone()).expect("a short context");
         }
         Arc::new(psk)
+    }
+}
+
+#[derive(Debug, Default)]
+struct SingleReplayMark(Mutex<Option<Vec<u8>>>);
+
+impl ExternalPskReplayPolicy for SingleReplayMark {
+    fn check_and_mark(
+        &self,
+        key: &ExternalPskReplayKey,
+        _expires_at: UnixTime,
+    ) -> ExternalPskReplayDecision {
+        use ExternalPskReplayDecision::*;
+        let mut mark = self.0.lock().expect("fuzz fixture lock");
+        match &*mark {
+            Some(prior) if prior == key.as_ref() => Duplicate,
+            Some(_) => Unavailable,
+            None => {
+                *mark = Some(key.as_ref().to_vec());
+                FirstUse
+            }
+        }
     }
 }
 
@@ -450,7 +480,7 @@ enum ServerMode {
 /// empty), key length and an 8-bit-prefixed key prefix, import flag and
 /// context, suite flag and selector, early data limit (16 bits, 0 for
 /// none), server name flag, deviation selector and its argument byte,
-/// server mode, then 8-bit-prefixed early data.
+/// server mode, 8-bit-prefixed early data, then omit-replay-policy flag.
 fn handshake(input: &mut Input) {
     let hash = if input.bool() {
         HashAlgorithm::SHA384
@@ -533,6 +563,7 @@ fn handshake(input: &mut Input) {
         _ => ServerMode::CertWithPsk,
     };
     let early_data = input.short_field();
+    let replay_policy = !input.bool();
 
     let pki = pki();
     let provider = Arc::new(browntls_core::crypto::native::default_provider());
@@ -558,6 +589,9 @@ fn handshake(input: &mut Input) {
         }
     };
     server_config.max_early_data_size = shared.early;
+    if replay_policy {
+        server_config.external_psk_replay_policy = Some(Arc::new(SingleReplayMark::default()));
+    }
 
     let client_psk = theirs.build();
     let mut client_config = ClientConfig::builder_with_provider(provider)
@@ -572,6 +606,8 @@ fn handshake(input: &mut Input) {
     let name = ServerName::try_from("localhost").expect("name");
     let mut client = ClientConnection::new(Arc::new(client_config), name).expect("client");
     let mut server = ServerConnection::new(Arc::new(server_config)).expect("server");
+    assert!(!client.negotiated_cert_with_extern_psk());
+    assert!(!server.negotiated_cert_with_extern_psk());
     let mut sent_early = Vec::new();
     if let Some(mut early) = client.early_data() {
         // 0-RTT is offered only under a pinned suite, with the PSK first.
@@ -596,12 +632,26 @@ fn handshake(input: &mut Input) {
         assert_eq!(server.external_psk_identity(), Some(&shared.identity[..]));
         assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
         assert_eq!(
+            client.negotiated_cert_with_extern_psk(),
+            mode == ServerMode::CertWithPsk,
+        );
+        assert_eq!(
+            server.negotiated_cert_with_extern_psk(),
+            mode == ServerMode::CertWithPsk,
+        );
+        assert_eq!(
             client.peer_certificates().is_some(),
             mode == ServerMode::CertWithPsk
         );
         let negotiated = client.negotiated_cipher_suite().expect("suite");
         if let Some(suite) = shared.suite {
             assert_eq!(negotiated.suite(), suite);
+        }
+        if !replay_policy {
+            assert!(
+                !client.is_early_data_accepted() && server.early_data().is_none(),
+                "external PSK accepted without a replay policy"
+            );
         }
         if client.is_early_data_accepted() {
             let mut got = Vec::new();
@@ -622,6 +672,8 @@ fn handshake(input: &mut Input) {
 
     // A PSK the two sides do not share is never used.
     if completed {
+        assert!(!client.negotiated_cert_with_extern_psk());
+        assert!(!server.negotiated_cert_with_extern_psk());
         assert!(client.external_psk_identity().is_none(), "{deviation:?}");
         assert!(server.external_psk_identity().is_none(), "{deviation:?}");
         assert!(client.peer_certificates().is_some());
@@ -764,13 +816,15 @@ pub fn seeds() -> Vec<Vec<u8>> {
         put_short_field(&mut seed, b"");
         seeds.push(seed);
     }
-    // a pinned suite with 0-RTT data
+    // A pinned suite with 0-RTT data, with and without replay protection.
     let mut seed = vec![3, 0];
     put_short_field(&mut seed, b"early");
     seed.push(0);
     put_short_field(&mut seed, b"early key");
     seed.extend_from_slice(&[0, 1, 0, 4, 0, 0, 0, 0, 0]);
     put_short_field(&mut seed, b"GET /idempotent");
+    seeds.push(seed.clone());
+    seed.push(1); // omit replay policy
     seeds.push(seed);
     seeds
 }

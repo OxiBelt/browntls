@@ -88,11 +88,11 @@ sources = [
 
 [targets.tls_ech]
 topic = "tls-extensions"
-sources = ["crates/browntls-core/src/ech/**", "crates/browntls-core/src/crypto/hpke.rs", "crates/browntls-crypto/src/hpke/**"]
+sources = ["crates/browntls-core/src/ech/**", "crates/browntls-core/src/crypto/hpke.rs", "crates/browntls-crypto/src/hpke/**", "crates/browntls-pki/src/pem.rs", "crates/browntls-core/src/server/tls13/flight.rs"]
 
 [targets.tls_psk]
 topic = "tls-extensions"
-sources = ["crates/browntls-core/src/psk.rs", "crates/browntls-core/src/tls13/**", "crates/browntls-core/src/client/**", "crates/browntls-core/src/server/**"]
+sources = ["crates/browntls-core/src/psk.rs", "crates/browntls-core/src/psk/**", "crates/browntls-core/src/tls13/**", "crates/browntls-core/src/client/**", "crates/browntls-core/src/server/**"]
 
 [targets.tls_binding]
 topic = "tls-extensions"
@@ -109,6 +109,35 @@ sources = [
   "crates/browntls-core/src/server/**",
   "crates/browntls-core/src/conn.rs",
   "crates/browntls-core/src/common_state.rs",
+]
+
+[targets.tls_dtls]
+topic = "tls-extensions"
+sources = [
+  "crates/browntls-core/src/dtls.rs",
+  "crates/browntls-core/src/dtls/**",
+  "crates/browntls-core/src/tls13/**",
+  "crates/browntls-core/src/msgs/handshake/**",
+  "crates/browntls-core/src/server/cookie.rs",
+  "crates/browntls-core/src/server/hs/retry.rs",
+]
+
+[targets.tls_dtls_udp]
+harness = ["fuzz/src/tls_dtls_udp.rs", "fuzz/src/tls_dtls_udp/**", "fuzz/src/tls_dtls/setup.rs", "fuzz/src/tls_dtls/shape.rs"]
+topic = "tls-extensions"
+sources = ["crates/browntls-core/src/dtls/udp.rs", "crates/browntls-core/src/dtls/udp/**", "crates/browntls-core/src/dtls/acceptor.rs"]
+
+[targets.tls_dtls_tokio]
+harness = ["fuzz/src/tls_dtls_tokio.rs", "fuzz/src/tls_dtls_tokio/**", "fuzz/src/tls_dtls/setup.rs"]
+topic = "tls-extensions"
+sources = [
+  "crates/browntls-tokio/src/dtls/**",
+  "crates/browntls-core/src/dtls.rs",
+  "crates/browntls-core/src/dtls/**",
+  "crates/browntls-core/src/tls13/**",
+  "crates/browntls-core/src/msgs/handshake/**",
+  "crates/browntls-core/src/server/cookie.rs",
+  "crates/browntls-core/src/server/hs/retry.rs",
 ]
 
 [targets.tls_auth]

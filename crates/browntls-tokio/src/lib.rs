@@ -230,7 +230,10 @@ macro_rules! ready {
 
 pub mod certificate_url;
 pub mod client;
+mod client_early;
 mod common;
+#[cfg(feature = "dtls")]
+pub mod dtls;
 pub mod kernel;
 #[cfg(feature = "ocsp")]
 pub mod revocation;
@@ -239,6 +242,7 @@ mod split;
 pub mod unbuffered;
 
 pub use client::{Connect, FallibleConnect, TlsConnector, TlsConnectorWithAlpn};
+pub use client_early::{EarlyDataNotResent, EarlyDataOutcome, RejectedEarlyDataPolicy};
 pub use server::{Accept, FallibleAccept, LazyConfigAcceptor, StartHandshake, TlsAcceptor};
 pub use split::{ReadHalf, ReuniteError, WriteHalf};
 

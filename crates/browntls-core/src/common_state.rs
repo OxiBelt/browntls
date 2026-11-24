@@ -1,5 +1,9 @@
 //! State shared by client and server connections.
 
+mod record_limits;
+#[cfg(feature = "tls12")]
+mod tls12;
+
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -178,6 +182,7 @@ pub struct CommonState {
     pub(crate) kx_state: KxState,
     pub(crate) alpn_protocol: Option<Vec<u8>>,
     pub(crate) peer_certificates: Option<CertificateChain<'static>>,
+    pub(crate) matched_service_identity: Option<browntls_pki::ReferenceIdentifier>,
     pub(crate) pending_revocation: Option<alloc::boxed::Box<crate::revocation::PendingRevocation>>,
     pub(crate) peer_revocation_status: Option<crate::revocation::RevocationStatus>,
     pub(crate) revocation_auth_outstanding: bool,
@@ -218,6 +223,10 @@ pub struct CommonState {
     /// Present on QUIC connections (RFC 9001): handshake messages and alerts
     /// go to the QUIC implementation instead of the record layer.
     pub(crate) quic: Option<alloc::boxed::Box<crate::quic::Quic>>,
+    /// Present on DTLS connections (RFC 9147): handshake messages, alerts
+    /// and application data go to the DTLS record layer and its flights
+    /// instead of the TLS record layer.
+    pub(crate) dtls: Option<alloc::boxed::Box<crate::dtls::Dtls>>,
     /// Driven by the unbuffered API: received application data stays in the
     /// caller's buffer instead of being copied into `received_plaintext`.
     pub(crate) unbuffered: bool,
@@ -230,6 +239,7 @@ pub struct CommonState {
     /// Whether the peer's Finished has verified, which authenticates the
     /// peer's knowledge of [`Self::external_psk`].
     pub(crate) external_psk_confirmed: bool,
+    pub(crate) cert_with_extern_psk: bool,
     /// Present once the connection is handed to the kernel: records go to
     /// this queue as plaintext for the kernel to protect
     /// ([`crate::kernel::KernelConnection`]).
@@ -253,6 +263,7 @@ impl CommonState {
             kx_state: KxState::Start,
             alpn_protocol: None,
             peer_certificates: None,
+            matched_service_identity: None,
             pending_revocation: None,
             peer_revocation_status: None,
             revocation_auth_outstanding: false,
@@ -281,10 +292,12 @@ impl CommonState {
             encrypt_failed: false,
             fips: false,
             quic: None,
+            dtls: None,
             unbuffered: false,
             app_data_in_place: false,
             external_psk: None,
             external_psk_confirmed: false,
+            cert_with_extern_psk: false,
             kernel: None,
             peer_external_binding: None,
             cached_info: Default::default(),
@@ -338,7 +351,12 @@ impl CommonState {
 
     /// The negotiated protocol version, once agreed.
     pub fn protocol_version(&self) -> Option<ProtocolVersion> {
-        self.negotiated_version
+        match self.negotiated_version {
+            // The state machines run DTLS 1.3 as TLS 1.3.
+            Some(ProtocolVersion::TLSv1_2) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_2),
+            Some(ProtocolVersion::TLSv1_3) if self.is_dtls() => Some(ProtocolVersion::DTLSv1_3),
+            version => version,
+        }
     }
 
     /// How the handshake completed, once it has.
@@ -354,7 +372,7 @@ impl CommonState {
     ///
     /// Such a handshake is reported as [`HandshakeKind::Full`] (or
     /// [`HandshakeKind::FullWithHelloRetryRequest`]); unless certificate
-    /// authentication was negotiated on top of it (RFC 8773), there are no
+    /// authentication was negotiated on top of it (RFC 9973), there are no
     /// peer certificates. A session resumed from a ticket issued on such a
     /// connection ([`HandshakeKind::Resumed`]) reports the same identity.
     ///
@@ -368,6 +386,14 @@ impl CommonState {
             .as_ref()
             .filter(|_| self.external_psk_confirmed)
             .map(|psk| psk.identity())
+    }
+
+    /// Whether this completed handshake negotiated RFC 9973 with a fresh
+    /// external PSK and server certificate or raw public key authentication.
+    ///
+    /// Returns false during the handshake and for resumed sessions.
+    pub fn negotiated_cert_with_extern_psk(&self) -> bool {
+        self.cert_with_extern_psk && self.external_psk_confirmed && !self.is_handshaking()
     }
 
     /// The external PSK to record in a ticket issued on this connection.
@@ -452,39 +478,6 @@ impl CommonState {
         self.message_fragmenter.max_fragment_len()
     }
 
-    /// Puts a negotiated `record_size_limit` (RFC 8449) into effect: `ours`
-    /// is the value we announced, `peers` the value the peer announced.
-    ///
-    /// A peer value below 64 is `illegal_parameter` (RFC 8449 §4). A value
-    /// above the protocol maximum is not an error (a server MUST NOT
-    /// enforce that, and a client MAY abort but we do not): records never
-    /// exceed the protocol maximum anyway. Our records then carry at most
-    /// `peers` bytes of plaintext in TLS 1.2 and `peers - 1` in TLS 1.3,
-    /// whose limit counts the content type (and any padding, of which we
-    /// send none); the local `max_fragment_size` still applies when
-    /// smaller. Protected records the peer sends from now on (except 0-RTT
-    /// data) must respect `ours`, or the connection fails with
-    /// `record_overflow`.
-    pub(crate) fn apply_record_size_limits(
-        &mut self,
-        ours: u16,
-        peers: u16,
-        tls13: bool,
-    ) -> Result<(), Error> {
-        if peers < MIN_RECORD_SIZE_LIMIT {
-            return Err(self.send_fatal_alert(
-                AlertDescription::IllegalParameter,
-                PeerMisbehaved::IllegalRecordSizeLimit,
-            ));
-        }
-        let max = max_record_size_limit(tls13);
-        let peers = usize::from(peers.min(max)) - usize::from(tls13);
-        self.message_fragmenter.set_peer_record_size_limit(peers);
-        self.record_layer
-            .set_inbound_record_size_limit(ours.min(max), tls13);
-        Ok(())
-    }
-
     pub(crate) fn current_io_state(&self) -> IoState {
         IoState {
             tls_bytes_to_write: self.sendable_tls.len(),
@@ -504,13 +497,22 @@ impl CommonState {
         self.quic.is_some()
     }
 
+    /// Whether this is a DTLS connection (RFC 9147).
+    pub(crate) fn is_dtls(&self) -> bool {
+        self.dtls.is_some()
+    }
+
     /// Queues `m` for sending, encrypting it when `must_encrypt`.
     ///
     /// On a QUIC connection nothing goes to the record layer: handshake
     /// messages are queued for CRYPTO frames at the current encryption level
     /// and a fatal alert is kept for the QUIC CONNECTION_CLOSE (RFC 9001
     /// §4.1.3, §4.8). Nothing else is ever sent over QUIC.
+    /// On a DTLS connection see [`Self::send_to_dtls`].
     pub(crate) fn send_msg(&mut self, m: Message<'_>, must_encrypt: bool) {
+        if self.send_to_dtls(&m.payload) {
+            return;
+        }
         if let Some(quic) = &mut self.quic {
             match m.payload {
                 MessagePayload::Handshake { encoded, .. } => {
@@ -540,6 +542,9 @@ impl CommonState {
     /// Fragments and encrypts `m`; handshake and alert records never count
     /// towards the confidentiality limit check (they are few).
     pub(crate) fn send_msg_encrypt(&mut self, m: PlainMessage) {
+        if self.send_plain_to_dtls(&m) {
+            return;
+        }
         if self.send_to_kernel(&m) {
             return;
         }
@@ -769,32 +774,6 @@ impl CommonState {
             return;
         }
         self.received_plaintext.append(bytes.into_vec());
-    }
-
-    /// TLS 1.2: installs the record ciphers derived from `secrets`. Encryption
-    /// starts when we send ChangeCipherSpec; decryption when we receive it.
-    #[cfg(feature = "tls12")]
-    pub(crate) fn start_encryption_tls12(
-        &mut self,
-        secrets: &crate::tls12::ConnectionSecrets,
-        side: Side,
-        order: crate::crypto::cipher::Tls12MacOrder,
-    ) {
-        let pair = secrets.make_cipher_pair(side, order);
-        self.record_layer
-            .prepare_message_encrypter(pair.enc, secrets.suite().common.confidentiality_limit);
-        self.record_layer.prepare_message_decrypter(pair.dec);
-    }
-
-    /// Sends ChangeCipherSpec and starts encrypting (TLS 1.2).
-    #[cfg(feature = "tls12")]
-    pub(crate) fn send_change_cipher_spec(&mut self) {
-        let m = Message {
-            version: ProtocolVersion::TLSv1_2,
-            payload: MessagePayload::ChangeCipherSpec(crate::msgs::ccs::ChangeCipherSpecPayload),
-        };
-        self.send_msg(m, false);
-        self.record_layer.start_encrypting();
     }
 
     /// We may now send application data; flushes anything the application

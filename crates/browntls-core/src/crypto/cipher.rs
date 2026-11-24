@@ -14,6 +14,9 @@ pub use crate::msgs::message::{
 use crate::msgs::message::{HEADER_SIZE, encode_header};
 use crate::suites::ConnectionTrafficSecrets;
 
+#[cfg(all(feature = "tls12", any(feature = "native", feature = "rustcrypto")))]
+pub(crate) mod dtls12;
+
 /// An AEAD usable with TLS 1.3 (RFC 8446 §5.2).
 pub trait Tls13AeadAlgorithm: Send + Sync {
     /// Creates a record encrypter from the traffic key and IV.
@@ -41,6 +44,13 @@ pub trait Tls13AeadAlgorithm: Send + Sync {
 
 /// An AEAD usable with TLS 1.2 (RFC 5246 §6.2.3.3).
 pub trait Tls12AeadAlgorithm: Send + Sync + 'static {
+    /// CID capability as `(sending, receiving)`, for handshake selection.
+    /// The cipher instances for an opted-in direction must also report
+    /// support for its RFC 9146 operation.
+    fn dtls12_cid_support(&self) -> (bool, bool) {
+        (false, false)
+    }
+
     /// Creates a record encrypter from the write key, the fixed IV and the
     /// `extra` bytes that seed the explicit nonce.
     ///
@@ -212,11 +222,48 @@ impl fmt::Debug for Tls12RecordProtection {
 /// Decrypts records.
 pub trait MessageDecrypter: Send + Sync {
     /// Decrypts `msg` in place; `seq` is the record sequence number.
+    ///
+    /// For TLS 1.3, the result records the length of the entire
+    /// authenticated inner plaintext. Use
+    /// [`InboundOpaqueMessage::into_tls13_unpadded_message`] after
+    /// decryption to preserve the length while removing padding and type.
     fn decrypt<'a>(
         &mut self,
         msg: InboundOpaqueMessage<'a>,
         seq: u64,
     ) -> Result<InboundPlainMessage<'a>, Error>;
+
+    /// Whether this instance supports [`Self::decrypt_dtls12_cid`].
+    /// External providers remain unsupported until they opt in explicitly.
+    fn supports_dtls12_cid(&self) -> bool {
+        false
+    }
+
+    /// Authenticates a DTLS 1.2 type-25 record using RFC 9146 §5.3 AAD,
+    /// then removes inner padding and returns its authenticated content type.
+    /// `seq` is the exact wire `epoch || uint48 sequence_number`, big-endian,
+    /// packed into a `u64`; `cid` is the exact received CID (1..=255 bytes).
+    /// The caller must check it against the negotiated CID and enforce epoch,
+    /// replay, nonce/key usage and inner content/state policy separately.
+    ///
+    /// `msg` holds only the encrypted body, including any explicit nonce and
+    /// the full tag. Its type must be `Tls12Cid`, its version `DTLSv1_2`.
+    /// The encoded inner plaintext, including type and padding, is limited to
+    /// 16384 bytes. Return that length with the decrypted content using
+    /// [`InboundPlainMessage::with_record_plaintext_len`]. The supported
+    /// inner types are 20 through 24 and
+    /// RFC 9853 RRC.
+    /// only application data may be empty. No other AAD/tag format is tried.
+    /// On error the body is unspecified and must not be used as plaintext.
+    /// The default implementation fails without modifying `msg`.
+    fn decrypt_dtls12_cid<'a>(
+        &mut self,
+        _msg: InboundOpaqueMessage<'a>,
+        _seq: u64,
+        _cid: &[u8],
+    ) -> Result<InboundPlainMessage<'a>, Error> {
+        Err(Error::DecryptError)
+    }
 
     /// Whether too many records have failed authentication under this key
     /// for it to be used again (an AEAD integrity limit, for example
@@ -239,6 +286,42 @@ pub trait MessageEncrypter: Send + Sync {
         msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error>;
+
+    /// Whether this instance supports [`Self::encrypt_dtls12_cid`].
+    /// External providers remain unsupported until they opt in explicitly.
+    fn supports_dtls12_cid(&self) -> bool {
+        false
+    }
+
+    /// Encrypts `content || msg.typ || zeros[padding_len]` with RFC 9146
+    /// §5.3 AAD. `msg.version` must be `DTLSv1_2`, `cid` must contain
+    /// 1..=255 bytes, and `msg.typ` must be a DTLS 1.2 type (20 through 24)
+    /// or RFC 9853 RRC.
+    /// Only application data may be empty. The entire encoded inner
+    /// plaintext must fit in 16384 bytes, so unpadded content is at most
+    /// 16383 bytes. Invalid input fails with [`Error::EncryptError`].
+    ///
+    /// `seq` is the exact wire `epoch || uint48 sequence_number`, big-endian,
+    /// packed into a `u64`. It is used unchanged for AAD and nonce derivation;
+    /// the caller owns negotiation, key/nonce uniqueness and record limits,
+    /// and must consume the number even on failure.
+    ///
+    /// The returned type is `Tls12Cid`. Only its payload is a DTLS encrypted
+    /// body: the caller must frame the DTLS header and CID itself, rather
+    /// than use the returned object's stream-TLS `encode` method. To size
+    /// the body, call [`Self::encrypted_payload_len`] with the encoded inner
+    /// length, after checking the bound above. There is no CID `encrypt_into`
+    /// fallback through the stream-TLS header path.
+    /// The default implementation fails without encrypting anything.
+    fn encrypt_dtls12_cid(
+        &mut self,
+        _msg: OutboundPlainMessage<'_>,
+        _seq: u64,
+        _cid: &[u8],
+        _padding_len: usize,
+    ) -> Result<OutboundOpaqueMessage, Error> {
+        Err(Error::EncryptError)
+    }
 
     /// The ciphertext length (excluding the record header) for a plaintext of
     /// `payload_len`.
@@ -585,6 +668,31 @@ impl MessageDecrypter for InvalidMessageDecrypter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_cid_operations_fail_closed() {
+        let mut enc = InvalidMessageEncrypter;
+        let mut dec = InvalidMessageDecrypter;
+        assert!(!enc.supports_dtls12_cid());
+        assert!(!dec.supports_dtls12_cid());
+        let msg = OutboundPlainMessage {
+            typ: ContentType::ApplicationData,
+            version: ProtocolVersion::DTLSv1_2,
+            payload: OutboundChunks::Single(b"data"),
+        };
+        assert!(matches!(
+            enc.encrypt_dtls12_cid(msg, 1 << 48, b"cid", 0),
+            Err(Error::EncryptError)
+        ));
+        let mut body = [7; 32];
+        let msg =
+            InboundOpaqueMessage::new(ContentType::Tls12Cid, ProtocolVersion::DTLSv1_2, &mut body);
+        assert_eq!(
+            dec.decrypt_dtls12_cid(msg, 1 << 48, b"cid").unwrap_err(),
+            Error::DecryptError
+        );
+        assert_eq!(body, [7; 32]);
+    }
 
     #[test]
     fn nonce_xors_sequence() {

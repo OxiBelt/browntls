@@ -27,6 +27,7 @@ native = ["browntls-core/native"]
 rustcrypto = ["browntls-core/rustcrypto"]
 tls12 = ["browntls-core/tls12"]
 logging = ["browntls-core/logging"]
+key-log = ["browntls-core/key-log", "browntls-tokio?/key-log"]
 # `AsyncKtlsStream`: kernel TLS on a `tokio::net::TcpStream`, and the
 # handover of `browntls-tokio` streams.
 tokio = ["dep:tokio", "dep:browntls-tokio"]

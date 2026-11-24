@@ -18,7 +18,8 @@ use crate::msgs::grease::ServerGreaseValues;
 use crate::msgs::handshake::{
     CertificatePayloadTls13, CertificateRequestExtensions, CertificateRequestPayloadTls13,
     ClientHelloPayload, HandshakeMessagePayload, HandshakePayload, HelloRetryRequest,
-    HelloRetryRequestExtensions, KeyShareEntry, ServerExtensions, ServerHelloPayload, SessionId,
+    HelloRetryRequestExtensions, KeyShareEntry, MAX_HANDSHAKE_SIZE, ServerExtensions,
+    ServerHelloPayload, SessionId,
 };
 use crate::msgs::message::{Message, MessagePayload};
 use crate::server::common::{ActiveCertifiedKey, transparency_info_for};
@@ -44,19 +45,26 @@ pub(super) fn emit_server_hello(
     cert_with_extern_psk: bool,
 ) {
     let extensions = ServerExtensions {
+        connection_id: common.dtls.as_deref().and_then(|dtls| dtls.cid.response()),
+        return_routability_check: common
+            .dtls
+            .as_deref()
+            .and_then(|dtls| dtls.rrc_negotiated.then_some(())),
         key_share: Some(key_share),
         pre_shared_key: chosen_psk_index.and_then(|i| u16::try_from(i).ok()),
         supported_versions: Some(ProtocolVersion::TLSv1_3),
         cert_with_extern_psk: cert_with_extern_psk.then_some(()),
         ..Default::default()
     };
+    let dtls = common.is_dtls();
     let mut payload = ServerHelloPayload {
         legacy_version: ProtocolVersion::TLSv1_2,
         random: randoms.server.into(),
-        session_id: *session_id,
+        session_id: echoed_session_id(*session_id, dtls),
         cipher_suite: suite.common.suite,
         compression_method: Compression::Null,
         extensions,
+        dtls,
     };
     // RFC 9849 §7.2: confirm ECH in the last 8 bytes of the random,
     // computed over the inner transcript with those bytes zeroed. The
@@ -85,10 +93,21 @@ pub(super) fn emit_server_hello(
     common.send_msg(sh, false);
 }
 
+/// The `legacy_session_id_echo` of a ServerHello or HelloRetryRequest:
+/// the client's `legacy_session_id`, which a DTLS server never echoes
+/// (RFC 9147 §5).
+fn echoed_session_id(client_session_id: SessionId, dtls: bool) -> SessionId {
+    match dtls {
+        true => SessionId::empty(),
+        false => client_session_id,
+    }
+}
+
 /// Sends the middlebox-compatibility ChangeCipherSpec (RFC 8446 appendix D.4);
-/// never on QUIC, which has no such record (RFC 9001 §8.4).
+/// never on QUIC, which has no such record (RFC 9001 §8.4), nor on DTLS
+/// (RFC 9147 §5).
 pub(super) fn emit_fake_ccs(common: &mut CommonState) {
-    if common.is_quic() {
+    if common.is_quic() || common.is_dtls() {
         return;
     }
     let m = Message {
@@ -98,43 +117,46 @@ pub(super) fn emit_fake_ccs(common: &mut CommonState) {
     common.send_msg(m, false);
 }
 
-/// The HelloRetryRequest selecting `suite` and `group`, with `cookie` and
-/// no ECH extension.
+/// The HelloRetryRequest selecting `suite` and `group` (`None` to ask for
+/// nothing but the cookie), with `cookie` and no ECH extension, in the
+/// DTLS 1.3 encoding when `dtls`. `session_id` is the client's.
 pub(super) fn hello_retry_request(
     suite: &'static Tls13CipherSuite,
     session_id: SessionId,
-    group: NamedGroup,
+    group: Option<NamedGroup>,
     cookie: Option<Vec<u8>>,
+    dtls: bool,
 ) -> HelloRetryRequest {
     HelloRetryRequest {
         legacy_version: ProtocolVersion::TLSv1_2,
-        session_id,
+        session_id: echoed_session_id(session_id, dtls),
         cipher_suite: suite.common.suite,
         compression_method: Compression::Null,
         extensions: HelloRetryRequestExtensions {
-            key_share: Some(group),
+            key_share: group,
             cookie: cookie.map(PayloadU16::new),
             supported_versions: Some(ProtocolVersion::TLSv1_3),
             encrypted_client_hello: None,
             unknown: Vec::new(),
         },
+        dtls,
     }
 }
 
-/// The HelloRetryRequest selecting `suite` and `group`, with `cookie`, as
-/// a stateless retry sends it (never with ECH). Also used to rebuild it for
-/// the transcript.
+/// The HelloRetryRequest of [`hello_retry_request`] as a stateless retry
+/// sends it (never with ECH). Also used to rebuild it for the transcript.
 pub(in crate::server) fn hello_retry_request_message(
     suite: &'static Tls13CipherSuite,
     session_id: SessionId,
-    group: NamedGroup,
+    group: Option<NamedGroup>,
     cookie: Option<Vec<u8>>,
+    dtls: bool,
 ) -> Message<'static> {
     Message {
         version: ProtocolVersion::TLSv1_2,
         payload: MessagePayload::handshake(HandshakeMessagePayload(
             HandshakePayload::HelloRetryRequest(hello_retry_request(
-                suite, session_id, group, cookie,
+                suite, session_id, group, cookie, dtls,
             )),
         )),
     }
@@ -203,7 +225,7 @@ pub(super) fn emit_encrypted_extensions(
     supported_groups: Option<Vec<NamedGroup>>,
     retry_configs: Option<Vec<u8>>,
     expected_tickets: Option<u8>,
-) {
+) -> Result<(), Error> {
     let mut exts = ServerExtensions {
         supported_groups,
         encrypted_client_hello: retry_configs,
@@ -223,13 +245,12 @@ pub(super) fn emit_encrypted_extensions(
             .as_ref()
             .map(|q| Payload::new(q.local_params.clone())),
         // RFC 8449 §4: the TLS 1.3 server answers in EncryptedExtensions.
-        // QUIC has no TLS records: never acknowledged there.
         record_size_limit: hs::record_size_limit_ack(
+            cx.common,
             config,
             client_hello,
             ProtocolVersion::TLSv1_3,
-        )
-        .filter(|_| !cx.common.is_quic()),
+        ),
         // RFC 9149 §3: `expected_count`.
         ticket_request: expected_tickets,
         ..Default::default()
@@ -240,15 +261,29 @@ pub(super) fn emit_encrypted_extensions(
         &client_hello.extensions,
         &mut exts,
     );
+    let parsed = HandshakeMessagePayload(HandshakePayload::EncryptedExtensions(exts));
+    let encoded = parsed.get_encoding();
+    // Check the complete body before hashing or sending it. The two-byte
+    // vector length counts every extension header and body. Our handshake
+    // size limit also counts that vector's length prefix.
+    let body_len = encoded.len() - 4;
+    if body_len > MAX_HANDSHAKE_SIZE as usize || body_len - 2 > usize::from(u16::MAX) {
+        return Err(cx.common.send_fatal_alert(
+            AlertDescription::InternalError,
+            Error::general("EncryptedExtensions too long"),
+        ));
+    }
     let m = Message {
         version: ProtocolVersion::TLSv1_3,
-        payload: MessagePayload::handshake(HandshakeMessagePayload(
-            HandshakePayload::EncryptedExtensions(exts),
-        )),
+        payload: MessagePayload::Handshake {
+            parsed,
+            encoded: Payload::new(encoded),
+        },
     };
     trace!("sending encrypted extensions {:?}", m);
     transcript.add_message(&m);
     cx.common.send_msg(m, true);
+    Ok(())
 }
 
 /// Sends a CertificateRequest if the configuration wants client authentication.
@@ -355,7 +390,7 @@ fn certificate_body<'a>(
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
     server_cert_type: Option<CertificateType>,
-) -> CertificatePayloadTls13<'a> {
+) -> Result<CertificatePayloadTls13<'a>, Error> {
     let mut cert_body = CertificatePayloadTls13::from_certified_key(
         certified_key,
         client_hello.extensions.certificate_status_request.is_some(),
@@ -367,9 +402,9 @@ fn certificate_body<'a>(
     }
     // RFC 9345 §4.1.1: the credential goes on the end entity's entry.
     if let (Some(dc), Some(first)) = (delegated, cert_body.entries.first_mut()) {
-        first.delegated_credential = Some(dc.credential().clone());
+        first.set_delegated_credential(dc.credential())?;
     }
-    cert_body
+    Ok(cert_body)
 }
 
 /// Sends the Certificate (or CompressedCertificate) message for
@@ -382,8 +417,9 @@ pub(super) fn emit_certificate_tls13(
     client_hello: &ClientHelloPayload,
     delegated: Option<&DelegatedCredentialKey>,
     server_cert_type: Option<CertificateType>,
-) {
-    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type);
+) -> Result<(), Error> {
+    let cert_body = certificate_body(certified_key, client_hello, delegated, server_cert_type)
+        .map_err(|err| common.send_fatal_alert(AlertDescription::InternalError, err))?;
 
     // RFC 8879 §4: compress when the client offered an algorithm we have.
     if let Some(offered) = &client_hello.extensions.certificate_compression
@@ -402,7 +438,7 @@ pub(super) fn emit_certificate_tls13(
         };
         transcript.add_message(&m);
         common.send_msg(m, true);
-        return;
+        return Ok(());
     }
 
     let m = Message {
@@ -414,6 +450,7 @@ pub(super) fn emit_certificate_tls13(
     trace!("sending certificate {:?}", m);
     transcript.add_message(&m);
     common.send_msg(m, true);
+    Ok(())
 }
 
 pub(super) fn emit_certificate_verify_tls13(

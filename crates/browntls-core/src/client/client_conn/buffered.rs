@@ -32,7 +32,28 @@ impl ClientConnection {
         alpn_protocols: Vec<Vec<u8>>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            inner: ConnectionCore::for_client(config, name, alpn_protocols)?.into(),
+            inner: ConnectionCore::for_client(config, name, None, alpn_protocols)?.into(),
+        })
+    }
+
+    /// Starts a connection for an explicit service identity.
+    pub fn new_with_identity(
+        config: Arc<ClientConfig>,
+        identity: crate::ClientServerIdentity,
+    ) -> Result<Self, Error> {
+        let alpn = config.alpn_protocols.clone();
+        Self::new_with_identity_and_alpn(config, identity, alpn)
+    }
+
+    /// Starts a connection for an explicit identity and per-connection ALPN.
+    pub fn new_with_identity_and_alpn(
+        config: Arc<ClientConfig>,
+        identity: crate::ClientServerIdentity,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let (name, identity) = identity.into_parts();
+        Ok(Self {
+            inner: ConnectionCore::for_client(config, name, Some(identity), alpn_protocols)?.into(),
         })
     }
 
@@ -93,6 +114,12 @@ impl ClientConnection {
     /// [`Self::early_data`] was used).
     pub fn is_early_data_accepted(&self) -> bool {
         self.inner.core.data.early_data.is_accepted()
+    }
+
+    /// The ALPN protocol from the ticket-issuing handshake or provisioned
+    /// external PSK, if known. Available even after early data is declined.
+    pub fn early_data_alpn(&self) -> Option<&[u8]> {
+        self.inner.core.data.early_data.alpn.as_deref()
     }
 
     fn write_early_data(&mut self, data: &[u8]) -> std::io::Result<usize> {

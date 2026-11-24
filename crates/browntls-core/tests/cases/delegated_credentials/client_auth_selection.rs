@@ -44,7 +44,7 @@ fn client_credential_answers_when_the_certificate_key_cannot_sign() {
         .load_private_key(chain.private_key())
         .unwrap();
     let ck = CertifiedKey::new(chain.cert_chain(), Arc::new(OfflineKey(cert_key)))
-        .with_client_delegated_credential(dc.clone(), key)
+        .with_client_delegated_credential(dc.clone(), key, &provider())
         .unwrap();
 
     let verifier = recording_verifier(&chain);
@@ -70,22 +70,20 @@ fn client_credential_answers_when_the_certificate_key_cannot_sign() {
 /// certificate does. One that does not would be refused by the peer, so
 /// neither side sends it: the certificate key signs instead.
 #[test]
-fn credential_valid_beyond_its_certificate_is_not_sent() {
+fn credential_valid_beyond_its_certificate_is_rejected_at_attachment() {
     let two_days = shifted(2 * 24 * 3600);
     let five_days = shifted(5 * 24 * 3600);
 
     // A client's credential.
     let server_chain = server_chain(KeyType::EcdsaP256);
     let chain = delegation_chain_expiring(KeyType::EcdsaP256, true, two_days);
-    let beyond = issue_for(Side::Client, &chain, SignatureScheme::ED25519, five_days);
-    let verifier = recording_verifier(&chain);
-    let (mut client, mut server) = connect(
-        client_with(&server_chain, with_client_credentials(&chain, vec![beyond])),
-        dc_server(&server_chain, verifier.clone()),
-    );
-    do_handshake(&mut client, &mut server).unwrap();
-    assert!(server.client_delegated_credential().is_none());
-    assert_eq!(verifier.seen(), [chain.key_type.schemes()[0]]);
+    let (beyond, key) = issue_for(Side::Client, &chain, SignatureScheme::ED25519, five_days);
+    assert!(matches!(
+        certified_key(&chain).with_client_delegated_credential(beyond, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::InvalidExpiry
+        ))
+    ));
     // One within the certificate's validity is sent.
     let (within, key) = issue_for(
         Side::Client,
@@ -106,10 +104,10 @@ fn credential_valid_beyond_its_certificate_is_not_sent() {
     // A server's credential.
     let chain = delegation_chain_expiring(KeyType::EcdsaP256, false, two_days);
     let (beyond, key) = issue(&chain, SignatureScheme::ED25519, five_days);
-    let ck = certified_key(&chain)
-        .with_delegated_credential(beyond, key)
-        .unwrap();
-    let (mut client, mut server) = connect(dc_client(&chain), server_with(ck));
-    do_handshake(&mut client, &mut server).unwrap();
-    assert!(client.delegated_credential().is_none());
+    assert!(matches!(
+        certified_key(&chain).with_delegated_credential(beyond, key, &provider()),
+        Err(Error::InvalidDelegatedCredential(
+            browntls_core::delegated_credential::AttachmentError::InvalidExpiry
+        ))
+    ));
 }

@@ -23,6 +23,14 @@
 //!
 //! # Verification
 //!
+//! A WebPKI verifier with CT policy requires both `transparency_info` and
+//! `status_request` in the effective ClientHello (§8.1.6). It reports
+//! [`CertificateError::TransparencyOfferRequired`] if an offer is
+//! incomplete or the caller supplies no verification context. A policy
+//! wrapper forwards both the request hook and
+//! [`ServerCertVerifier::verify_server_cert_with_context`].
+//! Standalone evidence checks use [`LocalEvidence`].
+//!
 //! The client hands the received list to its verifier as
 //! [`CertificateEvidence::transparency_info`] of the end entity. The
 //! built-in [`WebPkiServerVerifier`] verifies Certificate Transparency 2.0
@@ -45,6 +53,8 @@
 //! [`pki_types::transparency`](crate::pki_types::transparency).
 //!
 //! [`ServerCertVerifier::requests_transparency_info`]: crate::client::danger::ServerCertVerifier::requests_transparency_info
+//! [`ServerCertVerifier::verify_server_cert_with_context`]: crate::client::danger::ServerCertVerifier::verify_server_cert_with_context
+//! [`LocalEvidence`]: crate::client::danger::ServerCertVerificationContext::LocalEvidence
 //! [`ClientConfig::request_transparency_info`]: crate::ClientConfig::request_transparency_info
 //! [`CertifiedKey::set_transparency_info`]: crate::sign::CertifiedKey::set_transparency_info
 //! [`CertificateEvidence::transparency_info`]: crate::revocation::CertificateEvidence::transparency_info
@@ -52,6 +62,7 @@
 //! [`ServerCertVerifierBuilder::with_certificate_transparency`]: crate::client::ServerCertVerifierBuilder::with_certificate_transparency
 //! [`CtV2Verifier`]: browntls_pki::transparency::CtV2Verifier
 //! [`CertificateError::InsufficientTransparency`]: crate::CertificateError::InsufficientTransparency
+//! [`CertificateError::TransparencyOfferRequired`]: crate::CertificateError::TransparencyOfferRequired
 //! [`UnbufferedClientConnection`]: crate::client::UnbufferedClientConnection
 
 use alloc::vec::Vec;

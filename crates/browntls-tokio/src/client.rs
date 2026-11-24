@@ -7,17 +7,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use browntls_core::crypto::hpke::Hpke;
+use browntls_core::ech::pem::{EchPem, EchPemError};
+use browntls_core::ech::{EchConfig, EchMode};
 use browntls_core::pki_types::ServerName;
-use browntls_core::{ClientConfig, ClientConnection};
+use browntls_core::{ClientConfig, ClientConnection, ClientServerIdentity};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::client_early::EarlyResult;
 use crate::common::{self, IoSession, MidHandshake, RevocationSource, StreamState, coop};
 use crate::kernel::IntoKernelHandoff;
 use crate::split::{self, ReadHalf, WriteHalf};
 
 mod early;
+pub use crate::client_early::{EarlyDataNotResent, EarlyDataOutcome, RejectedEarlyDataPolicy};
 use early::EarlyData;
-pub use early::EarlyDataNotResent;
 
 /// Starts client handshakes with a shared [`ClientConfig`].
 ///
@@ -26,10 +30,24 @@ pub use early::EarlyDataNotResent;
 pub struct TlsConnector {
     inner: Arc<ClientConfig>,
     early_data: bool,
+    rejected_early_data: RejectedEarlyDataPolicy,
     revocation: RevocationSource,
 }
 
 impl TlsConnector {
+    /// Replaces the ECH mode in `config` with the first usable configuration
+    /// from `pem`, using the caller's HPKE `suites`.
+    ///
+    /// All other client settings are preserved. Real ECH requires TLS 1.3.
+    pub fn from_ech_pem(
+        mut config: ClientConfig,
+        pem: &EchPem,
+        suites: &[&'static dyn Hpke],
+    ) -> Result<Self, EchPemError> {
+        config.ech_mode = Some(EchMode::Enable(EchConfig::from_pem(pem, suites)?));
+        Ok(Self::from(Arc::new(config)))
+    }
+
     /// Answers the certificate status (OCSP) queries of this connector's
     /// connections with `fetcher`: during the handshake, and in reads
     /// after it. Without one, such a query is answered as unavailable at
@@ -47,22 +65,21 @@ impl TlsConnector {
     /// to send 0-RTT ("early") data. Off by default.
     ///
     /// It does when the configuration enables early data
-    /// ([`ClientConfig::enable_early_data`]) and a resumable TLS 1.3 session
-    /// allows it. Writes then take early data, up to the server's allowance.
-    /// The first read, flush or shutdown, or a write beyond the allowance,
-    /// sends the ClientHello with the early data and completes the handshake.
-    /// Early data the server declined is then sent again as ordinary data
-    /// when the same application protocol is certain to be in use (no ALPN
-    /// offered, or exactly one offered and selected); otherwise that
-    /// operation fails with [`EarlyDataNotResent`] and the stream stays
-    /// usable (RFC 9846 §4.2.10).
-    /// [`ClientConnection::is_early_data_accepted`] tells which happened.
+    /// ([`ClientConfig::enable_early_data`]) and the selected PSK permits
+    /// it. The first read, flush, shutdown or write beyond the allowance
+    /// finishes the handshake. The resend policy defaults to reporting
+    /// rejected bytes for the application to handle.
     ///
-    /// Early data is **replayable** by an attacker and has no forward
-    /// secrecy with respect to the resumption secret: send only requests
-    /// that are safe to repeat.
+    /// Early data is replayable. Send only requests that are safe to repeat.
     pub fn early_data(mut self, enabled: bool) -> Self {
         self.early_data = enabled;
+        self
+    }
+
+    /// Sets how the adapter handles early data the server declines.
+    /// This does not enable early writes.
+    pub fn rejected_early_data_policy(mut self, policy: RejectedEarlyDataPolicy) -> Self {
+        self.rejected_early_data = policy;
         self
     }
 
@@ -86,6 +103,35 @@ impl TlsConnector {
         F: FnOnce(&mut ClientConnection),
     {
         self.connect_impl(domain, stream, None, f)
+    }
+
+    /// Connects using RFC 9525 service identity matching. `identity` supplies
+    /// the routing name sent as SNI and the reference identifiers checked
+    /// against the server certificate.
+    pub fn connect_with_identity<IO>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.connect_identity_impl(identity, stream, None, |_| ())
+    }
+
+    /// Like [`connect_with_identity`](Self::connect_with_identity), adjusting
+    /// the connection before its first flight is sent.
+    pub fn connect_with_identity_and_callback<IO, F>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        self.connect_identity_impl(identity, stream, None, f)
     }
 
     /// Overrides the configuration's ALPN protocols for one connection.
@@ -113,8 +159,43 @@ impl TlsConnector {
         F: FnOnce(&mut ClientConnection),
     {
         let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
-        let alpn_offered = alpn.clone();
-        let mut session = match ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn) {
+        self.finish_connect(
+            stream,
+            ClientConnection::new_with_alpn(self.inner.clone(), domain, alpn),
+            f,
+        )
+    }
+
+    fn connect_identity_impl<IO, F>(
+        &self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        alpn_protocols: Option<Vec<Vec<u8>>>,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        let alpn = alpn_protocols.unwrap_or_else(|| self.inner.alpn_protocols.clone());
+        self.finish_connect(
+            stream,
+            ClientConnection::new_with_identity_and_alpn(self.inner.clone(), identity, alpn),
+            f,
+        )
+    }
+
+    fn finish_connect<IO, F>(
+        &self,
+        stream: IO,
+        result: Result<ClientConnection, browntls_core::Error>,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        let mut session = match result {
             Ok(session) => session,
             Err(error) => {
                 return Connect(MidHandshake::Error {
@@ -126,12 +207,18 @@ impl TlsConnector {
         f(&mut session);
 
         let early = (self.early_data && session.early_data().is_some())
-            .then(|| EarlyData::new(alpn_offered));
+            .then(|| EarlyData::new(self.rejected_early_data));
+        let early_result = if early.is_some() {
+            EarlyResult::pending()
+        } else {
+            EarlyResult::default()
+        };
         Connect(MidHandshake::Handshaking(TlsStream {
             io: stream,
             session,
             st: StreamState::new(self.revocation.for_stream()),
             early,
+            early_result,
         }))
     }
 }
@@ -141,6 +228,7 @@ impl From<Arc<ClientConfig>> for TlsConnector {
         Self {
             inner,
             early_data: false,
+            rejected_early_data: RejectedEarlyDataPolicy::default(),
             revocation: RevocationSource::default(),
         }
     }
@@ -150,6 +238,7 @@ impl fmt::Debug for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsConnector")
             .field("early_data", &self.early_data)
+            .field("rejected_early_data", &self.rejected_early_data)
             .field("revocation", &self.revocation)
             .finish_non_exhaustive()
     }
@@ -172,6 +261,19 @@ impl TlsConnectorWithAlpn<'_> {
             .connect_impl(domain, stream, Some(self.alpn_protocols), |_| ())
     }
 
+    /// [`TlsConnector::connect_with_identity`] with these ALPN protocols.
+    pub fn connect_with_identity<IO>(
+        self,
+        identity: ClientServerIdentity,
+        stream: IO,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner
+            .connect_identity_impl(identity, stream, Some(self.alpn_protocols), |_| ())
+    }
+
     /// [`TlsConnector::connect_with`] with these ALPN protocols.
     pub fn connect_with<IO, F>(self, domain: ServerName<'static>, stream: IO, f: F) -> Connect<IO>
     where
@@ -180,6 +282,22 @@ impl TlsConnectorWithAlpn<'_> {
     {
         self.inner
             .connect_impl(domain, stream, Some(self.alpn_protocols), f)
+    }
+
+    /// [`TlsConnector::connect_with_identity_and_callback`] with these ALPN
+    /// protocols.
+    pub fn connect_with_identity_and_callback<IO, F>(
+        self,
+        identity: ClientServerIdentity,
+        stream: IO,
+        f: F,
+    ) -> Connect<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+        F: FnOnce(&mut ClientConnection),
+    {
+        self.inner
+            .connect_identity_impl(identity, stream, Some(self.alpn_protocols), f)
     }
 }
 
@@ -308,16 +426,30 @@ pub struct TlsStream<IO> {
     pub(crate) st: StreamState,
     /// Set while the handshake is unfinished and early data may be sent.
     pub(crate) early: Option<EarlyData>,
+    early_result: EarlyResult,
 }
 
 impl<IO> TlsStream<IO> {
+    /// Returns the local early-data outcome without consuming it.
+    pub fn early_data_outcome(&self) -> EarlyDataOutcome {
+        self.early_result.outcome
+    }
+
+    /// Acknowledges unresent early data, returning its byte count once.
+    ///
+    /// Subsequent writes may proceed. The caller decides what to send.
+    pub fn acknowledge_rejected_early_data(&mut self) -> Option<usize> {
+        self.early_result.acknowledge()
+    }
+
     /// The transport and the connection.
     pub fn get_ref(&self) -> (&IO, &ClientConnection) {
         (&self.io, &self.session)
     }
 
     /// The transport and the connection. Reading from or writing to the
-    /// transport directly corrupts the TLS stream.
+    /// transport directly corrupts the TLS stream. Use the stream's writer
+    /// for early data so that the adapter accounts for those bytes.
     pub fn get_mut(&mut self) -> (&mut IO, &mut ClientConnection) {
         (&mut self.io, &mut self.session)
     }
@@ -346,7 +478,51 @@ impl<IO> TlsStream<IO> {
     }
 }
 
+impl<IO> ReadHalf<TlsStream<IO>> {
+    /// Returns the shared stream's local early-data outcome.
+    pub async fn early_data_outcome(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.inspect(TlsStream::early_data_outcome).await
+    }
+}
+
+impl<IO> WriteHalf<TlsStream<IO>> {
+    /// Returns the shared stream's local early-data outcome.
+    pub async fn early_data_outcome(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.inspect(|stream| stream.early_data_outcome()).await
+    }
+
+    /// Acknowledges unresent early data on the shared stream.
+    pub async fn acknowledge_rejected_early_data(&mut self) -> io::Result<Option<usize>> {
+        self.inspect(TlsStream::acknowledge_rejected_early_data)
+            .await
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> WriteHalf<TlsStream<IO>> {
+    /// Completes the shared stream's early phase and returns its outcome.
+    pub async fn finish_early_data(&mut self) -> io::Result<EarlyDataOutcome> {
+        self.drive(TlsStream::poll_early_data_outcome).await
+    }
+}
+
 impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
+    /// Completes the early phase and returns its outcome. A rejected
+    /// outcome leaves the stream usable after acknowledgement.
+    pub async fn finish_early_data(&mut self) -> io::Result<EarlyDataOutcome> {
+        std::future::poll_fn(|cx| self.poll_early_data_outcome(cx)).await
+    }
+
+    pub(crate) fn poll_early_data_outcome(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<EarlyDataOutcome>> {
+        self.st.begin_poll();
+        coop::budgeted(cx, |cx| {
+            ready!(self.poll_drive_early_for_write(cx))?;
+            Poll::Ready(Ok(self.early_data_outcome()))
+        })
+    }
+
     /// Readies the stream for kernel TLS offload (see [`crate::kernel`]):
     /// completes the handshake of a stream returned early for 0-RTT data
     /// (sending declined early data again where that is allowed), writes
@@ -390,6 +566,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     pub(crate) fn poll_finish_early(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         early::poll_finish(
             &mut self.early,
+            &mut self.early_result,
             &mut self.io,
             &mut self.session,
             &mut self.st,
@@ -398,12 +575,33 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     }
 
     /// A write of nothing: moves nothing, and fails as a write would after
-    /// a handshake failure kept by the early phase or after `shutdown`.
+    /// the early phase (a kept handshake failure or an unacknowledged
+    /// rejection) or after `shutdown`.
     fn empty_write(&self) -> io::Result<usize> {
-        if let Some(early) = &self.early {
-            early.check()?;
-        }
+        self.early_result.check_write()?;
         common::empty_write(&self.st)
+    }
+
+    pub(crate) fn poll_finish_early_for_write(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        ready!(self.poll_drive_early_for_write(cx))?;
+        Poll::Ready(self.early_result.check_write())
+    }
+
+    fn poll_drive_early_for_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let joint = self
+            .early
+            .as_ref()
+            .and_then(EarlyData::read_waker)
+            .filter(|reader| !reader.will_wake(cx.waker()))
+            .map(|reader| common::joint_waker(cx.waker(), Some(reader)));
+        let poll = match &joint {
+            Some(waker) => self.poll_finish_early(&mut Context::from_waker(waker)),
+            None => self.poll_finish_early(cx),
+        };
+        self.st.track(cx, poll)
     }
 
     /// The early-data part of a write: `Ready(Ok(n))` with `n > 0` when
@@ -415,14 +613,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let Some(early) = &mut self.early else {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(self.early_result.check_write().map(|()| 0));
         };
         match early::write(early, &mut self.session, bufs) {
             Ok(0) => {}
             other => return Poll::Ready(other),
         }
-        let poll = self.poll_finish_early(cx);
-        self.st.track(cx, poll).map_ok(|()| 0)
+        self.poll_finish_early_for_write(cx).map_ok(|()| 0)
     }
 
     /// Ends the early-data phase for a read, which may have taken over the
@@ -430,7 +627,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// when another operation ends the phase.
     fn poll_finish_early_for_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.early.is_none() {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(self.early_result.failure());
         }
         // The handshake writes too, and may take a parked writer's
         // registration: register both tasks, as answering reads do.
@@ -530,8 +727,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
-            let poll = this.poll_finish_early(cx);
-            ready!(this.st.track(cx, poll))?;
+            ready!(this.poll_finish_early_for_write(cx))?;
             common::poll_flush(&mut this.io, &mut this.session, &mut this.st, cx)
         })
     }
@@ -540,8 +736,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         coop::budgeted(cx, |cx| {
-            let poll = this.poll_finish_early(cx);
-            ready!(this.st.track(cx, poll))?;
+            ready!(this.poll_finish_early_for_write(cx))?;
             common::poll_shutdown(&mut this.io, &mut this.session, &mut this.st, cx)
         })
     }

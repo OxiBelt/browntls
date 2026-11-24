@@ -16,7 +16,7 @@ use super::{Options, Result, connect_with_retry, listen, serve, server_config, s
 pub(super) fn client_facing(o: &Options) -> Result<()> {
     let ech = o
         .ech_server()?
-        .ok_or("--ech-config and --ech-key are required")?;
+        .ok_or("client-facing requires an ECH decryption configuration")?;
     if o.backends.is_empty() {
         return Err("--backend is required".into());
     }
@@ -81,7 +81,7 @@ fn front(
         let conn = front
             .into_server_connection(local.clone())
             .map_err(|e| e.to_string())?;
-        return serve(StreamOwned::new(conn, client), index);
+        return serve(StreamOwned::new(conn, client), index, o);
     }
 
     let name = front.server_name().unwrap_or_default().to_owned();

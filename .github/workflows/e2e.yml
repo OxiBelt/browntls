@@ -76,6 +76,35 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  dtls:
+    name: DTLS interoperability
+    needs: image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download amd64 image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: browntls-e2e-image-amd64
+          path: ${{ runner.temp }}/browntls-e2e-image
+
+      - name: Load amd64 image
+        run: docker load --input "${RUNNER_TEMP}/browntls-e2e-image/browntls-e2e-amd64.tar"
+
+      - name: Exchange DTLS datagrams with wolfSSL and OpenSSL
+        run: |
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite all
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite openssl --resumption --skip-peer-build
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite wolfssl-cid --skip-peer-build
+          python3 -B tests/e2e/dtls.py --arch amd64 --suite wolfssl-pqc --skip-peer-build
+
   e2e:
     name: E2E ${{ matrix.label }} vs ${{ matrix.description }}
     needs:

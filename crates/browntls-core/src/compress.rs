@@ -31,9 +31,17 @@
 //! work in the output buffer alone; each documents the memory it can use
 //! besides it, which never depends on what the peer declares beyond these
 //! bounds: a fixed decoder state (about 11 KiB) for zlib, a window no larger
-//! than the expected length
-//! rounded up to a power of two for Brotli, and at most 256 KiB for
-//! Zstandard, plus entropy tables whose size the formats fix.
+//! than the expected length rounded up to a power of two for Brotli, and a
+//! bounded Zstandard workspace. With ruzstd 0.9.1, at most 128 KiB of history
+//! is retained between blocks. The ring can grow beyond that during a block,
+//! including when ruzstd appends a sequence before checking its decoded size.
+//! The format bounds that transient growth by the maximum literal and match
+//! lengths. The block input and literal vectors each hold at most 128 KiB of
+//! data, and the sequence vector holds at most 43,690 three-word entries.
+//! With the pinned decoder and toolchain, the variable buffers request less
+//! than 4 MiB including capacity growth and temporary reallocations, plus
+//! bounded Huffman/FSE tables and allocator overhead. These allocations are
+//! independent of the size of the advertised window.
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -43,7 +51,7 @@ use crate::enums::{AlertDescription, CertificateCompressionAlgorithm};
 use crate::error::{Error, PeerMisbehaved};
 use crate::msgs::codec::Codec;
 use crate::msgs::handshake::{
-    CertificatePayloadTls13, CompressedCertificatePayload, MAX_CERTIFICATE_SIZE_LIMIT,
+    CertificatePayloadTls13, CompressedCertificatePayload, MAX_HANDSHAKE_SIZE,
 };
 
 #[cfg(feature = "brotli")]
@@ -58,17 +66,29 @@ pub use self::brotli::{BROTLI, Brotli};
 #[cfg(feature = "zlib")]
 pub use self::zlib::{ZLIB, Zlib};
 #[cfg(feature = "zstd")]
-pub use self::zstd::{ZSTD, Zstd};
+pub use self::zstd::{ZSTD, Zstd, ZstdDecompressionLimits};
 
 /// The largest `uncompressed_length` ever accepted, whatever a configuration
-/// allows: the size limit of an uncompressed Certificate message (64 KiB).
-pub const MAX_DECOMPRESSED_CERTIFICATE_SIZE: usize = MAX_CERTIFICATE_SIZE_LIMIT;
+/// allows: the handshake body limit also applied to a plain Certificate.
+pub const MAX_DECOMPRESSED_CERTIFICATE_SIZE: usize = MAX_HANDSHAKE_SIZE as usize;
 
 /// Decompresses a received `CompressedCertificate`.
 pub trait CertDecompressor: Debug + Send + Sync {
     /// Decompresses `input` into `output`, which is exactly the declared
     /// uncompressed length; fails unless `output` is filled completely.
     fn decompress(&self, input: &[u8], output: &mut [u8]) -> Result<(), DecompressionFailed>;
+
+    /// Decompresses with the endpoint's Zstandard window and history limits.
+    /// Implementations which own their own limits can use the default.
+    #[cfg(feature = "zstd")]
+    fn decompress_with_zstd_limits(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        _limits: ZstdDecompressionLimits,
+    ) -> Result<(), DecompressionFailed> {
+        self.decompress(input, output)
+    }
 
     /// The algorithm implemented.
     fn algorithm(&self) -> CertificateCompressionAlgorithm;
@@ -176,19 +196,56 @@ pub(crate) enum CertDecompressionError {
     Invalid,
 }
 
+pub(crate) struct DecompressionLimits {
+    output: usize,
+    #[cfg(feature = "zstd")]
+    zstd: ZstdDecompressionLimits,
+}
+
+impl From<&crate::ClientConfig> for DecompressionLimits {
+    fn from(config: &crate::ClientConfig) -> Self {
+        Self {
+            output: config.cert_decompression_limit,
+            #[cfg(feature = "zstd")]
+            zstd: config.cert_zstd_decompression_limits,
+        }
+    }
+}
+
+impl From<&crate::ServerConfig> for DecompressionLimits {
+    fn from(config: &crate::ServerConfig) -> Self {
+        Self {
+            output: config.cert_decompression_limit,
+            #[cfg(feature = "zstd")]
+            zstd: config.cert_zstd_decompression_limits,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "fuzzing"))]
+impl From<usize> for DecompressionLimits {
+    fn from(output: usize) -> Self {
+        Self {
+            output,
+            #[cfg(feature = "zstd")]
+            zstd: ZstdDecompressionLimits::default(),
+        }
+    }
+}
+
 /// Expands a received `CompressedCertificate` (RFC 8879 §4) into the encoded
 /// Certificate message body.
 ///
-/// `limit` is the configured maximum; [`MAX_DECOMPRESSED_CERTIFICATE_SIZE`]
-/// applies as well. The output buffer is allocated once, at the declared
+/// The configured output limit and [`MAX_DECOMPRESSED_CERTIFICATE_SIZE`]
+/// both apply. The output buffer is allocated once, at the declared
 /// length, and only after that length passed both limits.
 pub(crate) fn decompress_certificate(
     decompressors: &[&'static dyn CertDecompressor],
-    limit: usize,
+    limits: DecompressionLimits,
     compressed: &CompressedCertificatePayload<'_>,
 ) -> Result<Vec<u8>, CertDecompressionError> {
     // With a limit of zero nothing was offered (`offered_cert_compression`).
-    if limit == 0 {
+    if limits.output == 0 {
         return Err(CertDecompressionError::UnofferedAlgorithm);
     }
     let decompressor = decompressors
@@ -197,13 +254,21 @@ pub(crate) fn decompress_certificate(
         .ok_or(CertDecompressionError::UnofferedAlgorithm)?;
     let len = usize::try_from(compressed.uncompressed_len)
         .map_err(|_| CertDecompressionError::Invalid)?;
-    if len == 0 || len > limit.min(MAX_DECOMPRESSED_CERTIFICATE_SIZE) {
+    if len == 0 || len > limits.output.min(MAX_DECOMPRESSED_CERTIFICATE_SIZE) {
         return Err(CertDecompressionError::Invalid);
     }
     let mut output = alloc::vec![0u8; len];
-    decompressor
-        .decompress(compressed.compressed.0.bytes(), &mut output)
-        .map_err(|_| CertDecompressionError::Invalid)?;
+    let input = compressed.compressed.0.bytes();
+    #[cfg(feature = "zstd")]
+    let result = match compressed.alg {
+        CertificateCompressionAlgorithm::Zstd => {
+            decompressor.decompress_with_zstd_limits(input, &mut output, limits.zstd)
+        }
+        _ => decompressor.decompress(input, &mut output),
+    };
+    #[cfg(not(feature = "zstd"))]
+    let result = decompressor.decompress(input, &mut output);
+    result.map_err(|_| CertDecompressionError::Invalid)?;
     Ok(output)
 }
 
@@ -212,10 +277,10 @@ pub(crate) fn decompress_certificate(
 pub(crate) fn receive_compressed_certificate(
     common: &mut CommonState,
     decompressors: &[&'static dyn CertDecompressor],
-    limit: usize,
+    limits: DecompressionLimits,
     compressed: &CompressedCertificatePayload<'_>,
 ) -> Result<CertificatePayloadTls13<'static>, Error> {
-    let body = match decompress_certificate(decompressors, limit, compressed) {
+    let body = match decompress_certificate(decompressors, limits, compressed) {
         Ok(body) => body,
         Err(CertDecompressionError::UnofferedAlgorithm) => {
             return Err(common.send_fatal_alert(
@@ -232,7 +297,10 @@ pub(crate) fn receive_compressed_certificate(
     };
     CertificatePayloadTls13::read_bytes(&body)
         .map(CertificatePayloadTls13::into_owned)
-        .map_err(|_| {
+        .map_err(|error| {
+            if error == crate::error::InvalidMessage::DisallowedCertificateExtension {
+                return common.send_fatal_alert(AlertDescription::IllegalParameter, error);
+            }
             common.send_fatal_alert(
                 AlertDescription::BadCertificate,
                 PeerMisbehaved::InvalidCertCompression,
@@ -249,6 +317,9 @@ pub(crate) fn compress_certificate(
     offered: &[CertificateCompressionAlgorithm],
     encoded: &[u8],
 ) -> Option<CompressedCertificatePayload<'static>> {
+    if encoded.len() > MAX_DECOMPRESSED_CERTIFICATE_SIZE {
+        return None;
+    }
     let compressor = compressors
         .iter()
         .find(|c| offered.contains(&c.algorithm()))?;
@@ -383,7 +454,7 @@ mod tests {
             compressed: PayloadU24(Payload::Borrowed(&[1, 2, 3, 4])),
         };
         assert_eq!(
-            decompress_certificate(&[], 1024, &payload),
+            decompress_certificate(&[], 1024.into(), &payload),
             Err(CertDecompressionError::UnofferedAlgorithm)
         );
     }
@@ -419,7 +490,7 @@ mod tests {
         // configured limit: refused without calling the decompressor
         // a limit of zero offers nothing, so anything is unoffered
         assert_eq!(
-            decompress_certificate(&[&PROBE], 0, &payload(1)),
+            decompress_certificate(&[&PROBE], 0.into(), &payload(1)),
             Err(CertDecompressionError::UnofferedAlgorithm)
         );
         assert_eq!(called(), usize::MAX);
@@ -437,7 +508,7 @@ mod tests {
             (usize::MAX, 0x00ff_ffff),
         ] {
             assert_eq!(
-                decompress_certificate(&[&PROBE], limit, &payload(len)),
+                decompress_certificate(&[&PROBE], limit.into(), &payload(len)),
                 Err(CertDecompressionError::Invalid),
                 "limit {limit} len {len}"
             );
@@ -446,14 +517,14 @@ mod tests {
 
         // at a limit: the buffer has exactly the declared length
         assert_eq!(
-            decompress_certificate(&[&PROBE], 1024, &payload(1024))
+            decompress_certificate(&[&PROBE], 1024.into(), &payload(1024))
                 .unwrap()
                 .len(),
             1024
         );
         assert_eq!(called(), 1024);
         assert_eq!(
-            decompress_certificate(&[&PROBE], usize::MAX, &payload(hard))
+            decompress_certificate(&[&PROBE], usize::MAX.into(), &payload(hard))
                 .unwrap()
                 .len(),
             MAX_DECOMPRESSED_CERTIFICATE_SIZE
@@ -575,12 +646,12 @@ mod tests {
         }
         let list = [Leak::of(decompressor)];
         assert_eq!(
-            decompress_certificate(&list, 3000, &payload(3000)).unwrap(),
+            decompress_certificate(&list, 3000.into(), &payload(3000)).unwrap(),
             plain
         );
         for (limit, len) in [(2999, 3000), (3000, 2999), (usize::MAX, 3001), (1, 3000)] {
             assert_eq!(
-                decompress_certificate(&list, limit, &payload(len)),
+                decompress_certificate(&list, limit.into(), &payload(len)),
                 Err(CertDecompressionError::Invalid)
             );
         }

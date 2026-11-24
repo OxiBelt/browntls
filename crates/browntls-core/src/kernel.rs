@@ -50,8 +50,9 @@ use crate::suites::{ConnectionTrafficSecrets, ExtractedSecrets, SupportedCipherS
 
 /// What keeps a connection from being handed to the kernel now.
 ///
-/// Every blocker but the first four can be cleared by driving the
-/// connection on: read the received data, write the queued records.
+/// Transient blockers can be cleared by driving the connection on: read the
+/// received data, write the queued records. Other blockers need a different
+/// connection, configuration, or kernel.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernelHandoffBlocker {
@@ -89,6 +90,9 @@ pub enum KernelHandoffBlocker {
     /// The configured `max_fragment_size` is below the smallest record
     /// payload Linux accepts (64 bytes; 63 for TLS 1.3).
     FragmentTooSmall,
+    /// The negotiated receive record size limit is below the protocol
+    /// maximum, which Linux kernel TLS cannot enforce on received records.
+    ReceiveRecordSizeLimit,
 }
 
 impl fmt::Display for KernelHandoffBlocker {
@@ -106,6 +110,9 @@ impl fmt::Display for KernelHandoffBlocker {
             Self::KeyUpdatePending => "a KeyUpdate is waiting to be sent",
             Self::RevocationPending => "certificate authentication is awaiting revocation evidence",
             Self::FragmentTooSmall => "the maximum fragment size is below what kernel TLS takes",
+            Self::ReceiveRecordSizeLimit => {
+                "the receive record size limit is below what kernel TLS can enforce"
+            }
         })
     }
 }
@@ -203,6 +210,13 @@ impl<Data: SideData> ConnectionCore<Data> {
             }
             Err(_) => return Some(KernelHandoffBlocker::UnsupportedCipherSuite),
         }
+        let max_rx_record_size = crate::common_state::max_record_size_limit(common.is_tls13());
+        if common
+            .negotiated_receive_record_size_limit()
+            .is_some_and(|limit| limit < max_rx_record_size)
+        {
+            return Some(KernelHandoffBlocker::ReceiveRecordSizeLimit);
+        }
         if let Some(blocker) = self.in_flight_blocker() {
             return Some(blocker);
         }
@@ -286,6 +300,13 @@ impl CommonState {
     }
 }
 
+impl KernelConnection<crate::client::ClientConnectionData> {
+    /// The reference identity authenticated in the userspace handshake.
+    pub fn matched_service_identity(&self) -> Option<&browntls_pki::ReferenceIdentifier> {
+        self.core.common_state.matched_service_identity()
+    }
+}
+
 impl<Data: SideData> KernelConnection<Data> {
     /// The negotiated protocol version.
     pub fn protocol_version(&self) -> ProtocolVersion {
@@ -339,11 +360,11 @@ impl<Data: SideData> KernelConnection<Data> {
         let state = match typ {
             ContentType::Handshake => self.handle_handshake(state, payload)?,
             _ => {
-                let result = match Message::try_from(InboundPlainMessage {
+                let result = match Message::try_from(InboundPlainMessage::new(
                     typ,
-                    version: ProtocolVersion::TLSv1_2,
+                    ProtocolVersion::TLSv1_2,
                     payload,
-                }) {
+                )) {
                     Ok(msg) => ConnectionCore::process_msg(
                         &mut self.core.common_state,
                         &mut self.core.data,

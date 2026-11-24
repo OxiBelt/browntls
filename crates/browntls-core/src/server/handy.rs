@@ -34,7 +34,9 @@ mod cache {
     use core::fmt::{Debug, Formatter};
     use std::sync::Mutex;
 
+    use crate::enums::ProtocolVersion;
     use crate::limited_cache::LimitedCache;
+    use crate::msgs::persist::ServerSessionValue;
     use crate::server::server_conn::StoresServerSessions;
     use crate::sync::Arc;
 
@@ -65,6 +67,11 @@ mod cache {
 
         fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
             self.cache.lock().ok()?.get(key).cloned()
+        }
+
+        fn session_version(&self, key: &[u8]) -> Option<ProtocolVersion> {
+            let cache = self.cache.lock().ok()?;
+            ServerSessionValue::encoded_version(cache.get(key)?)
         }
 
         fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -98,6 +105,31 @@ mod cache {
             assert_eq!(c.get(&[1]), None);
             assert_eq!(c.take(&[3]), Some(alloc::vec![30]));
             assert_eq!(c.get(&[3]), None);
+        }
+
+        #[test]
+        fn session_versions_are_read_without_removing_values() {
+            let cache = ServerSessionMemoryCache::new(4);
+            let cases = [
+                (b'a', alloc::vec![0, 3, 3], Some(ProtocolVersion::TLSv1_2)),
+                (
+                    b'b',
+                    alloc::vec![1, 3, b's', b'n', b'i', 3, 4],
+                    Some(ProtocolVersion::TLSv1_3),
+                ),
+                (
+                    b'c',
+                    alloc::vec![0, 0xfe, 0xfc],
+                    Some(ProtocolVersion::DTLSv1_3),
+                ),
+                (b'd', alloc::vec![1, 1], None),
+            ];
+            for (key, value, version) in cases {
+                assert!(cache.put(alloc::vec![key], value.clone()));
+                assert_eq!(cache.session_version(&[key]), version);
+                assert_eq!(cache.take(&[key]), Some(value));
+            }
+            assert_eq!(cache.session_version(b"absent"), None);
         }
     }
 }
@@ -194,7 +226,7 @@ mod sni_resolver {
     impl ResolvesServerCert for ResolvesServerCertUsingSni {
         fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
             let name = client_hello.server_name()?;
-            let dns = DnsName::try_from(name).ok()?.to_lowercase_owned();
+            let dns = DnsName::try_from_ascii(name).ok()?.to_lowercase_owned();
             self.by_name.get(&dns).cloned()
         }
     }

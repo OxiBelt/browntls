@@ -256,7 +256,7 @@ impl PostHandshakeAuth {
                 let certp = crate::compress::receive_compressed_certificate(
                     cx.common,
                     &self.config.cert_decompressors,
-                    self.config.cert_decompression_limit,
+                    crate::compress::DecompressionLimits::from(self.config.as_ref()),
                     compressed,
                 )?;
                 pending.transcript.add_message(m);

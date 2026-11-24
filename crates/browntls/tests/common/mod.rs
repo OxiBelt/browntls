@@ -21,10 +21,114 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
+/// Adds an observable Zstandard-only receive path to a facade handshake.
+#[cfg(feature = "zstd")]
+pub fn zstd_server(
+    mut server: ServerConfig,
+    client: &mut ClientConfig,
+) -> (ServerConfig, &'static ZstdReception) {
+    use browntls::CertificateCompressionAlgorithm;
+    use browntls::compress::{self, CertCompressor, CompressionFailed, CompressionLevel};
+
+    #[derive(Debug)]
+    struct ZstdSender;
+
+    impl CertCompressor for ZstdSender {
+        fn algorithm(&self) -> CertificateCompressionAlgorithm {
+            CertificateCompressionAlgorithm::Zstd
+        }
+
+        fn compress(
+            &self,
+            plain: Vec<u8>,
+            _: CompressionLevel,
+        ) -> Result<Vec<u8>, CompressionFailed> {
+            let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x68];
+            frame.extend_from_slice(&(((plain.len() as u32) << 3) | 1).to_le_bytes()[..3]);
+            frame.extend_from_slice(&plain);
+            Ok(frame)
+        }
+    }
+
+    let probe = Box::leak(Box::new(ZstdReception::default()));
+    client.cert_decompressors = vec![probe];
+    client.cert_zstd_decompression_limits =
+        compress::ZstdDecompressionLimits::new(8 << 20, 128 << 10).unwrap();
+    server.cert_compressors = vec![&ZstdSender];
+    (server, probe)
+}
+
+#[cfg(feature = "zstd")]
+#[derive(Debug, Default)]
+pub struct ZstdReception(std::sync::atomic::AtomicUsize);
+
+#[cfg(feature = "zstd")]
+impl ZstdReception {
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "zstd")]
+impl browntls::compress::CertDecompressor for ZstdReception {
+    fn algorithm(&self) -> browntls::CertificateCompressionAlgorithm {
+        browntls::CertificateCompressionAlgorithm::Zstd
+    }
+
+    fn decompress(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), browntls::compress::DecompressionFailed> {
+        self.decompress_with_zstd_limits(input, output, Default::default())
+    }
+
+    fn decompress_with_zstd_limits(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        limits: browntls::compress::ZstdDecompressionLimits,
+    ) -> Result<(), browntls::compress::DecompressionFailed> {
+        browntls::compress::ZSTD.decompress_with_limits(input, output, limits)?;
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// The native provider, named explicitly: a build with both the `native` and
 /// the `rustcrypto` feature has no process default to fall back on.
 pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(browntls::crypto::native::default_provider())
+}
+
+/// One explicit provider policy for each RFC 10024 group it must implement.
+pub fn hybrid_providers() -> Vec<(browntls::NamedGroup, CryptoProvider)> {
+    use browntls::NamedGroup;
+    use browntls::crypto::SupportedKxGroup;
+
+    let mut cases = Vec::new();
+    let mut add = |provider: CryptoProvider, groups: &[&'static dyn SupportedKxGroup]| {
+        for name in [
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::secp256r1MLKEM768,
+            NamedGroup::secp384r1MLKEM1024,
+        ] {
+            let mut provider = provider.clone();
+            provider.kx_groups = vec![*groups.iter().find(|group| group.name() == name).unwrap()];
+            cases.push((name, provider));
+        }
+    };
+    #[cfg(feature = "native")]
+    add(
+        browntls::crypto::native::default_provider(),
+        browntls::crypto::native::ALL_KX_GROUPS,
+    );
+    #[cfg(feature = "rustcrypto")]
+    add(
+        browntls::crypto::rustcrypto::default_provider(),
+        browntls::crypto::rustcrypto::ALL_KX_GROUPS,
+    );
+    cases
 }
 
 /// A CA, a `localhost` server certificate and a `client.example` client
@@ -114,8 +218,12 @@ impl Pki {
 
     /// A server configuration for every protocol version that is built.
     pub fn server_config(&self) -> ServerConfig {
+        self.server_config_with_provider(provider())
+    }
+
+    pub fn server_config_with_provider(&self, provider: Arc<CryptoProvider>) -> ServerConfig {
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
-        ServerConfig::builder_with_provider(provider())
+        ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()
@@ -155,7 +263,11 @@ impl Pki {
 
     /// A client configuration that trusts the CA.
     pub fn client_config(&self) -> ClientConfig {
-        ClientConfig::builder_with_provider(provider())
+        self.client_config_with_provider(provider())
+    }
+
+    pub fn client_config_with_provider(&self, provider: Arc<CryptoProvider>) -> ClientConfig {
+        ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(self.roots())

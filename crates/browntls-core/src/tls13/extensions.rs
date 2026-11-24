@@ -63,8 +63,11 @@ pub(crate) fn allowed_in(ext: ExtensionType, msg: Tls13Message) -> Option<bool> 
         E::MaxFragmentLength => &[ClientHello, EncryptedExtensions],
         E::SCT => &[ClientHello, CertificateRequest, Certificate],
         E::TransportParametersDraft => &[ClientHello, EncryptedExtensions],
-        // RFC 8773 (RFC 9973).
+        // RFC 9973 §5.
         E::TlsCertWithExternPsk => &[ClientHello, ServerHello],
+        // DTLS admits these in ServerHello through its CID and RRC hooks.
+        // Stream TLS and QUIC must never select it.
+        E::ConnectionId | E::ReturnRoutabilityCheck => &[ClientHello],
 
         // Defined by RFCs outside RFC 9846; IANA registry TLS 1.3 column.
         // RFC 8449 §4: the server answers in EncryptedExtensions.

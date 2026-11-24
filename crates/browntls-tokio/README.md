@@ -27,6 +27,11 @@ The items are the same ones (`browntls::tokio::TlsConnector` is
 the items through this crate, `browntls_tokio`, and the protocol crate
 through its re-export `browntls_tokio::browntls`.
 
+Key logging is configured on the shared `browntls::ClientConfig` or
+`ServerConfig`. It is disabled by default; see the facade's
+[key logging](../browntls/README.md#key-logging) section for explicit file
+sink construction and its secret exposure.
+
 ## Client
 
 ```rust,no_run
@@ -85,6 +90,119 @@ async fn serve(config: ServerConfig) -> std::io::Result<()> {
 }
 ```
 
+## Encrypted Client Hello
+
+The buffered and unbuffered `TlsConnector::from_ech_pem` install a client
+ECH configuration from a parsed `browntls::ech::pem::EchPem`.
+`TlsAcceptor::from_ech_pem` takes separate sets of decryption and retry
+PEM objects for a server that decrypts ECH itself. Both take an owned TLS
+configuration and the HPKE suites to use. They preserve the other TLS
+settings, including certificate validation and the certificate resolver.
+Use a TLS 1.3 configuration for the ECH client. The server's resolver
+must also cover the public name so clients can authenticate an ECH
+rejection.
+
+## DTLS over UDP
+
+The optional `dtls` feature provides `dtls::UdpClient` over a Tokio
+`UdpSocket` the application binds and connects. Through the facade, enable
+`browntls`'s `dtls` feature (which also enables `tokio`). This is a datagram
+API, separate from the stream connector and acceptor above.
+
+```rust,no_run
+# #[cfg(feature = "dtls")]
+# async fn example(config: std::sync::Arc<browntls_tokio::browntls::ClientConfig>) -> std::io::Result<()> {
+use browntls_tokio::dtls::{Recv, UdpClient};
+use browntls_tokio::browntls::pki_types::ServerName;
+use std::time::Duration;
+use tokio::net::UdpSocket;
+
+let socket = UdpSocket::bind("127.0.0.1:0").await?;
+socket.connect("127.0.0.1:4433").await?;
+let name = ServerName::try_from("localhost").expect("valid DNS name");
+let mut client = UdpClient::new(config, name, socket)?;
+client.set_timeout(Some(Duration::from_secs(10)));
+client.complete_handshake().await?;
+assert!(!client.connection().is_handshaking());
+client.send(b"hello").await?;
+let mut buf = [0; 2048];
+match client.recv(&mut buf).await? {
+    Recv::Data(len) => { /* buf[..len], including a possible empty datagram */ }
+    Recv::Closed => { /* authenticated close_notify */ }
+}
+client.close().await?;
+# Ok(())
+# }
+```
+
+The client takes ownership of the socket and starts no background task.
+Enable the runtime's I/O and time drivers. Handshake, send, receive and close
+drive core's datagrams and timers using elapsed `tokio::time::Instant` from
+one fixed origin. `set_timeout` bounds each complete operation, including an
+implicit handshake and protocol writes; incoming traffic does not restart
+the deadline. Zero expires immediately. Without that limit core's handshake
+retransmission limit still applies. Idle clients do no work; call an I/O
+operation to process messages or overdue timers.
+
+`new` and `from_connection` return before I/O; `connect` is a convenience
+constructor that completes the handshake. Use the former constructors to
+retain the client when cancelling a handshake. A `from_connection` connection
+must be fresh, with no timers already driven under another clock origin.
+`connection()` exposes negotiated parameters directly without a wrapper
+cache. Live OCSP queries return `Unsupported` without bypassing verification.
+
+Each send seals one whole application datagram. Oversized data returns
+`InvalidInput`; inspect `connection().max_application_data()` after the
+handshake for the current limit. Receive keeps whole records from one UDP
+payload until consumed. A short application buffer returns `InvalidInput`
+and retains the record; empty records return `Recv::Data(0)`, while only an
+authenticated close returns `Recv::Closed`. Ordinary UDP payloads are read
+into a 65,535-byte buffer; IPv6 jumbograms are unsupported. The receive side
+never accumulates another UDP payload while plaintext from the current one
+remains. Each poll does a bounded burst of work and then yields.
+
+Cancellation and operation timeouts retain the client's protocol state,
+plaintext ranges and pending ciphertext. Sealed ciphertext stays byte for
+byte unchanged until the socket accepts the entire datagram, including after
+an I/O error. A cancelled or failed send may already have accepted or sent
+the application's data; the next operation first drains pending output.
+Retrying the plaintext can therefore duplicate an application message. DTLS
+does not reliably deliver application data. Close sends `close_notify`
+without waiting for acknowledgement, can be resumed after cancellation,
+and forbids later sends. Established clients can still receive. If a client
+closes during the handshake, later handshake and receive calls return
+`ConnectionAborted`. Dropping the client releases the socket and buffered
+state.
+
+`dtls::UdpServer` serves multiple peers on one unconnected Tokio UDP
+socket. Call `next_event` to receive `Connected`, `Received`, `Closed`,
+and `Failed` events. `send_to` and `close` address a peer by its socket
+address. The server requires a cookie sealer. It bounds pending handshakes,
+established peers, and queued datagrams. Poll an operation to drive both
+socket I/O and retransmission timers.
+
+For individually owned peers, `dtls::UdpListener::new` returns a listener
+and a `SessionDriver`. Run the driver in a task owned by the application.
+Each accepted `UdpSession` receives whole datagrams and can send and close
+independently. `SessionLimits` bounds retained sessions and all queues.
+Sends wait for command capacity. A full receive queue drops newly arriving
+application datagrams while retaining close and error state.
+
+The client, event server, and session listener default to DTLS 1.3.
+Use `new_with_versions` with `browntls::dtls::Versions` to enable DTLS 1.2.
+The certificates and suites in the shared TLS configuration determine the
+handshake.
+
+Use the settings-based constructors with
+`Settings::with_return_routability_checks` for RFC 9853 path validation.
+Servers and listeners support basic and enhanced selection. A client can call
+`replace_socket` with another UDP socket connected to the same server and
+drive `recv` to answer path checks. Applications can retry data discarded
+before validation. An event server keeps its original peer handle and reports
+a validated address change through `ServerEvent::PeerAddressChanged`. An
+existing `UdpSession` stays usable and exposes its latest validated address
+through `peer_addr` and `peer_addr_changed`.
+
 ## Choosing the configuration per ClientHello
 
 `LazyConfigAcceptor` reads the ClientHello before the server picks a
@@ -113,15 +231,42 @@ async fn accept(
 
 ## 0-RTT early data
 
-With `ClientConfig::enable_early_data` set and `TlsConnector::early_data(true)`,
-`connect` returns before the handshake when a resumed TLS 1.3 session allows
-early data. Writes then go out as early data with the ClientHello, up to the
-server's allowance; the first read, flush or shutdown (or a write beyond the
-allowance) completes the handshake. Early data the server declined is sent again
-as ordinary data only when the same application protocol is certain (no ALPN
-offered, or exactly one offered and selected, as RFC 9846 §4.2.10 requires);
-otherwise that operation fails with `client::EarlyDataNotResent` and the
-application decides what to send.
+With `ClientConfig::enable_early_data` and `TlsConnector::early_data(true)`,
+`connect` can return before the handshake when a TLS 1.3 ticket or an
+external PSK permits early writes. A read, flush, shutdown, explicit
+`finish_early_data()`, or write past the allowance finishes the handshake.
+
+By default the client reports declined 0-RTT without sending it again.
+Retain the original payload and use `finish_early_data()` or
+`early_data_outcome()` to see how many bytes remain unresent. Ordinary
+writes, flush, shutdown and kernel handoff return `EarlyDataNotResent`
+until `acknowledge_rejected_early_data()` is called. The native client
+split exposes the shared outcome on either half and acknowledgement on the
+write half. Settle the early phase before a generic Tokio split when
+application retry is required, or reunite the halves to acknowledge it.
+
+Opt in separately by passing `RejectedEarlyDataPolicy::ResendIfSameAlpn`
+with a nonzero `max_bytes` to `rejected_early_data_policy`.
+The cap limits early writes and the plaintext retained for resend. The
+retry requires the same concrete ALPN as the ticket-issuing connection or
+provisioned PSK (RFC 9846 §4.3.10 and Appendix F.5). Absent, unknown or
+different ALPN leaves the decision to the application. Counts describe
+local TLS progress. The peer application may not have processed the bytes.
+
+In report-only mode the application can use this sequence before it writes
+ordinary data. A returned byte count tells the caller how much of its
+retained payload needs a decision. The same sequence works with
+`unbuffered::ClientTlsStream`.
+
+```rust,no_run
+use browntls_tokio::client::TlsStream;
+use tokio::net::TcpStream;
+
+async fn settle(tls: &mut TlsStream<TcpStream>) -> std::io::Result<usize> {
+    tls.finish_early_data().await?;
+    Ok(tls.acknowledge_rejected_early_data().unwrap_or(0))
+}
+```
 
 A server that set `max_early_data_size` (with stateful session storage) reads
 accepted early data through `server::TlsStream::early_data`, an `AsyncRead`
@@ -166,9 +311,10 @@ after the handshake comes from a client that took part in it. Read before, it
 may be a recorded ClientHello and early data sent again. For a resumed
 session, browntls takes the session out of the server's session storage, which
 makes a ticket good for one attempt as long as every server honouring it shares
-that storage; early data under an external PSK that allows it has no such
-protection, and the library keeps no other anti-replay store. Act before the
-handshake completes only on requests that are safe to repeat (RFC 9846 §8, RFC
+that storage. For an external PSK, acceptance requires a per-key cutoff
+and a committed decision from an application-supplied replay policy. Act
+before the handshake completes only on requests that are safe to repeat
+(RFC 9846 §8, RFC
 8470 for HTTP), and bound the operations that complete the handshake with
 timeouts of their own: the one around `accept` no longer covers them.
 
@@ -299,19 +445,20 @@ async fn echo(tcp: TcpStream, config: Arc<ServerConfig>) -> std::io::Result<()> 
 `get_ref` gives an `UnbufferedClientConnection` or
 `UnbufferedServerConnection` (the negotiated parameters and exporters, no
 reader, writer or I/O methods), and `into_parts` the connection with the
-stream's buffers. The unbuffered connector does not send 0-RTT early data; a
-server's accepted early data is collected during the handshake
+stream's buffers. The unbuffered connector starts in handshake-first mode.
+Opt into early writes and, separately, into bounded automatic resend using
+the same settings as the buffered connector. Settle and flush before
+unwrapping a stream for manual kernel handoff. A server's accepted early
+data is collected during the handshake
 (`TlsStream::early_data`), and the unbuffered acceptors have no
 `early_data` option to return a stream before the handshake completes.
 While more than 16 KiB of answers to the peer are unwritten, reads take no
 more input.
 
-Three things under Behaviour below are not there for these streams yet:
-they have no `into_split` (`tokio::io::split` splits them), the `coop`
-feature does not cover them, so they take nothing from the task budget
-themselves (a transport that counts, such as Tokio's sockets, still does),
-and their handshake futures give only the transport (`get_ref`, `get_mut`),
-not the connection.
+Clients can use `into_split` and inspect early-data results on either half.
+`tokio::io::split` also works for either stream. Unbuffered streams use the
+transport's task budget behavior. Their handshake futures give access to
+the transport through `get_ref` and `get_mut`.
 
 ## Behaviour
 
@@ -379,6 +526,10 @@ counts still does).
 
 `ocsp` enables `browntls_tokio::revocation` (see above). It enables Tokio's
 `time` feature for the deadlines, which adds no dependency.
+
+`dtls` enables the datagram client described above and Tokio's `net` and
+`time` features. It adds no dependency and leaves the default feature set
+unchanged.
 
 ## Minimum supported Rust and Tokio versions
 

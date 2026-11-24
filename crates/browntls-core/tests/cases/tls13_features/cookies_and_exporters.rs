@@ -485,3 +485,49 @@ fn early_exporter_needs_0rtt() {
     assert!(early_export(&client).is_err());
     assert!(early_export(&server).is_err());
 }
+
+#[cfg(feature = "key-log")]
+#[test]
+fn key_log_early_labels_follow_client_attempt_and_server_acceptance() {
+    #[derive(Debug, Default)]
+    struct Labels(std::sync::Mutex<Vec<&'static str>>);
+
+    impl browntls_core::KeyLog for Labels {
+        fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+            let label = match label {
+                "CLIENT_EARLY_TRAFFIC_SECRET" => "CLIENT_EARLY_TRAFFIC_SECRET",
+                "EARLY_EXPORTER_SECRET" => "EARLY_EXPORTER_SECRET",
+                _ => return,
+            };
+            self.0.lock().unwrap().push(label);
+        }
+    }
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    for (attempt, accept) in [(true, true), (true, false), (false, false)] {
+        let (mut client_config, mut server_config) = early_data_pair(&chain);
+        let client_log = Arc::new(Labels::default());
+        let server_log = Arc::new(Labels::default());
+        Arc::make_mut(&mut client_config).key_log = client_log.clone();
+        Arc::make_mut(&mut client_config).enable_early_data = attempt;
+        Arc::make_mut(&mut server_config).key_log = server_log.clone();
+        let mut client = ClientConnection::new(client_config, server_name()).unwrap();
+        let mut server = ServerConnection::new(server_config).unwrap();
+        if !accept {
+            server.reject_early_data();
+        }
+
+        let both = ["CLIENT_EARLY_TRAFFIC_SECRET", "EARLY_EXPORTER_SECRET"];
+        assert_eq!(
+            *client_log.0.lock().unwrap(),
+            if attempt { &both[..] } else { &[] }
+        );
+        do_handshake(&mut client, &mut server).unwrap();
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Resumed));
+        assert_eq!(client.is_early_data_accepted(), accept);
+        assert_eq!(
+            *server_log.0.lock().unwrap(),
+            if accept { &both[..] } else { &[] }
+        );
+    }
+}

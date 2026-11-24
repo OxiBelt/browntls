@@ -50,6 +50,7 @@ pub enum StreamHandoffError<S> {
     /// kernel attaches it to an established connection only) and before
     /// anything was taken from the stream, or when it wraps
     /// [`EarlyDataNotResent`](browntls_tokio::client::EarlyDataNotResent).
+    /// In that case, acknowledge the rejection before retrying handoff.
     /// After any other error the stream has failed like one whose read or
     /// write returned that error.
     ///
@@ -619,7 +620,8 @@ pub(crate) fn permanent(blocker: KernelHandoffBlocker, handshaking: bool) -> boo
         | KernelHandoffBlocker::Quic
         | KernelHandoffBlocker::UnsupportedCipherSuite
         | KernelHandoffBlocker::Closed
-        | KernelHandoffBlocker::FragmentTooSmall => true,
+        | KernelHandoffBlocker::FragmentTooSmall
+        | KernelHandoffBlocker::ReceiveRecordSizeLimit => true,
         _ => false,
     }
 }

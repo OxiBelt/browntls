@@ -89,6 +89,9 @@ pub enum Error {
     /// The configured TLS 1.3 ticket limit exceeds 255.
     BadTls13TicketLimit,
 
+    /// A local delegated credential is malformed or unusable.
+    InvalidDelegatedCredential(crate::delegated_credential::AttachmentError),
+
     /// The private key does not match the certificate.
     InconsistentKeys(InconsistentKeys),
 
@@ -406,9 +409,20 @@ pub enum PeerMisbehaved {
     /// The server selected an external PSK and an ALPN protocol other than
     /// the one the key is restricted to.
     SelectedExternalPskWithOtherAlpn,
-    /// The server negotiated `tls_cert_with_extern_psk` (RFC 8773) without
+    /// The server negotiated `tls_cert_with_extern_psk` (RFC 9973) without
     /// selecting an external PSK.
     CertWithExternPskWithoutExternalPsk,
+    /// RFC 9973 was offered with early data or without the required mode.
+    InvalidCertWithExternPskOffer,
+    /// A required companion to the RFC 9973 ClientHello offer was absent.
+    MissingCertWithExternPskCompanion,
+    /// The RFC 9973 offer changed between the two effective ClientHellos.
+    CertWithExternPskChangedOnRetry,
+    /// An RFC 9973 ClientHello offered a recognizable resumption ticket.
+    ResumptionPskOfferedWithCertWithExternPsk,
+    /// A DTLS 1.3 ClientHello whose `legacy_cookie` is not empty (RFC 9147
+    /// §5.3).
+    IllegalDtlsLegacyCookie,
     /// The peer's `external_id_hash` differs from the one expected
     /// (RFC 8844 §3.2).
     ExternalIdHashMismatch,
@@ -463,12 +477,16 @@ pub enum PeerIncompatible {
     /// The client offered neither a PSK we could use nor anything a server
     /// without a certificate could authenticate with.
     NoUsablePskForServerWithoutCertificate,
-    /// The server selected an external PSK without the certificate
-    /// authentication (RFC 8773) our configuration requires.
+    /// The peer would complete a handshake without the fresh certificate
+    /// and external PSK combination (RFC 9973) required by our policy.
     CertWithExternPskRequired,
     /// The peer completed (or would complete) the handshake without the
     /// external PSK our configuration requires (`require_external_psk`).
     ExternalPskRequired,
+    /// The default DTLS endpoint policy requires DTLS 1.3.
+    Tls13RequiredForDtls,
+    /// The peer selected a version disabled by explicit DTLS endpoint policy.
+    DtlsVersionDisabledByEndpoint,
     /// The peer sent no `external_id_hash` although one is expected and
     /// [`ExternalBinding::require_peer_support`] is set (RFC 8844 §3.2).
     ///
@@ -563,6 +581,9 @@ pub enum CertificateError {
     /// verified: a list is malformed or too large, or verification went
     /// over one of its budgets.
     InvalidTransparencyEvidence(browntls_pki::transparency::TransparencyError),
+    /// CT policy requires a ClientHello that offered both
+    /// `transparency_info` and `status_request` (RFC 9162 §8.1.6).
+    TransparencyOfferRequired,
 }
 
 impl From<CertificateError> for AlertDescription {
@@ -586,7 +607,9 @@ impl From<CertificateError> for AlertDescription {
             InvalidPurpose => Self::UnsupportedCertificate,
             ApplicationVerificationFailure => Self::AccessDenied,
             InvalidTransparencyEvidence(_) => Self::BadCertificate,
-            Other(..) | InsufficientTransparency { .. } => Self::CertificateUnknown,
+            Other(..) | InsufficientTransparency { .. } | TransparencyOfferRequired => {
+                Self::CertificateUnknown
+            }
         }
     }
 }
@@ -761,6 +784,7 @@ impl fmt::Display for Error {
             Self::BadTls13TicketLimit => {
                 f.write_str("the supplied TLS 1.3 ticket limit exceeds 255")
             }
+            Self::InvalidDelegatedCredential(why) => write!(f, "delegated credential: {why}"),
             Self::BadExternalSessionIdLength => {
                 f.write_str("the supplied external_session_id is not 20 to 255 bytes long")
             }

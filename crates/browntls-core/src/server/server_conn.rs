@@ -4,6 +4,7 @@ mod accept;
 #[cfg(feature = "std")]
 mod buffered;
 mod client_hello;
+mod early_data;
 mod unbuffered_acceptor;
 
 use alloc::vec::Vec;
@@ -19,6 +20,7 @@ pub use unbuffered_acceptor::{
     UnbufferedAcceptStatus, UnbufferedAccepted, UnbufferedAcceptedAlert, UnbufferedAcceptor,
 };
 
+use self::early_data::EarlyDataState;
 use super::hs;
 use crate::builder::{ConfigBuilder, WantsVersions};
 use crate::common_state::{CommonState, Side};
@@ -33,7 +35,6 @@ use crate::sign::CertifiedKey;
 use crate::suites::SupportedCipherSuite;
 use crate::sync::Arc;
 use crate::time_provider::TimeProvider;
-use crate::vecbuf::ChunkVecBuffer;
 use crate::verify::ClientCertVerifier;
 use crate::versions::EnabledVersions;
 
@@ -45,7 +46,22 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
     /// Fetches the value under `key`, leaving it in place.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
 
-    /// Fetches and removes the value under `key`.
+    /// Reads the protocol version without consuming the stored session.
+    ///
+    /// RFC 9973 can call this once per distinct PSK identity. The default
+    /// fetches the value using [`Self::get`]. Stores can override this method
+    /// to read version metadata without fetching the full value.
+    fn session_version(&self, key: &[u8]) -> Option<ProtocolVersion> {
+        let mut value = self.get(key)?;
+        let version = crate::msgs::persist::ServerSessionValue::encoded_version(&value);
+        crate::crypto::zeroize_vec(&mut value);
+        version
+    }
+
+    /// Atomically fetches and removes the value under `key`.
+    ///
+    /// At most one concurrent taker may receive a stored TLS 1.3 ticket.
+    /// This is required for single-use ticket early data.
     fn take(&self, key: &[u8]) -> Option<Vec<u8>>;
 
     /// Whether `put` can ever succeed.
@@ -95,6 +111,15 @@ pub struct ServerConfig {
     /// How tickets are produced; disabled by default.
     pub ticketer: Arc<dyn ProducesTickets>,
 
+    /// DTLS 1.2 RFC 5077 tickets, disabled by default. Configure a producer
+    /// with independent keys from `ticketer` and `hello_retry_cookies`.
+    /// Also call [`Self::enable_dtls12_resumption`] after selecting policy.
+    #[cfg(feature = "tls12")]
+    pub dtls12_ticketer: Arc<dyn ProducesTickets>,
+
+    #[cfg(feature = "tls12")]
+    pub(crate) dtls12_resumption_context: Option<Arc<super::tls12::resumption::Context>>,
+
     /// Chooses the server certificate.
     pub cert_resolver: Arc<dyn ResolvesServerCert>,
 
@@ -108,8 +133,8 @@ pub struct ServerConfig {
     pub enable_secret_extraction: bool,
 
     /// How much 0-RTT data to accept under resumption; zero disables it.
-    /// Early data under an external PSK is governed by that PSK's own limit
-    /// (`ExternalPsk::with_early_data`) instead, whatever this value.
+    /// External PSKs use their own limit, expiry, and
+    /// [`Self::external_psk_replay_policy`].
     ///
     /// It also bounds the rejected 0-RTT records skipped during the
     /// handshake: their plaintext, and their number, since each costs at
@@ -211,14 +236,19 @@ pub struct ServerConfig {
     pub ech_backend: bool,
     /// The largest `uncompressed_length` accepted in a peer's
     /// `CompressedCertificate` (RFC 8879 §4), in bytes. Defaults to
-    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (64 KiB), which also
-    /// applies to larger values: a message declaring more than 64 KiB does
+    /// [`compress::MAX_DECOMPRESSED_CERTIFICATE_SIZE`] (65,535 bytes), which
+    /// also applies to larger values: a message declaring more than that does
     /// not parse and ends the connection with `decode_error`. A message
     /// declaring more than this limit is refused with `bad_certificate`
     /// before anything is decompressed. Zero turns reception off: the
     /// `compress_certificate` extension is then not sent, whatever
     /// `cert_decompressors` holds.
     pub cert_decompression_limit: usize,
+
+    /// Window and history policy for the built-in Zstandard certificate
+    /// decompressor, independent of the expanded Certificate body limit.
+    #[cfg(feature = "zstd")]
+    pub cert_zstd_decompression_limits: compress::ZstdDecompressionLimits,
 
     /// The `record_size_limit` to answer a client's with (RFC 8449): the
     /// largest record plaintext we accept, counting the content type in TLS
@@ -273,15 +303,26 @@ pub struct ServerConfig {
     /// Finds the external PSKs (RFC 9846 §4.3.11) clients may offer; `None`
     /// (the default) accepts none. See [`crate::psk`].
     ///
-    /// A TLS 1.3 handshake that selects an external PSK authenticates
-    /// through it and sends no certificate, so [`Self::cert_resolver`] may
-    /// return nothing for a client that offers one.
+    /// An ordinary TLS 1.3 external-PSK handshake can proceed when
+    /// [`Self::cert_resolver`] returns no certificate.
     pub external_psks: Option<Arc<dyn crate::psk::ResolvesExternalPsk>>,
 
+    /// Atomically authorizes external-PSK 0-RTT. Without this policy, the
+    /// server declines such early data. Ticket 0-RTT uses session storage.
+    pub external_psk_replay_policy: Option<Arc<dyn crate::psk::ExternalPskReplayPolicy>>,
+
     /// Whether to authenticate with our certificate as well when the
-    /// client asks for it with `tls_cert_with_extern_psk` (RFC 8773) and an
+    /// client asks for it with `tls_cert_with_extern_psk` (RFC 9973) and an
     /// external PSK is selected. Off by default.
     pub cert_with_extern_psk: bool,
+
+    /// Require a fresh RFC 9973 handshake on every connection.
+    ///
+    /// This implies [`Self::cert_with_extern_psk`] and requires a usable
+    /// server credential and an external PSK. Client authentication follows
+    /// the configured client verifier. The server issues no tickets under
+    /// this policy. Off by default.
+    pub require_cert_with_extern_psk: bool,
 
     /// Whether to refuse a client that does not authenticate through one of
     /// [`Self::external_psks`]: the handshake fails unless an external PSK
@@ -403,6 +444,18 @@ impl ServerConfig {
     /// with the configuration or given it by an acceptor.
     pub(super) fn apply_to(&self, common: &mut CommonState) -> Result<(), Error> {
         self.check_cookie_sealer()?;
+        #[cfg(feature = "tls12")]
+        if common.is_dtls()
+            && (Arc::ptr_eq(&self.dtls12_ticketer, &self.ticketer)
+                || self
+                    .hello_retry_cookies
+                    .as_ref()
+                    .is_some_and(|s| Arc::ptr_eq(s, &self.dtls12_ticketer)))
+        {
+            return Err(Error::General(
+                "DTLS 1.2 tickets need independent keys from TLS tickets and cookies".into(),
+            ));
+        }
         self.check_ech_role()?;
         common.set_max_fragment_size(self.max_fragment_size)?;
         crate::common_state::check_record_size_limit_config(self.record_size_limit)?;
@@ -422,6 +475,21 @@ impl ServerConfig {
             )),
             _ => Ok(()),
         }
+    }
+
+    /// Enables DTLS 1.2 session IDs and configured RFC 5077 tickets under
+    /// a fresh server authentication policy context. Clones retain it;
+    /// calling this again invalidates previous sessions for this config.
+    ///
+    /// Call after configuring the client verifier and server credentials.
+    /// Replacing either object disables resumption until this is called
+    /// again. Mutable policies must rotate this context when they change.
+    /// RNG failure leaves the previous context unchanged and returns an error.
+    #[cfg(feature = "tls12")]
+    pub fn enable_dtls12_resumption(&mut self) -> Result<(), Error> {
+        let context = super::tls12::resumption::Context::new(self)?;
+        self.dtls12_resumption_context = Some(Arc::new(context));
+        Ok(())
     }
 
     pub(super) fn current_time(&self) -> Result<UnixTime, Error> {
@@ -444,105 +512,6 @@ struct NoTime;
 impl TimeProvider for NoTime {
     fn current_time(&self) -> Option<UnixTime> {
         None
-    }
-}
-
-/// Where 0-RTT stands on a server connection.
-#[derive(Default)]
-enum EarlyDataKind {
-    /// No decision yet.
-    #[default]
-    New,
-    /// Accepted: `received` holds the data (buffered API only), `left` what
-    /// may still arrive.
-    Accepted {
-        received: ChunkVecBuffer,
-        left: usize,
-    },
-    /// Declined (by configuration, policy, or the application).
-    Rejected,
-}
-
-/// The server's 0-RTT bookkeeping.
-#[derive(Default)]
-pub(super) struct EarlyDataState {
-    kind: EarlyDataKind,
-    /// Unbuffered API: accepted early data stays in the caller's buffer.
-    in_place: bool,
-    /// Unbuffered API: the record just processed was accepted early data.
-    in_place_pending: bool,
-}
-
-impl EarlyDataState {
-    pub(super) fn reject(&mut self) {
-        self.kind = EarlyDataKind::Rejected;
-    }
-
-    pub(super) fn accept(&mut self, max_size: usize) {
-        self.kind = EarlyDataKind::Accepted {
-            received: ChunkVecBuffer::new(Some(max_size)),
-            left: max_size,
-        };
-    }
-
-    pub(super) fn was_accepted(&self) -> bool {
-        matches!(self.kind, EarlyDataKind::Accepted { .. })
-    }
-
-    pub(super) fn was_rejected(&self) -> bool {
-        matches!(self.kind, EarlyDataKind::Rejected)
-    }
-
-    /// Stores early data; `false` if it exceeds what was announced.
-    ///
-    /// With the unbuffered API nothing is copied: the record stays where it
-    /// was decrypted and only the budget is charged.
-    pub(super) fn take_received_plaintext(&mut self, bytes: &[u8]) -> bool {
-        let EarlyDataKind::Accepted { received, left } = &mut self.kind else {
-            return false;
-        };
-        let available = bytes.len();
-        if self.in_place {
-            if available > *left {
-                return false;
-            }
-            *left -= available;
-            self.in_place_pending = true;
-            return true;
-        }
-        if received.apply_limit(available) != available || available > *left {
-            return false;
-        }
-        received.append(bytes.to_vec());
-        *left -= available;
-        true
-    }
-
-    /// Unbuffered API: leave accepted early data in the caller's buffer.
-    fn set_in_place(&mut self) {
-        self.in_place = true;
-    }
-
-    #[cfg(feature = "std")]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match &mut self.kind {
-            EarlyDataKind::Accepted { received, .. } => Ok(received.read(buf)),
-            _ => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
-        }
-    }
-}
-
-impl fmt::Debug for EarlyDataState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            EarlyDataKind::New => f.write_str("EarlyDataState::New"),
-            EarlyDataKind::Accepted { received, left } => f
-                .debug_struct("EarlyDataState::Accepted")
-                .field("received", &received.len())
-                .field("left", left)
-                .finish(),
-            EarlyDataKind::Rejected => f.write_str("EarlyDataState::Rejected"),
-        }
     }
 }
 
@@ -569,6 +538,8 @@ pub struct ServerConnectionData {
     /// so a fatal error can forget it (tickets are stateless and cannot be
     /// recalled).
     pub(super) tls12_session: Option<(Arc<dyn StoresServerSessions>, Vec<u8>)>,
+    #[cfg(feature = "tls12")]
+    pub(super) dtls12_session_binding: Option<Vec<u8>>,
     /// What was decided about Encrypted Client Hello.
     pub(crate) ech: crate::ech::server::ServerEch,
     /// State for exported authenticators (RFC 9261).
@@ -607,11 +578,11 @@ impl SideData for ServerConnectionData {
     }
 
     fn take_early_data_in_place(&mut self) -> bool {
-        core::mem::take(&mut self.early_data.in_place_pending)
+        self.early_data.take_in_place_pending()
     }
 
     fn has_unread_early_data(&self) -> bool {
-        matches!(&self.early_data.kind, EarlyDataKind::Accepted { received, .. } if !received.is_empty())
+        self.early_data.has_buffered_plaintext()
     }
 }
 
@@ -662,7 +633,7 @@ impl ServerConnectionData {
 
 impl ConnectionCore<ServerConnectionData> {
     pub(crate) fn for_server(config: Arc<ServerConfig>) -> Result<Self, Error> {
-        Self::for_server_with(config, None)
+        Self::for_server_with(config, None, None)
     }
 
     /// Queues a post-handshake CertificateRequest (RFC 9846 §4.7.2); the
@@ -674,6 +645,11 @@ impl ConnectionCore<ServerConnectionData> {
         if !self.common_state.is_tls13() {
             return Err(Error::General(
                 "post-handshake client authentication requires TLS 1.3".into(),
+            ));
+        }
+        if self.common_state.is_dtls() {
+            return Err(Error::General(
+                "post-handshake client authentication is not supported over DTLS".into(),
             ));
         }
         let state = match &mut self.state {
@@ -731,15 +707,56 @@ impl ConnectionCore<ServerConnectionData> {
                 "Encrypted Client Hello is not supported over QUIC".into(),
             ));
         }
-        Self::for_server_with(config, Some(quic))
+        Self::for_server_with(config, Some(quic), None)
+    }
+
+    /// A DTLS 1.3 server (RFC 9147): TLS 1.3 only, with a DTLS-capable
+    /// suite, without Encrypted Client Hello, and with a cookie sealer when
+    /// Validate the endpoint policy and matching suites. When `dtls`
+    /// requires cookies, validate that a cookie sealer is configured.
+    pub(crate) fn for_dtls_server(
+        config: Arc<ServerConfig>,
+        dtls: crate::dtls::Dtls,
+    ) -> Result<Self, Error> {
+        if ![ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2]
+            .iter()
+            .any(|v| dtls.allows(*v) && config.supports_version(*v))
+        {
+            return Err(Error::General(
+                "no configured version matches the DTLS endpoint policy".into(),
+            ));
+        }
+        if !config.provider.cipher_suites.iter().any(|cs| {
+            cs.usable_for_dtls()
+                && dtls.allows(cs.version().version)
+                && config.supports_version(cs.version().version)
+        }) {
+            return Err(Error::General(
+                "no cipher suite of the configuration is usable with the DTLS endpoint policy"
+                    .into(),
+            ));
+        }
+        if config.ech.is_some() || config.ech_backend {
+            return Err(Error::General(
+                "Encrypted Client Hello is not supported over DTLS".into(),
+            ));
+        }
+        if dtls.require_cookie() && config.hello_retry_cookies.is_none() {
+            return Err(Error::General(
+                "DTLS servers that require cookies need hello_retry_cookies".into(),
+            ));
+        }
+        Self::for_server_with(config, None, Some(dtls))
     }
 
     fn for_server_with(
         config: Arc<ServerConfig>,
         quic: Option<crate::quic::Quic>,
+        dtls: Option<crate::dtls::Dtls>,
     ) -> Result<Self, Error> {
         let mut common = CommonState::new(Side::Server);
         common.quic = quic.map(alloc::boxed::Box::new);
+        common.dtls = dtls.map(alloc::boxed::Box::new);
         config.apply_to(&mut common)?;
         Ok(Self::new(
             alloc::boxed::Box::new(hs::ExpectClientHello::new(config)),

@@ -104,10 +104,12 @@ enum_builder! {
         SignatureAlgorithmsCert => 0x0032,
         KeyShare => 0x0033,
         TransparencyInfo => 0x0034,
+        ConnectionId => 0x0036,
         ExternalIdHash => 0x0037,
         ExternalSessionId => 0x0038,
         TransportParameters => 0x0039,
         TicketRequest => 0x003a,
+        ReturnRoutabilityCheck => 0x003d,
         NextProtocolNegotiation => 0x3374,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,
@@ -155,16 +157,23 @@ enum_builder! {
         MLKEM768 => 0x0201,
         /// ML-KEM-1024 (FIPS 203).
         MLKEM1024 => 0x0202,
-        /// Hybrid secp256r1 + ML-KEM-768 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid secp256r1 + ML-KEM-768 (RFC 10024).
         secp256r1MLKEM768 => 0x11eb,
-        /// Hybrid X25519 + ML-KEM-768 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid X25519 + ML-KEM-768 (RFC 10024).
         X25519MLKEM768 => 0x11ec,
-        /// Hybrid secp384r1 + ML-KEM-1024 (draft-ietf-tls-ecdhe-mlkem).
+        /// Hybrid secp384r1 + ML-KEM-1024 (RFC 10024).
         secp384r1MLKEM1024 => 0x11ed,
     }
 }
 
 impl NamedGroup {
+    pub(crate) fn is_rfc10024_hybrid(self) -> bool {
+        matches!(
+            self,
+            Self::X25519MLKEM768 | Self::secp256r1MLKEM768 | Self::secp384r1MLKEM1024
+        )
+    }
+
     /// Whether the group belongs to the non-preferred tier: the groups
     /// RFC 9846 defines beyond those §9.1 makes mandatory or recommended,
     /// i.e. X448 and the RFC 7919 finite-field groups. A server ranks them

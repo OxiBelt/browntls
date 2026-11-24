@@ -26,7 +26,8 @@ browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, 
 tokio = { version = "1.53", default-features = false, features = ["io-util", "test-util"] }
 libfuzzer-sys = "0.4"
 # Independent implementations used only as differential oracles by the
-# crypto targets (the same set as `browntls-crypto`'s dev-dependencies).
+# crypto targets (the same set as `browntls-crypto`'s dev-dependencies,
+# apart from `ml-dsa`, which no fuzz target uses yet).
 sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.12"

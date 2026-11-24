@@ -3010,6 +3010,15 @@ reference for testing, plus accelerated backends selected at run time.
 | RSA | BMI2 + ADX Montgomery kernel, AVX-512 IFMA exponentiation | portable 64-bit | portable 64-bit |
 | FFDHE (RFC 7919) | RSA BMI2 + ADX Montgomery kernel | portable 64-bit | portable 64-bit |
 | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
+| ML-DSA (FIPS 204) | portable (scalar NTT; no SIMD backend) | portable | portable |
+
+ML-DSA (`browntls_crypto::mldsa`: ML-DSA-44, -65 and -87, key generation,
+hedged and deterministic signing with a context string, verification and the
+FIPS 204 key and signature encodings) is a primitive only so far: it has the
+portable scalar backend alone, does not take part in load-aware routing, and
+is not yet used by X.509 path validation, the TLS handshake or either crypto
+provider. HashML-DSA is not implemented. Its module documentation states which
+operations are constant time, the stack use and the key sizes.
 
 GHASH is also available on its own as `browntls_crypto::gcm::Ghash` (SP
 800-38D section 6.4, keyed by the hash subkey `H`, the counterpart of the

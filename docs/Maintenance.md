@@ -66,7 +66,8 @@ fuzzing, and named independent review of `unsafe` code and cryptography.
 Dependabot covers both. The fuzz project's extra dependencies (`libfuzzer-sys`
 and its build-time `cc`, `arbitrary`, `rcgen`, and the RustCrypto crates the
 crypto targets use as differential oracles, the same set as
-`browntls-crypto`'s dev-dependencies) are development tooling:
+`browntls-crypto`'s dev-dependencies except `ml-dsa`, which has no fuzz target
+yet) are development tooling:
 `safe-to-run` is the bar once `cargo vet` is adopted. `libfuzzer-sys` carries
 LLVM's libFuzzer (C++, NCSA licence), which `deny.toml` admits for the exact
 locked version of that crate only; the exception is due for review by

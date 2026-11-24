@@ -43,6 +43,7 @@ p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p384 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 p521 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 ml-kem = "0.3"
+ml-dsa = "0.1"
 hpke = { version = "0.15.1", default-features = false, features = ["alloc", "getrandom", "aes", "chacha", "x25519", "nistp"] }
 num-bigint = "0.5"
 ed448-goldilocks = "0.14.0-pre.15"

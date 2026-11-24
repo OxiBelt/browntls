@@ -18,10 +18,14 @@
 //! | RSA | 64-bit Montgomery, BMI2/ADX | 64-bit Montgomery | 64-bit Montgomery |
 //! | FFDHE | 64-bit Montgomery, BMI2/ADX (RSA kernels) | 64-bit Montgomery | 64-bit Montgomery |
 //! | ML-KEM | AVX2 NTT | NEON NTT | RVV NTT |
+//! | ML-DSA | portable scalar | portable scalar | portable scalar |
 //!
 //! [`tls_cbc`] implements the TLS 1.2 CBC record transform (MAC-then-encrypt
 //! with a Lucky Thirteen-resistant constant-time check, and encrypt-then-MAC)
 //! over a caller-supplied block cipher.
+//!
+//! [`mldsa`] implements ML-DSA signatures (FIPS 204, pure variant) in
+//! portable scalar code; it has no SIMD backend yet.
 //!
 //! [`hpke`] implements Hybrid Public Key Encryption (RFC 9180, base mode)
 //! from the primitives above.
@@ -77,6 +81,7 @@ pub mod gcm;
 pub mod curve25519;
 pub mod curve448;
 pub mod ffdhe;
+pub mod mldsa;
 pub mod mlkem;
 pub mod nist;
 pub mod rsa;

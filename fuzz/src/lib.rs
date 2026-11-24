@@ -32,6 +32,7 @@ pub mod crypto_ecc;
 pub mod crypto_hash;
 pub mod crypto_hpke;
 pub mod crypto_kem;
+pub mod crypto_mldsa;
 pub mod crypto_rsa;
 pub mod crypto_util;
 pub mod pki_api;

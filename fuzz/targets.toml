@@ -265,6 +265,14 @@ sources = [
   "crates/browntls-crypto/src/cpu/**",
 ]
 
+[targets.crypto_mldsa]
+topic = "crypto-asymmetric"
+sources = [
+  "crates/browntls-crypto/src/mldsa/**",
+  "crates/browntls-crypto/src/hash/**",
+  "crates/browntls-crypto/src/zeroize.rs",
+]
+
 [targets.crypto_hpke]
 topic = "crypto-asymmetric"
 sources = [

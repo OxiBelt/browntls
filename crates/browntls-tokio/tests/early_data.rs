@@ -262,9 +262,11 @@ async fn check_rejection(initial: &[&[u8]], next: Option<&[u8]>) {
             },
         );
         assert!(client.write_all(b"must wait").await.is_err());
+        assert!(client.write(b"").await.is_err(), "nor writes of nothing");
         assert!(client.shutdown().await.is_err());
         assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
         assert_eq!(client.acknowledge_rejected_early_data(), None);
+        assert_eq!(client.write(b"").await.unwrap(), 0);
         client.write_all(b"chosen again").await.unwrap();
         client.shutdown().await.unwrap();
         client

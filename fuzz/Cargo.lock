@@ -237,6 +237,7 @@ dependencies = [
  "hmac",
  "hpke",
  "libfuzzer-sys",
+ "ml-dsa",
  "ml-kem",
  "num-bigint 0.5.1",
  "p256",
@@ -972,6 +973,20 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ml-dsa"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f6d49c3f3f0e10e18ca975ffda66f8da0ec36521c1d911adcbc521bf0743f5c"
+dependencies = [
+ "crypto-common",
+ "ctutils",
+ "hybrid-array",
+ "module-lattice",
+ "shake",
+ "signature",
 ]
 
 [[package]]

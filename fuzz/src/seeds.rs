@@ -56,6 +56,11 @@ pub const TARGETS: &[Target] = &[
         crate::crypto_kem::seeds,
     ),
     (
+        "crypto_mldsa",
+        crate::crypto_mldsa::run,
+        crate::crypto_mldsa::seeds,
+    ),
+    (
         "crypto_hpke",
         crate::crypto_hpke::run,
         crate::crypto_hpke::seeds,

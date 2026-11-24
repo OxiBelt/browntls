@@ -21,9 +21,11 @@
 //! * A [`SigningKey`] is created from the 32-byte seed `xi`
 //!   ([`SigningKey::from_seed`], ML-DSA.KeyGen_internal) or loaded from the
 //!   FIPS 204 expanded encoding ([`SigningKey::from_expanded_bytes`]). The
-//!   expanded encoding is checked in full: `s1` and `s2` coefficients must
+//!   expanded encoding is checked: `s1` and `s2` coefficients must
 //!   be in `[-eta, eta]`, and `t0` and `tr` must equal the values recomputed
 //!   from `rho`, `s1` and `s2`; this also yields the public key.
+//!   The signing seed `K` is not bound to the rest of the key and cannot be
+//!   checked: only a key given with its seed detects a changed `K`.
 //! * A [`VerifyingKey`] accepts any byte string of the right length, as
 //!   FIPS 204 `pkDecode` does (every 10-bit `t1` value is valid). It caches
 //!   `tr = H(pk, 64)`.
@@ -33,6 +35,35 @@
 //!   7.6 KB). The matrix `A` and the NTT forms of `s1`, `s2` and `t0` are
 //!   recomputed for each operation rather than cached, trading some speed
 //!   for small key objects.
+//!
+//! # X.509 and PKCS #8 encodings (RFC 9881)
+//!
+//! The same OBJECT IDENTIFIER, [`ParameterSet::OID`] (`id-ml-dsa-44`, `-65`
+//! or `-87`), identifies a parameter set's public keys, private keys and
+//! signatures; its parameters are always absent, and an
+//! `AlgorithmIdentifier` with any parameters (NULL included) is rejected.
+//!
+//! * [`VerifyingKey::from_spki_der`] and [`VerifyingKey::to_spki_der`] read
+//!   and write the RFC 9881 §4 `SubjectPublicKeyInfo`: the raw public key in
+//!   a BIT STRING without unused bits ([`VerifyingKey::SPKI_LEN`] bytes).
+//! * [`SigningKey::from_pkcs8_der`] reads an RFC 9881 §6 PKCS #8
+//!   `OneAsymmetricKey` (version 1 or 2) in strict DER, with the private
+//!   key in any of the three `ML-DSA-*-PrivateKey` CHOICE forms, `seed`,
+//!   `expandedKey` and `both`, told apart by tag only. An `expandedKey` is
+//!   validated as by [`SigningKey::from_expanded_bytes`], which cannot
+//!   check its `K`; the `seed` and `both` forms detect a changed `K`. For
+//!   `both`, the expanded key derived from the seed must equal the
+//!   presented one byte for byte (the RFC 9881 §8.2 consistency check, in
+//!   constant time). With every form, an optional `publicKey` must equal
+//!   the public key of the private key. Failing a check rejects the key.
+//!   Attributes must have the DER `Attribute` structure and are otherwise
+//!   ignored (their values and SET OF ordering are not checked).
+//! * [`SigningKey::to_pkcs8_der`] writes version 1 (no attributes, no public
+//!   key) in the [`PrivateKeyFormat`] chosen; the seed form RFC 9881
+//!   RECOMMENDS needs a key that still has its seed.
+//!
+//! Loading a private key and comparing its `SubjectPublicKeyInfo` with a
+//! certificate's associates the key with the certificate.
 //!
 //! # Stack use
 //!
@@ -138,6 +169,7 @@
 mod dsa;
 mod encode;
 mod params;
+mod pkcs8;
 mod poly;
 mod rounding;
 mod sample;
@@ -150,6 +182,7 @@ mod tests;
 use core::marker::PhantomData;
 
 pub use params::{ByteArray, MlDsa44, MlDsa65, MlDsa87, ParameterSet};
+pub use pkcs8::PrivateKeyFormat;
 
 use crate::Error;
 use crate::hash::Shake256;
@@ -359,6 +392,8 @@ impl<P: ParameterSet> SigningKey<P> {
     /// `[-eta, eta]`, and the stored `t0` and `tr` must equal the values
     /// recomputed from `rho`, `s1` and `s2`. The verifying key is derived
     /// in the process. The checks reveal only whether the key was accepted.
+    /// The signing seed `K` is not bound to the rest of the key and cannot
+    /// be checked; only a key derived from its seed detects a changed `K`.
     ///
     /// # Errors
     ///

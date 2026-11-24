@@ -3,7 +3,7 @@
 use browntls_crypto::Error;
 use browntls_crypto::mldsa::{MAX_CONTEXT_LEN, SEED_LEN, SigningKey, VerifyingKey};
 
-use super::{Failing, Fixed, Set, exact, flip};
+use super::{Failing, Fixed, Set, encodings, exact, flip};
 use crate::input::Input;
 
 /// Bytes 32..64 of an expanded key: the signing seed `K`, which the
@@ -242,4 +242,5 @@ pub(super) fn expanded_op<P: Set>(input: &mut Input<'_>) {
         P::oracle_sign_expanded(&bytes, msg, b"", &[0; 32])
     );
     assert_eq!(key.verifying_key().verify(msg, sig.as_ref()), Ok(()));
+    encodings::check_signing_key(&key);
 }

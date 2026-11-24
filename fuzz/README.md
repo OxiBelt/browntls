@@ -17,7 +17,10 @@ offer `fuzzing`. It enables both the
 `native` and the `rustcrypto` providers, so the library has no implicit default
 provider; harnesses call `browntls_fuzz::init()` to install the native one.
 The crypto targets also depend on the RustCrypto crates that `browntls-crypto`
-uses as test oracles. No private key, corpus or crash artifact is committed.
+uses as test oracles. No private key, corpus or crash artifact is committed;
+the ML-DSA seeds read the published RFC 9881 Appendix C examples from the
+crates' test data (`crates/browntls-crypto/tests/data/rfc9881/`,
+`crates/browntls-pki/tests/data/rfc9881/`).
 
 ## Targets
 
@@ -52,10 +55,10 @@ and re-encoding stability.
 | `crypto_ecc` | crypto-asymmetric | X25519 (also with load-aware routing between its backends), X448, Ed25519, Ed448, P-256, P-384 and P-521 ECDH and ECDSA (public keys, agreement, signing and verification also with load-aware routing between their backends) and their field, scalar and point arithmetic (against num-bigint and the RustCrypto scalars, points and SEC 1 decoders, on both backends); key and signature decoding, agreement and verdicts against the oracles and between backends |
 | `crypto_rsa` | crypto-asymmetric | RSA public and private keys (DER, components), PKCS#1 v1.5 and PSS signing and verification on every backend (signing also with load-aware routing between them, for the 2048- and 3072-bit keys of the harness), against a num-bigint reference |
 | `crypto_kem` | crypto-asymmetric | ML-KEM-512/768/1024 key generation, encapsulation, decapsulation (implicit rejection) and key parsing against the `ml-kem` oracle, on every backend and with load-aware routing between them; FFDHE peer validation and agreement against num-bigint |
-| `crypto_mldsa` | crypto-asymmetric | ML-DSA-44/65/87 (FIPS 204) against the `ml-dsa` oracle: key generation, deterministic and hedged signing (byte for byte, with fuzzed seed, message, context and `rnd`), verification verdicts on fuzzed and mutated keys and signatures, expanded private keys (a flip outside `K` is refused) |
+| `crypto_mldsa` | crypto-asymmetric | ML-DSA-44/65/87 (FIPS 204) against the `ml-dsa` oracle: key generation, deterministic and hedged signing (byte for byte, with fuzzed seed, message, context and `rnd`), verification verdicts on fuzzed and mutated keys and signatures, expanded private keys (a flip outside `K` is refused); the RFC 9881 decoders: PKCS #8 and SPKI on fuzzed and mutated DER and the Appendix C keys (one parameter set at most, documented error kinds, re-encoding to the input or to the harness's own DER, the C.4 keys refused) and on `OneAsymmetricKey` values built from fuzzed choices against a model of the rules |
 | `crypto_hpke` | crypto-asymmetric | HPKE identifiers, keys and sessions (seal, open, export, sequence numbers) byte for byte against the `hpke` oracle; the TLS-side HPKE provider |
 | `crypto_util` | crypto-util | The DER reader and writer against a reference TLV parser, constant-time helpers, zeroization, random sources, CPU feature detection, acceleration policies, the load-aware routing controls (`accel::load`: configurations, stream status, fixed shares) and kernel TLS in the routing order (`accel::load::kernel`: activation, placement of connections, reported writes, fixed shares) |
-| `pki_api` | pki | Server names and IP addresses against `std::net`, times, algorithm identifiers, RSASSA-PSS parameters, DER containers, PEM, certificates and path validation against a model, signatures and CRLs with real providers, certificate extensions, alternative names and X.501 names against an independent DER reading and a model of the `Name` parsing rules, `SignedData` against the algorithm model, path validation and `RawPublicKeyEntity` |
+| `pki_api` | pki | Server names and IP addresses against `std::net`, times, algorithm identifiers, RSASSA-PSS parameters, DER containers, PEM, certificates and path validation against a model, signatures and CRLs with real providers, the RFC 9881 ML-DSA certificates and signatures with the native default and opt-in tables, certificate extensions, alternative names and X.501 names against an independent DER reading and a model of the `Name` parsing rules, `SignedData` against the algorithm model, path validation and `RawPublicKeyEntity` |
 | `pki_revocation` | pki | Signed OCSP and SCT evidence, Clubcard snapshots and ordered deltas, revocation pause and resume over buffered TLS and QUIC, in-memory Tokio connections over both TLS drivers with live lookup, response caching, and staple refresh, RFC 9162 transparency lists, items, SCT v2 and tree head verification, and Merkle proofs, and the RFC 9162 `transparency_info` extension and CT 2.0 client policy over buffered and unbuffered TLS 1.2 and 1.3 handshakes |
 | `tls_config` | tls-config | Client and server configuration builders, providers and cipher suites, signers, verifiers and root stores, ticketers, certificate compression, key logs, session caches and certificate resolvers, `trusted_ca_keys` identifiers from fuzzed certificates and its resolver over TLS 1.2 and 1.3 handshakes |
 | `tls_conn` | tls-connection | An in-process client and server driven by API calls: transfers with damaged bytes, reader and writer, early data, close_notify, key updates, exporters, `complete_io`, `Stream`, `Acceptor`, accessors, secret extraction |
@@ -87,8 +90,9 @@ handshake randomness comes from the operating system, as in the connection
 targets below.
 
 `browntls-pki` has no cryptography of its own, so `pki_cert` and `pki_crl`
-supply stand-in signature algorithms that accept everything, reject
-everything, or decide from a signature byte. Path building therefore runs to
+supply stand-in signature algorithms (ECDSA, RSA, RSASSA-PSS, Ed25519 and
+the three ML-DSA identifiers) that accept everything, reject everything, or
+decide from a signature byte. Path building therefore runs to
 its full depth on forged chains, which real providers would stop at the first
 signature.
 

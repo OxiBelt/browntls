@@ -183,7 +183,12 @@ sources = ["crates/browntls-pki/**"]
 
 [targets.pki_api]
 topic = "pki"
-sources = ["crates/browntls-pki/**"]
+sources = [
+  "crates/browntls-pki/**",
+  "crates/browntls-crypto/src/mldsa/**",
+  "crates/browntls-crypto/tests/data/rfc9881/**",
+  "crates/browntls-core/src/crypto/native/verify_mldsa.rs",
+]
 
 [targets.pki_revocation]
 topic = "pki"
@@ -269,8 +274,10 @@ sources = [
 topic = "crypto-asymmetric"
 sources = [
   "crates/browntls-crypto/src/mldsa/**",
+  "crates/browntls-crypto/src/der.rs",
   "crates/browntls-crypto/src/hash/**",
   "crates/browntls-crypto/src/zeroize.rs",
+  "crates/browntls-crypto/tests/data/rfc9881/**",
 ]
 
 [targets.crypto_hpke]

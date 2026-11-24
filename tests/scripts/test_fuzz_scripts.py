@@ -64,6 +64,16 @@ class PlanTests(unittest.TestCase):
             include = PLAN.matrix("target", [path], None)["include"]
             self.assertIn("pki_revocation", {e["targets"] for e in include}, path)
 
+    def test_ml_dsa_changes_select_the_ml_dsa_harnesses(self):
+        for path in (
+            "crates/browntls-crypto/src/mldsa/pkcs8.rs",
+            "crates/browntls-crypto/tests/data/rfc9881/ml-dsa-44-seed.der",
+        ):
+            include = PLAN.matrix("target", [path], None)["include"]
+            self.assertEqual({e["targets"] for e in include}, {"crypto_mldsa", "pki_api"}, path)
+        include = PLAN.matrix("target", ["fuzz/src/crypto_mldsa/encodings.rs"], None)["include"]
+        self.assertEqual({e["targets"] for e in include}, {"crypto_mldsa"})
+
     def test_crate_manifest_selects_that_crates_targets(self):
         include = PLAN.matrix("target", ["crates/browntls-pki/Cargo.toml"], None)["include"]
         self.assertEqual(

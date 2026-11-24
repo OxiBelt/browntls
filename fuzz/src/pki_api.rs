@@ -51,7 +51,16 @@
 //!   alike), never once
 //!   corrupted or with another key, and path validation never accepts an
 //!   end entity whose signature check fails; raw triples give the verdicts
-//!   of `RawPublicKeyEntity`.
+//!   of `RawPublicKeyEntity`;
+//! * the RFC 9881 Appendix C.3 ML-DSA certificates, possibly corrupted,
+//!   verify with their Appendix C.2 key exactly when the table (the native
+//!   default, the native ML-DSA opt-in, the RustCrypto default or a fuzzed
+//!   subset of the opt-in) has that parameter set's algorithm, never with
+//!   another set's key, hold the Appendix C.2 key (which
+//!   `subject_public_keys_match` matches against that set's key only), and
+//!   never validate as end entities; signatures by the Appendix C.1 keys
+//!   verify through `RawPublicKeyEntity` and `SignedData` with that
+//!   algorithm only, never tampered or under another set's identifier.
 //!
 //! Keys, certificates and CRLs come from the `tls_config` fixtures,
 //! generated once per process, and from certificates `inspect` generates
@@ -62,6 +71,7 @@ use crate::input::{put_field, put_short_field};
 
 mod chains;
 mod inspect;
+mod mldsa;
 mod names;
 mod signed;
 mod values;
@@ -86,6 +96,7 @@ const OPS: &[Op] = &[
     (x500::dn_op, 1),
     (signed::structure_op, 12),
     (signed::parts_op, 3),
+    (mldsa::ml_dsa_op, 3),
 ];
 
 /// Operation numbers, in [`OPS`] order.
@@ -104,6 +115,7 @@ mod op {
     pub const DN: u8 = 11;
     pub const SIGNED: u8 = 12;
     pub const SIGNED_PARTS: u8 = 13;
+    pub const ML_DSA: u8 = 14;
 }
 
 /// The `pki_api` fuzz target.
@@ -455,6 +467,23 @@ pub fn seeds() -> Vec<Vec<u8>> {
             &[&[tamper, 0, tamper, 0, 9, 3], &short(&[0x06, 0x01, 0x2a])],
         );
     }
+
+    // ML-DSA: each set's certificate with its own key under each table,
+    // with another set's key, corrupted; each set's signature under each
+    // table, then tampered; a fuzzed subset of the opt-in table.
+    for set in 0..3u8 {
+        for table in 0..3u8 {
+            add(op::ML_DSA, &[&[set, table, 1, 0, 0]]);
+            add(op::ML_DSA, &[&[set, table, 0, 0]]);
+        }
+        add(op::ML_DSA, &[&[set, 1, 1, 0, 1]]);
+        add(op::ML_DSA, &[&[set, 1, 1, 1, 0, 40, 3, 0]]);
+        add(op::ML_DSA, &[&[set, 1, 0, 1, 0, 20, 1]]);
+        add(op::ML_DSA, &[&[set, 1, 0, 2, 0, 3, 1]]);
+        add(op::ML_DSA, &[&[set, 1, 0, 3, 0, 100]]);
+        add(op::ML_DSA, &[&[set, 3, 0x03, 0x80, 0, 0, 1, 0, 0]]);
+    }
+    add(op::ML_DSA, &[&[0, 1, 1, 0, 2], &field(&[0x30, 0x00])]);
 
     seeds
 }

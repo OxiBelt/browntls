@@ -39,13 +39,12 @@ use browntls_core::server::danger::ClientCertVerifier;
 use browntls_core::sign::{CertifiedKey, Signer, SigningKey};
 use browntls_core::{
     AlertDescription, CertificateError, ClientConfig, ClientConnection, ConnectionCommon, Error,
-    HandshakeKind, SideData,
-    PeerIncompatible, PeerMisbehaved, ProtocolVersion, RootCertStore, ServerConfig,
-    ServerConnection, SignatureAlgorithm, SignatureScheme, version,
+    HandshakeKind, PeerIncompatible, PeerMisbehaved, ProtocolVersion, RootCertStore, ServerConfig,
+    ServerConnection, SideData, SignatureAlgorithm, SignatureScheme, version,
 };
 use common::{
-    SchemeRecordingClientVerifier, SchemeRecordingServerVerifier,
-    do_handshake_until_error, send_and_receive, transfer,
+    SchemeRecordingClientVerifier, SchemeRecordingServerVerifier, do_handshake_until_error,
+    send_and_receive, transfer,
 };
 use ml_dsa::{Key, Set};
 use support::{Impl, Issuer, MlKey, Purpose};
@@ -154,9 +153,16 @@ fn identity(ee: Alg, cas: &[Alg], purpose: Purpose, label: &str) -> Identity {
         .map(|(i, alg)| Held::new(*alg, &format!("{label} CA {i}")))
         .collect();
     let ee_key = Held::new(ee, &format!("{label} end entity {purpose:?}"));
-    let intermediates: Vec<(Issuer<'_>, Option<&[u8]>)> =
-        ca_keys[1..].iter().map(|key| (key.issuer(), None)).collect();
-    let chain = support::build_chain(ca_keys[0].issuer(), &intermediates, ee_key.oracle(), purpose);
+    let intermediates: Vec<(Issuer<'_>, Option<&[u8]>)> = ca_keys[1..]
+        .iter()
+        .map(|key| (key.issuer(), None))
+        .collect();
+    let chain = support::build_chain(
+        ca_keys[0].issuer(),
+        &intermediates,
+        ee_key.oracle(),
+        purpose,
+    );
     Identity {
         alg: ee,
         root: CertificateDer::from(chain.root),
@@ -224,7 +230,10 @@ fn server_name() -> ServerName<'static> {
 
 /// The library's server certificate verifier for `server`'s root, wrapped
 /// to record the scheme of every handshake signature it checks.
-fn server_verifier(provider: CryptoProvider, server: &Identity) -> Arc<SchemeRecordingServerVerifier> {
+fn server_verifier(
+    provider: CryptoProvider,
+    server: &Identity,
+) -> Arc<SchemeRecordingServerVerifier> {
     let inner = WebPkiServerVerifier::builder_with_provider(server.roots(), arc(provider))
         .build()
         .unwrap();
@@ -372,7 +381,11 @@ fn ml_dsa_handshake(
     let client_verifier =
         client.map(|client| client_verifier(prov::provider_with_ml_dsa(), client, true));
     let (mut c, mut s) = connect(
-        client_config(prov::provider_with_ml_dsa(), server_verifier.clone(), client),
+        client_config(
+            prov::provider_with_ml_dsa(),
+            server_verifier.clone(),
+            client,
+        ),
         server_config(
             prov::provider_with_ml_dsa(),
             server,

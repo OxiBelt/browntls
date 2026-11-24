@@ -134,14 +134,19 @@ fn client_signs_with(
         .with_client_auth_certified_key(CertifiedKey::new(client.chain.clone(), key));
     let (mut c, mut s) = connect(
         client_config,
-        server_config(prov::provider_with_ml_dsa(), &server, Some(verifier.clone())),
+        server_config(
+            prov::provider_with_ml_dsa(),
+            &server,
+            Some(verifier.clone()),
+        ),
     );
     let (client_res, server_res) = do_handshake_until_error(&mut c, &mut s);
     (client_res, server_res, verifier.seen())
 }
 
 const BAD_SIGNATURE: Error = Error::InvalidCertificate(CertificateError::BadSignature);
-const UNSUPPORTED: Error = Error::InvalidCertificate(CertificateError::UnsupportedSignatureAlgorithm);
+const UNSUPPORTED: Error =
+    Error::InvalidCertificate(CertificateError::UnsupportedSignatureAlgorithm);
 
 /// A `CertificateVerify` that names a scheme whose key type is not the
 /// certificate's: another ML-DSA parameter set (both ways), a classical
@@ -156,15 +161,30 @@ fn certificate_verify_scheme_must_match_the_certificate_key() {
     let p256 = server_id(Alg::P256);
     let other_p256 = server_id(Alg::P256).signing_key(&prov::provider_with_ml_dsa());
     let cases = [
-        ("44 under a 65 certificate", &ml65, SignatureScheme::ML_DSA_44, SignWith::Hedged(ml(&ml44))),
-        ("65 under a 44 certificate", &ml44, SignatureScheme::ML_DSA_65, SignWith::Hedged(ml(&ml65))),
+        (
+            "44 under a 65 certificate",
+            &ml65,
+            SignatureScheme::ML_DSA_44,
+            SignWith::Hedged(ml(&ml44)),
+        ),
+        (
+            "65 under a 44 certificate",
+            &ml44,
+            SignatureScheme::ML_DSA_65,
+            SignWith::Hedged(ml(&ml65)),
+        ),
         (
             "ECDSA under an ML-DSA certificate",
             &ml65,
             SignatureScheme::ECDSA_NISTP256_SHA256,
             SignWith::Key(other_p256, SignatureScheme::ECDSA_NISTP256_SHA256),
         ),
-        ("ML-DSA under an ECDSA certificate", &p256, SignatureScheme::ML_DSA_65, SignWith::Hedged(ml(&ml65))),
+        (
+            "ML-DSA under an ECDSA certificate",
+            &p256,
+            SignatureScheme::ML_DSA_65,
+            SignWith::Hedged(ml(&ml65)),
+        ),
     ];
     for (what, cert, claims, with) in cases {
         let (client_res, server_res, seen) =
@@ -184,7 +204,9 @@ fn certificate_verify_scheme_must_match_the_certificate_key() {
 #[test]
 fn certificate_verify_with_an_unoffered_ml_dsa_scheme() {
     let server = server_id(Alg::Ml(Set::MlDsa44));
-    let mut offer = prov::provider().signature_verification_algorithms.supported_schemes();
+    let mut offer = prov::provider()
+        .signature_verification_algorithms
+        .supported_schemes();
     offer.extend([SignatureScheme::ML_DSA_65, SignatureScheme::ML_DSA_87]);
     let key = Misbehaving::new(
         SignatureScheme::ML_DSA_44,
@@ -229,8 +251,11 @@ fn damaged_and_non_conforming_signatures() {
                 true => SignWith::Context(ml(id), b"x"),
                 false => SignWith::Hedged(ml(id)),
             };
-            let (client_res, server_res, seen) =
-                server_signs_with(&server, Misbehaving::new(scheme, with(&server), damage), None);
+            let (client_res, server_res, seen) = server_signs_with(
+                &server,
+                Misbehaving::new(scheme, with(&server), damage),
+                None,
+            );
             assert_eq!(client_res, Err(BAD_SIGNATURE), "server {set:?} {what}");
             assert_eq!(
                 server_res,

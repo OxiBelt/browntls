@@ -9,6 +9,12 @@
 //! chains are those of `native_mldsa.rs` (`native_mldsa/support.rs`); every
 //! key is derived at run time from a fixed label, and nothing secret is
 //! committed.
+//!
+//! The TLS 1.3 opt-in of `draft-ietf-tls-mldsa-06`
+//! (`rustcrypto::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`,
+//! `rustcrypto::KEY_PROVIDER_WITH_ML_DSA`) is checked against the native
+//! provider's: both load and refuse the same RFC 9881 private keys, verify
+//! each other's signatures, and complete handshakes with each other.
 
 #![cfg(all(feature = "native", feature = "rustcrypto", feature = "std"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -32,6 +38,10 @@ mod algorithms;
 mod differential;
 #[path = "rustcrypto_mldsa/handshake.rs"]
 mod handshake;
+#[path = "rustcrypto_mldsa/signing.rs"]
+mod signing;
+#[path = "rustcrypto_mldsa/tls13.rs"]
+mod tls13;
 
 use std::sync::Arc;
 

@@ -199,6 +199,7 @@ dependencies = [
  "hmac",
  "log",
  "miniz_oxide",
+ "ml-dsa",
  "ml-kem",
  "p256",
  "p384",
@@ -985,6 +986,7 @@ dependencies = [
  "ctutils",
  "hybrid-array",
  "module-lattice",
+ "pkcs8",
  "shake",
  "signature",
 ]

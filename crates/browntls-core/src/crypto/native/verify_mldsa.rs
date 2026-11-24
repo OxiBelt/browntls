@@ -10,6 +10,7 @@ use browntls_crypto::mldsa::{self, MlDsa44, MlDsa65, MlDsa87, ParameterSet};
 use browntls_pki::{AlgorithmIdentifier, InvalidSignature, SignatureVerificationAlgorithm, alg_id};
 
 use super::{ALL_VERIFICATION_ALGS, VERIFICATION_ALG_MAPPING};
+use crate::crypto::verify_list::concat;
 use crate::webpki::WebPkiSupportedAlgorithms;
 
 /// The ML-DSA parameter sets.
@@ -109,28 +110,6 @@ pub static ML_DSA_87: MlDsaVerify = MlDsaVerify { set: Set::MlDsa87 };
 /// [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] for what adding them changes.
 pub static ML_DSA_VERIFICATION_ALGS: &[&dyn SignatureVerificationAlgorithm] =
     &[&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
-
-/// `a` followed by `b`, as an array of exactly `N` entries. A wrong `N` is
-/// a compile-time error where the result initialises a static.
-const fn concat<const N: usize>(
-    a: &[&'static dyn SignatureVerificationAlgorithm],
-    b: &[&'static dyn SignatureVerificationAlgorithm],
-) -> [&'static dyn SignatureVerificationAlgorithm; N] {
-    assert!(a.len() + b.len() == N && N > 0);
-    let first = if a.is_empty() { b[0] } else { a[0] };
-    let mut out = [first; N];
-    let mut i = 0;
-    while i < a.len() {
-        out[i] = a[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < b.len() {
-        out[a.len() + j] = b[j];
-        j += 1;
-    }
-    out
-}
 
 static WITH_ML_DSA: [&dyn SignatureVerificationAlgorithm;
     ALL_VERIFICATION_ALGS.len() + ML_DSA_VERIFICATION_ALGS.len()] =

@@ -45,6 +45,39 @@ fn context_lists_are_capped_separately() {
     );
 }
 
+/// Authenticators are signed with the TLS 1.3 schemes other than ML-DSA,
+/// which no specification defines for RFC 9261: a request never lists an
+/// ML-DSA scheme, and one in a peer's request is not used.
+#[test]
+fn ml_dsa_schemes_are_left_out() {
+    use crate::enums::SignatureScheme;
+
+    assert_eq!(
+        messages::tls13_schemes(&[
+            SignatureScheme::ML_DSA_65,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ML_DSA_44,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ML_DSA_87,
+            SignatureScheme::Unknown(0x0905),
+        ]),
+        [
+            SignatureScheme::ED25519,
+            SignatureScheme::ECDSA_NISTP256_SHA256
+        ]
+    );
+    // A request for ML-DSA alone has no usable scheme.
+    let extensions = AuthenticatorRequestExtensions {
+        signature_schemes: Some(vec![SignatureScheme::ML_DSA_65]),
+        ..Default::default()
+    };
+    assert!(matches!(
+        messages::make_request(crate::common_state::Side::Client, b"c", &extensions, vec![]),
+        Err(Error::General(_))
+    ));
+}
+
 /// Exported authenticators between unbuffered connections, the only kind
 /// there is without `std`. This module is built with every configuration
 /// the unit tests are, so `cargo test -p browntls-core --lib

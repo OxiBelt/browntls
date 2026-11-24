@@ -134,7 +134,7 @@ impl ExpectClientHello {
     /// certificate and hands off to the version-specific handler.
     pub(super) fn with_certified_key(
         mut self,
-        sig_schemes: Vec<SignatureScheme>,
+        mut sig_schemes: Vec<SignatureScheme>,
         client_hello: &ClientHelloPayload,
         m: &Message<'_>,
         cx: &mut ServerContext<'_>,
@@ -332,6 +332,19 @@ impl ExpectClientHello {
         // offered only a PSK may omit it (see `process_client_hello`).
         // The resolver may say it chose with the client's trusted_ca_keys
         // (RFC 6066 §6); only a full TLS 1.2 handshake acts on that.
+        // A TLS 1.2 handshake cannot use the ML-DSA schemes
+        // (`SignatureScheme::is_ml_dsa`): neither the resolver nor the
+        // rest of the handshake sees them, and a client that offered
+        // nothing else shares no scheme with us.
+        if version == ProtocolVersion::TLSv1_2 && sig_schemes.iter().any(|s| s.is_ml_dsa()) {
+            sig_schemes.retain(|scheme| !scheme.is_ml_dsa());
+            if sig_schemes.is_empty() {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::HandshakeFailure,
+                    PeerIncompatible::NoSignatureSchemesInCommon,
+                ));
+            }
+        }
         let trusted_ca_keys_ack = core::sync::atomic::AtomicBool::new(false);
         let certkey = if sig_schemes.is_empty() {
             None

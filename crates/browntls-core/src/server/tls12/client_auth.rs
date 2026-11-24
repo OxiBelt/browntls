@@ -119,12 +119,8 @@ impl State<ServerConnectionData> for ExpectCertificateVerify {
             HandshakePayload::CertificateVerify
         )?;
 
-        if !self
-            .config
-            .verifier
-            .supported_verify_schemes()
-            .contains(&sig.scheme)
-        {
+        // Only a scheme the CertificateRequest listed.
+        if !super::client_auth_schemes(&self.config).contains(&sig.scheme) {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,

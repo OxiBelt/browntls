@@ -187,6 +187,20 @@ impl ClientHelloDetails {
         }
     }
 
+    /// The `signature_algorithms` to offer, from the verifier's schemes.
+    /// The one list serves every offered version (RFC 9846 §4.3.3). The
+    /// ML-DSA schemes are for TLS 1.3 only (`SignatureScheme::is_ml_dsa`),
+    /// so a hello that does not offer TLS 1.3 leaves them out.
+    pub(super) fn sigschemes_to_offer(
+        mut verifier_schemes: Vec<SignatureScheme>,
+        offers_tls13: bool,
+    ) -> Vec<SignatureScheme> {
+        if !offers_tls13 {
+            verifier_schemes.retain(|scheme| !scheme.is_ml_dsa());
+        }
+        verifier_schemes
+    }
+
     pub(super) fn new() -> Self {
         Self {
             sent_extensions: Vec::new(),

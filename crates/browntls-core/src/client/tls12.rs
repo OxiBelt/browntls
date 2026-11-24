@@ -20,7 +20,9 @@ use crate::common_state::{CommonState, ConnectionRandoms, HandshakeKind, KxState
 use crate::conn::State;
 use crate::crypto::cipher::Tls12MacOrder;
 use crate::ct::constant_time_eq;
-use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
+use crate::enums::{
+    AlertDescription, ContentType, HandshakeType, ProtocolVersion, SignatureScheme,
+};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
 use crate::log::{debug, trace, warning};
@@ -315,12 +317,20 @@ impl ExpectServerDoneOrCertReq {
         debug!("Got CertificateRequest {:?}", certreq);
 
         // RFC 5246 §7.4.4: the schemes must be non-empty (checked by the
-        // codec).
+        // codec). Schemes defined for TLS 1.3 only (ML-DSA) are not ones a
+        // TLS 1.2 CertificateVerify can use, so the resolver and the key do
+        // not see them.
+        let sigschemes: Vec<SignatureScheme> = certreq
+            .sigschemes
+            .iter()
+            .copied()
+            .filter(|scheme| !scheme.is_ml_dsa())
+            .collect();
         let client_auth = ClientAuthDetails::resolve(
             &*self.config.client_auth_cert_resolver,
             Some(&certreq.canames),
             Some(&certreq.certtypes),
-            &certreq.sigschemes,
+            &sigschemes,
             None,
             None,
         );
@@ -455,6 +465,14 @@ fn emit_certverify(
         ));
     };
     let scheme = signer.scheme();
+    // The key chose from a list without the ML-DSA schemes, which are not
+    // for TLS 1.2; a signer naming one anyway ignored that list.
+    if scheme.is_ml_dsa() {
+        return Err(common.send_fatal_alert(
+            AlertDescription::InternalError,
+            Error::general("signing key chose a TLS 1.3-only signature scheme"),
+        ));
+    }
     let sig = signer.sign(&message)?;
     let m = Message {
         version: ProtocolVersion::TLSv1_2,

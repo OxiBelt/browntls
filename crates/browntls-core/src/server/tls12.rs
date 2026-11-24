@@ -550,6 +550,14 @@ fn emit_server_kx(
             PeerIncompatible::NoSignatureSchemesInCommon,
         )
     })?;
+    // The list had no ML-DSA scheme (they are not for TLS 1.2); a signer
+    // naming one anyway ignored it.
+    if signer.scheme().is_ml_dsa() {
+        return Err(common.send_fatal_alert(
+            AlertDescription::InternalError,
+            Error::general("signing key chose a TLS 1.3-only signature scheme"),
+        ));
+    }
     let sig = signer.sign(&msg)?;
     let skx = ServerKeyExchange {
         params: ServerKeyExchangeParams::Ecdh(params),
@@ -566,16 +574,28 @@ fn emit_server_kx(
     Ok(kx)
 }
 
+/// The schemes a client may sign its TLS 1.2 CertificateVerify with: the
+/// verifier's, without those defined for TLS 1.3 only (ML-DSA). The
+/// CertificateRequest lists exactly these and no other is accepted.
+pub(super) fn client_auth_schemes(config: &ServerConfig) -> Vec<SignatureScheme> {
+    config
+        .verifier
+        .supported_verify_schemes()
+        .into_iter()
+        .filter(|scheme| !scheme.is_ml_dsa())
+        .collect()
+}
+
 /// The CertificateRequest, if the configuration wants client
 /// authentication.
 fn certificate_request(config: &ServerConfig) -> Result<Option<CertificateRequestPayload>, Error> {
     if !config.verifier.offer_client_auth() {
         return Ok(None);
     }
-    let sigschemes = config.verifier.supported_verify_schemes();
+    let sigschemes = client_auth_schemes(config);
     if sigschemes.is_empty() {
         return Err(Error::general(
-            "client certificate verifier supports no signature schemes",
+            "client certificate verifier supports no signature schemes for TLS 1.2",
         ));
     }
     let cr = CertificateRequestPayload {

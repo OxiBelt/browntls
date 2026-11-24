@@ -237,6 +237,25 @@ impl SignatureScheme {
             SignatureAlgorithm::Anonymous | SignatureAlgorithm::RSA | SignatureAlgorithm::DSA
         )
     }
+
+    /// Whether this is an ML-DSA scheme (`draft-ietf-tls-mldsa-06`), which
+    /// that draft specifies for TLS 1.3 `CertificateVerify` and for
+    /// certificate signatures only. So:
+    ///
+    /// - A TLS 1.2 handshake never offers one in a CertificateRequest, signs
+    ///   with one or accepts one, whatever the provider's algorithms and the
+    ///   keys can do. A ClientHello that offers TLS 1.3 keeps them in the
+    ///   single `signature_algorithms` list, which serves both versions
+    ///   (RFC 9846 §4.3.3).
+    /// - Delegated credentials (RFC 9345) and exported authenticators
+    ///   (RFC 9261) do not use them: no specification says how, and such a
+    ///   combination is not enabled by assumption.
+    ///
+    /// The code point decides, so that `Unknown(0x0904)`, which an
+    /// application can construct, is treated like `ML_DSA_44`.
+    pub(crate) fn is_ml_dsa(&self) -> bool {
+        matches!(u16::from(*self), 0x0904..=0x0906)
+    }
 }
 
 enum_builder! {

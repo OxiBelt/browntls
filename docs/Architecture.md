@@ -677,6 +677,33 @@ violation is reported as `CertificateError::Other` (alert
 provider has the same opt-in, described below; its default provider does not
 verify ML-DSA either.
 
+Should a custom verifier or algorithm table name the ML-DSA signature
+schemes (`mldsa44`, `mldsa65`, `mldsa87`; `draft-ietf-tls-mldsa-06`
+specifies them for TLS 1.3 `CertificateVerify` and certificate signatures),
+the library uses them for handshake signatures in TLS 1.3 only
+(`SignatureScheme::is_ml_dsa`, crate-private, which goes by the code point).
+A TLS 1.2 handshake does not list them in a CertificateRequest or pass them
+to a certificate resolver or key (a TLS 1.2 ClientHello that names no other
+scheme fails with `handshake_failure`), and both sides refuse them in
+`ServerKeyExchange` and `CertificateVerify` whatever the cipher suite and
+the verifier say (`verify_tls12_signature` and
+`verify_tls12_signature_with_raw_key` also reject them before looking at
+the table). A key whose signer names one of them in a TLS 1.2 handshake,
+against the list it was given, fails the handshake with `internal_error`.
+A ClientHello that does not offer TLS 1.3 leaves them out of
+`signature_algorithms`. Delegated credentials (RFC 9345) are not issued,
+loaded or accepted with an ML-DSA credential key or delegation signature,
+and exported authenticators (RFC 9261) do not request, offer or accept the
+schemes: no specification defines ML-DSA for either, so the combinations
+are not enabled by assumption. All of this is about handshake signatures
+and what `signature_algorithms` says. Certificate path signatures are
+verified with the table's `all` list in every protocol version, so a chain
+with ML-DSA-signed certificates and a classical end entity also validates
+in TLS 1.2 under the opt-in above.
+`crates/browntls-core/tests/mldsa_tls13_only_rules.rs` checks these rules
+with test doubles (verifiers, keys and cipher suites that name the schemes)
+and with rewritten handshake messages.
+
 `crates/browntls-core/tests/native_mldsa.rs` checks the algorithms against
 the RustCrypto `ml-dsa` crate (signatures of each verified by the other, and
 identical deterministic signatures), the RFC 9881 Appendix C certificates,

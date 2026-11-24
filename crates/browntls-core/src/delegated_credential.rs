@@ -107,19 +107,39 @@ impl From<AttachmentError> for Error {
 }
 
 /// Whether `scheme` may be a credential's `dc_cert_verify_algorithm`: a
-/// TLS 1.3 scheme whose key is not an `rsaEncryption` key. RFC 9345 §4
-/// forbids `rsaEncryption` credential keys, so the `rsa_pss_rsae_*` schemes
-/// are excluded (`rsa_pss_pss_*` keys are allowed). The handshakes offer
-/// only such schemes in `delegated_credential`, and [`validate`] accepts no
-/// other.
+/// TLS 1.3 scheme whose key is not an `rsaEncryption` key, and not an
+/// ML-DSA scheme. RFC 9345 §4 forbids `rsaEncryption` credential keys, so
+/// the `rsa_pss_rsae_*` schemes are excluded (`rsa_pss_pss_*` keys are
+/// allowed). The handshakes offer only such schemes in
+/// `delegated_credential`, and [`validate`] accepts no other.
+///
+/// ML-DSA (`mldsa44`, `mldsa65`, `mldsa87`) is excluded because no
+/// specification defines it for delegated credentials:
+/// `draft-ietf-tls-mldsa-06` covers certificate signatures and a
+/// `CertificateVerify` made with the end-entity certificate's key, not a
+/// credential key or the signature over a credential. For the same reason
+/// the other scheme of a credential, [`DelegatedCredential::algorithm`]
+/// (the signature the certificate's key makes over it), is never an
+/// ML-DSA scheme either: such a credential is not issued, not attached and
+/// not accepted from a peer.
 pub fn credential_scheme_allowed(scheme: SignatureScheme) -> bool {
     scheme.supported_in_tls13()
+        && !scheme.is_ml_dsa()
         && !matches!(
             scheme,
             SignatureScheme::RSA_PSS_SHA256
                 | SignatureScheme::RSA_PSS_SHA384
                 | SignatureScheme::RSA_PSS_SHA512
         )
+}
+
+/// Whether `scheme` may be a credential's `algorithm`, the scheme of the
+/// signature the certificate's key makes over the credential: a TLS 1.3
+/// scheme that is not an ML-DSA scheme (see [`credential_scheme_allowed`]
+/// for why). A credential is neither issued nor attached with another,
+/// and [`validate`] accepts no other.
+fn delegation_scheme_allowed(scheme: SignatureScheme) -> bool {
+    scheme.supported_in_tls13() && !scheme.is_ml_dsa()
 }
 
 /// The `Credential` structure of RFC 9345 §4: the delegated public key, the
@@ -287,7 +307,7 @@ impl DelegatedCredential {
         let schemes: Vec<SignatureScheme> = schemes
             .iter()
             .copied()
-            .filter(SignatureScheme::supported_in_tls13)
+            .filter(|scheme| delegation_scheme_allowed(*scheme))
             .collect();
         let signer = cert_key.choose_scheme(&schemes).ok_or_else(|| {
             Error::General("the certificate key cannot sign with any of the given schemes".into())
@@ -423,7 +443,7 @@ impl DelegatedCredentialKey {
         let algorithms = provider
             .signature_verification_algorithms
             .supported_schemes();
-        if !credential.algorithm.supported_in_tls13()
+        if !delegation_scheme_allowed(credential.algorithm)
             || !algorithms.contains(&credential.algorithm)
             || !algorithms.contains(&scheme)
         {
@@ -609,6 +629,7 @@ pub fn validate(
     // §4.1.1: both schemes must be ones we offered, in the right list; §4:
     // never an rsaEncryption key, whatever was offered.
     if !credential_scheme_allowed(cred.dc_cert_verify_algorithm)
+        || !delegation_scheme_allowed(dc.algorithm)
         || !presented
             .offered_dc_schemes
             .contains(&cred.dc_cert_verify_algorithm)

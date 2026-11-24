@@ -222,6 +222,108 @@ fn no_rsa_encryption_keys() {
     ));
 }
 
+/// No specification defines ML-DSA for delegated credentials
+/// (`draft-ietf-tls-mldsa-06` covers certificates and the certificate
+/// key's CertificateVerify), so neither scheme of a credential may be one.
+#[test]
+fn no_ml_dsa_schemes() {
+    const ML_DSA: [SignatureScheme; 3] = [
+        SignatureScheme::ML_DSA_44,
+        SignatureScheme::ML_DSA_65,
+        SignatureScheme::ML_DSA_87,
+    ];
+    const P256: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
+    let now = UnixTime::now().as_secs();
+    let provider = crate::crypto::native::default_provider();
+    let (ee, key) = cert(true, true);
+    let refused = |r: Result<(), Error>| {
+        r == Err(Error::InvalidDelegatedCredential(
+            AttachmentError::UnsupportedScheme,
+        ))
+    };
+    let unoffered = Err(Error::PeerMisbehaved(
+        PeerMisbehaved::DelegatedCredentialWithUnofferedScheme,
+    ));
+    // The code point decides, not the enum variant an application built.
+    for code in 0x0904..=0x0906 {
+        let scheme = SignatureScheme::Unknown(code);
+        assert!(!credential_scheme_allowed(scheme), "{scheme:?}");
+        assert!(!delegation_scheme_allowed(scheme), "{scheme:?}");
+        let mut dc = credential(&ee, &*key, now + 3600);
+        dc.credential.dc_cert_verify_algorithm = scheme;
+        assert!(refused(
+            DelegatedCredential::issue(
+                Side::Server,
+                &ee,
+                &*key,
+                &[SignatureScheme::ED25519],
+                dc.credential
+            )
+            .map(|_| ())
+        ));
+    }
+    for scheme in ML_DSA {
+        assert!(!credential_scheme_allowed(scheme), "{scheme:?}");
+        assert!(!delegation_scheme_allowed(scheme), "{scheme:?}");
+
+        // As the credential key's scheme: refused by a validator that
+        // offered it everywhere, neither issued nor attached.
+        let mut dc = credential(&ee, &*key, now + 3600);
+        dc.credential.dc_cert_verify_algorithm = scheme;
+        assert_eq!(
+            check(&dc, &ee, &[scheme, P256], scheme, now).map(|_| ()),
+            unoffered
+        );
+        assert!(refused(
+            DelegatedCredential::issue(
+                Side::Server,
+                &ee,
+                &*key,
+                &[SignatureScheme::ED25519],
+                dc.credential.clone()
+            )
+            .map(|_| ())
+        ));
+        assert!(refused(
+            DelegatedCredentialKey::new(&ee, dc, key.clone(), &provider).map(|_| ())
+        ));
+
+        // As the scheme of the signature over the credential: refused by
+        // a validator that offered it, before any signature check, and
+        // not attached.
+        let mut dc = credential(&ee, &*key, now + 3600);
+        dc.algorithm = scheme;
+        assert_eq!(
+            validate(
+                &dc,
+                &Presented {
+                    side: Side::Server,
+                    end_entity: &ee,
+                    offered_dc_schemes: &[P256],
+                    offered_sig_schemes: &[scheme, P256],
+                    cert_verify_scheme: P256,
+                    now: UnixTime::since_unix_epoch(Duration::from_secs(now)),
+                },
+                |_, _| panic!("the signature is not looked at"),
+            )
+            .map(|_| ()),
+            unoffered
+        );
+        assert!(refused(
+            DelegatedCredentialKey::new(&ee, dc, key.clone(), &provider).map(|_| ())
+        ));
+    }
+    // A certificate key is never asked to sign a credential with one: the
+    // schemes it may choose from do not include them.
+    let dc = credential(&ee, &*key, now + 3600);
+    assert_eq!(
+        DelegatedCredential::issue(Side::Server, &ee, &*key, &ML_DSA, dc.credential).map(|_| ()),
+        Err(Error::General(
+            "the certificate key cannot sign with any of the given schemes".into()
+        ))
+    );
+}
+
 #[test]
 fn not_beyond_the_certificate() {
     let (ee, key) = cert(true, true);

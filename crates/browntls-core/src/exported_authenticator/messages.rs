@@ -89,11 +89,15 @@ pub(super) fn parse_request(bytes: &[u8], expected_type: u8) -> Result<Request<'
     })
 }
 
+/// The schemes an authenticator may be signed with: the TLS 1.3 ones
+/// (RFC 9261 §5.2.3), without ML-DSA. `draft-ietf-tls-mldsa-06` specifies
+/// ML-DSA for the TLS 1.3 handshake; nothing specifies it for exported
+/// authenticators, so it is neither requested, offered nor accepted here.
 pub(super) fn tls13_schemes(schemes: &[SignatureScheme]) -> Vec<SignatureScheme> {
     schemes
         .iter()
         .copied()
-        .filter(SignatureScheme::supported_in_tls13)
+        .filter(|scheme| scheme.supported_in_tls13() && !scheme.is_ml_dsa())
         .collect()
 }
 

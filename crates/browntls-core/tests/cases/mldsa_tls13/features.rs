@@ -18,7 +18,11 @@ fn hello_retry_request() {
         let server_verifier = server_verifier(prov::provider_with_ml_dsa(), &server);
         let client_verifier = client_verifier(prov::provider_with_ml_dsa(), &client, true);
         let (mut c, mut s) = connect(
-            client_config(prov::provider_with_ml_dsa(), server_verifier.clone(), client_id),
+            client_config(
+                prov::provider_with_ml_dsa(),
+                server_verifier.clone(),
+                client_id,
+            ),
             server_config(
                 server_provider.clone(),
                 &server,
@@ -54,8 +58,11 @@ fn resumption_after_ml_dsa_authentication() {
         let client = client.as_ref();
         let server_verifier = server_verifier(prov::provider_with_ml_dsa(), &server);
         // Without a client identity, a verifier that is never consulted.
-        let client_verifier =
-            client_verifier(prov::provider_with_ml_dsa(), client.unwrap_or(&server), true);
+        let client_verifier = client_verifier(
+            prov::provider_with_ml_dsa(),
+            client.unwrap_or(&server),
+            true,
+        );
         let client_config = Arc::new(client_config(
             prov::provider_with_ml_dsa(),
             server_verifier.clone(),
@@ -100,8 +107,11 @@ fn post_handshake_auth_with_an_ml_dsa_client() {
         Some(&client),
     );
     client_config.enable_post_handshake_auth = true;
-    let mut server_config =
-        server_config(prov::provider_with_ml_dsa(), &server, Some(client_verifier.clone()));
+    let mut server_config = server_config(
+        prov::provider_with_ml_dsa(),
+        &server,
+        Some(client_verifier.clone()),
+    );
     server_config.request_client_auth_after_handshake = true;
     let (mut c, mut s) = connect(client_config, server_config);
     handshake(&mut c, &mut s).unwrap();
@@ -144,7 +154,12 @@ fn certificate_compression_of_ml_dsa_chains() {
 
     let ml87 = Alg::Ml(Set::MlDsa87);
     let server = identity(ml87, &[ml87, ml87], Purpose::Server, "compression");
-    let client = identity(Alg::Ml(Set::MlDsa44), &[ml87], Purpose::Client, "compression");
+    let client = identity(
+        Alg::Ml(Set::MlDsa44),
+        &[ml87],
+        Purpose::Client,
+        "compression",
+    );
     let server_verifier = server_verifier(prov::provider_with_ml_dsa(), &server);
     let client_verifier = client_verifier(prov::provider_with_ml_dsa(), &client, true);
     let mut client_config = client_config(
@@ -152,8 +167,11 @@ fn certificate_compression_of_ml_dsa_chains() {
         server_verifier.clone(),
         Some(&client),
     );
-    let mut server_config =
-        server_config(prov::provider_with_ml_dsa(), &server, Some(client_verifier.clone()));
+    let mut server_config = server_config(
+        prov::provider_with_ml_dsa(),
+        &server,
+        Some(client_verifier.clone()),
+    );
     assert!(!client_config.cert_compressors.is_empty());
     assert!(!server_config.cert_compressors.is_empty());
     let client_counts = counting(&mut client_config.cert_decompressors);

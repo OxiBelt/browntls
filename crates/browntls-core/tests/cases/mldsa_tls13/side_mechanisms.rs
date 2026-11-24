@@ -138,7 +138,12 @@ fn delegated_credential_offer_to_an_ml_dsa_server() {
 /// requested one is declined), a classical key under the same root can.
 #[test]
 fn exported_authenticators_on_an_ml_dsa_connection() {
-    let ml = identity(Alg::Ml(Set::MlDsa65), &[Alg::Ml(Set::MlDsa65)], Purpose::Server, "ea");
+    let ml = identity(
+        Alg::Ml(Set::MlDsa65),
+        &[Alg::Ml(Set::MlDsa65)],
+        Purpose::Server,
+        "ea",
+    );
     let classical = identity(Alg::P256, &[Alg::Ml(Set::MlDsa65)], Purpose::Server, "ea");
     assert_eq!(ml.root, classical.root);
     let (mut c, mut s, seen, _) = ml_dsa_handshake(&ml, None);

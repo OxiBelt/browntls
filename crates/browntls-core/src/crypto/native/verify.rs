@@ -4,10 +4,20 @@
 //! Each algorithm pairs a `SubjectPublicKeyInfo` algorithm identifier with a
 //! signature algorithm identifier, as webpki does. Public keys are the content
 //! of the `subjectPublicKey` BIT STRING: an uncompressed SEC 1 point for ECDSA,
-//! 32 bytes for Ed25519, 57 bytes for Ed448 and a PKCS #1 `RSAPublicKey` for
+//! 32 bytes for Ed25519, 57 bytes for Ed448, a PKCS #1 `RSAPublicKey` for
 //! RSA (with either the `rsaEncryption` or the `id-RSASSA-PSS` algorithm,
-//! RFC 4055 §1.2). Every failure, including a malformed key, is reported as
+//! RFC 4055 §1.2) and the FIPS 204 encoding for ML-DSA (1312, 1952 or 2592
+//! bytes). Every failure, including a malformed key, is reported as
 //! [`InvalidSignature`].
+//!
+//! # ML-DSA
+//!
+//! [`ML_DSA_44`], [`ML_DSA_65`] and [`ML_DSA_87`] ([`MlDsaVerify`]) verify
+//! pure ML-DSA signatures with the empty context, for certificates and CRLs
+//! (RFC 9881). They are not part of
+//! [`ALL_VERIFICATION_ALGS`](super::ALL_VERIFICATION_ALGS) and map to no
+//! TLS signature scheme; opt in with
+//! [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`](super::SUPPORTED_SIG_ALGS_WITH_ML_DSA).
 //!
 //! # RSASSA-PSS public keys
 //!
@@ -45,6 +55,8 @@ use browntls_crypto::hash::HashAlgorithm as BcHash;
 use browntls_crypto::nist::{p256, p384, p521};
 use browntls_crypto::rsa::{self, RsaPublicKey};
 use browntls_pki::{AlgorithmIdentifier, InvalidSignature, SignatureVerificationAlgorithm, alg_id};
+
+pub use super::verify_mldsa::{ML_DSA_44, ML_DSA_65, ML_DSA_87, MlDsaVerify};
 
 /// The curves ECDSA verification supports.
 #[derive(Clone, Copy, Debug)]

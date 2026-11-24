@@ -257,6 +257,7 @@ dependencies = [
  "hmac",
  "log",
  "miniz_oxide",
+ "ml-dsa",
  "ml-kem",
  "p256",
  "p384",

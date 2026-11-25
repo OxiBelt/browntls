@@ -307,10 +307,15 @@ fn fixture() -> &'static Fixture {
 // ------------------------------------------------------------------- model
 
 /// `SignatureScheme::supported_in_tls13`: no hash below SHA-256 and no
-/// RSA PKCS#1, DSA or anonymous signature.
+/// RSA PKCS#1, DSA or anonymous signature. The legacy schemes of RFC 9963
+/// (0x0420, 0x0520, 0x0620) are RSA PKCS#1 under other code points, for a
+/// client's `CertificateVerify` alone: not TLS 1.3 schemes for a
+/// credential, an authenticator or a server.
 fn tls13_scheme(scheme: SignatureScheme) -> bool {
     let [hash, sign] = u16::from(scheme).to_be_bytes();
-    !matches!(hash, 0..=3) && !matches!(sign, 0..=2)
+    !matches!(hash, 0..=3)
+        && !matches!(sign, 0..=2)
+        && !matches!(u16::from(scheme), 0x0420 | 0x0520 | 0x0620)
 }
 
 /// The ML-DSA schemes (`draft-ietf-tls-mldsa-06`), which no specification

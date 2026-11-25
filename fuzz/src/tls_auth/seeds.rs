@@ -317,23 +317,27 @@ pub fn seeds() -> Vec<Vec<u8>> {
     seeds.push(unbuffered);
     // ML-DSA is not for authenticators: a request for mldsa65 alone is
     // refused whichever side asks, and one that also lists the default
-    // schemes is answered with those
-    let mut seed = vec![6, 0];
-    for (exchange, identity) in [(0u8, 0u8), (1, 2)] {
-        if seed.len() > 2 {
-            seed.push(6);
+    // schemes is answered with those. Nor are the legacy schemes of
+    // RFC 9963 (rsa_pkcs1_sha256_legacy here), which are for a client's
+    // CertificateVerify in the handshake
+    for code in [[0x09, 0x05], [0x04, 0x20]] {
+        let mut seed = vec![6, 0];
+        for (exchange, identity) in [(0u8, 0u8), (1, 2)] {
+            if seed.len() > 2 {
+                seed.push(6);
+            }
+            seed.push(exchange);
+            put_short_field(&mut seed, &[b'm', exchange]);
+            // one scheme, a raw code point; no defaults, no authorities
+            seed.extend_from_slice(&[1, 1, 0, code[0], code[1], 0, 0]);
+            seed.extend_from_slice(&[identity, 0]);
+            seed.extend_from_slice(&[6, exchange]);
+            put_short_field(&mut seed, &[b'd', exchange]);
+            seed.extend_from_slice(&[1, 1, 0, code[0], code[1], 1, 0]);
+            seed.extend_from_slice(&[identity, 0]);
         }
-        seed.push(exchange);
-        put_short_field(&mut seed, &[b'm', exchange]);
-        // one scheme, a raw code point; no defaults, no authorities
-        seed.extend_from_slice(&[1, 1, 0, 0x09, 0x05, 0, 0]);
-        seed.extend_from_slice(&[identity, 0]);
-        seed.extend_from_slice(&[6, exchange]);
-        put_short_field(&mut seed, &[b'd', exchange]);
-        seed.extend_from_slice(&[1, 1, 0, 0x09, 0x05, 1, 0]);
-        seed.extend_from_slice(&[identity, 0]);
+        seeds.push(seed);
     }
-    seeds.push(seed);
 
     // 7: client certificate URLs
     seeds.extend(super::certificate_url::seeds(7));

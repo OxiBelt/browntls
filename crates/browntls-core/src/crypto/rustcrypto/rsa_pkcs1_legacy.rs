@@ -74,7 +74,9 @@ pub static VERIFICATION_ALG_MAPPING_WITH_RSA_PKCS1_LEGACY: &[(
 /// is):
 ///
 /// * name `rsa_pkcs1_sha512_legacy`, `rsa_pkcs1_sha384_legacy` and
-///   `rsa_pkcs1_sha256_legacy` after the other schemes;
+///   `rsa_pkcs1_sha256_legacy` after the other schemes, so that a server
+///   with that verifier lists them, last, in the `signature_algorithms`
+///   of its TLS 1.3 CertificateRequests;
 /// * accept a client's TLS 1.3 `CertificateVerify` signed with one of
 ///   them: RSASSA-PKCS1-v1_5 over the same content as any other scheme,
 ///   by an `rsaEncryption` key, in the exact encoding (see

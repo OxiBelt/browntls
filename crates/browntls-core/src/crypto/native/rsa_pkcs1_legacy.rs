@@ -72,7 +72,12 @@ fn hash_of(scheme: SignatureScheme) -> Option<BcHash> {
 ///   the key cannot authenticate a TLS 1.3 server (RFC 9963 §3 defines
 ///   the legacy schemes for the client's `CertificateVerify` only, and
 ///   the handshake never offers them to a server's key), nor a client to
-///   a server that did not opt in.
+///   a server that did not opt in: that client sends an empty Certificate
+///   message.
+///
+/// So as a TLS 1.3 client key it authenticates, in the handshake or in
+/// post-handshake authentication, to servers whose CertificateRequest
+/// lists a legacy scheme, and to no other.
 ///
 /// The signature is RSASSA-PKCS1-v1_5 as RFC 8017 §8.2 specifies it, the
 /// `DigestInfo` in DER with its NULL parameters (RFC 9963 §3), with CRT,
@@ -234,7 +239,9 @@ pub static VERIFICATION_ALG_MAPPING_WITH_RSA_PKCS1_LEGACY: &[(
 /// is):
 ///
 /// * name `rsa_pkcs1_sha512_legacy`, `rsa_pkcs1_sha384_legacy` and
-///   `rsa_pkcs1_sha256_legacy` after the other schemes;
+///   `rsa_pkcs1_sha256_legacy` after the other schemes, so that a server
+///   with that verifier lists them, last, in the `signature_algorithms`
+///   of its TLS 1.3 CertificateRequests;
 /// * accept a client's TLS 1.3 `CertificateVerify` signed with one of
 ///   them: RSASSA-PKCS1-v1_5 over the same content as any other scheme,
 ///   by an `rsaEncryption` key, in the exact encoding (see

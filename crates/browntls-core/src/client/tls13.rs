@@ -614,7 +614,11 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
 }
 
 /// Checks a CertificateRequest's extensions (RFC 9846 §4.4.2) and returns
-/// the TLS 1.3 signature schemes it allows.
+/// the signature schemes it allows for our CertificateVerify: the TLS 1.3
+/// ones and the legacy RSASSA-PKCS1-v1_5 schemes of RFC 9963, which a
+/// server lists for clients whose RSA key cannot make RSASSA-PSS
+/// signatures. The resolver and the key choose among them; no key of this
+/// crate chooses a legacy scheme unless it was loaded to do so.
 fn certificate_request_sigschemes(
     common: &mut CommonState,
     certreq: &CertificateRequestPayloadTls13,
@@ -644,7 +648,7 @@ fn certificate_request_sigschemes(
     let compat_sigschemes: Vec<_> = sigschemes
         .iter()
         .copied()
-        .filter(crate::enums::SignatureScheme::supported_in_tls13)
+        .filter(crate::enums::SignatureScheme::supported_in_tls13_client_auth)
         .collect();
     if compat_sigschemes.is_empty() {
         return Err(common.send_fatal_alert(

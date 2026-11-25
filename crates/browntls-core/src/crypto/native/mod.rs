@@ -25,6 +25,7 @@
 //! | [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`] (opt-in) | the above and `browntls_crypto::mldsa` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
 //! | [`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`], [`KEY_PROVIDER_WITH_ML_DSA`] (opt-in, experimental) | the above and `browntls_crypto::mldsa` for TLS 1.3 handshake signatures |
+//! | [`SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY`], [`sign::RsaPkcs1LegacySigningKey`] (opt-in) | `browntls_crypto::rsa` for the RFC 9963 legacy schemes of a TLS 1.3 client |
 //! | [`SECURE_RANDOM`] | `browntls_crypto::rand::OsRng` |
 //! | [`ticketer`] | AES-256-GCM from `browntls_crypto::gcm` |
 //!
@@ -112,6 +113,64 @@
 //! provider.key_provider = native::KEY_PROVIDER_WITH_ML_DSA;
 //! let provider = Arc::new(provider);
 //! # let _ = provider;
+//! ```
+//!
+//! # Legacy RSA client authentication in TLS 1.3 (opt-in)
+//!
+//! TLS 1.3 signs handshakes with RSASSA-PSS, which some RSA keys cannot
+//! do: keys in hardware tokens or operating system key stores that offer
+//! RSASSA-PKCS1-v1_5 only. RFC 9963 defines `rsa_pkcs1_sha256_legacy`,
+//! `rsa_pkcs1_sha384_legacy` and `rsa_pkcs1_sha512_legacy` (0x0420,
+//! 0x0520, 0x0620) so that such a key can still authenticate a TLS 1.3
+//! *client*, and for nothing else. As its §3 asks, they are disabled by
+//! default, and each side opts in separately:
+//!
+//! * A server sets [`SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY`] as the
+//!   `signature_verification_algorithms` of the provider its client
+//!   certificate verifier is built with. Its TLS 1.3 CertificateRequest
+//!   then lists the three schemes after the others, and it accepts a
+//!   client's `CertificateVerify` signed with one, in the handshake or in
+//!   post-handshake authentication: the opt-in is visible on the wire.
+//! * A client gives its certificate a key that chooses these schemes:
+//!   [`sign::RsaPkcs1LegacySigningKey`], loaded by
+//!   [`sign::any_rsa_pkcs1_legacy_type`], for key material in memory, or
+//!   its own `SigningKey` for a key held elsewhere. [`KEY_PROVIDER`] and
+//!   the other RSA keys never choose them, so a key that can sign with
+//!   RSASSA-PSS keeps doing so.
+//!
+//! Nothing else changes, whatever is configured. A ClientHello never lists
+//! the schemes, no server signs with them and no client accepts them from
+//! a server, so server authentication with an RSA key still requires
+//! RSASSA-PSS. TLS 1.2 handshakes, delegated credentials (RFC 9345) and
+//! exported authenticators (RFC 9261) never use them. A signature verifies
+//! only in the exact encoding of RFC 8017 §8.2, `DigestInfo` with its
+//! NULL parameters.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::native;
+//!
+//! // A server that also accepts clients whose RSA key signs with
+//! // RSASSA-PKCS1-v1_5 only: build its `WebPkiClientVerifier` with this
+//! // provider (`builder_with_provider`).
+//! let mut provider = native::default_provider();
+//! provider.signature_verification_algorithms =
+//!     native::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY;
+//! let provider = Arc::new(provider);
+//! # let _ = provider;
+//!
+//! // A client whose RSA key must not be asked for RSASSA-PSS.
+//! # fn client(
+//! #     chain: Vec<browntls_core::pki_types::CertificateDer<'static>>,
+//! #     der: browntls_core::pki_types::PrivateKeyDer<'static>,
+//! # ) -> Result<(), browntls_core::Error> {
+//! let key = native::sign::any_rsa_pkcs1_legacy_type(&der)?;
+//! let certified = browntls_core::sign::CertifiedKey::new(chain, key);
+//! // ... `.with_client_auth_certified_key(certified)` on the builder.
+//! # let _ = certified;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Hardware acceleration

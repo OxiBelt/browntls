@@ -20,7 +20,6 @@ use crate::common::{
     server_chain, server_name,
 };
 use crate::doubles::*;
-use crate::tls12_wire::{ILLEGAL_PARAMETER, find_message, set_hello_schemes, set_scheme};
 
 const TLS13_ONLY: &str = "signing key chose a TLS 1.3-only signature scheme";
 

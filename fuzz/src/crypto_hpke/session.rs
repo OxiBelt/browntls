@@ -10,6 +10,7 @@ use browntls_crypto::hpke::{Aead, Kdf, Kem, RecipientContext, SenderContext, Sui
 use browntls_crypto::rand::FixedRng;
 use hpke::{Deserializable as _, Serializable as _};
 
+use super::kem_secret::KemSecrets;
 use super::{
     MAX_STEPS, STEP_EXPORT, STEP_OPEN, STEP_OPEN_FUZZED, STEP_OUT_OF_ORDER, STEP_SEAL,
     STEP_SEAL_IN_PLACE, STEPS, exact, mutate, suite,
@@ -352,6 +353,7 @@ pub(super) fn session(input: &mut Input<'_>) {
         .setup_recipient(enc.as_bytes(), &sk, &info)
         .expect("genuine enc");
     let oracle = make_session_oracle(suite, &ikm_r, &ikm_e, &info, enc.as_bytes());
+    let kem_secrets = KemSecrets::new(suite, &sk, &ikm_r, &ikm_e, &info, enc.as_bytes());
     let mut s = Session {
         suite,
         sender,
@@ -463,6 +465,7 @@ pub(super) fn session(input: &mut Input<'_>) {
                         "{e:?}"
                     );
                 }
+                kem_secrets.recipient(&fuzzed, ours.is_ok());
                 if let Some(oracle) = &s.oracle {
                     let theirs = oracle.recipient_export(&fuzzed, ctx, 48);
                     assert_eq!(

@@ -335,34 +335,70 @@ impl Suite {
         rng: &dyn SecureRandom,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         let ephemeral = self.kem.generate_key_pair(rng)?;
-        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral)
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, None)
+    }
+
+    /// [`Suite::setup_sender`] that also copies the KEM shared secret into
+    /// `kem_secret`, for a caller that writes it to a key log (RFC 9850
+    /// `ECH_SECRET`).
+    ///
+    /// Call it only when a key log is authorised to receive the secret; use
+    /// [`Suite::setup_sender`] otherwise, which never lets it leave this
+    /// module. `kem_secret` is cleared first, so after an error it is empty.
+    ///
+    /// # Errors
+    ///
+    /// As [`Suite::setup_sender`].
+    #[cfg(feature = "key-log")]
+    pub fn setup_sender_with_kem_secret(
+        self,
+        pk_r: &PublicKey,
+        info: &[u8],
+        rng: &dyn SecureRandom,
+        kem_secret: &mut KemSharedSecret,
+    ) -> Result<(EncapsulatedKey, SenderContext), Error> {
+        kem_secret.0.clear();
+        let ephemeral = self.kem.generate_key_pair(rng)?;
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, Some(&mut kem_secret.0))
     }
 
     /// `SetupBaseS` with the ephemeral key derived from `ikm_e` through
     /// `DeriveKeyPair` (as RFC 9180's test vectors do). Test-only: a reused
-    /// `ikm_e` would reuse the ephemeral key.
+    /// `ikm_e` would reuse the ephemeral key. The KEM shared secret is
+    /// copied into `kem_secret`, so that the vectors' `shared_secret` checks
+    /// what the logging entry points hand out.
     #[cfg(all(test, feature = "alloc"))]
     pub(crate) fn setup_sender_derandomized(
         self,
         pk_r: &PublicKey,
         info: &[u8],
         ikm_e: &[u8],
+        kem_secret: &mut labeled::Secret,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         let ephemeral = self.kem.derive_key_pair(ikm_e)?;
-        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral)
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, Some(kem_secret))
     }
 
+    /// The common part of every sender setup. `capture`, when present,
+    /// receives a copy of the KEM shared secret: the output of the KEM's
+    /// `Encap`, which is the key schedule's input and none of its outputs.
+    /// Only [`Suite::setup_sender_with_kem_secret`] passes one outside
+    /// tests.
     fn setup_sender_with_ephemeral(
         self,
         pk_r: &PublicKey,
         info: &[u8],
         ephemeral: &PrivateKey,
+        capture: Option<&mut labeled::Secret>,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         if pk_r.kem() != self.kem || ephemeral.kem() != self.kem {
             return Err(Error::InvalidKey);
         }
         let (enc, shared_secret) = kem::encap(ephemeral, pk_r)?;
         let ctx = context::key_schedule(self, &shared_secret, info)?;
+        if let Some(capture) = capture {
+            capture.copy_from(&shared_secret);
+        }
         Ok((enc, SenderContext(ctx)))
     }
 
@@ -380,11 +416,98 @@ impl Suite {
         sk_r: &PrivateKey,
         info: &[u8],
     ) -> Result<RecipientContext, Error> {
+        self.setup_recipient_capturing(enc, sk_r, info, None)
+    }
+
+    /// [`Suite::setup_recipient`] that also copies the KEM shared secret
+    /// into `kem_secret`, for a caller that writes it to a key log (RFC 9850
+    /// `ECH_SECRET`).
+    ///
+    /// Call it only when a key log is authorised to receive the secret; use
+    /// [`Suite::setup_recipient`] otherwise. `kem_secret` is cleared first,
+    /// so after an error it is empty. A successful return does not mean that
+    /// `enc` came from an honest sender: only a ciphertext that the context
+    /// opens shows that, so a caller logs the secret after a successful
+    /// `open` and clears or drops it otherwise.
+    ///
+    /// # Errors
+    ///
+    /// As [`Suite::setup_recipient`].
+    #[cfg(feature = "key-log")]
+    pub fn setup_recipient_with_kem_secret(
+        self,
+        enc: &[u8],
+        sk_r: &PrivateKey,
+        info: &[u8],
+        kem_secret: &mut KemSharedSecret,
+    ) -> Result<RecipientContext, Error> {
+        kem_secret.0.clear();
+        self.setup_recipient_capturing(enc, sk_r, info, Some(&mut kem_secret.0))
+    }
+
+    /// The common part of every recipient setup; `capture` is as in
+    /// [`Suite::setup_sender_with_ephemeral`], with `Decap` for `Encap`.
+    fn setup_recipient_capturing(
+        self,
+        enc: &[u8],
+        sk_r: &PrivateKey,
+        info: &[u8],
+        capture: Option<&mut labeled::Secret>,
+    ) -> Result<RecipientContext, Error> {
         if sk_r.kem() != self.kem {
             return Err(Error::InvalidKey);
         }
         let shared_secret = kem::decap(enc, sk_r)?;
         let ctx = context::key_schedule(self, &shared_secret, info)?;
+        if let Some(capture) = capture {
+            capture.copy_from(&shared_secret);
+        }
         Ok(RecipientContext(ctx))
+    }
+}
+
+/// The KEM shared secret of one HPKE setup (`shared_secret` in RFC 9180
+/// §5.1.1), `Nsecret` bytes long ([`Kem::shared_secret_len`]).
+///
+/// It exists only with the `key-log` feature, for the `ECH_SECRET` label of
+/// an SSLKEYLOGFILE (RFC 9850 §2.3), a diagnostic facility that must not be
+/// used in production. Together with the public `info` it yields the whole
+/// encryption context, so it is as sensitive as the context: whoever reads
+/// it can open everything the context sealed.
+///
+/// The caller owns the buffer and the setup functions fill it in place, so
+/// the secret is not moved around. The bytes are zeroised on drop, the type
+/// can be neither cloned nor compared, and its [`Debug`](core::fmt::Debug)
+/// form does not show them.
+#[cfg(feature = "key-log")]
+pub struct KemSharedSecret(labeled::Secret);
+
+#[cfg(feature = "key-log")]
+impl KemSharedSecret {
+    /// An empty buffer for [`Suite::setup_sender_with_kem_secret`] or
+    /// [`Suite::setup_recipient_with_kem_secret`] to fill.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(labeled::Secret::zeroed(0))
+    }
+
+    /// The secret: empty until a setup function succeeded.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+#[cfg(feature = "key-log")]
+impl Default for KemSharedSecret {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "key-log")]
+impl core::fmt::Debug for KemSharedSecret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("KemSharedSecret(..)")
     }
 }

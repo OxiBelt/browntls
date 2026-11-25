@@ -17,6 +17,11 @@ alloc = []
 # built-in raw-syscall entropy source (Linux x86-64/aarch64/riscv64 use the
 # `getrandom(2)` system call directly).
 getrandom = ["dep:getrandom"]
+# Diagnostic only, never for production builds: lets a caller that writes an
+# SSLKEYLOGFILE (RFC 9850) obtain the KEM shared secret of an HPKE setup
+# (`hpke::KemSharedSecret`). Without it no public interface returns that
+# secret.
+key-log = []
 
 [dependencies]
 getrandom = { version = "0.4", optional = true, default-features = false }

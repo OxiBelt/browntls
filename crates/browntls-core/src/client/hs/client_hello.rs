@@ -758,8 +758,8 @@ pub(super) fn emit_client_hello_for_retry(
         input.check_cert_with_extern_psk_retry(cx.common, cert_with_extern_psk)?;
     }
     // RFC 5746 §3.3: signal secure renegotiation support (we never
-    // renegotiate); a TLS 1.3-only hello has nothing to signal.
-    if supports_tls12 || !ech_tls13_only {
+    // renegotiate); a hello that offers no TLS 1.2 has nothing to signal.
+    if supports_tls12 {
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 

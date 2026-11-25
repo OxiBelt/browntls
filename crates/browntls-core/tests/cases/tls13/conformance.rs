@@ -204,6 +204,51 @@ fn client_hello_with_supported_versions_needs_legacy_version_tls12() {
     );
 }
 
+/// The cipher suites of the ClientHello in `record`.
+fn offered_cipher_suites(record: &[u8]) -> Vec<u16> {
+    let at = cipher_suites_offset(record);
+    let len = usize::from(u16::from_be_bytes([record[at - 2], record[at - 1]]));
+    record[at..at + len]
+        .chunks(2)
+        .map(|suite| u16::from_be_bytes([suite[0], suite[1]]))
+        .collect()
+}
+
+#[test]
+fn a_tls13_only_client_hello_lists_tls13_suites_alone() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let (mut client, _server) =
+        connect(tls13_only_client(&chain, None, None), server_config(&chain));
+    let suites = offered_cipher_suites(&take_tls(&mut client));
+    // TLS_EMPTY_RENEGOTIATION_INFO_SCSV (RFC 5746 §3.3) is about
+    // renegotiation, which TLS 1.3 does not have (RFC 9846 §4.1.2), so a
+    // hello that offers TLS 1.3 alone ends with the provider's last suite.
+    assert!(!suites.is_empty());
+    assert!(
+        suites.iter().all(|suite| suite >> 8 == 0x13),
+        "{suites:04x?}"
+    );
+}
+
+/// With TLS 1.2 on offer the signalling value still ends the list: a
+/// TLS 1.2 server requires it or the `renegotiation_info` extension.
+#[cfg(feature = "tls12")]
+#[test]
+fn a_client_hello_that_offers_tls12_keeps_the_renegotiation_signal() {
+    init_logging();
+    let chain = server_chain(KeyType::Ed25519);
+    let config = ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    let (mut client, _server) = connect(config, server_config(&chain));
+    let suites = offered_cipher_suites(&take_tls(&mut client));
+    assert_eq!(suites.last(), Some(&0x00ff), "{suites:04x?}");
+}
+
 /// A ticketer announcing a zero ticket lifetime.
 #[derive(Debug)]
 struct ZeroLifetime(Arc<dyn browntls_core::server::ProducesTickets>);

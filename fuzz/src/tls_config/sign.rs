@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use browntls_core::crypto::{
     WebPkiSupportedAlgorithms, native, rustcrypto, verify_tls12_signature,
-    verify_tls12_signature_with_raw_key, verify_tls13_signature,
+    verify_tls12_signature_with_raw_key, verify_tls13_client_signature,
+    verify_tls13_client_signature_with_raw_key, verify_tls13_signature,
     verify_tls13_signature_with_raw_key,
 };
 use browntls_core::delegated_credential::{Credential, DelegatedCredential};
@@ -80,10 +81,28 @@ pub(super) fn loadable(p: usize, k: usize) -> bool {
     p == 0 || fixtures::get().keys[k].rustcrypto
 }
 
-/// RFC 8446 §4.2.3: no SHA-1/SHA-224/MD5, no PKCS #1 v1.5, no DSA.
+/// RFC 8446 §4.2.3: no SHA-1/SHA-224/MD5, no PKCS #1 v1.5, no DSA. That
+/// leaves out the legacy schemes of RFC 9963, which are PKCS #1 v1.5 for a
+/// client's `CertificateVerify` alone.
 pub(super) fn tls13_scheme(scheme: SignatureScheme) -> bool {
     let [hash, sign] = u16::from(scheme).to_be_bytes();
-    hash > 3 && sign > 2
+    hash > 3 && sign > 2 && !LEGACY_SCHEMES.contains(&scheme)
+}
+
+/// The legacy RSASSA-PKCS1-v1_5 schemes of RFC 9963, in the order the
+/// opt-in tables and the native PKCS #1-only key prefer them.
+const LEGACY_SCHEMES: [SignatureScheme; 3] = [
+    SignatureScheme::RSA_PKCS1_SHA512_LEGACY,
+    SignatureScheme::RSA_PKCS1_SHA384_LEGACY,
+    SignatureScheme::RSA_PKCS1_SHA256_LEGACY,
+];
+
+/// The opt-in table of provider `p` that maps [`LEGACY_SCHEMES`].
+fn legacy_algs(p: usize) -> WebPkiSupportedAlgorithms {
+    [
+        native::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,
+        rustcrypto::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,
+    ][p]
 }
 
 fn algs(p: usize) -> WebPkiSupportedAlgorithms {
@@ -120,6 +139,13 @@ pub(super) fn load(p: usize, k: usize) -> Option<Arc<dyn SigningKey>> {
         assert_eq!(
             native::sign::any_rsa_type(&der).is_ok(),
             rsa,
+            "{}",
+            key.name
+        );
+        // The PKCS #1-only loader takes `rsaEncryption` keys alone.
+        assert_eq!(
+            native::sign::any_rsa_pkcs1_legacy_type(&der).is_ok(),
+            rsa && k != RSA_PSS,
             "{}",
             key.name
         );
@@ -201,6 +227,14 @@ pub(super) fn fuzzed_key(input: &mut Input<'_>) {
     };
     let _ = native::sign::any_supported_type(&der);
     let _ = native::sign::any_ecdsa_type(&der);
+    // Whatever the PKCS #1-only loader takes, the RSA loader takes.
+    if let Ok(key) = native::sign::any_rsa_pkcs1_legacy_type(&der) {
+        let rsa = native::sign::any_rsa_type(&der).expect("an RSA key");
+        assert_eq!(
+            key.public_key().expect("public key").as_ref(),
+            rsa.public_key().expect("public key").as_ref()
+        );
+    }
     let _ = native::sign::any_rsa_type(&der);
     let _ = rustcrypto::sign::any_supported_type(&der);
     let _ = rustcrypto::sign::any_ecdsa_type(&der);
@@ -349,6 +383,130 @@ fn ml_dsa_fixtures() {
             }
         }
     });
+}
+
+/// The native PKCS #1-only RSA key (`any_rsa_pkcs1_legacy_type`) and the
+/// client `CertificateVerify` functions, by the rules of RFC 9963 §3. The
+/// key signs with RSASSA-PKCS1-v1_5 alone: the first of `rsa_pkcs1_*` and
+/// then of the legacy schemes that the offer holds. A legacy signature
+/// verifies with the client functions under an opt-in table of either
+/// provider and with nothing else; an `rsa_pkcs1_*` one under the TLS 1.2
+/// rules only. An ordinary key's signature verifies with the client
+/// functions exactly as with the TLS 1.3 ones.
+pub(super) fn rsa_pkcs1_legacy_op(input: &mut Input<'_>) {
+    let fx = fixtures::get();
+    let k = input.choose(fx.keys.len());
+    let key = &fx.keys[k];
+    let cert = key.chain.first().filter(|_| k != MISMATCHED);
+    let msg = input.field();
+    let mut offered = offered_schemes(input);
+    let mask = input.byte();
+    for (i, scheme) in LEGACY_SCHEMES.iter().enumerate() {
+        if mask & (1 << i) != 0 {
+            offered.push(*scheme);
+        }
+    }
+
+    let Ok(signing) = native::sign::any_rsa_pkcs1_legacy_type(&key.der()) else {
+        assert!(!matches!(k, RSA | RSA_PKCS1), "{}", key.name);
+        // Another key: the client functions follow the TLS 1.3 ones.
+        let Some(signing) = load(0, k) else { return };
+        let Some(signer) = signing.choose_scheme(&offered) else {
+            return;
+        };
+        let spki = signing.public_key().expect("public key");
+        let dss = DigitallySignedStruct::new(signer.scheme(), signer.sign(msg).expect("signing"));
+        for algs in [algs(0), algs(1), legacy_algs(0), legacy_algs(1)] {
+            let tls13 = verify_tls13_signature_with_raw_key(msg, &spki, &dss, &algs).is_ok();
+            assert_eq!(
+                verify_tls13_client_signature_with_raw_key(msg, &spki, &dss, &algs).is_ok(),
+                tls13,
+                "{} {:?}",
+                key.name,
+                dss.scheme
+            );
+            if let Some(cert) = cert {
+                assert_eq!(
+                    verify_tls13_client_signature(msg, cert, &dss, &algs).is_ok(),
+                    tls13
+                );
+            }
+        }
+        return;
+    };
+    assert!(matches!(k, RSA | RSA_PKCS1), "{}", key.name);
+    assert_eq!(signing.algorithm(), SignatureAlgorithm::RSA);
+    let spki = signing.public_key().expect("public key");
+    let ordinary = load(0, k).expect("an RSA key");
+    assert_eq!(
+        spki.as_ref(),
+        ordinary.public_key().expect("public key").as_ref()
+    );
+
+    let pkcs1 = &key_schemes(k)[3..];
+    let expected = pkcs1
+        .iter()
+        .chain(&LEGACY_SCHEMES)
+        .copied()
+        .find(|scheme| offered.contains(scheme));
+    let signer = signing.choose_scheme(&offered);
+    assert_eq!(signer.as_ref().map(|s| s.scheme()), expected, "{offered:?}");
+    let Some(signer) = signer else { return };
+    let scheme = signer.scheme();
+    let legacy = LEGACY_SCHEMES.contains(&scheme);
+    let sig = signer.sign(msg).expect("signing");
+    let dss = DigitallySignedStruct::new(scheme, sig.clone());
+    let cert = cert.expect("the RSA keys have a chain");
+    let mut bad = sig;
+    let at = usize::from(input.u16()) % bad.len();
+    bad[at] ^= 1 << input.choose(8);
+    let bad = DigitallySignedStruct::new(scheme, bad);
+
+    for q in 0..2 {
+        for (algs, opt_in) in [(algs(q), false), (legacy_algs(q), true)] {
+            let ctx = format!("{scheme:?} verified by {q}, opt-in {opt_in}");
+            // Never a TLS 1.3 scheme for a server, a credential or an
+            // authenticator; a TLS 1.2 scheme unless it is a legacy one.
+            assert!(
+                verify_tls13_signature_with_raw_key(msg, &spki, &dss, &algs).is_err(),
+                "{ctx}"
+            );
+            assert!(
+                verify_tls13_signature(msg, cert, &dss, &algs).is_err(),
+                "{ctx}"
+            );
+            assert_eq!(
+                verify_tls12_signature_with_raw_key(msg, &spki, &dss, &algs).is_ok(),
+                !legacy,
+                "{ctx}"
+            );
+            assert_eq!(
+                verify_tls12_signature(msg, cert, &dss, &algs).is_ok(),
+                !legacy,
+                "{ctx}"
+            );
+            // A client's CertificateVerify: the legacy schemes, opted in.
+            assert_eq!(
+                verify_tls13_client_signature_with_raw_key(msg, &spki, &dss, &algs).is_ok(),
+                legacy && opt_in,
+                "{ctx}"
+            );
+            assert_eq!(
+                verify_tls13_client_signature(msg, cert, &dss, &algs).is_ok(),
+                legacy && opt_in,
+                "{ctx}"
+            );
+            assert!(
+                verify_tls13_client_signature_with_raw_key(msg, &spki, &bad, &algs).is_err(),
+                "{ctx}: tampered signature"
+            );
+            let longer = [msg, b"!"].concat();
+            assert!(
+                verify_tls13_client_signature(&longer, cert, &dss, &algs).is_err(),
+                "{ctx}: other message"
+            );
+        }
+    }
 }
 
 /// One key, one provider, one message: scheme selection, then the signature

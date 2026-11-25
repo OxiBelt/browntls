@@ -128,7 +128,12 @@ pub(crate) mod tls13;
 pub mod verify;
 mod verify_mldsa;
 
+mod rsa_pkcs1_legacy;
 mod sign_mldsa;
+pub use rsa_pkcs1_legacy::{
+    RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING, SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,
+    VERIFICATION_ALG_MAPPING_WITH_RSA_PKCS1_LEGACY,
+};
 pub use sign_mldsa::{
     KEY_PROVIDER_WITH_ML_DSA, ML_DSA_VERIFICATION_ALG_MAPPING, RustCryptoWithMlDsa,
     SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13, VERIFICATION_ALG_MAPPING_WITH_ML_DSA,

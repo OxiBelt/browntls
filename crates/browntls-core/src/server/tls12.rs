@@ -550,9 +550,9 @@ fn emit_server_kx(
             PeerIncompatible::NoSignatureSchemesInCommon,
         )
     })?;
-    // The list had no ML-DSA scheme (they are not for TLS 1.2); a signer
-    // naming one anyway ignored it.
-    if signer.scheme().is_ml_dsa() {
+    // The list had no TLS 1.3-only scheme (ML-DSA, the legacy schemes of
+    // RFC 9963); a signer naming one anyway ignored it.
+    if signer.scheme().is_tls13_only() {
         return Err(common.send_fatal_alert(
             AlertDescription::InternalError,
             Error::general("signing key chose a TLS 1.3-only signature scheme"),
@@ -575,14 +575,15 @@ fn emit_server_kx(
 }
 
 /// The schemes a client may sign its TLS 1.2 CertificateVerify with: the
-/// verifier's, without those defined for TLS 1.3 only (ML-DSA). The
-/// CertificateRequest lists exactly these and no other is accepted.
+/// verifier's, without those defined for TLS 1.3 only (ML-DSA and the
+/// legacy schemes of RFC 9963). The CertificateRequest lists exactly these
+/// and no other is accepted.
 pub(super) fn client_auth_schemes(config: &ServerConfig) -> Vec<SignatureScheme> {
     config
         .verifier
         .supported_verify_schemes()
         .into_iter()
-        .filter(|scheme| !scheme.is_ml_dsa())
+        .filter(|scheme| !scheme.is_tls13_only())
         .collect()
 }
 

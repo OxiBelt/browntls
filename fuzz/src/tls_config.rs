@@ -140,6 +140,7 @@ const OPS: &[Op] = &[
     (misc::compress_op, 7),
     (misc::keylog_enum_op, 1),
     (trusted_ca::trusted_ca_op, 55),
+    (sign::rsa_pkcs1_legacy_op, 40),
 ];
 
 /// Operation numbers, as the seeds write them.
@@ -171,6 +172,7 @@ mod op {
     pub(super) const COMPRESS: u8 = 24;
     pub(super) const KEYLOG: u8 = 25;
     pub(super) const TRUSTED_CA: u8 = 26;
+    pub(super) const RSA_PKCS1_LEGACY: u8 = 27;
 }
 
 /// The `tls_config` fuzz target.
@@ -586,6 +588,30 @@ pub fn seeds() -> Vec<Vec<u8>> {
         op::TRUSTED_CA,
         &[&[0, 2, 0, 3, 0xff, 1, 1, 1, 0, 1, 5], &[7; 20]],
     );
+
+    // The PKCS #1-only RSA key (RFC 9963): offered each legacy scheme
+    // alone, all three, `rsa_pkcs1_sha256` (index 2 of the known schemes)
+    // with a legacy scheme, and nothing it signs with; the `id-RSASSA-PSS`
+    // key, which it does not load; and two ordinary keys, whose signatures
+    // the client functions verify as the TLS 1.3 ones do.
+    for (k, schemes, mask) in [
+        (3u8, &[][..], 1u8),
+        (4, &[], 2),
+        (3, &[], 4),
+        (4, &[], 7),
+        (3, &[2], 1),
+        (4, &[11], 0),
+        (5, &[13], 7),
+        (0, &[3], 7),
+        (2, &[11], 0),
+    ] {
+        let mut offer = vec![schemes.len() as u8];
+        offer.extend_from_slice(schemes);
+        add(
+            op::RSA_PKCS1_LEGACY,
+            &[&[k], &field(text), &offer, &[mask, 0, 9, 3]],
+        );
+    }
 
     // A program of several operations.
     let program: Vec<u8> = [op::SUITE, op::KEYLOG, op::HASH, op::HELPERS]

@@ -476,6 +476,16 @@ pub(super) fn emit_certificate_verify_tls13(
         )
     })?;
     let scheme = signer.scheme();
+    // RFC 9963 §3: a server never signs with a legacy RSASSA-PKCS1-v1_5
+    // scheme. The key chose from a list without them (the ClientHello's
+    // schemes that TLS 1.3 allows, or a credential's scheme); a signer
+    // naming one anyway ignored that list.
+    if scheme.is_rsa_pkcs1_legacy() {
+        return Err(common.send_fatal_alert(
+            AlertDescription::InternalError,
+            Error::general("signing key chose a signature scheme for client authentication only"),
+        ));
+    }
     let sig = signer.sign(&message)?;
     let cv = DigitallySignedStruct::new(scheme, sig);
     let m = Message {

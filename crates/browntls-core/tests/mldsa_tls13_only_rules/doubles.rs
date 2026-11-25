@@ -1,7 +1,9 @@
 //! Test doubles and wire helpers: verifiers that advertise the ML-DSA
 //! schemes on top of the provider's, resolvers that record the schemes they
-//! are given, a key that claims an ML-DSA scheme, and readers for the
-//! `signature_algorithms` lists of hellos and certificate requests.
+//! are given, a key that claims an ML-DSA scheme, readers for the
+//! `signature_algorithms` lists of hellos and certificate requests, and
+//! editors of plaintext handshake messages. All but the ML-DSA items are
+//! general: the `rsa_pkcs1_legacy_rules` target uses them too.
 
 #![allow(unreachable_pub)]
 
@@ -309,4 +311,90 @@ pub fn raw_request(typ: u8, context: &[u8], schemes: &[SignatureScheme]) -> Vec<
     msg.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     msg.extend_from_slice(&body);
     msg
+}
+
+/// The `handshake_failure` alert description (RFC 9846 §6).
+pub const HANDSHAKE_FAILURE: u8 = 40;
+/// The `illegal_parameter` alert description (RFC 9846 §6).
+pub const ILLEGAL_PARAMETER: u8 = 47;
+
+/// Where the first handshake message of type `typ` starts in the plaintext
+/// part of `flight` (up to a ChangeCipherSpec), as `(record, message)`
+/// offsets. Each message must lie within one record.
+pub fn find_message(flight: &[u8], typ: u8) -> Option<(usize, usize)> {
+    let mut record = 0;
+    while record + 5 <= flight.len() && flight[record] != 20 {
+        let end = record + 5 + u16_at(flight, record + 3);
+        let mut msg = record + 5;
+        while flight[record] == 22 && msg + 4 <= end {
+            if flight[msg] == typ {
+                return Some((record, msg));
+            }
+            assert_eq!(flight[msg + 1], 0, "message under 64 KiB");
+            msg += 4 + u16_at(flight, msg + 2);
+        }
+        record = end;
+    }
+    None
+}
+
+/// Replaces the `signature_algorithms` of the ClientHello at the start of
+/// `flight` with `schemes`, fixing the five lengths around it.
+pub fn set_hello_schemes(flight: &mut Vec<u8>, schemes: &[SignatureScheme]) {
+    let (record, msg) = find_message(flight, 1).unwrap();
+    assert_eq!((record, msg), (0, 5));
+    let mut at = msg + 4 + 2 + 32;
+    at += 1 + usize::from(flight[at]);
+    at += 2 + u16_at(flight, at);
+    at += 1 + usize::from(flight[at]);
+    let block = at;
+    let end = block + 2 + u16_at(flight, block);
+    at += 2;
+    while at < end {
+        let len = u16_at(flight, at + 2);
+        if u16_at(flight, at) == usize::from(EXT_SIGNATURE_ALGORITHMS) {
+            let list = encode_schemes(schemes);
+            let mut body = u16::try_from(list.len()).unwrap().to_be_bytes().to_vec();
+            body.extend_from_slice(&list);
+            let delta = body.len() as isize - len as isize;
+            let adjust = |buf: &mut Vec<u8>, at: usize| {
+                let new = u16_at(buf, at) as isize + delta;
+                put_u16(buf, at, usize::try_from(new).unwrap());
+            };
+            flight.splice(at + 4..at + 4 + len, body);
+            adjust(flight, at + 2);
+            adjust(flight, block);
+            adjust(flight, msg + 2);
+            adjust(flight, record + 3);
+            return;
+        }
+        at += 4 + len;
+    }
+    panic!("no signature_algorithms in the ClientHello")
+}
+
+/// Rewrites the scheme of the `DigitallySignedStruct` at `at`.
+pub fn set_scheme(flight: &mut [u8], at: usize, scheme: u16) {
+    flight[at..at + 2].copy_from_slice(&scheme.to_be_bytes());
+}
+
+/// The `signature_algorithms` of the first datagram of a DTLS client
+/// (RFC 9147 §5.3: a 13-byte record header and a 12-byte handshake header).
+pub fn dtls_hello_schemes(datagram: &[u8]) -> Vec<SignatureScheme> {
+    assert_eq!((datagram[0], datagram[13]), (22, 1), "a DTLS ClientHello");
+    let mut at = 13 + 12 + 2 + 32;
+    at += 1 + usize::from(datagram[at]); // session_id
+    at += 1 + usize::from(datagram[at]); // cookie
+    at += 2 + u16_at(datagram, at); // cipher_suites
+    at += 1 + usize::from(datagram[at]); // compression_methods
+    let end = at + 2 + u16_at(datagram, at);
+    at += 2;
+    while at < end {
+        let len = u16_at(datagram, at + 2);
+        if u16_at(datagram, at) == usize::from(EXT_SIGNATURE_ALGORITHMS) {
+            return prefixed_schemes(&datagram[at + 4..at + 4 + len]);
+        }
+        at += 4 + len;
+    }
+    panic!("no signature_algorithms")
 }

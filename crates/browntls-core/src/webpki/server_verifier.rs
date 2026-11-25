@@ -544,7 +544,11 @@ impl ServerCertVerifier for WebPkiServerVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported.supported_schemes()
+        // Without the legacy schemes of RFC 9963, which the algorithms may
+        // map for a server's client verifier: no server signs with them.
+        let mut schemes = self.supported.supported_schemes();
+        schemes.retain(|scheme| !scheme.is_rsa_pkcs1_legacy());
+        schemes
     }
 
     fn verify_tls13_signature_with_delegated_key(

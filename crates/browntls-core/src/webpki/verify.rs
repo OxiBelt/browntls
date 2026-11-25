@@ -152,16 +152,17 @@ pub(crate) fn verify_cert_for_usage<'p>(
 
 /// Verifies a TLS 1.2 handshake signature over `message` with `cert`'s key.
 ///
-/// The ML-DSA schemes are rejected before any cryptography runs, whatever
-/// `supported_schemes` maps: they are specified for TLS 1.3 only
-/// (`draft-ietf-tls-mldsa-06`).
+/// The ML-DSA schemes and the RFC 9963 legacy RSASSA-PKCS1-v1_5 schemes
+/// are rejected before any cryptography runs, whatever `supported_schemes`
+/// maps: they are specified for TLS 1.3 only (`draft-ietf-tls-mldsa-06`;
+/// RFC 9963 §3).
 pub fn verify_tls12_signature(
     message: &[u8],
     cert: &CertificateDer<'_>,
     dss: &DigitallySignedStruct,
     supported_schemes: &WebPkiSupportedAlgorithms,
 ) -> Result<HandshakeSignatureValid, Error> {
-    if dss.scheme.is_ml_dsa() {
+    if dss.scheme.is_tls13_only() {
         return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
     }
     let possible_algs = supported_schemes.convert_scheme(dss.scheme)?;
@@ -172,7 +173,10 @@ pub fn verify_tls12_signature(
 /// Verifies a TLS 1.3 handshake signature over `message` with `cert`'s key.
 ///
 /// Schemes that TLS 1.3 forbids (RSA PKCS#1, SHA-1) are rejected before any
-/// cryptography runs.
+/// cryptography runs. So are the RFC 9963 legacy schemes
+/// (`rsa_pkcs1_sha256_legacy` and the like), whatever `supported_schemes`
+/// maps: only a client's `CertificateVerify` may use them, which
+/// [`verify_tls13_client_signature`] verifies.
 pub fn verify_tls13_signature(
     msg: &[u8],
     cert: &CertificateDer<'_>,
@@ -180,6 +184,38 @@ pub fn verify_tls13_signature(
     supported_schemes: &WebPkiSupportedAlgorithms,
 ) -> Result<HandshakeSignatureValid, Error> {
     if !dss.scheme.supported_in_tls13() {
+        return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
+    }
+    let possible_algs = tls13_algs(dss.scheme, supported_schemes.convert_scheme(dss.scheme)?);
+    let cert = ParsedCertificate::try_from(cert)?;
+    verify_sig_using_any_alg(&cert, &possible_algs, msg, dss.signature())
+}
+
+/// Verifies the signature of a client's TLS 1.3 `CertificateVerify` over
+/// `msg` with `cert`'s key: as [`verify_tls13_signature`], and also with
+/// an RFC 9963 legacy scheme (`rsa_pkcs1_sha256_legacy`,
+/// `rsa_pkcs1_sha384_legacy`, `rsa_pkcs1_sha512_legacy`) that
+/// `supported_schemes` maps. No default table of this crate maps them: see
+/// `SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY` of the providers.
+///
+/// This is for a [`ClientCertVerifier`](crate::verify::ClientCertVerifier)
+/// (`WebPkiClientVerifier` uses it). RFC 9963 §3 defines the legacy
+/// schemes for the client's `CertificateVerify` only: a server certificate
+/// verifier must not call this, and a server accepts such a signature only
+/// when its CertificateRequest listed the scheme, which the handshake
+/// checks before it calls the verifier.
+///
+/// The legacy schemes are RSASSA-PKCS1-v1_5 (RFC 8017 §8.2) with an
+/// `rsaEncryption` key. The algorithms the providers map them to accept
+/// only the exact encoding, `DigestInfo` with the NULL parameters
+/// included (RFC 9963 §3).
+pub fn verify_tls13_client_signature(
+    msg: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+    supported_schemes: &WebPkiSupportedAlgorithms,
+) -> Result<HandshakeSignatureValid, Error> {
+    if !dss.scheme.supported_in_tls13_client_auth() {
         return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
     }
     let possible_algs = tls13_algs(dss.scheme, supported_schemes.convert_scheme(dss.scheme)?);
@@ -226,16 +262,41 @@ pub fn verify_tls13_signature_with_raw_key(
     )
 }
 
+/// Verifies the signature of a client's TLS 1.3 `CertificateVerify` with
+/// a bare `SubjectPublicKeyInfo` (RFC 7250 raw public keys): as
+/// [`verify_tls13_signature_with_raw_key`], and also with an RFC 9963
+/// legacy scheme that `supported_schemes` maps. See
+/// [`verify_tls13_client_signature`], whose conditions apply. Not for the
+/// key of a delegated credential (RFC 9345), which the legacy schemes do
+/// not cover.
+pub fn verify_tls13_client_signature_with_raw_key(
+    msg: &[u8],
+    spki: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
+    dss: &DigitallySignedStruct,
+    supported_schemes: &WebPkiSupportedAlgorithms,
+) -> Result<HandshakeSignatureValid, Error> {
+    if !dss.scheme.supported_in_tls13_client_auth() {
+        return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
+    }
+    verify_sig_with_spki(
+        spki.as_ref(),
+        &tls13_algs(dss.scheme, supported_schemes.convert_scheme(dss.scheme)?),
+        msg,
+        dss.signature(),
+    )
+}
+
 /// Verifies a TLS 1.2 handshake signature with a bare `SubjectPublicKeyInfo`.
 ///
-/// As [`verify_tls12_signature`], it rejects the ML-DSA schemes.
+/// As [`verify_tls12_signature`], it rejects the ML-DSA schemes and the
+/// RFC 9963 legacy schemes.
 pub fn verify_tls12_signature_with_raw_key(
     msg: &[u8],
     spki: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
     dss: &DigitallySignedStruct,
     supported_schemes: &WebPkiSupportedAlgorithms,
 ) -> Result<HandshakeSignatureValid, Error> {
-    if dss.scheme.is_ml_dsa() {
+    if dss.scheme.is_tls13_only() {
         return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
     }
     verify_sig_with_spki(
@@ -294,6 +355,9 @@ fn verify_sig_using_any_alg(
     }
     Err(last)
 }
+
+#[cfg(all(test, any(feature = "native", feature = "rustcrypto")))]
+mod rsa_pkcs1_legacy_tests;
 
 #[cfg(test)]
 mod tests {

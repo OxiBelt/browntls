@@ -320,7 +320,13 @@ impl State<ClientConnectionData> for ExpectCertificateVerify {
                 )
             })?;
 
-        if !self.offered_sigschemes.contains(&cert_verify.scheme) {
+        // RFC 9963 §3: a client never accepts a legacy RSASSA-PKCS1-v1_5
+        // scheme in the server's CertificateVerify. The hello never lists
+        // one (`ClientHelloDetails::sigschemes_to_offer`); the second test
+        // says so here, whatever the list holds.
+        if !self.offered_sigschemes.contains(&cert_verify.scheme)
+            || cert_verify.scheme.is_rsa_pkcs1_legacy()
+        {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,
                 PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,

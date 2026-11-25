@@ -220,6 +220,7 @@ pub mod verify;
 
 pub(crate) mod ccm;
 pub(crate) mod kx;
+mod rsa_pkcs1_legacy;
 mod sign_mldsa;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
@@ -228,6 +229,10 @@ pub(crate) mod tls12_cbc;
 pub(crate) mod tls13;
 mod verify_mldsa;
 
+pub use rsa_pkcs1_legacy::{
+    RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING, SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,
+    VERIFICATION_ALG_MAPPING_WITH_RSA_PKCS1_LEGACY,
+};
 pub use sign_mldsa::{
     KEY_PROVIDER_WITH_ML_DSA, ML_DSA_VERIFICATION_ALG_MAPPING, NativeWithMlDsa,
     SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13, VERIFICATION_ALG_MAPPING_WITH_ML_DSA,

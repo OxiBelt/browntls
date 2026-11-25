@@ -20,6 +20,12 @@
 //! [`any_supported_type`] and the provider's
 //! [`KEY_PROVIDER`](super::KEY_PROVIDER) do not load them;
 //! [`KEY_PROVIDER_WITH_ML_DSA`](super::KEY_PROVIDER_WITH_ML_DSA) does.
+//!
+//! An RSA key restricted to PKCS #1 v1.5
+//! ([`RsaPkcs1LegacySigningKey`], loaded by [`any_rsa_pkcs1_legacy_type`])
+//! authenticates a TLS 1.3 client with the legacy schemes of RFC 9963. No
+//! key provider loads it: it is for keys that cannot make RSASSA-PSS
+//! signatures.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -35,6 +41,7 @@ use browntls_crypto::rsa::{MAX_MODULUS_BYTES, RsaKeyAlgorithm, RsaPrivateKey};
 
 use browntls_pki::{PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer, alg_id};
 
+pub use super::rsa_pkcs1_legacy::{RsaPkcs1LegacySigningKey, any_rsa_pkcs1_legacy_type};
 pub use super::sign_mldsa::{MlDsaSigningKey, any_ml_dsa_type};
 use crate::crypto::signer::{Signer, SigningKey, public_key_to_spki, spki_from_parts};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
@@ -403,13 +410,13 @@ fn rsa_key_permits(algorithm: RsaKeyAlgorithm, scheme: SignatureScheme) -> bool 
 /// An RSA signing key (2048 to 8192 bits, two primes), identified by
 /// `rsaEncryption` or `id-RSASSA-PSS`.
 pub struct RsaSigningKey {
-    key: Arc<RsaPrivateKey>,
-    algorithm: RsaKeyAlgorithm,
-    spki: SubjectPublicKeyInfoDer<'static>,
+    pub(super) key: Arc<RsaPrivateKey>,
+    pub(super) algorithm: RsaKeyAlgorithm,
+    pub(super) spki: SubjectPublicKeyInfoDer<'static>,
 }
 
 impl RsaSigningKey {
-    fn load(der: &PrivateKeyDer<'_>) -> Result<Self, Error> {
+    pub(super) fn load(der: &PrivateKeyDer<'_>) -> Result<Self, Error> {
         let invalid = || Error::general("invalid RSA private key");
         // Loading validates the key's consistency and runs a sign/verify
         // self-test.

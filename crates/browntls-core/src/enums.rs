@@ -177,10 +177,13 @@ enum_builder! {
         ECDSA_SHA1_Legacy => 0x0203,
         RSA_PKCS1_SHA256 => 0x0401,
         ECDSA_NISTP256_SHA256 => 0x0403,
+        RSA_PKCS1_SHA256_LEGACY => 0x0420,
         RSA_PKCS1_SHA384 => 0x0501,
         ECDSA_NISTP384_SHA384 => 0x0503,
+        RSA_PKCS1_SHA384_LEGACY => 0x0520,
         RSA_PKCS1_SHA512 => 0x0601,
         ECDSA_NISTP521_SHA512 => 0x0603,
+        RSA_PKCS1_SHA512_LEGACY => 0x0620,
         RSA_PSS_SHA256 => 0x0804,
         RSA_PSS_SHA384 => 0x0805,
         RSA_PSS_SHA512 => 0x0806,
@@ -221,7 +224,15 @@ impl SignatureScheme {
 
     /// Whether this scheme may be used for TLS 1.3 handshake signatures
     /// (RFC 8446 §4.2.3: no SHA-1, no RSASSA-PKCS1-v1_5, no DSA).
+    ///
+    /// The RFC 9963 legacy schemes are not among them: they are RSASSA-
+    /// PKCS1-v1_5, which TLS 1.3 allows in one message alone. See
+    /// [`Self::is_rsa_pkcs1_legacy`] and
+    /// [`Self::supported_in_tls13_client_auth`].
     pub(crate) fn supported_in_tls13(&self) -> bool {
+        if self.is_rsa_pkcs1_legacy() {
+            return false;
+        }
         let [hash, sign] = self.to_array();
         match HashAlgorithm::from(hash) {
             HashAlgorithm::NONE
@@ -255,6 +266,44 @@ impl SignatureScheme {
     /// application can construct, is treated like `ML_DSA_44`.
     pub(crate) fn is_ml_dsa(&self) -> bool {
         matches!(u16::from(*self), 0x0904..=0x0906)
+    }
+
+    /// Whether this is one of the legacy RSASSA-PKCS1-v1_5 schemes of
+    /// RFC 9963 (`rsa_pkcs1_sha256_legacy`, `rsa_pkcs1_sha384_legacy`,
+    /// `rsa_pkcs1_sha512_legacy`; 0x0420, 0x0520, 0x0620), which exist for
+    /// clients whose RSA key cannot make RSASSA-PSS signatures (some
+    /// hardware tokens). RFC 9963 §3 defines them for the signature in the
+    /// client's TLS 1.3 `CertificateVerify` and for nothing else. So:
+    ///
+    /// - A ClientHello never lists one in `signature_algorithms`, a server
+    ///   never signs with one and a client never accepts one in the
+    ///   server's `CertificateVerify`, whatever the provider's algorithms,
+    ///   the verifier and the keys can do.
+    /// - A server accepts one in the client's `CertificateVerify` only
+    ///   when its CertificateRequest listed it, and a client signs with
+    ///   one only then.
+    /// - TLS 1.2 handshakes, delegated credentials (RFC 9345) and exported
+    ///   authenticators (RFC 9261) never use them.
+    ///
+    /// The code point decides, so that `Unknown(0x0420)`, which an
+    /// application can construct, is treated like
+    /// `RSA_PKCS1_SHA256_LEGACY`.
+    pub(crate) fn is_rsa_pkcs1_legacy(&self) -> bool {
+        matches!(u16::from(*self), 0x0420 | 0x0520 | 0x0620)
+    }
+
+    /// Whether this scheme may sign a client's TLS 1.3 `CertificateVerify`
+    /// in the handshake or in post-handshake authentication: the TLS 1.3
+    /// schemes and the RFC 9963 legacy ones.
+    pub(crate) fn supported_in_tls13_client_auth(&self) -> bool {
+        self.supported_in_tls13() || self.is_rsa_pkcs1_legacy()
+    }
+
+    /// Whether this scheme is specified for TLS 1.3 only, so that no
+    /// TLS 1.2 message may carry it: the ML-DSA schemes and the RFC 9963
+    /// legacy ones.
+    pub(crate) fn is_tls13_only(&self) -> bool {
+        self.is_ml_dsa() || self.is_rsa_pkcs1_legacy()
     }
 }
 
@@ -339,6 +388,39 @@ mod tests {
         assert_eq!(u16::from(SignatureScheme::RSA_PSS_PSS_SHA384), 0x080a);
         assert_eq!(u16::from(SignatureScheme::RSA_PSS_PSS_SHA512), 0x080b);
         assert!(SignatureScheme::from(0x081a).supported_in_tls13());
+    }
+
+    /// RFC 9963: the legacy schemes are TLS 1.3 schemes for the client's
+    /// `CertificateVerify` only, by code point.
+    #[test]
+    fn rsa_pkcs1_legacy_schemes() {
+        for (scheme, code) in [
+            (SignatureScheme::RSA_PKCS1_SHA256_LEGACY, 0x0420),
+            (SignatureScheme::RSA_PKCS1_SHA384_LEGACY, 0x0520),
+            (SignatureScheme::RSA_PKCS1_SHA512_LEGACY, 0x0620),
+        ] {
+            assert_eq!(u16::from(scheme), code);
+            assert_eq!(SignatureScheme::from(code), scheme);
+            for scheme in [scheme, SignatureScheme::Unknown(code)] {
+                assert!(scheme.is_rsa_pkcs1_legacy());
+                assert!(!scheme.supported_in_tls13());
+                assert!(scheme.supported_in_tls13_client_auth());
+                assert!(scheme.is_tls13_only() && !scheme.is_ml_dsa());
+                // Not an RSA scheme of TLS 1.2 suite selection.
+                assert_eq!(scheme.algorithm(), None);
+            }
+        }
+        for code in [0x0401, 0x041f, 0x0421, 0x0320, 0x0720, 0x0804, 0x0904] {
+            let scheme = SignatureScheme::from(code);
+            assert!(!scheme.is_rsa_pkcs1_legacy(), "{code:#06x}");
+            assert_eq!(
+                scheme.supported_in_tls13_client_auth(),
+                scheme.supported_in_tls13(),
+                "{code:#06x}"
+            );
+        }
+        assert!(!SignatureScheme::RSA_PKCS1_SHA256.is_tls13_only());
+        assert!(SignatureScheme::ML_DSA_65.is_tls13_only());
     }
 
     #[test]

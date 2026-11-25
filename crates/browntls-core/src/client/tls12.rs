@@ -317,14 +317,14 @@ impl ExpectServerDoneOrCertReq {
         debug!("Got CertificateRequest {:?}", certreq);
 
         // RFC 5246 §7.4.4: the schemes must be non-empty (checked by the
-        // codec). Schemes defined for TLS 1.3 only (ML-DSA) are not ones a
-        // TLS 1.2 CertificateVerify can use, so the resolver and the key do
-        // not see them.
+        // codec). Schemes defined for TLS 1.3 only (ML-DSA and the legacy
+        // schemes of RFC 9963) are not ones a TLS 1.2 CertificateVerify
+        // can use, so the resolver and the key do not see them.
         let sigschemes: Vec<SignatureScheme> = certreq
             .sigschemes
             .iter()
             .copied()
-            .filter(|scheme| !scheme.is_ml_dsa())
+            .filter(|scheme| !scheme.is_tls13_only())
             .collect();
         let client_auth = ClientAuthDetails::resolve(
             &*self.config.client_auth_cert_resolver,
@@ -465,9 +465,10 @@ fn emit_certverify(
         ));
     };
     let scheme = signer.scheme();
-    // The key chose from a list without the ML-DSA schemes, which are not
-    // for TLS 1.2; a signer naming one anyway ignored that list.
-    if scheme.is_ml_dsa() {
+    // The key chose from a list without the TLS 1.3-only schemes (ML-DSA
+    // and the legacy schemes of RFC 9963); a signer naming one anyway
+    // ignored that list.
+    if scheme.is_tls13_only() {
         return Err(common.send_fatal_alert(
             AlertDescription::InternalError,
             Error::general("signing key chose a TLS 1.3-only signature scheme"),

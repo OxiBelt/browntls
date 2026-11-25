@@ -352,7 +352,9 @@ impl ClientCertVerifier for WebPkiClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, Error> {
-        super::verify::verify_tls13_signature(message, cert, dss, &self.supported_algs)
+        // With the RFC 9963 legacy schemes, when the algorithms map them
+        // (no default table does): this is the client's CertificateVerify.
+        super::verify::verify_tls13_client_signature(message, cert, dss, &self.supported_algs)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

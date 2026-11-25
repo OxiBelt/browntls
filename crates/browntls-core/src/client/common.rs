@@ -145,7 +145,12 @@ impl ClientAuthDetails {
                     delegated: Some(dc),
                 };
             }
-            if let Some(signer) = certkey.key.choose_scheme(sigschemes) {
+            // RFC 9963 §3: a legacy RSASSA-PKCS1-v1_5 scheme signs only an
+            // answer to a request that listed it. A key naming one anyway
+            // ignored the list and is treated as one that cannot sign.
+            if let Some(signer) = certkey.key.choose_scheme(sigschemes).filter(|signer| {
+                !signer.scheme().is_rsa_pkcs1_legacy() || sigschemes.contains(&signer.scheme())
+            }) {
                 debug!("Attempting client auth");
                 return Self::Verify {
                     certkey,
@@ -190,14 +195,17 @@ impl ClientHelloDetails {
     /// The `signature_algorithms` to offer, from the verifier's schemes.
     /// The one list serves every offered version (RFC 9846 §4.3.3). The
     /// ML-DSA schemes are for TLS 1.3 only (`SignatureScheme::is_ml_dsa`),
-    /// so a hello that does not offer TLS 1.3 leaves them out.
+    /// so a hello that does not offer TLS 1.3 leaves them out. The legacy
+    /// schemes of RFC 9963 are never offered, whatever the verifier lists:
+    /// they are for a client's own `CertificateVerify`, and a hello that
+    /// listed one would invite the server to sign with it (RFC 9963 §3).
     pub(super) fn sigschemes_to_offer(
         mut verifier_schemes: Vec<SignatureScheme>,
         offers_tls13: bool,
     ) -> Vec<SignatureScheme> {
-        if !offers_tls13 {
-            verifier_schemes.retain(|scheme| !scheme.is_ml_dsa());
-        }
+        verifier_schemes.retain(|scheme| {
+            !scheme.is_rsa_pkcs1_legacy() && (offers_tls13 || !scheme.is_ml_dsa())
+        });
         verifier_schemes
     }
 

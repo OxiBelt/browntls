@@ -49,6 +49,7 @@ pub use crate::rand::GetRandomFailed;
 pub use crate::suites::CipherSuiteCommon;
 pub use crate::webpki::{
     WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls12_signature_with_raw_key,
+    verify_tls13_client_signature, verify_tls13_client_signature_with_raw_key,
     verify_tls13_signature, verify_tls13_signature_with_raw_key,
 };
 

@@ -332,12 +332,15 @@ impl ExpectClientHello {
         // offered only a PSK may omit it (see `process_client_hello`).
         // The resolver may say it chose with the client's trusted_ca_keys
         // (RFC 6066 §6); only a full TLS 1.2 handshake acts on that.
-        // A TLS 1.2 handshake cannot use the ML-DSA schemes
-        // (`SignatureScheme::is_ml_dsa`): neither the resolver nor the
-        // rest of the handshake sees them, and a client that offered
-        // nothing else shares no scheme with us.
-        if version == ProtocolVersion::TLSv1_2 && sig_schemes.iter().any(|s| s.is_ml_dsa()) {
-            sig_schemes.retain(|scheme| !scheme.is_ml_dsa());
+        // A TLS 1.2 handshake cannot use the schemes defined for TLS 1.3
+        // only (`SignatureScheme::is_tls13_only`: ML-DSA, and the legacy
+        // schemes of RFC 9963, which no ClientHello should list): neither
+        // the resolver nor the rest of the handshake sees them, and a
+        // client that offered nothing else shares no scheme with us. (A
+        // TLS 1.3 handshake keeps only its own schemes, which the legacy
+        // ones are not: `SignatureScheme::supported_in_tls13`.)
+        if version == ProtocolVersion::TLSv1_2 && sig_schemes.iter().any(|s| s.is_tls13_only()) {
+            sig_schemes.retain(|scheme| !scheme.is_tls13_only());
             if sig_schemes.is_empty() {
                 return Err(cx.common.send_fatal_alert(
                     AlertDescription::HandshakeFailure,

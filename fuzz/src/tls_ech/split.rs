@@ -12,7 +12,7 @@ use browntls_core::ech::{
 };
 use browntls_core::{ClientConnection, Error, ServerConfig, ServerConnection};
 
-use super::handshake::{connect, default_key, server_config};
+use super::handshake::{NoKeyLogCalls, connect, default_key, server_config};
 use super::{ECH_VERSION, Fields, KEMS, PUBLIC, SECRET, State, config_list, fixture};
 use crate::input::Input;
 
@@ -246,7 +246,7 @@ pub(super) fn split(
     };
     let mut run = SplitRun {
         client,
-        front: Some(ClientFacing::new(ech.clone())),
+        front: Some(ClientFacing::new(ech.clone()).with_key_log(Arc::new(NoKeyLogCalls))),
         backend: None,
         local: None,
         backend_config: Arc::new(backend),

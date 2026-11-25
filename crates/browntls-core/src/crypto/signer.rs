@@ -24,6 +24,15 @@ const MAX_OCSP_RESPONSE_LEN: usize = 0xff_ffff;
 /// A private key that can produce handshake signatures.
 pub trait SigningKey: Debug + Send + Sync {
     /// Picks a scheme from `offered` this key can sign with, if any.
+    ///
+    /// For a TLS 1.3 client's `CertificateVerify`, `offered` holds the
+    /// legacy RSASSA-PKCS1-v1_5 schemes of RFC 9963
+    /// (`rsa_pkcs1_sha256_legacy`, `rsa_pkcs1_sha384_legacy`,
+    /// `rsa_pkcs1_sha512_legacy`) that the server's CertificateRequest
+    /// lists; no other list holds them. A key that can make RSASSA-PSS
+    /// signatures should not choose one (RFC 9963 §3). A signer that names
+    /// one `offered` does not hold is not used: a client then sends no
+    /// certificate, and a server fails the handshake.
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>>;
 
     /// The key's `SubjectPublicKeyInfo`, if it can be computed.

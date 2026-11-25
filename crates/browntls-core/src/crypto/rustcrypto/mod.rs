@@ -102,6 +102,51 @@
 //! let provider = Arc::new(provider);
 //! # let _ = provider;
 //! ```
+//!
+//! # Legacy RSA client authentication in TLS 1.3 (opt-in)
+//!
+//! TLS 1.3 signs handshakes with RSASSA-PSS, which some RSA keys cannot
+//! do: keys in hardware tokens or operating system key stores that offer
+//! RSASSA-PKCS1-v1_5 only. RFC 9963 defines `rsa_pkcs1_sha256_legacy`,
+//! `rsa_pkcs1_sha384_legacy` and `rsa_pkcs1_sha512_legacy` (0x0420,
+//! 0x0520, 0x0620) so that such a key can still authenticate a TLS 1.3
+//! *client*, and for nothing else. As its §3 asks, they are disabled by
+//! default, and each side opts in separately:
+//!
+//! * A server sets [`SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY`] as the
+//!   `signature_verification_algorithms` of the provider its client
+//!   certificate verifier is built with. Its TLS 1.3 CertificateRequest
+//!   then lists the three schemes after the others, and it accepts a
+//!   client's `CertificateVerify` signed with one, in the handshake or in
+//!   post-handshake authentication: the opt-in is visible on the wire.
+//! * A client gives its certificate a key that chooses these schemes.
+//!   This provider has none (it does not sign with RSA at all): the key
+//!   is the application's own `SigningKey`, typically for a key held in a
+//!   token, or `crypto::native::sign::RsaPkcs1LegacySigningKey` of the
+//!   native provider.
+//!
+//! Nothing else changes, whatever is configured. A ClientHello never lists
+//! the schemes, no server signs with them and no client accepts them from
+//! a server, so server authentication with an RSA key still requires
+//! RSASSA-PSS. TLS 1.2 handshakes, delegated credentials (RFC 9345) and
+//! exported authenticators (RFC 9261) never use them. A signature verifies
+//! only in the exact encoding of RFC 8017 §8.2, `DigestInfo` with its
+//! NULL parameters.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::rustcrypto;
+//!
+//! // A server that also accepts clients whose RSA key signs with
+//! // RSASSA-PKCS1-v1_5 only: build its `WebPkiClientVerifier` with this
+//! // provider (`builder_with_provider`).
+//! let mut provider = rustcrypto::default_provider();
+//! provider.signature_verification_algorithms =
+//!     rustcrypto::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY;
+//! let provider = Arc::new(provider);
+//! # let _ = provider;
+//! ```
 
 use browntls_pki::PrivateKeyDer;
 

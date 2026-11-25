@@ -29,7 +29,13 @@ use crate::tls13::Tls13CipherSuite;
 use crate::tls13::key_schedule::KeyScheduleTrafficWithClientFinishedPending;
 use crate::verify::{DigitallySignedStruct, HandshakeSignatureValid};
 
-/// The schemes authorized by a single CertificateRequest, without GREASE.
+/// The schemes authorized by a single CertificateRequest, without GREASE:
+/// the verifier's TLS 1.3 schemes and, when it lists them, the legacy
+/// RSASSA-PKCS1-v1_5 schemes of RFC 9963, which exist for this message's
+/// answer alone (`SignatureScheme::supported_in_tls13_client_auth`). No
+/// default verifier lists those. A client's CertificateVerify is accepted
+/// only with a scheme of this list (RFC 9963 §3: a server must not accept
+/// a legacy scheme it did not offer).
 pub(super) struct ClientAuthOffer {
     pub(super) signature_schemes: Vec<SignatureScheme>,
     pub(super) delegated_schemes: Option<Vec<SignatureScheme>>,
@@ -41,7 +47,7 @@ impl ClientAuthOffer {
             .verifier
             .supported_verify_schemes()
             .into_iter()
-            .filter(SignatureScheme::supported_in_tls13)
+            .filter(SignatureScheme::supported_in_tls13_client_auth)
             .filter(|&scheme| !is_grease_u16(scheme.into()))
             .collect();
         let delegated_schemes =

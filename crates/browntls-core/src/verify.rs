@@ -314,6 +314,11 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     ) -> Result<HandshakeSignatureValid, Error>;
 
     /// The schemes this verifier can check; offered in `signature_algorithms`.
+    ///
+    /// The legacy RSASSA-PKCS1-v1_5 schemes of RFC 9963
+    /// (`rsa_pkcs1_sha256_legacy` and the like) are never offered and
+    /// never accepted in a server's `CertificateVerify`, even if listed
+    /// here: they are for a client's `CertificateVerify` only.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 
     /// Whether the server must present a raw public key instead of a
@@ -409,6 +414,17 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     ) -> Result<HandshakeSignatureValid, Error>;
 
     /// The schemes this verifier can check; sent in the CertificateRequest.
+    ///
+    /// A TLS 1.3 CertificateRequest also lists the legacy RSASSA-PKCS1-v1_5
+    /// schemes of RFC 9963 (`rsa_pkcs1_sha256_legacy`,
+    /// `rsa_pkcs1_sha384_legacy`, `rsa_pkcs1_sha512_legacy`) that are
+    /// among them, and the server then accepts a client's
+    /// `CertificateVerify` signed with one, which
+    /// [`Self::verify_tls13_signature`] must verify (see
+    /// [`verify_tls13_client_signature`](crate::crypto::verify_tls13_client_signature)).
+    /// That is an opt-in: RFC 9963 §3 says to leave them disabled by
+    /// default, and the provider's default algorithms do not include
+    /// them. A TLS 1.2 CertificateRequest never lists them.
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 
     /// Whether the client must present a raw public key instead of a

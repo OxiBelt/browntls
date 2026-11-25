@@ -40,6 +40,11 @@ mod construct;
 pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
     /// Picks a certificate acceptable to the given issuers and schemes, or
     /// `None`.
+    ///
+    /// For a TLS 1.3 CertificateRequest, `sigschemes` holds the request's
+    /// TLS 1.3 schemes and any legacy RSASSA-PKCS1-v1_5 scheme of RFC 9963
+    /// it lists (`rsa_pkcs1_sha256_legacy` and the like), which only a key
+    /// that cannot make RSASSA-PSS signatures should be chosen for.
     fn resolve(
         &self,
         root_hint_subjects: &[&[u8]],

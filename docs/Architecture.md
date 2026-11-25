@@ -847,6 +847,23 @@ same cases as the native target with the RustCrypto provider, and
 to the same `SubjectPublicKeyInfo`, verify each other's signatures and
 agree on the RFC 9881 Appendix C keys and on malformed encodings.
 
+The transports that carry the TLS 1.3 handshake use the opt-in unchanged.
+QUIC (RFC 9001) carries the larger flight in CRYPTO frames (about 10, 14
+and 19 kB at the Handshake level for an ML-DSA-44, -65 and -87 server
+chain of two certificates). DTLS 1.3 fragments and reassembles it (an
+ML-DSA-87 mutual handshake is about 22 kB of handshake-epoch datagrams in
+each direction at the default MTU, within the reassembly limits) and
+retransmits lost fragments; at a small MTU a flight of more than 32
+records is acknowledged in parts, which costs extra retransmissions.
+DTLS 1.2 follows the TLS 1.2 rules above. The unbuffered API, the Tokio
+streams and the `browntls` facade need nothing beyond the provider fields
+(a Tokio worker's default 2 MiB stack is ample for either provider), and
+kernel TLS offload starts after authentication, a later post-handshake
+authentication being handled in user space.
+`crates/browntls-core/tests/mldsa_transports.rs`,
+`crates/browntls-tokio/tests/mldsa.rs` and `crates/browntls/tests/mldsa.rs`
+cover these with the native provider.
+
 Resumption needs nothing specific: a resumed handshake has no
 `CertificateVerify`. As with every algorithm, a client's sessions are bound
 to its verifier, so a configuration without the opt-in does not resume a

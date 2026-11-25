@@ -65,11 +65,13 @@ fn find_session(
     #[cfg(feature = "tls12")]
     let ech_offer = matches!(config.ech_mode, Some(crate::ech::EchMode::Enable(_)));
 
-    let found = (if cx
-        .common
-        .dtls
-        .as_ref()
-        .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
+    // Taking a ticket removes it from the store, which other clients may share.
+    let found = (if config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
     {
         take_tls13_ticket(
             &*config.resumption.store,

@@ -55,6 +55,7 @@ use super::server::{Accepted, Fatal, Opened, check_outer_extensions, client_hell
 use super::{EchServerConfig, EchStatus};
 use crate::enums::{AlertDescription, ProtocolVersion};
 use crate::error::{Error, InvalidMessage};
+use crate::key_log::{KeyLog, NoKeyLog};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader;
 use crate::msgs::handshake::{
@@ -117,6 +118,9 @@ enum ClientSide {
 /// (RFC 9849 §7.1); see the [module documentation](self).
 pub struct ClientFacing {
     config: Arc<EchServerConfig>,
+    /// Where an accepted offer's ECH records go; [`NoKeyLog`] unless
+    /// [`ClientFacing::with_key_log`] installed another.
+    key_log: Arc<dyn KeyLog>,
     client: ClientSide,
     /// The back-end server's first handshake message has been classified
     /// (or something else arrived first): its bytes pass unmodified.
@@ -151,6 +155,7 @@ impl ClientFacing {
     pub fn new(config: Arc<EchServerConfig>) -> Self {
         Self {
             config,
+            key_log: Arc::new(NoKeyLog),
             client: ClientSide::FirstHello,
             backend_relaying: false,
             from_client: Vec::new(),
@@ -167,6 +172,33 @@ impl ClientFacing {
             server_name: None,
             error: None,
         }
+    }
+
+    /// Sends the ECH records of the key log (RFC 9850 §2.3) to `key_log`:
+    /// for diagnosing test traffic only, never in production.
+    ///
+    /// Without this call nothing is logged; no environment variable and no
+    /// [`ServerConfig`](crate::ServerConfig) turns it on. It has an effect
+    /// only with the `key-log` feature, with HPKE suites of the built-in
+    /// provider, and for a sink that takes the labels.
+    ///
+    /// When the decision is [`ClientFacingDecision::Forward`], `key_log`
+    /// receives `ECH_SECRET` and `ECH_CONFIG` once, identified by the outer
+    /// ClientHello's random. These let a reader of a capture taken between
+    /// the client and this server decrypt the inner ClientHello, which this
+    /// server already reads and forwards in the clear. They do not include
+    /// any of the connection's traffic secrets, which this server never
+    /// has: the back-end server logs those, under the inner ClientHello's
+    /// random, if its own configuration says so. The back-end server writes
+    /// no ECH record.
+    ///
+    /// Nothing is logged for a second ClientHello, nor when the decision is
+    /// [`ClientFacingDecision::Local`] (no ECH extension, GREASE, or an
+    /// offer that did not decrypt), nor after an error.
+    #[must_use]
+    pub fn with_key_log(mut self, key_log: Arc<dyn KeyLog>) -> Self {
+        self.key_log = key_log;
+        self
     }
 
     /// Processes bytes received from the client.
@@ -501,9 +533,11 @@ impl ClientFacing {
             return Ok(());
         };
         let outer_name = ch.sni().map(|n| String::from(n.as_ref()));
-        let opened = match check_outer_extensions(ch)
-            .and_then(|()| super::server::open_first(&self.config, ch, body, message.version))
-        {
+        let opened = match check_outer_extensions(ch).and_then(|()| {
+            // The one place this server writes ECH records, and only for an
+            // offer it accepts (`open_first`).
+            super::server::open_first(&self.config, ch, body, message.version, &*self.key_log)
+        }) {
             Ok(opened) => opened,
             Err(fatal) => return Err(self.fail(fatal)),
         };

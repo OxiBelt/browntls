@@ -12,14 +12,6 @@
 //! other case the ordinary setup runs, which has no way to return it. The
 //! capturing setup cannot be called without the sink's answer: it takes a
 //! [`KeyLogAuthorisation`], which only that answer makes.
-#![cfg_attr(
-    not(all(test, feature = "native")),
-    expect(
-        dead_code,
-        reason = "the capture is wired into the handshake by the next change"
-    )
-)]
-
 use alloc::boxed::Box;
 
 pub(crate) use crate::crypto::hpke::ECH_SECRET;

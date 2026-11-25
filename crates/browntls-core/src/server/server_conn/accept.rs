@@ -172,6 +172,7 @@ fn handshake_with(
         cx.common,
         &outer,
         false,
+        &*config.key_log,
     )?;
     let state = hs::ExpectClientHello::new(config);
     match &inner {

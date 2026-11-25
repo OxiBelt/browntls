@@ -10,14 +10,15 @@ use super::codec::{
     EchClientHello, EchOuter, find_extension, raw_extensions, server_hello_extensions_offset,
 };
 use super::{
-    ACCEPT_LABEL, EchConfig, EchGreaseConfig, EchStatus, HRR_ACCEPT_LABEL, accept_confirmation,
-    hpke_info,
+    ACCEPT_LABEL, EchConfig, EchGreaseConfig, EchMode, EchStatus, HRR_ACCEPT_LABEL,
+    accept_confirmation, hpke_info,
 };
 use crate::crypto::SecureRandom;
 use crate::crypto::hpke::{HpkeSealer, HpkeSymmetricCipherSuite};
 use crate::ct::constant_time_eq;
 use crate::error::Error;
 use crate::hash_hs::HandshakeHashBuffer;
+use crate::key_log::KeyLog;
 use crate::msgs::base::{PayloadU8, PayloadU16};
 use crate::msgs::codec::{Codec, encode_vec_u8, encode_vec_u16};
 use crate::msgs::enums::ExtensionType;
@@ -69,17 +70,105 @@ pub(crate) enum ClientEch {
     },
 }
 
+/// The key log records owed for an offer (RFC 9850 §2.3: `ECH_SECRET` and
+/// `ECH_CONFIG`, under the outer ClientHello's random).
+///
+/// [`ClientEch::offer`] fills it and the function that starts the handshake
+/// writes it out once the ClientHello carrying the offer is on its way: a
+/// client that offered nothing logs nothing. It stays a local of that
+/// function, so the offer that outlives it, and with it the connection,
+/// never holds the KEM secret. Without the `key-log` feature it is empty.
+pub(crate) struct OfferKeyLogRecords {
+    #[cfg(feature = "key-log")]
+    kem_secret: crate::crypto::hpke::KemSecret,
+    /// The outer random, once an offer was made.
+    #[cfg(feature = "key-log")]
+    outer_random: Option<[u8; 32]>,
+}
+
+impl OfferKeyLogRecords {
+    /// Nothing to write.
+    pub(crate) const fn new() -> Self {
+        Self {
+            #[cfg(feature = "key-log")]
+            kem_secret: crate::crypto::hpke::KemSecret::empty(),
+            #[cfg(feature = "key-log")]
+            outer_random: None,
+        }
+    }
+
+    /// Whether an offer left records to write.
+    #[cfg(feature = "key-log")]
+    pub(crate) const fn is_pending(&self) -> bool {
+        self.outer_random.is_some()
+    }
+
+    /// Writes the records of the offer made under `mode`, if one was made.
+    #[cfg(feature = "key-log")]
+    pub(crate) fn emit(&self, key_log: &dyn KeyLog, mode: Option<&EchMode>) {
+        if let (Some(outer_random), Some(EchMode::Enable(config))) = (&self.outer_random, mode) {
+            super::key_log::emit(key_log, outer_random, &self.kem_secret, &config.encoded);
+        }
+    }
+}
+
 impl ClientEch {
+    /// The ECH state of a new handshake under `mode`: an offer, GREASE, or
+    /// none. The other arguments are those of [`offer`](Self::offer).
+    ///
+    /// # Errors
+    ///
+    /// RFC 9849 §6.1: an offer needs TLS 1.3 (`supports_tls13`).
+    pub(crate) fn start(
+        mode: Option<&EchMode>,
+        supports_tls13: bool,
+        rng: &dyn SecureRandom,
+        client_auth_enabled: bool,
+        key_log: &dyn KeyLog,
+        records: &mut OfferKeyLogRecords,
+    ) -> Result<Option<Self>, Error> {
+        match mode {
+            Some(EchMode::Enable(_)) if !supports_tls13 => Err(Error::general(
+                "Encrypted Client Hello requires TLS 1.3 to be enabled",
+            )),
+            Some(EchMode::Enable(config)) => {
+                Self::offer(config, rng, client_auth_enabled, key_log, records).map(Some)
+            }
+            Some(EchMode::Grease(grease)) => Ok(Some(Self::GreasePending(grease.clone()))),
+            None => Ok(None),
+        }
+    }
+
     /// Starts an offer with `config`: sets up the HPKE context.
-    pub(crate) fn offer(
+    ///
+    /// With the `key-log` feature, `records` receives what `key_log` is
+    /// owed for the offer: the KEM secret, if the sink takes it and the
+    /// suite can hand it out, and the outer ClientHello's random. The
+    /// caller writes them after sending the ClientHello. A GREASE extension
+    /// is not an offer and comes from elsewhere ([`grease_extension`]).
+    fn offer(
         config: &EchConfig,
         rng: &dyn SecureRandom,
         client_auth_enabled: bool,
+        key_log: &dyn KeyLog,
+        records: &mut OfferKeyLogRecords,
     ) -> Result<Self, Error> {
         let info = hpke_info(&config.encoded);
         let public_key =
             crate::crypto::hpke::HpkePublicKey(config.contents.key_config.public_key.0.clone());
-        let (enc, sealer) = config.hpke.setup_sealer(&info, &public_key)?;
+        #[cfg(feature = "key-log")]
+        let (enc, sealer) = super::key_log::setup_sealer(
+            config.hpke,
+            key_log,
+            &info,
+            &public_key,
+            &mut records.kem_secret,
+        )?;
+        #[cfg(not(feature = "key-log"))]
+        let (enc, sealer) = {
+            let _ = (key_log, records);
+            config.hpke.setup_sealer(&info, &public_key)?
+        };
         let mut outer_transcript = HandshakeHashBuffer::new();
         if client_auth_enabled {
             outer_transcript.set_client_auth_enabled();
@@ -91,12 +180,17 @@ impl ClientEch {
         } else {
             config.contents.key_config.config_id
         };
+        let outer_random = Random::new(rng)?;
+        #[cfg(feature = "key-log")]
+        {
+            records.outer_random = Some(outer_random.0);
+        }
         Ok(Self::Offer(Box::new(EchOffer {
             config: config.clone(),
             config_id,
             sealer,
             enc: enc.0,
-            outer_random: Random::new(rng)?,
+            outer_random,
             outer_transcript,
             outer_sent_extensions: Vec::new(),
             first_outer_ext: None,

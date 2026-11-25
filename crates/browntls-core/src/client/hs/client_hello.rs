@@ -15,8 +15,7 @@ use super::{
 };
 use crate::common_state::KxState;
 use crate::crypto::ActiveKeyExchange;
-use crate::ech::EchMode;
-use crate::ech::client::ClientEch;
+use crate::ech::client::{ClientEch, OfferKeyLogRecords};
 use crate::enums::{CertificateType, CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
 use crate::hash_hs::HandshakeHashBuffer;
@@ -64,7 +63,7 @@ fn find_session(
     // ID went out in the clear next to the hidden server name, so any use
     // of it in the outer ClientHello would link the two connections.
     #[cfg(feature = "tls12")]
-    let ech_offer = matches!(config.ech_mode, Some(EchMode::Enable(_)));
+    let ech_offer = matches!(config.ech_mode, Some(crate::ech::EchMode::Enable(_)));
 
     let found = (if cx
         .common
@@ -305,30 +304,20 @@ pub(in crate::client) fn start_handshake(
 
     // RFC 9849 §6.1: an ECH offer needs TLS 1.3. `find_session` already
     // left out TLS 1.2 sessions, before the session ID above was chosen.
-    let ech = match &config.ech_mode {
-        Some(EchMode::Enable(ech_config)) => {
-            if !supports_tls13 {
-                return Err(Error::general(
-                    "Encrypted Client Hello requires TLS 1.3 to be enabled",
-                ));
-            }
-            #[cfg(feature = "tls12")]
-            debug_assert!(!matches!(
-                &resuming,
-                Some(Retrieved {
-                    value: ClientSessionValue::Tls12(_),
-                    ..
-                })
-            ));
-            Some(ClientEch::offer(
-                ech_config,
-                config.provider.secure_random,
-                config.client_auth_cert_resolver.has_certs(),
-            )?)
-        }
-        Some(EchMode::Grease(grease)) => Some(ClientEch::GreasePending(grease.clone())),
-        None => None,
-    };
+    let mut ech_records = OfferKeyLogRecords::new();
+    let ech = ClientEch::start(
+        config.ech_mode.as_ref(),
+        supports_tls13,
+        config.provider.secure_random,
+        config.client_auth_cert_resolver.has_certs(),
+        &*config.key_log,
+        &mut ech_records,
+    )?;
+    #[cfg(feature = "tls12")]
+    debug_assert!(
+        !(ech.as_ref().is_some_and(ClientEch::restricts_to_tls13)
+            && matches!(&resuming, Some(r) if matches!(r.value, ClientSessionValue::Tls12(_))))
+    );
     if let Some(ech) = &ech {
         cx.data.ech_status = ech.initial_status();
     }
@@ -351,14 +340,24 @@ pub(in crate::client) fn start_handshake(
         ech,
         grease,
     };
-    emit_client_hello_for_retry(
+    // RFC 9850 §2.3: the ECH records are for a client that offered ECH, so
+    // they wait until the ClientHello with the offer is on its way. The
+    // KEM secret stays in this function's `ech_records` meanwhile.
+    #[cfg(feature = "key-log")]
+    let ech_key_log = ech_records.is_pending().then(|| Arc::clone(&input.config));
+    let next = emit_client_hello_for_retry(
         transcript_buffer,
         None,
         key_share.map(OfferedKeyShare::Full),
         None,
         input,
         cx,
-    )
+    )?;
+    #[cfg(feature = "key-log")]
+    if let Some(config) = &ech_key_log {
+        ech_records.emit(&*config.key_log, config.ech_mode.as_ref());
+    }
+    Ok(next)
 }
 
 /// Builds and sends a ClientHello (the first, or the answer to a

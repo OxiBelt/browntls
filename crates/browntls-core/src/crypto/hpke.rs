@@ -250,10 +250,6 @@ mod capture {
 
     impl KemSecret {
         /// An empty buffer.
-        #[cfg_attr(
-            not(all(test, feature = "native")),
-            expect(dead_code, reason = "used by the handshake in the next change")
-        )]
         pub(crate) const fn empty() -> Self {
             Self {
                 bytes: [0; MAX_KEM_SECRET_LEN],

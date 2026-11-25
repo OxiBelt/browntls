@@ -92,7 +92,26 @@ pub(super) fn server_config(ech: Option<Arc<EchServerConfig>>, hrr: bool) -> Arc
         .expect("server certificate");
     config.alpn_protocols = vec![b"h2".to_vec()];
     config.ech = ech;
+    config.key_log = Arc::new(NoKeyLogCalls);
     Arc::new(config)
+}
+
+/// The key log of every party of this target. The fuzz crate builds
+/// `browntls-core` without its `key-log` feature, as production does, so
+/// whatever the input makes of an ECH offer (accepted, rejected, GREASE, a
+/// candidate key that fails, split mode), nothing may reach a key log: not
+/// a record, and not the question whether it would take one.
+#[derive(Debug)]
+pub(super) struct NoKeyLogCalls;
+
+impl browntls_core::KeyLog for NoKeyLogCalls {
+    fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+        panic!("a build without `key-log` logged {label}");
+    }
+
+    fn will_log(&self, label: &str) -> bool {
+        panic!("a build without `key-log` asked about {label}");
+    }
 }
 
 /// A client offering `mode` and a server. The client may fail to start
@@ -111,6 +130,7 @@ pub(super) fn connect(
     .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec()];
     config.ech_mode = Some(mode);
+    config.key_log = Arc::new(NoKeyLogCalls);
     let name = ServerName::try_from(SECRET).expect("name");
     let client = match ClientConnection::new(Arc::new(config), name) {
         Ok(client) => client,

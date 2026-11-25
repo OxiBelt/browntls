@@ -736,6 +736,7 @@ impl State<ServerConnectionData> for ExpectClientHello {
             cx.common,
             &m,
             self.done_retry,
+            &*self.config.key_log,
         )? {
             Some(inner) => inner,
             None => m,

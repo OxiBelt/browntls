@@ -61,9 +61,12 @@ impl State<ClientConnectionData> for ExpectServerDone {
 
         // 2. Verify the signature over the key exchange parameters
         //    (RFC 5246 §7.4.3: client_random || server_random || params).
+        //    The ML-DSA schemes, which a hello that also offered TLS 1.3
+        //    may have listed, are not for TLS 1.2 whatever the suite says.
         let sig = &st.server_kx.sig;
         if !st.hello.offered_sigschemes.contains(&sig.scheme)
             || !st.suite.sign.contains(&sig.scheme)
+            || sig.scheme.is_ml_dsa()
         {
             return Err(cx.common.send_fatal_alert(
                 AlertDescription::IllegalParameter,

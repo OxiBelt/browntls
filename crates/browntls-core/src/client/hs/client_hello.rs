@@ -417,7 +417,10 @@ pub(super) fn emit_client_hello_for_retry(
         _ => None,
     };
 
-    let offered_sigschemes = config.verifier().supported_verify_schemes();
+    let offered_sigschemes = ClientHelloDetails::sigschemes_to_offer(
+        config.verifier().supported_verify_schemes(),
+        supported_versions.contains(&ProtocolVersion::TLSv1_3),
+    );
 
     // Only groups usable with an offered version: a TLS 1.2-only hello must
     // not offer TLS 1.3-only groups such as FFDHE (RFC 10015 §3, RFC 7919

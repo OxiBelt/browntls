@@ -151,12 +151,19 @@ pub(crate) fn verify_cert_for_usage<'p>(
 }
 
 /// Verifies a TLS 1.2 handshake signature over `message` with `cert`'s key.
+///
+/// The ML-DSA schemes are rejected before any cryptography runs, whatever
+/// `supported_schemes` maps: they are specified for TLS 1.3 only
+/// (`draft-ietf-tls-mldsa-06`).
 pub fn verify_tls12_signature(
     message: &[u8],
     cert: &CertificateDer<'_>,
     dss: &DigitallySignedStruct,
     supported_schemes: &WebPkiSupportedAlgorithms,
 ) -> Result<HandshakeSignatureValid, Error> {
+    if dss.scheme.is_ml_dsa() {
+        return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
+    }
     let possible_algs = supported_schemes.convert_scheme(dss.scheme)?;
     let cert = ParsedCertificate::try_from(cert)?;
     verify_sig_using_any_alg(&cert, possible_algs, message, dss.signature())
@@ -220,12 +227,17 @@ pub fn verify_tls13_signature_with_raw_key(
 }
 
 /// Verifies a TLS 1.2 handshake signature with a bare `SubjectPublicKeyInfo`.
+///
+/// As [`verify_tls12_signature`], it rejects the ML-DSA schemes.
 pub fn verify_tls12_signature_with_raw_key(
     msg: &[u8],
     spki: &browntls_pki::SubjectPublicKeyInfoDer<'_>,
     dss: &DigitallySignedStruct,
     supported_schemes: &WebPkiSupportedAlgorithms,
 ) -> Result<HandshakeSignatureValid, Error> {
+    if dss.scheme.is_ml_dsa() {
+        return Err(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
+    }
     verify_sig_with_spki(
         spki.as_ref(),
         supported_schemes.convert_scheme(dss.scheme)?,
@@ -328,6 +340,70 @@ mod tests {
             verify_tls13_signature(&[], &CertificateDer::from_slice(&[]), &dss, &ALGS).unwrap_err(),
             Error::PeerMisbehaved(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme)
         );
+    }
+
+    /// The ML-DSA schemes are TLS 1.3-only (`draft-ietf-tls-mldsa-06`): the
+    /// TLS 1.2 helpers refuse them before the table or the key is looked
+    /// at, even when a table maps them.
+    #[test]
+    fn tls12_refuses_ml_dsa_schemes_whatever_the_table_maps() {
+        static WITH_ML_DSA: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
+            all: &[&DUMMY],
+            mapping: &[
+                (SignatureScheme::ML_DSA_44, &[&DUMMY]),
+                (SignatureScheme::ML_DSA_65, &[&DUMMY]),
+                (SignatureScheme::ML_DSA_87, &[&DUMMY]),
+                (SignatureScheme::ED25519, &[&DUMMY]),
+            ],
+        };
+        let refused =
+            Error::PeerMisbehaved(PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme);
+        let no_cert = CertificateDer::from_slice(&[]);
+        let no_key = browntls_pki::SubjectPublicKeyInfoDer::from(&[][..]);
+        // The code point decides: a constructed `Unknown` is ML-DSA too.
+        for code in [0x0903, 0x0904, 0x0905, 0x0906, 0x0907] {
+            assert_eq!(
+                SignatureScheme::Unknown(code).is_ml_dsa(),
+                (0x0904..=0x0906).contains(&code)
+            );
+        }
+        let dss = DigitallySignedStruct::new(SignatureScheme::Unknown(0x0905), alloc::vec![1]);
+        assert_eq!(
+            verify_tls12_signature(&[], &no_cert, &dss, &WITH_ML_DSA).unwrap_err(),
+            refused
+        );
+        for scheme in [
+            SignatureScheme::ML_DSA_44,
+            SignatureScheme::ML_DSA_65,
+            SignatureScheme::ML_DSA_87,
+        ] {
+            assert!(scheme.is_ml_dsa() && scheme.supported_in_tls13());
+            let dss = DigitallySignedStruct::new(scheme, alloc::vec![1]);
+            assert_eq!(
+                verify_tls12_signature(&[], &no_cert, &dss, &WITH_ML_DSA).unwrap_err(),
+                refused
+            );
+            assert_eq!(
+                verify_tls12_signature_with_raw_key(&[], &no_key, &dss, &WITH_ML_DSA).unwrap_err(),
+                refused
+            );
+            // TLS 1.3 gets as far as the (here unusable) certificate and key.
+            assert_ne!(
+                verify_tls13_signature(&[], &no_cert, &dss, &WITH_ML_DSA).unwrap_err(),
+                refused
+            );
+            assert_ne!(
+                verify_tls13_signature_with_raw_key(&[], &no_key, &dss, &WITH_ML_DSA).unwrap_err(),
+                refused
+            );
+        }
+        // A scheme of both versions is not refused at that point.
+        let dss = DigitallySignedStruct::new(SignatureScheme::ED25519, alloc::vec![1]);
+        assert_ne!(
+            verify_tls12_signature(&[], &no_cert, &dss, &WITH_ML_DSA).unwrap_err(),
+            refused
+        );
+        assert!(!SignatureScheme::ED25519.is_ml_dsa());
     }
 
     /// RFC 9846 §4.3.3: in TLS 1.3 each ECDSA scheme is verified only with

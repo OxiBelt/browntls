@@ -313,10 +313,17 @@ fn tls13_scheme(scheme: SignatureScheme) -> bool {
     !matches!(hash, 0..=3) && !matches!(sign, 0..=2)
 }
 
+/// The ML-DSA schemes (`draft-ietf-tls-mldsa-06`), which no specification
+/// defines for delegated credentials.
+fn ml_dsa_scheme(scheme: SignatureScheme) -> bool {
+    matches!(u16::from(scheme), 0x0904..=0x0906)
+}
+
 /// RFC 9345 §4: a TLS 1.3 scheme that does not need an `rsaEncryption`
-/// key.
+/// key; and never ML-DSA.
 fn credential_scheme_ok(scheme: SignatureScheme) -> bool {
     tls13_scheme(scheme)
+        && !ml_dsa_scheme(scheme)
         && !matches!(
             scheme,
             SignatureScheme::RSA_PSS_SHA256
@@ -438,6 +445,7 @@ fn expected_validation(dc: &DelegatedCredential, offer: &Offer<'_>) -> Option<u6
     )
     .is_ok();
     let valid = credential_scheme_ok(scheme)
+        && !ml_dsa_scheme(dc.algorithm)
         && offer.dc_schemes.contains(&scheme)
         && offer.sig_schemes.contains(&dc.algorithm)
         && offer.now < expiry

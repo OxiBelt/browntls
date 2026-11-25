@@ -116,6 +116,57 @@ impl Hpke for NativeHpke {
             HpkePrivateKey::from(bytes),
         ))
     }
+
+    #[cfg(feature = "key-log")]
+    fn kem_secret_capture(&self) -> Option<&dyn crate::crypto::hpke::KemSecretCapture> {
+        Some(self)
+    }
+}
+
+/// The key log's view of a setup: the same operations, with the KEM shared
+/// secret copied to the caller's buffer. The intermediate copy is zeroised
+/// when it goes out of scope, whatever the outcome.
+#[cfg(feature = "key-log")]
+impl crate::crypto::hpke::KemSecretCapture for NativeHpke {
+    fn setup_sealer(
+        &self,
+        _authorised: &crate::crypto::hpke::KeyLogAuthorisation,
+        info: &[u8],
+        pub_key: &HpkePublicKey,
+        kem_secret: &mut crate::crypto::hpke::KemSecret,
+    ) -> Result<(EncapsulatedSecret, Box<dyn HpkeSealer>), Error> {
+        kem_secret.clear();
+        let pk = PublicKey::from_bytes(self.0.kem, &pub_key.0).map_err(map_err)?;
+        let mut captured = browntls_crypto::hpke::KemSharedSecret::new();
+        let (enc, ctx) = self
+            .0
+            .setup_sender_with_kem_secret(&pk, info, &OsRng, &mut captured)
+            .map_err(map_err)?;
+        kem_secret.set(captured.as_bytes());
+        Ok((
+            EncapsulatedSecret(enc.as_bytes().to_vec()),
+            Box::new(NativeSealer(ctx)),
+        ))
+    }
+
+    fn setup_opener(
+        &self,
+        _authorised: &crate::crypto::hpke::KeyLogAuthorisation,
+        enc: &EncapsulatedSecret,
+        info: &[u8],
+        secret_key: &HpkePrivateKey,
+        kem_secret: &mut crate::crypto::hpke::KemSecret,
+    ) -> Result<Box<dyn HpkeOpener>, Error> {
+        kem_secret.clear();
+        let sk = PrivateKey::from_bytes(self.0.kem, secret_key.secret_bytes()).map_err(map_err)?;
+        let mut captured = browntls_crypto::hpke::KemSharedSecret::new();
+        let ctx = self
+            .0
+            .setup_recipient_with_kem_secret(&enc.0, &sk, info, &mut captured)
+            .map_err(map_err)?;
+        kem_secret.set(captured.as_bytes());
+        Ok(Box::new(NativeOpener(ctx)))
+    }
 }
 
 #[derive(Debug)]

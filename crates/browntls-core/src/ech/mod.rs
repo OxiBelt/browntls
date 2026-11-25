@@ -60,6 +60,8 @@ use crate::msgs::handshake::MAX_HANDSHAKE_SIZE;
 pub(crate) mod client;
 pub(crate) mod codec;
 pub(crate) mod config;
+#[cfg(feature = "key-log")]
+pub(crate) mod key_log;
 pub mod pem;
 pub(crate) mod server;
 pub mod split;

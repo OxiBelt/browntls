@@ -174,6 +174,169 @@ pub trait Hpke: Debug + Send + Sync {
     fn fips(&self) -> bool {
         false
     }
+
+    /// The built-in provider's hook for writing the KEM shared secret to a
+    /// key log (RFC 9850 `ECH_SECRET`). It is not an extension point: the
+    /// trait it returns cannot be named outside this crate, so every other
+    /// implementation keeps the default, and no `ECH_SECRET` line is ever
+    /// written for it.
+    #[cfg(feature = "key-log")]
+    #[doc(hidden)]
+    fn kem_secret_capture(&self) -> Option<&dyn KemSecretCapture> {
+        None
+    }
+}
+
+#[cfg(feature = "key-log")]
+pub(crate) use capture::{ECH_SECRET, KemSecret, KemSecretCapture, KeyLogAuthorisation};
+
+/// Capture of the KEM shared secret for the key log.
+///
+/// The module is private, so [`KemSecretCapture`] is sealed: only a provider
+/// inside this crate can implement it, and the secret's provenance is the
+/// built-in HPKE's `Encap` or `Decap` output, never a value an application
+/// supplied.
+#[cfg(feature = "key-log")]
+mod capture {
+    use alloc::boxed::Box;
+    use core::fmt;
+
+    use super::{EncapsulatedSecret, HpkeOpener, HpkePrivateKey, HpkePublicKey, HpkeSealer};
+    use crate::error::Error;
+    use crate::key_log::KeyLog;
+
+    /// The key log label of the KEM shared secret (RFC 9850 §2.3).
+    pub(crate) const ECH_SECRET: &str = "ECH_SECRET";
+
+    /// Proof that a key log takes `ECH_SECRET`.
+    ///
+    /// The setup functions of [`KemSecretCapture`] demand one, and
+    /// [`ask`](Self::ask) is the only way to make one, so no caller can
+    /// reach the capture without the sink's answer for that connection.
+    #[allow(unreachable_pub)]
+    pub struct KeyLogAuthorisation(());
+
+    impl KeyLogAuthorisation {
+        /// Asks `key_log` whether it takes the secret: `None` unless
+        /// [`KeyLog::will_log`] says so.
+        pub(crate) fn ask(key_log: &dyn KeyLog) -> Option<Self> {
+            key_log.will_log(ECH_SECRET).then_some(Self(()))
+        }
+    }
+
+    impl fmt::Debug for KeyLogAuthorisation {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("KeyLogAuthorisation")
+        }
+    }
+
+    /// The largest `Nsecret` of a KEM in RFC 9180 (the output of
+    /// HKDF-SHA512).
+    const MAX_KEM_SECRET_LEN: usize = 64;
+
+    /// A caller-owned buffer for one KEM shared secret (`shared_secret` in
+    /// RFC 9180 §5.1.1).
+    ///
+    /// The setup functions of [`KemSecretCapture`] fill it in place. It is
+    /// zeroised when cleared and on drop, it can be neither cloned nor
+    /// compared, and its [`Debug`](fmt::Debug) form shows no byte of it.
+    /// Keep it a local of the function that emits the key log line: it must
+    /// not become part of a connection's state.
+    #[allow(unreachable_pub)]
+    pub struct KemSecret {
+        bytes: [u8; MAX_KEM_SECRET_LEN],
+        len: usize,
+    }
+
+    impl KemSecret {
+        /// An empty buffer.
+        #[cfg_attr(
+            not(all(test, feature = "native")),
+            expect(dead_code, reason = "used by the handshake in the next change")
+        )]
+        pub(crate) const fn empty() -> Self {
+            Self {
+                bytes: [0; MAX_KEM_SECRET_LEN],
+                len: 0,
+            }
+        }
+
+        /// Zeroises and empties the buffer.
+        pub(crate) fn clear(&mut self) {
+            crate::crypto::zeroize_slice(&mut self.bytes);
+            self.len = 0;
+        }
+
+        /// Replaces the content with a copy of `secret`. A length no KEM
+        /// has leaves the buffer empty.
+        #[cfg_attr(not(feature = "native"), allow(dead_code))]
+        pub(crate) fn set(&mut self, secret: &[u8]) {
+            self.clear();
+            if let Some(dst) = self.bytes.get_mut(..secret.len()) {
+                dst.copy_from_slice(secret);
+                self.len = secret.len();
+            }
+        }
+
+        /// The secret, or `None` while the buffer is empty.
+        pub(crate) fn get(&self) -> Option<&[u8]> {
+            match self.len {
+                0 => None,
+                len => self.bytes.get(..len),
+            }
+        }
+    }
+
+    impl Drop for KemSecret {
+        fn drop(&mut self) {
+            self.clear();
+        }
+    }
+
+    impl fmt::Debug for KemSecret {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("KemSecret(..)")
+        }
+    }
+
+    /// [`Hpke::setup_sealer`](super::Hpke::setup_sealer) and
+    /// [`Hpke::setup_opener`](super::Hpke::setup_opener) that also copy the
+    /// KEM shared secret into `kem_secret`.
+    ///
+    /// Both clear `kem_secret` first, so that it is empty after an error
+    /// and never holds the secret of an earlier call. Each takes the
+    /// [`KeyLogAuthorisation`] of the key log the secret is for.
+    #[allow(unreachable_pub)]
+    pub trait KemSecretCapture {
+        /// `SetupBaseS(pkR, info)`, capturing the secret.
+        ///
+        /// # Errors
+        ///
+        /// As [`Hpke::setup_sealer`](super::Hpke::setup_sealer).
+        fn setup_sealer(
+            &self,
+            authorised: &KeyLogAuthorisation,
+            info: &[u8],
+            pub_key: &HpkePublicKey,
+            kem_secret: &mut KemSecret,
+        ) -> Result<(EncapsulatedSecret, Box<dyn HpkeSealer>), Error>;
+
+        /// `SetupBaseR(enc, skR, info)`, capturing the secret. Success does
+        /// not show that `enc` is honest: the caller logs the secret only
+        /// after the context opened a ciphertext.
+        ///
+        /// # Errors
+        ///
+        /// As [`Hpke::setup_opener`](super::Hpke::setup_opener).
+        fn setup_opener(
+            &self,
+            authorised: &KeyLogAuthorisation,
+            enc: &EncapsulatedSecret,
+            info: &[u8],
+            secret_key: &HpkePrivateKey,
+            kem_secret: &mut KemSecret,
+        ) -> Result<Box<dyn HpkeOpener>, Error>;
+    }
 }
 
 /// A sender context (`ContextS`).

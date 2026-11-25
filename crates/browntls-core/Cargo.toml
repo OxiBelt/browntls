@@ -15,7 +15,9 @@ alloc = []
 tls12 = []
 logging = ["dep:log"]
 # Session-secret diagnostics. Omit this feature from production builds.
-key-log = ["alloc", "dep:rustix"]
+# With the built-in provider it also lets the HPKE setup hand the KEM shared
+# secret to the key log (`browntls-crypto`'s `key-log` feature).
+key-log = ["alloc", "dep:rustix", "browntls-crypto?/key-log"]
 # Orders X25519MLKEM768 first in the default key-exchange group list.
 prefer-post-quantum = []
 # Built-in certificate compression (RFC 8879), one feature per algorithm.

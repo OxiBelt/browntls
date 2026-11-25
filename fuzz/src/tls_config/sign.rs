@@ -91,14 +91,14 @@ pub(super) fn tls13_scheme(scheme: SignatureScheme) -> bool {
 
 /// The legacy RSASSA-PKCS1-v1_5 schemes of RFC 9963, in the order the
 /// opt-in tables and the native PKCS #1-only key prefer them.
-const LEGACY_SCHEMES: [SignatureScheme; 3] = [
+pub(super) const LEGACY_SCHEMES: [SignatureScheme; 3] = [
     SignatureScheme::RSA_PKCS1_SHA512_LEGACY,
     SignatureScheme::RSA_PKCS1_SHA384_LEGACY,
     SignatureScheme::RSA_PKCS1_SHA256_LEGACY,
 ];
 
 /// The opt-in table of provider `p` that maps [`LEGACY_SCHEMES`].
-fn legacy_algs(p: usize) -> WebPkiSupportedAlgorithms {
+pub(super) fn legacy_algs(p: usize) -> WebPkiSupportedAlgorithms {
     [
         native::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,
         rustcrypto::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY,

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
@@ -49,6 +50,23 @@ impl Sink {
         if client_random.len() != 32 || !secret_length_valid(label, Some(secret.len())) {
             return;
         }
+        // The one value that is not a secret, and the one that does not fit
+        // the fixed line: built before the file is locked.
+        let config_line = if label == ECH_CONFIG {
+            if !ech_config_well_formed(secret) {
+                return;
+            }
+            let mut line = Vec::with_capacity(record_len(label, secret.len()));
+            push_record(
+                &mut |bytes| line.extend_from_slice(bytes),
+                label,
+                client_random,
+                secret,
+            );
+            Some(line)
+        } else {
+            None
+        };
         let Ok(mut state) = self.file.lock() else {
             return;
         };
@@ -61,13 +79,11 @@ impl Sink {
             check_file(&fs::fstat(file).map_err(os_error)?)?;
             let len = check_record_boundary(file)?;
 
+            if let Some(line) = &config_line {
+                return append_record(file, len, line, |mut writer, bytes| writer.write(bytes));
+            }
             let mut line = SecretLine::new();
-            line.push(label.as_bytes());
-            line.push(b" ");
-            line.push_hex(client_random);
-            line.push(b" ");
-            line.push_hex(secret);
-            line.push(b"\n");
+            push_record(&mut |bytes| line.push(bytes), label, client_random, secret);
             append_record(file, len, line.as_bytes(), |mut writer, bytes| {
                 writer.write(bytes)
             })
@@ -237,6 +253,14 @@ fn os_error(err: Errno) -> io::Error {
     io_kind(err.into())
 }
 
+/// The label of an offer's `ECHConfig` (RFC 9850 §2.3): public data of a
+/// variable length, unlike every other value this sink writes.
+const ECH_CONFIG: &str = "ECH_CONFIG";
+
+/// The longest `ECHConfig` the format allows: a version, a length, and
+/// `2^16 - 1` bytes of contents (RFC 9849 §4).
+const MAX_ECH_CONFIG_LEN: usize = 4 + 0xffff;
+
 fn secret_length_valid(label: &str, length: Option<usize>) -> bool {
     match label {
         "CLIENT_RANDOM" => length.is_none_or(|len| len == 48),
@@ -247,12 +271,50 @@ fn secret_length_valid(label: &str, length: Option<usize>) -> bool {
         | "CLIENT_TRAFFIC_SECRET_0"
         | "SERVER_TRAFFIC_SECRET_0"
         | "EXPORTER_SECRET" => length.is_none_or(|len| matches!(len, 32 | 48 | 64)),
+        // The KEM shared secret of an ECH offer: `Nsecret` of a KEM of
+        // RFC 9180 §7.1, the output length of its HKDF.
+        "ECH_SECRET" => length.is_none_or(|len| matches!(len, 32 | 48 | 64)),
+        ECH_CONFIG => length.is_none_or(|len| (4..=MAX_ECH_CONFIG_LEN).contains(&len)),
         _ => false,
     }
 }
 
+/// Whether `config` has the framing of one `ECHConfig`: a version, then a
+/// length that accounts for every byte after it.
+fn ech_config_well_formed(config: &[u8]) -> bool {
+    match config {
+        [_, _, hi, lo, contents @ ..] => {
+            usize::from(u16::from_be_bytes([*hi, *lo])) == contents.len()
+        }
+        _ => false,
+    }
+}
+
+/// The length of the record of a `value_len`-byte value under `label`.
+fn record_len(label: &str, value_len: usize) -> usize {
+    label.len() + 1 + 64 + 1 + 2 * value_len + 1
+}
+
+/// Hands `push` one record, piece by piece: the label, the random and the
+/// value in lowercase hexadecimal, separated by single spaces, and a
+/// newline (RFC 9850 §2).
+fn push_record(push: &mut dyn FnMut(&[u8]), label: &str, client_random: &[u8], value: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let push_hex = |push: &mut dyn FnMut(&[u8]), data: &[u8]| {
+        for &byte in data {
+            push(&[HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]]);
+        }
+    };
+    push(label.as_bytes());
+    push(b" ");
+    push_hex(push, client_random);
+    push(b" ");
+    push_hex(push, value);
+    push(b"\n");
+}
+
 struct SecretLine {
-    // The longest accepted label, two spaces, 32-byte random, up to a
+    // The longest label of a secret, two spaces, 32-byte random, up to a
     // 64-byte secret (both hex-encoded), and newline fit in this buffer.
     bytes: [u8; 256],
     used: usize,
@@ -270,13 +332,6 @@ impl SecretLine {
         let end = self.used + data.len();
         self.bytes[self.used..end].copy_from_slice(data);
         self.used = end;
-    }
-
-    fn push_hex(&mut self, data: &[u8]) {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for &byte in data {
-            self.push(&[HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]]);
-        }
     }
 
     fn as_bytes(&self) -> &[u8] {

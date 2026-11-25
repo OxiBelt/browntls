@@ -606,7 +606,7 @@ negotiated when a peer shares nothing earlier.
 | TLS 1.3 suites | AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 | AES-128-CCM, then AES-128-CCM-8 (64-bit tag; no kernel TLS export) | |
 | TLS 1.2 suites | ECDHE with AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 (ECDSA and RSA) | ECDHE AES-CBC: AES-256-CBC-SHA384, AES-128-CBC-SHA256, then AES-256-CBC-SHA, AES-128-CBC-SHA (ECDSA and RSA; RFC 5289, RFC 8422); Encrypt-then-MAC only by default; no kernel TLS export | |
 | Groups | X25519MLKEM768, X25519, P-256, P-384 | X448, then FFDHE2048, FFDHE3072, FFDHE4096 (TLS 1.3 only, RFC 10015 §3) | FFDHE6144, FFDHE8192 (server cost 10 to 20 ms per handshake); the other ML-KEM groups and P-521 |
-| Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | `mldsa44`, `mldsa65`, `mldsa87` after every default scheme (TLS 1.3 only, experimental: `SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`, see [below](#ml-dsa-tls-13-authentication-opt-in-experimental)) |
+| Signature schemes | ECDSA, Ed25519, RSA-PSS (rsae), RSA PKCS #1 v1.5 | Ed448, then `rsa_pss_pss_sha512/384/256` (RSASSA-PSS public keys) | `mldsa44`, `mldsa65`, `mldsa87` after every default scheme (TLS 1.3 only, experimental: `SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`, see [below](#ml-dsa-tls-13-authentication-opt-in-experimental)); `rsa_pkcs1_sha512/384/256_legacy` after every default scheme (a TLS 1.3 client's `CertificateVerify` only: `SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY`, see [below](#legacy-rsa-client-authentication-in-tls-13-rfc-9963-opt-in)) |
 | Certificate and CRL signatures only (no TLS scheme) | the algorithms of the signature schemes above | | ML-DSA-44, -65, -87 (`ALL_VERIFICATION_ALGS_WITH_ML_DSA`, see [below](#ml-dsa-certificate-verification-native-provider-opt-in)) |
 
 A browntls server applies the same ranking whatever the client's order:
@@ -908,6 +908,148 @@ randomness source during a handshake, and fuzzing of handshakes with
 ML-DSA identities (the fuzz targets cover the key loaders only). The
 support stays experimental until the draft is published and these gaps
 are closed.
+
+### Legacy RSA client authentication in TLS 1.3 (RFC 9963, opt-in)
+
+TLS 1.3 signs handshakes with RSASSA-PSS, which some RSA keys cannot make:
+keys in hardware tokens or operating system key stores that offer
+RSASSA-PKCS1-v1_5 only.
+[RFC 9963](https://www.rfc-editor.org/rfc/rfc9963.html) registers
+`rsa_pkcs1_sha256_legacy` (0x0420), `rsa_pkcs1_sha384_legacy` (0x0520) and
+`rsa_pkcs1_sha512_legacy` (0x0620), with "Recommended: N", for one use:
+the signature in a TLS 1.3 client's `CertificateVerify`. browntls
+implements that use, with an `rsaEncryption` certificate key, and refuses
+every other. As §3 of the RFC asks, the schemes are off by default:
+`default_provider()` lists none of them and its key provider loads no key
+that chooses one, so a configuration that names none of the items below
+behaves as before.
+
+Each side opts in separately, here for the native provider:
+
+- A server sets `native::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY` as the
+  `signature_verification_algorithms` of the provider its client
+  certificate verifier is built with. Its `mapping` is
+  `VERIFICATION_ALG_MAPPING_WITH_RSA_PKCS1_LEGACY`: the default mapping
+  followed by `RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING`, which maps each
+  legacy scheme to the RSASSA-PKCS1-v1_5 algorithm of its hash. Its `all`
+  list is the default one, since the schemes add no certificate signature
+  algorithm. The TLS 1.3 CertificateRequest of such a server, in the
+  handshake and in post-handshake authentication, lists the three schemes
+  after every default scheme (0x0620, 0x0520, 0x0420), so the opt-in is
+  visible on the wire, and the server accepts a client `CertificateVerify`
+  under one of them. `WebPkiClientVerifier` checks it with
+  `crypto::verify_tls13_client_signature`, which a custom
+  `ClientCertVerifier` calls for the same behaviour (there is a raw public
+  key variant). `verify_tls13_signature`, which checks every other TLS 1.3
+  signature, refuses the legacy schemes whatever table it is given.
+- A client gives its certificate a key that chooses a legacy scheme.
+  `native::sign::any_rsa_pkcs1_legacy_type` loads an `rsaEncryption`
+  private key (PKCS #8 or PKCS #1, 2048 to 8192 bits) as an
+  `RsaPkcs1LegacySigningKey`, which signs with RSASSA-PKCS1-v1_5 alone:
+  in a TLS 1.3 CertificateRequest, `rsa_pkcs1_sha512_legacy`,
+  `rsa_pkcs1_sha384_legacy` or `rsa_pkcs1_sha256_legacy`, the first of
+  these, in that order, that the request lists; in TLS 1.2,
+  `rsa_pkcs1_sha512`, `rsa_pkcs1_sha384` or `rsa_pkcs1_sha256`.
+  It stands for a key that cannot do better. A key that lives in a token
+  is used through the application's own `SigningKey`, which chooses a
+  legacy scheme from the list it is offered by its own rule; browntls adds
+  no token or key store interface. No key provider loads the type, so the
+  choice is made per key, and the other RSA keys never choose a legacy
+  scheme: a key that can make RSASSA-PSS signatures keeps making them
+  when the request lists the legacy schemes too (RFC 9963 §3).
+
+The client needs no table and the server no key. A legacy key whose
+server did not opt in finds no scheme to sign with, and the client sends
+an empty Certificate message, which a server that requires a certificate
+answers with `certificate_required`.
+
+The rules hold by code point, whatever a verifier, a resolver or a key
+says:
+
+- A ClientHello never lists a legacy scheme, in TLS or DTLS, even when the
+  client's server verifier advertises one.
+- A client refuses a server `CertificateVerify` under a legacy scheme with
+  `illegal_parameter`, before a signature is checked. A TLS 1.3 server's
+  key is never offered one, and a server whose key returns a legacy signer
+  anyway fails with `internal_error` before it signs. Server
+  authentication with an RSA key still requires RSASSA-PSS.
+- A server accepts a legacy scheme only if its CertificateRequest listed
+  it. A server without the opt-in answers a client that signs with one
+  with `illegal_parameter`, before its verifier is called. A browntls
+  client sends no such message: a key that names a legacy scheme the
+  request did not list is treated as one that cannot sign.
+- TLS 1.2 and DTLS 1.2 never use the schemes: no CertificateRequest lists
+  them, no key is offered them, and a ServerKeyExchange or
+  CertificateVerify under one is refused. Like the ML-DSA schemes they
+  are TLS 1.3 only.
+- Delegated credentials (RFC 9345) and exported authenticators (RFC 9261)
+  never use them, in either role.
+
+A legacy signature verifies only as RSASSA-PKCS1-v1_5 in the encoding of
+RFC 8017 §8.2 with the scheme's hash, over the RFC 9846 §4.5.2 content.
+The native provider builds the expected encoded message, the DER
+`DigestInfo` with its NULL parameters included, and compares it in full
+with the one the signature opens to; it parses nothing. With either
+provider a `DigestInfo` without the NULL, with a BER length or with
+another hash's identifier, a bare digest, and a signature shorter or
+longer than the modulus are bad signatures (`decrypt_error`), as are an
+RSASSA-PSS signature named as a legacy scheme and the reverse. The
+certificate key must be an `rsaEncryption` key: with an `id-RSASSA-PSS`,
+ECDSA or EdDSA key the scheme is refused as unsupported for that key.
+
+The RustCrypto provider has the same table under the same names
+(`rustcrypto::SUPPORTED_SIG_ALGS_WITH_RSA_PKCS1_LEGACY` and the two
+mappings), so a server using it accepts legacy clients. It has no key
+type, because it does not sign with RSA; a client using it supplies its
+own `SigningKey`.
+
+The transports that carry the TLS 1.3 handshake use the opt-in unchanged:
+QUIC (RFC 9001), DTLS 1.3 (which retransmits a lost client flight with
+its legacy `CertificateVerify`), the unbuffered API, the Tokio streams
+and the `browntls` facade need nothing beyond the provider field and the
+key. Kernel TLS offload starts after authentication, and a later
+post-handshake authentication with a legacy scheme is handled in user
+space in either role. DTLS 1.2 follows the TLS 1.2 rules above.
+Resumption needs nothing specific: a resumed handshake has no
+`CertificateVerify`.
+`crates/browntls-core/tests/rsa_pkcs1_legacy_transports.rs`,
+`crates/browntls-tokio/tests/rsa_pkcs1_legacy.rs` and
+`crates/browntls/tests/rsa_pkcs1_legacy.rs` cover these with the native
+provider's key.
+
+`crates/browntls-core/tests/rsa_pkcs1_legacy_rules.rs` drives the rules
+with test doubles: verifiers that advertise the legacy schemes, keys that
+claim them and handshake messages rewritten on the wire.
+In the same directory, `rsa_pkcs1_legacy_native.rs` and
+`rsa_pkcs1_legacy.rs` run the cases of `cases/rsa_pkcs1_legacy.rs` with
+the native and the RustCrypto provider: each scheme in the handshake and
+after it, the CertificateRequest with and without the opt-in, an
+unchanged ClientHello, RSASSA-PSS for a capable key and for an RSA server,
+the malformed encodings above, scheme and key mismatches, and TLS 1.2. In
+the shared cases the client's legacy key is a double on the `rsa` crate,
+so the signatures the providers verify are made by an independent RSA
+implementation; the native target adds cases with its own key. The fuzz
+target `tls_config` checks the key, the verification functions and a
+model of client authentication over fuzz-chosen keys, schemes and
+signature forms, and `tls_auth` that an exported authenticator refuses
+the schemes ([fuzz targets](../fuzz/README.md)).
+
+Interoperability is tested with rustls 0.23 and nothing else, in memory
+in the same test targets. rustls does not implement the schemes, but it
+sends whatever scheme a custom signer names, so it is an independent
+implementation of the handshake and of the signed content: an opted-in
+browntls server accepts a rustls client that signs with 0x0420, a server
+without the opt-in refuses it, and browntls clients refuse a rustls
+server that signs its own `CertificateVerify` with 0x0420. No
+implementation of RFC 9963 itself has been tried. Of the peers of the
+[end-to-end tests](../tests/e2e/README.md), the OpenSSL and Go sources
+examined in November 2026 name none of the code points, and GnuTLS and
+wolfSSL were not examined. BoringSSL, a peer of the delegated credential
+harness only, implements `rsa_pkcs1_sha256_legacy` alone in its current
+sources; the revision that harness pins was not checked, and no handshake
+with it has been tried. The RFC publishes no test vectors. Not covered by
+any test: a key in a real token or key store, Encrypted Client Hello with
+a legacy client, and a real kernel offload.
 
 ### Post-quantum hybrid key agreement (RFC 10024)
 

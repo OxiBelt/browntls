@@ -63,11 +63,12 @@ fn hash_of(scheme: SignatureScheme) -> Option<BcHash> {
 /// * Offered the legacy schemes of RFC 9963, which only the
 ///   CertificateRequest of a TLS 1.3 server that opted in to them lists,
 ///   it signs with `rsa_pkcs1_sha512_legacy`, `rsa_pkcs1_sha384_legacy`
-///   or `rsa_pkcs1_sha256_legacy` (0x0620, 0x0520, 0x0420; the first of
-///   these in the list).
+///   or `rsa_pkcs1_sha256_legacy` (0x0620, 0x0520, 0x0420): the first of
+///   these, in this order, that the list holds, wherever the list puts
+///   it.
 /// * Offered TLS 1.2 schemes, it signs with `rsa_pkcs1_sha512`,
-///   `rsa_pkcs1_sha384` or `rsa_pkcs1_sha256`, as a client or as a
-///   server.
+///   `rsa_pkcs1_sha384` or `rsa_pkcs1_sha256`, chosen in the same way, as
+///   a client or as a server.
 /// * Offered neither, it does not sign. That is every other TLS 1.3 list:
 ///   the key cannot authenticate a TLS 1.3 server (RFC 9963 §3 defines
 ///   the legacy schemes for the client's `CertificateVerify` only, and
@@ -80,7 +81,7 @@ fn hash_of(scheme: SignatureScheme) -> Option<BcHash> {
 /// lists a legacy scheme, and to no other.
 ///
 /// The signature is RSASSA-PKCS1-v1_5 as RFC 8017 §8.2 specifies it, the
-/// `DigestInfo` in DER with its NULL parameters (RFC 9963 §3), with CRT,
+/// `DigestInfo` in DER with its NULL parameters (RFC 9963 §4), with CRT,
 /// blinding and a fault check as for the other RSA keys.
 ///
 /// Use this only for a key that cannot sign with RSASSA-PSS, or to stand
@@ -186,7 +187,7 @@ impl Debug for RsaPkcs1Signer {
 /// its hash and an `rsaEncryption` key of 2048 to 8192 bits, verified by
 /// comparing the whole encoded message (RFC 8017 §8.2.2): a `DigestInfo`
 /// without the NULL parameters, or in any other encoding, does not verify
-/// (RFC 9963 §3).
+/// (RFC 9963 §4).
 #[allow(clippy::type_complexity)]
 pub static RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING: &[(
     SignatureScheme,

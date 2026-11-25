@@ -208,7 +208,7 @@ pub fn verify_tls13_signature(
 /// The legacy schemes are RSASSA-PKCS1-v1_5 (RFC 8017 §8.2) with an
 /// `rsaEncryption` key. The algorithms the providers map them to accept
 /// only the exact encoding, `DigestInfo` with the NULL parameters
-/// included (RFC 9963 §3).
+/// included (RFC 9963 §4).
 pub fn verify_tls13_client_signature(
     msg: &[u8],
     cert: &CertificateDer<'_>,

@@ -155,7 +155,7 @@ fn check(table: &WebPkiSupportedAlgorithms, default: &WebPkiSupportedAlgorithms)
     client(S::RSA_PSS_SHA256, &pss, message).unwrap();
     assert!(client(S::RSA_PKCS1_SHA256_LEGACY, &pss, message).is_err());
 
-    // RFC 9963 §3: the DigestInfo must be the DER one, NULL parameters
+    // RFC 9963 §4: the DigestInfo must be the DER one, NULL parameters
     // included. `digest_info` is that encoding for SHA-256.
     let digest = Sha256::digest(message);
     let oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
@@ -206,13 +206,19 @@ fn check(table: &WebPkiSupportedAlgorithms, default: &WebPkiSupportedAlgorithms)
         assert!(client(S::RSA_PKCS1_SHA256_LEGACY, bad, message).is_err());
     }
 
-    // An `id-RSASSA-PSS` key never verifies a legacy signature.
+    // An `id-RSASSA-PSS` key never verifies a legacy signature: the
+    // scheme is unsupported for that key.
     let (_, key_bits) = crate::x509::split_spki(spki.as_ref()).unwrap();
     let mut contents = crate::x509::wrap_in_sequence(alg_id::RSASSA_PSS.as_ref());
     contents.extend_from_slice(&crate::x509::wrap_in_bit_string(key_bits));
     let pss_spki = SubjectPublicKeyInfoDer::from(crate::x509::wrap_in_sequence(&contents));
     let dss = DigitallySignedStruct::new(S::RSA_PKCS1_SHA256_LEGACY, signature);
-    assert!(verify_tls13_client_signature_with_raw_key(message, &pss_spki, &dss, table).is_err());
+    assert_eq!(
+        verify_tls13_client_signature_with_raw_key(message, &pss_spki, &dss, table).map(|_| ()),
+        Err(Error::InvalidCertificate(
+            crate::CertificateError::UnsupportedSignatureAlgorithm
+        ))
+    );
 }
 
 #[cfg(feature = "native")]

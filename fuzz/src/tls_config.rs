@@ -36,6 +36,11 @@
 //! * a handshake between compatible configurations completes, with the two
 //!   sides agreeing on the suite, version and ALPN protocol, and again on a
 //!   second connection;
+//! * client authentication with an RSA key against a server with or
+//!   without the RFC 9963 opt-in ends as a model of RFC 9963 §3 says
+//!   (`rsa_pkcs1_legacy`): the legacy schemes sign only a TLS 1.3 client's
+//!   `CertificateVerify`, only when the request listed them, and only as
+//!   RSASSA-PKCS1-v1_5 with the scheme's hash;
 //! * `trusted_ca_keys` (RFC 6066 §6): identifiers from fuzzed certificate
 //!   DER fail without panicking and agree across the certificate, trust
 //!   anchor and SPKI routes; a client list is refused at connection
@@ -57,6 +62,7 @@ mod config;
 mod crypto;
 pub(crate) mod fixtures;
 mod misc;
+mod rsa_pkcs1_legacy;
 mod rustcrypto_mldsa;
 pub(crate) mod sign;
 mod trusted_ca;
@@ -141,6 +147,7 @@ const OPS: &[Op] = &[
     (misc::keylog_enum_op, 1),
     (trusted_ca::trusted_ca_op, 55),
     (sign::rsa_pkcs1_legacy_op, 40),
+    (rsa_pkcs1_legacy::rsa_pkcs1_legacy_handshake_op, 60),
 ];
 
 /// Operation numbers, as the seeds write them.
@@ -173,6 +180,7 @@ mod op {
     pub(super) const KEYLOG: u8 = 25;
     pub(super) const TRUSTED_CA: u8 = 26;
     pub(super) const RSA_PKCS1_LEGACY: u8 = 27;
+    pub(super) const RSA_PKCS1_LEGACY_HANDSHAKE: u8 = 28;
 }
 
 /// The `tls_config` fuzz target.
@@ -610,6 +618,47 @@ pub fn seeds() -> Vec<Vec<u8>> {
         add(
             op::RSA_PKCS1_LEGACY,
             &[&[k], &field(text), &offer, &[mask, 0, 9, 3]],
+        );
+    }
+
+    // Client authentication with an RSA key (RFC 9963). Arguments: server
+    // and client provider, opt-in, mandatory, client and server versions,
+    // key, kind (0 the PKCS #1-only key, 1 the ordinary key, 2 a claiming
+    // key), the claimed scheme and the signature's (see `CLAIMS`), a flip.
+    for seed in [
+        // The PKCS #1-only key: an opted-in server (both providers and
+        // keys), a default one (mandatory and optional), and TLS 1.2.
+        [0u8, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+        [1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0],
+        [0, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0],
+        // The ordinary key keeps RSASSA-PSS; no version in common.
+        [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0],
+        [1, 1, 0, 1, 2, 0, 0, 1, 0, 0, 0],
+        // A claiming key: each legacy scheme over RSASSA-PKCS1-v1_5 with
+        // its hash, then over RSASSA-PSS, another hash and a flipped bit.
+        [0, 0, 1, 1, 0, 0, 0, 2, 0, 3, 0],
+        [1, 0, 1, 1, 1, 0, 1, 2, 1, 4, 0],
+        [0, 1, 1, 0, 0, 1, 0, 2, 2, 5, 0],
+        [0, 0, 1, 1, 0, 0, 0, 2, 0, 0, 0],
+        [1, 0, 1, 1, 0, 0, 0, 2, 1, 5, 0],
+        // A legacy scheme the request did not list (a default server,
+        // and TLS 1.2), `rsa_pkcs1_sha256` in TLS 1.3 and in TLS 1.2, and
+        // `rsa_pss_rsae_sha256` over both forms.
+        [0, 0, 0, 1, 0, 0, 0, 2, 0, 3, 0],
+        [0, 0, 1, 0, 2, 1, 0, 2, 2, 5, 0],
+        [0, 0, 1, 1, 0, 0, 0, 2, 6, 3, 0],
+        [1, 0, 1, 1, 2, 1, 0, 2, 6, 3, 0],
+        [0, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0],
+        [0, 0, 1, 1, 0, 0, 0, 2, 3, 3, 0],
+    ] {
+        add(op::RSA_PKCS1_LEGACY_HANDSHAKE, &[&seed]);
+    }
+    for flip in [[0u8, 0, 7], [0, 255, 0], [0, 100, 3]] {
+        add(
+            op::RSA_PKCS1_LEGACY_HANDSHAKE,
+            &[&[0, 0, 1, 1, 0, 0, 0, 2, 0, 3, 1], &flip],
         );
     }
 

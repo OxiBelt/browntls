@@ -21,7 +21,7 @@ use crate::webpki::WebPkiSupportedAlgorithms;
 /// provider's RSA algorithms check the length in bytes), which the `rsa`
 /// crate verifies by comparing the whole encoded message (RFC 8017
 /// §8.2.2): a `DigestInfo` without the NULL parameters, or in any other
-/// encoding, does not verify (RFC 9963 §3).
+/// encoding, does not verify (RFC 9963 §4).
 #[allow(clippy::type_complexity)]
 pub static RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING: &[(
     SignatureScheme,

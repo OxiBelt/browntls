@@ -10,13 +10,16 @@
 //! The tests are skipped, with a message, when no OpenSSL 3 (or later) binary
 //! is found.
 //! Set `BROWNTLS_OPENSSL_INTEROP=require` to make that a failure, and
-//! `BROWNTLS_OPENSSL` to choose the binary.
+//! `BROWNTLS_OPENSSL` to choose the binary. The ML-DSA cases (`mldsa`) also
+//! need OpenSSL 3.5 or later and have their own skip rule.
 
 #![cfg(feature = "native")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[path = "openssl_interop/matrix.rs"]
 mod matrix;
+#[path = "openssl_interop/mldsa.rs"]
+mod mldsa;
 #[path = "openssl_interop/ocsp.rs"]
 mod ocsp;
 #[path = "openssl_interop/psk.rs"]
@@ -115,6 +118,12 @@ enum KeyType {
     /// `saltLength` OpenSSL omits: a minimum of 20 bytes (RFC 4055 §3.3),
     /// which TLS signatures (32-byte salts) meet.
     RsaPssSha256DefaultSalt,
+    /// ML-DSA-44 (FIPS 204), OpenSSL 3.5 or later only.
+    MlDsa44,
+    /// ML-DSA-65 (FIPS 204), OpenSSL 3.5 or later only.
+    MlDsa65,
+    /// ML-DSA-87 (FIPS 204), OpenSSL 3.5 or later only.
+    MlDsa87,
 }
 
 impl KeyType {
@@ -125,6 +134,9 @@ impl KeyType {
             Self::Rsa2048 => &["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
             Self::Ed25519 => &["-algorithm", "ED25519"],
             Self::Ed448 => &["-algorithm", "ED448"],
+            Self::MlDsa44 => &["-algorithm", "ML-DSA-44"],
+            Self::MlDsa65 => &["-algorithm", "ML-DSA-65"],
+            Self::MlDsa87 => &["-algorithm", "ML-DSA-87"],
             Self::RsaPss => &["-algorithm", "RSA-PSS", "-pkeyopt", "rsa_keygen_bits:2048"],
             Self::RsaPssSha384 => &[
                 "-algorithm",

@@ -23,7 +23,8 @@
 //!         --record-size-limit N|none, --delegated-credentials, --grease,
 //!         --async (buffered Tokio), --unbuffered (unbuffered Tokio),
 //!         --key-log (logs only in diagnostic builds with SSLKEYLOGFILE),
-//!         --zstd-cert-compression (only when built with browntls/zstd)
+//!         --zstd-cert-compression (only when built with browntls/zstd),
+//!         --ml-dsa
 //! CLIENT: --ticket-request NEW,RESUMPTION, --padding N
 //!         --reference-id dns:NAME|ip:ADDR|uri:URI|srv:ID (repeatable)
 //! ECH-SERVER: --ech-config FILE --ech-key FILE (shared mode), --ech-backend,
@@ -48,7 +49,10 @@
 //! ClientHello, a server in its TLS 1.3 CertificateRequest and
 //! NewSessionTicket messages); `--ticket-request` sends the RFC 9149
 //! extension; `--padding` pads the ClientHello to at least N bytes (RFC
-//! 7685). `--async` runs TLS connections through the buffered `browntls-tokio`
+//! 7685). `--ml-dsa` opts into TLS 1.3 authentication with ML-DSA keys
+//! (`draft-ietf-tls-mldsa-06`): it verifies and offers the `mldsa44`,
+//! `mldsa65` and `mldsa87` schemes and loads ML-DSA private keys. `--async`
+//! runs TLS connections through the buffered `browntls-tokio`
 //! adapters and `--unbuffered` through its unbuffered adapters, both on a
 //! single-threaded Tokio runtime. For DTLS, `--async` selects the Tokio
 //! UDP client and server and reports `"io":"tokio-dtls"`. It cannot be
@@ -294,6 +298,8 @@ struct Options {
     external_psk_identity: Option<String>,
     zstd_cert_compression: bool,
     key_log: bool,
+    /// The native provider's ML-DSA TLS 1.3 opt-in (`--ml-dsa`).
+    ml_dsa: bool,
 }
 
 impl Options {
@@ -325,6 +331,7 @@ impl Options {
                 "--dtls-cid" => Some(&mut o.dtls_cid),
                 "--zstd-cert-compression" => Some(&mut o.zstd_cert_compression),
                 "--key-log" => Some(&mut o.key_log),
+                "--ml-dsa" => Some(&mut o.ml_dsa),
                 _ => None,
             };
             if let Some(switch) = switch {
@@ -430,9 +437,15 @@ impl Options {
         Ok(o)
     }
 
-    /// The native provider restricted to the requested suites and groups.
+    /// The native provider restricted to the requested suites and groups,
+    /// with the ML-DSA opt-in when requested.
     fn provider(&self) -> Arc<CryptoProvider> {
         let mut provider = native::default_provider();
+        if self.ml_dsa {
+            provider.signature_verification_algorithms =
+                native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13;
+            provider.key_provider = native::KEY_PROVIDER_WITH_ML_DSA;
+        }
         if !self.suites.is_empty() {
             provider.cipher_suites.clone_from(&self.suites);
         }

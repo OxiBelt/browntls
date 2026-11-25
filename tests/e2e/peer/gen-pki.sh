@@ -1,9 +1,12 @@
 #!/bin/sh
 # Generate a throwaway CA with server and client certificates for each key
 # type into the directory given as the first argument (a per-run Docker
-# volume). The optional second argument names the server (`tls-server`); the
-# `public` certificate names `ech-public.test`, the public name of the
-# Encrypted Client Hello scenarios, which a server rejecting ECH presents.
+# volume). ML-DSA key types (FIPS 204: mldsa44, mldsa65, mldsa87) are added
+# only when the OpenSSL tool lists them as TLS signature schemes (OpenSSL 3.5
+# or later); older peers get the classical key types alone. The optional
+# second argument names the server (`tls-server`); the `public` certificate
+# names `ech-public.test`, the public name of the Encrypted Client Hello
+# scenarios, which a server rejecting ECH presents.
 # Keys are world-readable because the browntls image runs as an unprivileged
 # user; they live only as long as the test run's volume.
 set -eu
@@ -21,11 +24,23 @@ gen_key() {
     ecdsa-p256) openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$2" ;;
     rsa-2048) openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$2" ;;
     ed25519) openssl genpkey -algorithm ED25519 -out "$2" ;;
+    mldsa44) openssl genpkey -algorithm ML-DSA-44 -out "$2" ;;
+    mldsa65) openssl genpkey -algorithm ML-DSA-65 -out "$2" ;;
+    mldsa87) openssl genpkey -algorithm ML-DSA-87 -out "$2" ;;
     *) echo "unknown key type $1" >&2; exit 2 ;;
   esac
 }
 
-for kt in ecdsa-p256 rsa-2048 ed25519; do
+key_types="ecdsa-p256 rsa-2048 ed25519"
+# OpenSSL 3.0 has no -tls-signature-algorithms option: the probe fails there.
+tls_sigalgs="$(openssl list -tls-signature-algorithms 2>/dev/null || true)"
+for kt in mldsa44 mldsa65 mldsa87; do
+  case ":${tls_sigalgs}:" in
+    *":${kt}:"*) key_types="${key_types} ${kt}" ;;
+  esac
+done
+
+for kt in ${key_types}; do
   d="${out}/${kt}"
   mkdir -p "${d}"
   gen_key "${kt}" "${d}/ca.key"

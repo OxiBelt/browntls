@@ -71,7 +71,7 @@ allows it, with browntls as server against the peer's client:
   X25519 otherwise);
 - TLS 1.3 with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 over X25519,
   P-256, P-384 and the RFC 10024 hybrids, with ECDSA P-256, RSA 2048 and Ed25519
-  certificates;
+  certificates (and ML-DSA, below);
 - a HelloRetryRequest (the server accepts only P-256, which the browntls
   client does not send a key share for by default);
 - client authentication in TLS 1.3 and TLS 1.2;
@@ -99,6 +99,21 @@ allows it, with browntls as server against the peer's client:
   `"io":"async"` in the output):
   TLS 1.3 with client authentication and TLS 1.2 in both roles, and TLS 1.3
   resumption as a client;
+- TLS 1.3 authentication with ML-DSA certificates (`draft-ietf-tls-mldsa-06`,
+  an Internet-Draft; suites `openssl`, `openssl-ubuntu-26.04` and
+  `browntls`): `tls13-mldsa44`, `tls13-mldsa65` and `tls13-mldsa87` (CA and
+  end entities of one parameter set; ML-DSA-65 in both browntls roles, the
+  others with browntls as client) and `tls13-mldsa65-client-auth` (mutual
+  authentication, both roles). browntls opts in with `browntls-e2e --ml-dsa`
+  (the native provider's `SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13` and
+  `KEY_PROVIDER_WITH_ML_DSA`), and the OpenSSL peer is restricted to the
+  certificate's scheme with `-sigalgs mldsa44|mldsa65|mldsa87`, so a passing
+  run used that scheme in every `CertificateVerify` OpenSSL sent or accepted.
+  `browntls-e2e` does not report the negotiated signature scheme. GnuTLS and
+  the OpenSSL 3.0 and Go peers do not run these scenarios;
+  [`peer/gen-pki.sh`](peer/gen-pki.sh) makes the ML-DSA PKI only where the
+  peer image's OpenSSL lists the schemes (`openssl list
+  -tls-signature-algorithms`, OpenSSL 3.5 or later);
 - Encrypted Client Hello (RFC 9849, suites `browntls` and `go`), with keys
   made per run by `browntls-e2e ech-keygen` (X25519, public name
   `ech-public.test`) in both server topologies. Shared mode (`ech-shared*`):

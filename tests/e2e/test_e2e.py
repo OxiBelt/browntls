@@ -7,8 +7,11 @@ derives from them.
 
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,7 +101,12 @@ class ScenarioTest(unittest.TestCase):
                 self.assertIn(sc.suite, e2e.SUITE_NAMES, sc.name)
             for g in sc.groups:
                 self.assertIn(g, e2e.GROUP_NAMES, sc.name)
-            self.assertIn(sc.key, ("ecdsa-p256", "rsa-2048", "ed25519"), sc.name)
+            self.assertIn(
+                sc.key,
+                ("ecdsa-p256", "rsa-2048", "ed25519", "mldsa44", "mldsa65", "mldsa87"),
+                sc.name,
+            )
+            self.assertEqual(sc.ml_dsa, sc.key.startswith("mldsa"), sc.name)
             self.assertTrue(set(sc.roles) <= set(e2e.ROLES), sc.name)
 
     def test_gnutls_scenarios_have_priority_strings(self):
@@ -136,6 +144,31 @@ class ScenarioTest(unittest.TestCase):
         for name in direct | retry:
             scenario = next(s for s in e2e.SCENARIOS if s.name == name)
             self.assertEqual(scenario.roles_for(e2e.SUITES["openssl"]), e2e.ROLES)
+
+    def test_ml_dsa_scenarios_follow_peer_support(self):
+        names = {
+            "tls13-mldsa44",
+            "tls13-mldsa65",
+            "tls13-mldsa87",
+            "tls13-mldsa65-client-auth",
+        }
+        self.assertEqual(names, {s.name for s in e2e.SCENARIOS if s.ml_dsa})
+        # OpenSSL 3.5 or later generates the ML-DSA PKI and is the peer;
+        # GnuTLS shares the Alpine image but is not an ML-DSA peer.
+        for suite in ("openssl", "openssl-ubuntu-26.04", "browntls"):
+            got = {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+            self.assertTrue(names <= got, suite)
+        for suite in ("openssl-3.0", "gnutls", "go"):
+            got = {s.name for s in e2e.scenarios_for(e2e.SUITES[suite])}
+            self.assertTrue(names.isdisjoint(got), suite)
+        openssl = e2e.SUITES["openssl"]
+        for sc in e2e.SCENARIOS:
+            if sc.ml_dsa:
+                self.assertEqual(sc.tls, "1.3", sc.name)
+                both = sc.key == "mldsa65"
+                self.assertEqual(
+                    sc.roles_for(openssl), e2e.ROLES if both else ("client",), sc.name
+                )
 
     def test_browntls_suite_runs_each_scenario_once(self):
         suite = e2e.SUITES["browntls"]
@@ -248,6 +281,26 @@ class CommandTest(unittest.TestCase):
         self.assertIn("--cert", e2e.browntls_args(sc, "client"))
         self.assertIn("-Verify", e2e.peer_server_command(sc, "openssl"))
         self.assertIn("--require-client-cert", e2e.peer_server_command(sc, "gnutls"))
+
+    def test_ml_dsa_arguments(self):
+        sc = self.scenario("tls13-mldsa65-client-auth")
+        for role in e2e.ROLES:
+            args = e2e.browntls_args(sc, role)
+            self.assertIn("--ml-dsa", args)
+            self.assertIn(e2e.pki("mldsa65", f"{role}.key"), args)
+        server = e2e.peer_server_command(sc, "openssl")
+        self.assertEqual(server[server.index("-sigalgs") + 1], "mldsa65")
+        self.assertIn("-Verify", server)
+        client = e2e.peer_client_command(sc, "openssl")[2]
+        self.assertIn("-sigalgs mldsa65", client)
+        self.assertIn("/pki/mldsa65/client.key", client)
+        for key in ("mldsa44", "mldsa87"):
+            server = e2e.peer_server_command(self.scenario(f"tls13-{key}"), "openssl")
+            self.assertEqual(server[server.index("-sigalgs") + 1], key)
+        plain = self.scenario("tls13-client-auth")
+        self.assertNotIn("--ml-dsa", e2e.browntls_args(plain, "client"))
+        self.assertNotIn("-sigalgs", e2e.peer_server_command(plain, "openssl"))
+        self.assertNotIn("-sigalgs", e2e.peer_client_command(plain, "openssl")[2])
 
     def test_async_scenarios_pass_the_flag_to_both_roles(self):
         scenarios = [s for s in e2e.SCENARIOS if s.async_io]
@@ -473,6 +526,72 @@ class EchTest(unittest.TestCase):
         self.assertEqual(
             len(e2e.check_ech_server(sc, "browntls", "b", e2e.Container("b", 0, outer), 1, 0, 0)), 1
         )
+
+
+# An `openssl` stand-in for gen-pki.sh: it logs its arguments, creates the
+# `-out` file, and lists `FAKE_TLS_SIGALGS` as the TLS signature algorithms
+# (failing like OpenSSL 3.0, which lacks the option, when that is empty).
+FAKE_OPENSSL = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_OPENSSL_LOG"
+if [ "$1" = list ]; then
+  [ -n "$FAKE_TLS_SIGALGS" ] || { echo "list: Unknown option: $2" >&2; exit 1; }
+  printf '%s\\n' "$FAKE_TLS_SIGALGS"
+  exit 0
+fi
+prev=
+for arg in "$@"; do
+  [ "$prev" = -out ] && : > "$arg"
+  prev=$arg
+done
+exit 0
+"""
+
+
+class GenPkiTest(unittest.TestCase):
+    """peer/gen-pki.sh generates ML-DSA PKI only where OpenSSL supports it."""
+
+    def generate(self, tls_sigalgs):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp, "bin")
+            bin_dir.mkdir()
+            fake = bin_dir / "openssl"
+            fake.write_text(FAKE_OPENSSL)
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            log = Path(tmp, "openssl.log")
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "FAKE_OPENSSL_LOG": str(log),
+                "FAKE_TLS_SIGALGS": tls_sigalgs,
+            }
+            out = Path(tmp, "pki")
+            subprocess.run(
+                ["sh", str(e2e.E2E_DIR / "peer" / "gen-pki.sh"), str(out)],
+                env=env,
+                check=True,
+                capture_output=True,
+            )
+            return sorted(p.name for p in out.iterdir()), log.read_text()
+
+    def test_openssl_30_gets_the_classical_key_types(self):
+        dirs, log = self.generate("")
+        self.assertEqual(dirs, ["ecdsa-p256", "ed25519", "rsa-2048"])
+        self.assertNotIn("ML-DSA", log)
+
+    def test_openssl_35_also_gets_ml_dsa(self):
+        dirs, log = self.generate("ecdsa_secp256r1_sha256:ed25519:mldsa44:mldsa65:mldsa87")
+        self.assertEqual(
+            dirs, ["ecdsa-p256", "ed25519", "mldsa44", "mldsa65", "mldsa87", "rsa-2048"]
+        )
+        for name in ("ML-DSA-44", "ML-DSA-65", "ML-DSA-87"):
+            # CA, server, client and public keys.
+            self.assertEqual(log.count(f"genpkey -algorithm {name} "), 4, name)
+
+    def test_only_listed_parameter_sets_are_generated(self):
+        dirs, _ = self.generate("ed25519:mldsa65")
+        self.assertIn("mldsa65", dirs)
+        self.assertNotIn("mldsa44", dirs)
+        self.assertNotIn("mldsa87", dirs)
 
 
 class DockerTest(unittest.TestCase):

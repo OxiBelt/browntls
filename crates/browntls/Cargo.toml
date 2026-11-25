@@ -69,6 +69,11 @@ browntls-ktls = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }
 # Certificates generated at test run time (no committed private keys).
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# RSA key generation for the RFC 9963 legacy client key test
+# (`tests/rsa_pkcs1_legacy.rs`): rcgen with ring cannot generate RSA keys,
+# and no generated private key is committed. Test data only; every TLS item
+# is still named through this crate.
+browntls-crypto = { workspace = true }
 
 [[test]]
 name = "facade"

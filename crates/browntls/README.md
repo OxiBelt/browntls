@@ -60,6 +60,16 @@ The same configuration applies to core and Tokio TLS, QUIC-TLS, DTLS, and
 the userspace handshake before kTLS handoff. Treat the diagnostic file as
 secret material. Access can compromise both old and active connections.
 
+A connection that uses Encrypted Client Hello also logs `ECH_SECRET` and
+`ECH_CONFIG` (RFC 9850 §2.3), which let a reader of a capture decrypt the
+inner ClientHello and so see the server name that ECH hides. A client logs
+them for an offer and a shared-mode server for an offer it accepts;
+`ECH_SECRET` comes only from the built-in HPKE suites. The client-facing
+server of split mode has no configuration to take a sink from: it logs only
+after `ech::split::ClientFacing::with_key_log`, and the back-end server
+never logs them. See
+[Architecture](../../docs/Architecture.md#ech-records-rfc-9850-23).
+
 ## Tokio
 
 The module `browntls::tokio` has the name of the Tokio crate. Name its items
@@ -160,7 +170,7 @@ this one that have it. The default set is `browntls-core`'s plus `coop`.
 | `rustcrypto` | no | A provider backed by the RustCrypto crates. Together with `native` there is no implicit process default: install or pass a provider |
 | `tls12` | yes | TLS 1.2 |
 | `logging` | yes | Debug logging through the `log` crate |
-| `key-log` | no | Opt-in RFC 9850 traffic-secret callbacks and supported file sink |
+| `key-log` | no | Opt-in RFC 9850 traffic-secret and ECH callbacks and supported file sink |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default key exchange groups |
 | `zlib`, `brotli`, `zstd` | no | Built-in certificate compression (RFC 8879); `brotli` enables `std` |
 | `tokio` | no | `browntls::tokio`; enables `std` |

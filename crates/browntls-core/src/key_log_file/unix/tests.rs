@@ -1,5 +1,6 @@
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 
 use std::fs::{self as disk, OpenOptions, Permissions};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
@@ -148,6 +149,93 @@ fn rejects_invalid_records_and_stops_after_file_policy_changes() {
     sink.log(LABEL, &RANDOM, &SECRET);
     assert!(!sink.will_log(LABEL));
     assert_eq!(disk::metadata(&path).unwrap().len(), 0);
+}
+
+/// A well-formed `ECHConfig` with `contents_len` bytes of contents.
+fn ech_config(contents_len: usize) -> Vec<u8> {
+    let mut config = vec![0xfe, 0x0d];
+    config.extend_from_slice(&u16::try_from(contents_len).unwrap().to_be_bytes());
+    config.extend((0..contents_len).map(|i| i as u8));
+    config
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn writes_the_ech_records_in_the_rfc_9850_format() {
+    let dir = TestDir::new();
+    let path = dir.path();
+    let sink = KeyLogFile::try_from_path(&path).unwrap();
+    assert!(sink.will_log("ECH_SECRET"));
+    assert!(sink.will_log("ECH_CONFIG"));
+    // Each `Nsecret` of RFC 9180, then configurations from an empty body
+    // (which only a version this library does not know could have) to the
+    // longest the length field allows, far longer than the line buffer of
+    // a secret.
+    let mut expected = String::new();
+    for len in [32, 48, 64] {
+        let secret = vec![0xcd; len];
+        sink.log("ECH_SECRET", &RANDOM, &secret);
+        expected += &format!("ECH_SECRET {} {}\n", "ab".repeat(32), "cd".repeat(len));
+    }
+    for contents_len in [0, 1, 60, 300, 0xffff] {
+        let config = ech_config(contents_len);
+        sink.log("ECH_CONFIG", &RANDOM, &config);
+        expected += &format!("ECH_CONFIG {} {}\n", "ab".repeat(32), hex(&config));
+    }
+    assert_eq!(disk::read_to_string(&path).unwrap(), expected);
+    // Still appending whole records after the long ones.
+    sink.log(LABEL, &RANDOM, &SECRET);
+    expected += &expected_line();
+    assert_eq!(disk::read_to_string(&path).unwrap(), expected);
+}
+
+#[test]
+fn rejects_ech_values_that_are_not_a_kem_secret_or_one_config() {
+    let dir = TestDir::new();
+    let path = dir.path();
+    let sink = KeyLogFile::try_from_path(&path).unwrap();
+    // No KEM has a secret of these lengths (66 is a P-521 scalar).
+    for len in [0, 16, 31, 33, 56, 65, 66, 128] {
+        sink.log("ECH_SECRET", &RANDOM, &vec![0xcd; len]);
+    }
+    sink.log("ECH_SECRET", &RANDOM[1..], &[0xcd; 32]);
+    // Too short for a version and a length; a length that leaves bytes
+    // over, or promises more than there are; two configurations in a row
+    // (a list entry pair); a whole ECHConfigList, with its length prefix;
+    // and one byte past the longest configuration.
+    let good = ech_config(60);
+    let mut list = u16::try_from(good.len()).unwrap().to_be_bytes().to_vec();
+    list.extend_from_slice(&good);
+    let mut too_long = ech_config(0xffff);
+    too_long.push(0);
+    for bad in [
+        &[][..],
+        &[0xfe, 0x0d, 0x00][..],
+        &good[..good.len() - 1],
+        &[&good[..], &[0]].concat(),
+        &[&good[..], &good[..]].concat(),
+        &list,
+        &too_long,
+    ] {
+        sink.log("ECH_CONFIG", &RANDOM, bad);
+    }
+    sink.log("ECH_CONFIG", &RANDOM[1..], &good);
+    // Near misses of the labels are unknown labels.
+    for label in ["ECH_SECRETS", "ECH", "ech_secret", "ECH_CONFIG ", "ECH_KEY"] {
+        assert!(!sink.will_log(label));
+        sink.log(label, &RANDOM, &[0xcd; 32]);
+        sink.log(label, &RANDOM, &good);
+    }
+    assert_eq!(disk::metadata(&path).unwrap().len(), 0);
+    // None of that disabled the sink.
+    sink.log("ECH_CONFIG", &RANDOM, &good);
+    assert_eq!(
+        disk::read_to_string(&path).unwrap(),
+        format!("ECH_CONFIG {} {}\n", "ab".repeat(32), hex(&good))
+    );
 }
 
 #[test]

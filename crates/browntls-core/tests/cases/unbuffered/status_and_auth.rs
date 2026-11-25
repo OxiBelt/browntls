@@ -531,3 +531,106 @@ fn unbuffered_connections_report_ech_status() {
         assert_eq!(rejected.retry_configs(), Some(current.ech_config_list()));
     }
 }
+
+/// The unbuffered connections write the ECH records of the key log (RFC
+/// 9850 §2.3) as the buffered ones do: one `ECH_SECRET` and one
+/// `ECH_CONFIG` on each side, both under the random of the outer
+/// ClientHello, which is not the random of the TLS secrets.
+#[cfg(all(feature = "native", feature = "key-log"))]
+#[test]
+fn unbuffered_connections_write_the_ech_key_log_records() {
+    use std::sync::Mutex;
+
+    use browntls_core::KeyLog;
+    use browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES;
+    use browntls_core::ech::{EchConfig, EchMode, EchServerConfig, EchServerKey, EchStatus};
+
+    /// The label and the random of each record.
+    #[derive(Debug, Default)]
+    struct Records(Mutex<Vec<(String, Vec<u8>)>>);
+
+    impl KeyLog for Records {
+        fn log(&self, label: &str, client_random: &[u8], _: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((label.to_string(), client_random.to_vec()));
+        }
+    }
+
+    impl Records {
+        /// The outer random, after checking the ECH records.
+        fn outer_random(&self) -> Vec<u8> {
+            let records = self.0.lock().unwrap();
+            let ech: Vec<_> = records
+                .iter()
+                .filter(|(label, _)| label.starts_with("ECH_"))
+                .collect();
+            let [(secret, outer), (config, same)] = &ech[..] else {
+                panic!("{} ECH records", ech.len());
+            };
+            assert_eq!(
+                (secret.as_str(), config.as_str()),
+                ("ECH_SECRET", "ECH_CONFIG")
+            );
+            assert_eq!(outer, same);
+            assert!(
+                records
+                    .iter()
+                    .all(|(label, random)| label.starts_with("ECH_") || random != outer)
+            );
+            assert!(records.len() > 2, "no TLS secret was logged");
+            outer.clone()
+        }
+    }
+
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let key = EchServerKey::generate(7, "public.example", 32, ALL_SUPPORTED_SUITES).unwrap();
+    let ech = Arc::new(EchServerConfig::new(vec![key]).unwrap());
+    let configs = || {
+        let (client_log, server_log) = (Arc::new(Records::default()), Arc::new(Records::default()));
+        let mut cc = versioned_client(&chain, ProtocolVersion::TLSv1_3);
+        cc.ech_mode = Some(EchMode::Enable(
+            EchConfig::new(ech.ech_config_list(), ALL_SUPPORTED_SUITES).unwrap(),
+        ));
+        cc.key_log = client_log.clone();
+        let mut sc = versioned_server(&chain, ProtocolVersion::TLSv1_3);
+        sc.ech = Some(ech.clone());
+        sc.key_log = server_log.clone();
+        (Arc::new(cc), Arc::new(sc), client_log, server_log)
+    };
+    let check = |statuses: (EchStatus, EchStatus), logs: (&Records, &Records)| {
+        assert_eq!(statuses, (EchStatus::Accepted, EchStatus::Accepted));
+        assert_eq!(logs.0.outer_random(), logs.1.outer_random());
+    };
+
+    for feed in [Feed::Whole, Feed::ByteByByte] {
+        // Unbuffered client, buffered server.
+        let (cc, sc, client_log, server_log) = configs();
+        let (mut c, mut s) = (ub_client(&cc, feed), b_server(&sc));
+        handshake(&mut c, &mut s);
+        check(
+            (c.conn.ech_status(), s.conn.ech_status()),
+            (&client_log, &server_log),
+        );
+
+        // Buffered client, unbuffered server.
+        let (cc, sc, client_log, server_log) = configs();
+        let (mut c, mut s) = (b_client(&cc), ub_server(&sc, feed));
+        handshake(&mut c, &mut s);
+        check(
+            (c.conn.ech_status(), s.conn.ech_status()),
+            (&client_log, &server_log),
+        );
+
+        // Both unbuffered.
+        let (cc, sc, client_log, server_log) = configs();
+        let (mut c, mut s) = (ub_client(&cc, feed), ub_server(&sc, feed));
+        handshake(&mut c, &mut s);
+        check(
+            (c.conn.ech_status(), s.conn.ech_status()),
+            (&client_log, &server_log),
+        );
+    }
+}

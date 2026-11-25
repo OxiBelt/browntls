@@ -124,3 +124,82 @@ fn facade_file_sink_is_inert_when_unavailable() {
     );
     assert!(!KeyLogFile::new().will_log(LABELS[0]));
 }
+
+/// The facade's paths reach everything an application uses for the ECH
+/// records of RFC 9850 §2.3: the shared-mode configuration, and the
+/// client-facing server's own opt-in.
+#[test]
+fn facade_paths_reach_the_ech_key_log_records() {
+    use browntls::crypto::hpke::Hpke;
+    use browntls::crypto::native::hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
+    use browntls::ech::split::{ClientFacing, ClientFacingDecision};
+    use browntls::ech::{EchConfig, EchMode, EchServerConfig, EchServerKey, EchStatus};
+
+    /// The ECH labels a party logged, in order.
+    #[derive(Debug, Default)]
+    struct EchLabels(Mutex<Vec<String>>);
+
+    impl KeyLog for EchLabels {
+        fn log(&self, label: &str, _: &[u8], _: &[u8]) {
+            if label.starts_with("ECH_") {
+                self.0.lock().unwrap().push(label.to_owned());
+            }
+        }
+    }
+
+    impl EchLabels {
+        fn assert_one_pair(&self) {
+            let labels = self.0.lock().unwrap();
+            let pair = ["ECH_SECRET", "ECH_CONFIG"];
+            if require_disabled_key_log() {
+                assert!(labels.is_empty());
+            } else if cfg!(feature = "key-log") {
+                assert_eq!(*labels, pair);
+            } else {
+                // Another workspace member can enable the core dependency
+                // feature.
+                assert!(labels.is_empty() || *labels == pair);
+            }
+        }
+    }
+
+    const SUITES: &[&dyn Hpke] = &[DH_KEM_X25519_HKDF_SHA256_AES_128];
+    let pki = Pki::new();
+    let key = EchServerKey::generate(7, "public.example", 32, SUITES).unwrap();
+    let ech = Arc::new(EchServerConfig::new(vec![key]).unwrap());
+    let logs = [(); 3].map(|()| Arc::new(EchLabels::default()));
+
+    // A client that offers ECH: its records exist once the ClientHello does.
+    let mut client_config = pki.client_config();
+    client_config.ech_mode = Some(EchMode::Enable(
+        EchConfig::new(ech.ech_config_list(), SUITES).unwrap(),
+    ));
+    client_config.key_log = logs[0].clone();
+    let mut client = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+    let mut flight = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut flight).unwrap();
+    }
+    logs[0].assert_one_pair();
+
+    // A server in shared mode, with the key log of its configuration.
+    let mut server_config = pki.server_config();
+    server_config.ech = Some(ech.clone());
+    server_config.key_log = logs[1].clone();
+    let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+    server.read_tls(&mut &flight[..]).unwrap();
+    server.process_new_packets().unwrap();
+    assert_eq!(server.ech_status(), EchStatus::Accepted);
+    logs[1].assert_one_pair();
+
+    // A client-facing server of split mode: it forwards with and without
+    // a sink, and writes the records to the one it was given. That it
+    // writes nothing otherwise is `browntls-core`'s own test.
+    let mut front = ClientFacing::new(ech.clone());
+    front.read_client(&flight).unwrap();
+    assert_eq!(front.decision(), Some(ClientFacingDecision::Forward));
+    let mut front = ClientFacing::new(ech).with_key_log(logs[2].clone());
+    front.read_client(&flight).unwrap();
+    assert_eq!(front.decision(), Some(ClientFacingDecision::Forward));
+    logs[2].assert_one_pair();
+}

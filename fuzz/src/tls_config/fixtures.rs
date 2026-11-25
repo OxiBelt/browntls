@@ -2,10 +2,10 @@
 //! `pki_api`.
 //!
 //! The ECDSA P-256/P-384 and Ed25519 keys come from `rcgen` (random); the
-//! RSA, RSA-PSS, P-521 and Ed448 keys are derived from fixed seeds with
-//! `browntls-crypto`, so that they are the same in every process. Every key
-//! with a certificate chains to [`Fixtures::ca`]; the P-384 one through an
-//! intermediate.
+//! RSA, RSA-PSS, P-521, Ed448 and ML-DSA keys are derived from fixed seeds
+//! with `browntls-crypto`, so that they are the same in every process. Every
+//! key with a certificate chains to [`Fixtures::ca`]; the P-384 one through
+//! an intermediate.
 
 use std::sync::OnceLock;
 
@@ -52,6 +52,33 @@ pub(crate) struct Fixtures {
     pub(crate) crl_revoking: Vec<u8>,
     /// [`KEY_NAMES`] order.
     pub(crate) keys: Vec<Key>,
+    /// ML-DSA-44, -65 and -87 private keys (RFC 9881 PKCS #8, in the
+    /// `seed`, `expandedKey` and `both` forms respectively) from fixed
+    /// seeds, for the opt-in ML-DSA key loader. They are not in
+    /// [`Self::keys`]: the default loaders do not load them.
+    pub(crate) ml_dsa: [Vec<u8>; 3],
+}
+
+/// The PKCS #8 encoding of the ML-DSA key of parameter set `P` from `seed`.
+fn ml_dsa_pkcs8<P: browntls_crypto::mldsa::ParameterSet>(
+    seed: u8,
+    format: browntls_crypto::mldsa::PrivateKeyFormat,
+) -> Vec<u8> {
+    use browntls_crypto::mldsa::SigningKey;
+    let key = SigningKey::<P>::from_seed(&[seed; 32]);
+    let mut der = vec![0; SigningKey::<P>::PKCS8_MAX_LEN];
+    let len = key.to_pkcs8_der(format, &mut der).expect("ML-DSA PKCS #8");
+    der.truncate(len);
+    der
+}
+
+fn ml_dsa_keys() -> [Vec<u8>; 3] {
+    use browntls_crypto::mldsa::{MlDsa44, MlDsa65, MlDsa87, PrivateKeyFormat};
+    [
+        ml_dsa_pkcs8::<MlDsa44>(0x44, PrivateKeyFormat::Seed),
+        ml_dsa_pkcs8::<MlDsa65>(0x65, PrivateKeyFormat::Expanded),
+        ml_dsa_pkcs8::<MlDsa87>(0x87, PrivateKeyFormat::Both),
+    ]
 }
 
 /// Indices into [`Fixtures::keys`].
@@ -302,6 +329,7 @@ fn generate() -> Fixtures {
         crl_clean: crl(&issuer, &[0x7b, 4, 5, 6]),
         crl_revoking: crl(&issuer, P256_SERIAL),
         keys,
+        ml_dsa: ml_dsa_keys(),
     }
 }
 

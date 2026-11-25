@@ -130,7 +130,18 @@ pub(super) fn load(p: usize, k: usize) -> Option<Arc<dyn SigningKey>> {
                 "{}",
                 key.name
             );
+            assert!(
+                native::sign::any_ml_dsa_type(pkcs8).is_err(),
+                "{}",
+                key.name
+            );
         }
+        // The ML-DSA opt-in loader loads every key the default one does.
+        let opt_in = native::KEY_PROVIDER_WITH_ML_DSA
+            .load_private_key(key.der())
+            .expect("the opt-in loader loads it");
+        assert_eq!(opt_in.algorithm(), key_algorithm(k), "{}", key.name);
+        ml_dsa_fixtures();
     } else {
         assert_eq!(
             rustcrypto::sign::any_supported_type(&der).is_ok(),
@@ -159,18 +170,29 @@ pub(super) fn load(p: usize, k: usize) -> Option<Arc<dyn SigningKey>> {
 /// Fuzzed private key encodings for every loader.
 pub(super) fn fuzzed_key(input: &mut Input<'_>) {
     let fx = fixtures::get();
+    let mut chosen = None;
     let mut bytes = if input.bool() {
-        let key = &fx.keys[input.choose(fx.keys.len())];
-        key.der().secret_der().to_vec()
+        let k = input.choose(fx.keys.len());
+        chosen = Some(k);
+        fx.keys[k].der().secret_der().to_vec()
     } else {
         Vec::new()
     };
     if bytes.is_empty() {
         bytes = input.field().to_vec();
     } else {
-        // Corrupt one byte of a genuine key.
-        let at = usize::from(input.u16()) % bytes.len();
-        bytes[at] ^= input.byte() | 1;
+        // Corrupt one byte of a genuine key, and the same way one of the
+        // ML-DSA keys (consuming no more input).
+        let at = usize::from(input.u16());
+        let flip = input.byte() | 1;
+        let len = bytes.len();
+        bytes[at % len] ^= flip;
+        if let Some(k) = chosen {
+            let mut ml_dsa = fx.ml_dsa[k % fx.ml_dsa.len()].clone();
+            let len = ml_dsa.len();
+            ml_dsa[at % len] ^= flip;
+            fuzzed_ml_dsa_key(&PrivatePkcs8KeyDer::from(ml_dsa));
+        }
     }
     let der = match input.choose(3) {
         0 => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(bytes)),
@@ -185,6 +207,15 @@ pub(super) fn fuzzed_key(input: &mut Input<'_>) {
     if let PrivateKeyDer::Pkcs8(pkcs8) = &der {
         let _ = native::sign::any_eddsa_type(pkcs8);
         let _ = rustcrypto::sign::any_eddsa_type(pkcs8);
+        fuzzed_ml_dsa_key(pkcs8);
+    }
+    // The opt-in loader loads what the default one loads.
+    if native::sign::any_supported_type(&der).is_ok() {
+        assert!(
+            native::KEY_PROVIDER_WITH_ML_DSA
+                .load_private_key(der.clone_key())
+                .is_ok()
+        );
     }
     for p in 0..2 {
         if let Ok(key) = provider(p).key_provider.load_private_key(der.clone_key())
@@ -201,6 +232,70 @@ pub(super) fn fuzzed_key(input: &mut Input<'_>) {
             );
         }
     }
+}
+
+/// The schemes of `draft-ietf-tls-mldsa-06`, in the order of
+/// [`fixtures::Fixtures::ml_dsa`].
+const ML_DSA_SCHEMES: [SignatureScheme; 3] = [
+    SignatureScheme::ML_DSA_44,
+    SignatureScheme::ML_DSA_65,
+    SignatureScheme::ML_DSA_87,
+];
+
+/// `any_ml_dsa_type` on a fuzzed or corrupted PKCS #8 key: the opt-in
+/// loader agrees with it, the default loaders never load an ML-DSA key, and
+/// a key that loads has a well-formed `SubjectPublicKeyInfo`, no TLS 1.2
+/// family and exactly one (ML-DSA) scheme.
+fn fuzzed_ml_dsa_key(pkcs8: &PrivatePkcs8KeyDer<'_>) {
+    let der = PrivateKeyDer::Pkcs8(pkcs8.clone_key());
+    let default = native::sign::any_supported_type(&der);
+    let opt_in = native::KEY_PROVIDER_WITH_ML_DSA.load_private_key(der.clone_key());
+    let Ok(key) = native::sign::any_ml_dsa_type(pkcs8) else {
+        assert_eq!(opt_in.is_ok(), default.is_ok());
+        return;
+    };
+    assert!(default.is_err());
+    assert_eq!(key.algorithm(), SignatureAlgorithm::Unknown(0xff));
+    let spki = key.public_key().expect("public key");
+    assert!(RawPublicKeyEntity::try_from(&spki).is_ok());
+    let opt_in = opt_in.expect("the opt-in loader loads it");
+    assert_eq!(
+        opt_in.public_key().expect("public key").as_ref(),
+        spki.as_ref()
+    );
+    assert!(key.choose_scheme(KNOWN_SCHEMES).is_none());
+    let own: Vec<_> = ML_DSA_SCHEMES
+        .into_iter()
+        .filter(|scheme| key.choose_scheme(&[*scheme]).is_some())
+        .collect();
+    assert_eq!(own.len(), 1, "{own:?}");
+}
+
+/// The ML-DSA fixtures load only through the opt-in loaders and sign with
+/// their own scheme only; the signatures verify under the TLS 1.3 rules
+/// with the opt-in table, and neither under the TLS 1.2 rules nor with the
+/// default table. Once per process: ML-DSA signing is slow next to the
+/// other operations.
+fn ml_dsa_fixtures() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let opt_in = native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13;
+        let msg = b"ml-dsa fixture";
+        for (der, scheme) in fixtures::get().ml_dsa.iter().zip(ML_DSA_SCHEMES) {
+            let pkcs8 = PrivatePkcs8KeyDer::from(der.clone());
+            let key = native::sign::any_ml_dsa_type(&pkcs8).expect("an ML-DSA key");
+            let der = PrivateKeyDer::Pkcs8(pkcs8.clone_key());
+            assert!(native::KEY_PROVIDER.load_private_key(der).is_err());
+            fuzzed_ml_dsa_key(&pkcs8);
+            let signer = key.choose_scheme(&ML_DSA_SCHEMES).expect("its scheme");
+            assert_eq!(signer.scheme(), scheme);
+            let spki = key.public_key().expect("public key");
+            let dss = DigitallySignedStruct::new(scheme, signer.sign(msg).expect("signing"));
+            assert!(verify_tls13_signature_with_raw_key(msg, &spki, &dss, &opt_in).is_ok());
+            assert!(verify_tls13_signature_with_raw_key(msg, &spki, &dss, &algs(0)).is_err());
+            assert!(verify_tls12_signature_with_raw_key(msg, &spki, &dss, &opt_in).is_err());
+        }
+    });
 }
 
 /// One key, one provider, one message: scheme selection, then the signature

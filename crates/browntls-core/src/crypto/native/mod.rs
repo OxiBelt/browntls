@@ -24,6 +24,7 @@
 //! | [`SUPPORTED_SIG_ALGS`] | `browntls_crypto::{nist, curve25519::ed25519, curve448::ed448, rsa}` |
 //! | [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`] (opt-in) | the above and `browntls_crypto::mldsa` |
 //! | [`KEY_PROVIDER`] ([`sign`]) | ECDSA, Ed25519, Ed448 and RSA signing keys from `browntls-crypto` |
+//! | [`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`], [`KEY_PROVIDER_WITH_ML_DSA`] (opt-in, experimental) | the above and `browntls_crypto::mldsa` for TLS 1.3 handshake signatures |
 //! | [`SECURE_RANDOM`] | `browntls_crypto::rand::OsRng` |
 //! | [`ticketer`] | AES-256-GCM from `browntls_crypto::gcm` |
 //!
@@ -41,9 +42,9 @@
 //! [`SUPPORTED_SIG_ALGS_WITH_ML_DSA`], which adds [`verify::ML_DSA_44`],
 //! [`verify::ML_DSA_65`] and [`verify::ML_DSA_87`] to the certificate path
 //! algorithms and leaves the TLS signature scheme mapping as it is. This
-//! does not enable TLS authentication with ML-DSA keys, which is not
-//! implemented; [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists exactly which
-//! signatures the opt-in covers.
+//! does not enable TLS authentication with ML-DSA keys, which is a
+//! separate opt-in (below); [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists
+//! exactly which signatures this one covers.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -65,6 +66,52 @@
 //!     .with_no_client_auth();
 //! # let _ = config;
 //! # Ok::<(), browntls_core::Error>(())
+//! ```
+//!
+//! # ML-DSA in TLS 1.3 (opt-in, experimental)
+//!
+//! TLS 1.3 authentication with ML-DSA keys follows
+//! `draft-ietf-tls-mldsa-06` ("Use of ML-DSA in TLS 1.3"), an
+//! Internet-Draft and not a published RFC: the schemes `mldsa44`,
+//! `mldsa65` and `mldsa87` (0x0904 to 0x0906, registered with
+//! "Recommended: N") sign `CertificateVerify` with pure ML-DSA and the
+//! empty context string, under an end-entity key of the same parameter
+//! set. [`default_provider`] neither offers nor accepts these schemes and
+//! loads no ML-DSA private key. Two independent provider fields opt in:
+//!
+//! * [`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`] as
+//!   `signature_verification_algorithms` verifies a peer's ML-DSA
+//!   `CertificateVerify` (and ML-DSA certificate paths, as above). The
+//!   schemes are then listed, after the default ones, in the
+//!   `signature_algorithms` of every ClientHello that offers TLS 1.3 and
+//!   every TLS 1.3 CertificateRequest the configuration sends: the opt-in
+//!   is visible on the wire.
+//! * [`KEY_PROVIDER_WITH_ML_DSA`] as `key_provider` loads ML-DSA private
+//!   keys (RFC 9881 PKCS #8), so that a certified key can sign with its
+//!   scheme when the peer offers it ([`sign::MlDsaSigningKey`]).
+//!
+//! The schemes are used in TLS 1.3 (and with it QUIC and DTLS 1.3) only:
+//! never in a TLS 1.2 handshake, whichever side holds the key, and never
+//! in delegated credentials (RFC 9345) or exported authenticators
+//! (RFC 9261), for which no specification defines them. A peer without
+//! the opt-in fails the handshake with an ML-DSA-only peer as it would
+//! with any unsupported key type; nothing falls back to another algorithm
+//! unless the application configures another certified key.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::native;
+//!
+//! let mut provider = native::default_provider();
+//! // Verify peers that authenticate with ML-DSA, and say so in
+//! // `signature_algorithms`.
+//! provider.signature_verification_algorithms = native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13;
+//! // Load our own ML-DSA private keys (`with_single_cert`,
+//! // `with_client_auth_cert`, `CertifiedKey::from_der`).
+//! provider.key_provider = native::KEY_PROVIDER_WITH_ML_DSA;
+//! let provider = Arc::new(provider);
+//! # let _ = provider;
 //! ```
 //!
 //! # Hardware acceleration
@@ -173,6 +220,7 @@ pub mod verify;
 
 pub(crate) mod ccm;
 pub(crate) mod kx;
+mod sign_mldsa;
 #[cfg(feature = "tls12")]
 pub(crate) mod tls12;
 #[cfg(feature = "tls12")]
@@ -180,6 +228,10 @@ pub(crate) mod tls12_cbc;
 pub(crate) mod tls13;
 mod verify_mldsa;
 
+pub use sign_mldsa::{
+    KEY_PROVIDER_WITH_ML_DSA, ML_DSA_VERIFICATION_ALG_MAPPING, NativeWithMlDsa,
+    SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13, VERIFICATION_ALG_MAPPING_WITH_ML_DSA,
+};
 pub use verify_mldsa::{
     ALL_VERIFICATION_ALGS_WITH_ML_DSA, ML_DSA_VERIFICATION_ALGS, SUPPORTED_SIG_ALGS_WITH_ML_DSA,
 };

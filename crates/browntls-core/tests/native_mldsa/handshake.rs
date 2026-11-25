@@ -1,8 +1,11 @@
-//! What the ML-DSA opt-in means in a TLS 1.3 handshake: a chain with
-//! ML-DSA CA certificates and an ECDSA end entity is accepted, the
-//! `CertificateVerify` signature stays classical, and an ML-DSA end entity
-//! cannot authenticate the handshake (TLS ML-DSA schemes are not
-//! implemented).
+//! What the X.509-only ML-DSA opt-in (`native::SUPPORTED_SIG_ALGS_WITH_ML_DSA`)
+//! means in a TLS 1.3 handshake: a chain with ML-DSA CA certificates and an
+//! ECDSA end entity is accepted, the `CertificateVerify` signature stays
+//! classical, and an ML-DSA end entity cannot authenticate the handshake,
+//! because this table neither offers nor accepts the TLS ML-DSA schemes.
+//! TLS 1.3 authentication with ML-DSA keys is the separate opt-in
+//! `native::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13` (with
+//! `native::KEY_PROVIDER_WITH_ML_DSA`), tested in `mldsa_tls13_native.rs`.
 
 use std::sync::Arc;
 
@@ -156,7 +159,8 @@ fn rfc9881_key_usage_violation_in_a_handshake() {
 }
 
 /// An ML-DSA-65 handshake signing key with the TLS code point of
-/// `draft-ietf-tls-mldsa`, which browntls does not otherwise support.
+/// `draft-ietf-tls-mldsa`, made here rather than loaded, so that the test
+/// does not depend on the TLS 1.3 opt-in key loader.
 #[derive(Debug)]
 struct MlDsaHandshakeKey(Arc<MlKey>);
 
@@ -185,6 +189,10 @@ impl Signer for MlDsaSigner {
     }
 }
 
+/// With the X.509-only table, an ML-DSA end entity cannot sign
+/// `CertificateVerify`: the client does not offer the ML-DSA schemes, and
+/// a client that names one anyway has no algorithm to verify it with. (The
+/// TLS 1.3 opt-in table offers and verifies them.)
 #[test]
 fn an_ml_dsa_end_entity_cannot_sign_certificate_verify() {
     let root = MlKey::new(Set::MlDsa65, "root");
@@ -208,8 +216,8 @@ fn an_ml_dsa_end_entity_cannot_sign_certificate_verify() {
     // The path itself validates with the opt-in table.
     assert_eq!(chain.verify_server(opt_in_provider(), &[]), Ok(()));
 
-    // An opt-in client advertises no ML-DSA scheme, so the server finds
-    // no scheme its key can sign with.
+    // A client with the X.509-only table advertises no ML-DSA scheme, so
+    // the server finds no scheme its key can sign with.
     let (mut client, mut server_conn) = connect(client_with(opt_in_verifier(&chain)), server());
     let (client_res, server_res) = do_handshake_until_error(&mut client, &mut server_conn);
     assert_eq!(

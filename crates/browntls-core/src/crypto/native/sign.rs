@@ -13,6 +13,13 @@
 //! Secret key material is held in `browntls-crypto` key types, which zeroise
 //! it on drop. ECDSA nonces are RFC 6979 deterministic nonces hedged with
 //! fresh randomness; RSA signing uses CRT with blinding and a fault check.
+//!
+//! ML-DSA keys ([`MlDsaSigningKey`], loaded by [`any_ml_dsa_type`]) sign
+//! TLS 1.3 handshakes as `draft-ietf-tls-mldsa-06` specifies. That is an
+//! Internet-Draft, so they are an experimental opt-in:
+//! [`any_supported_type`] and the provider's
+//! [`KEY_PROVIDER`](super::KEY_PROVIDER) do not load them;
+//! [`KEY_PROVIDER_WITH_ML_DSA`](super::KEY_PROVIDER_WITH_ML_DSA) does.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -28,6 +35,7 @@ use browntls_crypto::rsa::{MAX_MODULUS_BYTES, RsaKeyAlgorithm, RsaPrivateKey};
 
 use browntls_pki::{PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer, alg_id};
 
+pub use super::sign_mldsa::{MlDsaSigningKey, any_ml_dsa_type};
 use crate::crypto::signer::{Signer, SigningKey, public_key_to_spki, spki_from_parts};
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
 use crate::error::Error;
@@ -39,8 +47,9 @@ const UNSUPPORTED_PSS_PARAMETERS: &str = "unsupported RSASSA-PSS key parameters:
     SHA-256, SHA-384 or SHA-512 with MGF1 over the same hash, a minimum salt length of at \
     most the digest length and trailer field 1 can sign in TLS";
 
-/// Loads any private key this provider can sign with: ECDSA (PKCS #8 or
-/// SEC 1), Ed25519 or Ed448 (PKCS #8) or RSA (PKCS #8 or PKCS #1).
+/// Loads any private key the default provider signs with: ECDSA (PKCS #8
+/// or SEC 1), Ed25519 or Ed448 (PKCS #8) or RSA (PKCS #8 or PKCS #1). Not
+/// ML-DSA, which is an explicit opt-in ([`any_ml_dsa_type`]).
 ///
 /// A PKCS #8 key that fits no loader fails with one generic message, except
 /// an `id-RSASSA-PSS` key whose parameters are well formed but unsupported

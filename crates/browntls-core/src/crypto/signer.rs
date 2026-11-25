@@ -31,9 +31,25 @@ pub trait SigningKey: Debug + Send + Sync {
         None
     }
 
-    /// The key's algorithm family.
+    /// The key's algorithm family, as TLS 1.2 names it: it selects the
+    /// TLS 1.2 cipher suites a server may use with the key and the
+    /// `certificate_types` a TLS 1.2 client answers with it.
+    ///
+    /// A key whose family has no TLS 1.2 `SignatureAlgorithm` (ML-DSA,
+    /// whose schemes exist in TLS 1.3 only) returns an
+    /// [`Unknown`](SignatureAlgorithm::Unknown) value that the registry
+    /// does not assign; the providers here use 255, from its private-use
+    /// range. Such a key takes part in TLS 1.3 handshakes only.
     fn algorithm(&self) -> SignatureAlgorithm;
 }
+
+/// What [`SigningKey::algorithm`] returns in this crate's providers for a
+/// key without a TLS 1.2 `SignatureAlgorithm`: 255, in the registry's
+/// private-use range (224 to 255, RFC 5246 §12), which names no algorithm
+/// of any TLS 1.2 cipher suite.
+#[cfg_attr(not(any(feature = "native", feature = "rustcrypto")), allow(dead_code))]
+pub(crate) const NO_TLS12_SIGNATURE_ALGORITHM: SignatureAlgorithm =
+    SignatureAlgorithm::Unknown(0xff);
 
 /// A signer committed to one scheme.
 pub trait Signer: Debug + Send + Sync {

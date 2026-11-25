@@ -129,6 +129,35 @@ impl MlKey {
             NativeKey::K87(k) => k.sign(msg, b"", rng).unwrap().as_ref().to_vec(),
         }
     }
+
+    /// Hedged signing by `browntls_crypto` with the FIPS 204 context
+    /// string `ctx`.
+    pub fn sign_with_context(&self, msg: &[u8], ctx: &[u8]) -> Vec<u8> {
+        let rng = &browntls_crypto::rand::OsRng;
+        match &self.native {
+            NativeKey::K44(k) => k.sign(msg, ctx, rng).unwrap().as_ref().to_vec(),
+            NativeKey::K65(k) => k.sign(msg, ctx, rng).unwrap().as_ref().to_vec(),
+            NativeKey::K87(k) => k.sign(msg, ctx, rng).unwrap().as_ref().to_vec(),
+        }
+    }
+
+    /// The RFC 9881 §6 PKCS #8 private key in the `seed` form, from
+    /// `browntls_crypto`.
+    pub fn pkcs8_der(&self) -> Vec<u8> {
+        fn encode<P: mldsa::ParameterSet>(key: &mldsa::SigningKey<P>) -> Vec<u8> {
+            let mut der = vec![0; mldsa::SigningKey::<P>::PKCS8_MAX_LEN];
+            let len = key
+                .to_pkcs8_der(mldsa::PrivateKeyFormat::Seed, &mut der)
+                .unwrap();
+            der.truncate(len);
+            der
+        }
+        match &self.native {
+            NativeKey::K44(k) => encode(&**k),
+            NativeKey::K65(k) => encode(&**k),
+            NativeKey::K87(k) => encode(&**k),
+        }
+    }
 }
 
 /// A certificate or CRL issuer: an ML-DSA key with the implementation that

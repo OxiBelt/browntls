@@ -19,8 +19,8 @@ enum Form {
     Both,
 }
 
-/// The forms this provider loads (`Form::Expanded` is refused).
-const FORMS: [Form; 2] = [Form::Seed, Form::Both];
+/// The forms of RFC 9881 §6, all of which this provider loads.
+const FORMS: [Form; 3] = [Form::Seed, Form::Expanded, Form::Both];
 
 fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     let mut out = crate::x509::asn1_wrap(tag, value);
@@ -30,14 +30,14 @@ fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
 }
 
 #[allow(deprecated)]
-fn expanded_bytes<P: MlDsaParams>(seed: &[u8; 32]) -> Vec<u8> {
+fn expanded_bytes<P: ParameterSet>(seed: &[u8; 32]) -> Vec<u8> {
     ExpandedSigningKey::<P>::from_seed(&B32::from(*seed))
         .to_expanded()
         .to_vec()
 }
 
 /// A version 0 PKCS #8 key of parameter set `P` in `form` (test data).
-fn pkcs8<P: MlDsaParams>(alg: AlgorithmIdentifier, seed: &[u8; 32], form: Form) -> Vec<u8> {
+fn pkcs8<P: ParameterSet>(alg: AlgorithmIdentifier, seed: &[u8; 32], form: Form) -> Vec<u8> {
     let sk = expanded_bytes::<P>(seed);
     let choice = match form {
         Form::Seed => tlv(0x80, seed),
@@ -53,11 +53,11 @@ fn pkcs8<P: MlDsaParams>(alg: AlgorithmIdentifier, seed: &[u8; 32], form: Form) 
     tlv(0x30, &body)
 }
 
-fn verifying_key<P: MlDsaParams>(seed: &[u8; 32]) -> VerifyingKey<P> {
+fn verifying_key<P: ParameterSet>(seed: &[u8; 32]) -> VerifyingKey<P> {
     ExpandedSigningKey::<P>::from_seed(&B32::from(*seed)).verifying_key()
 }
 
-fn check<P: MlDsaParams>(
+fn check<P: ParameterSet>(
     scheme: SignatureScheme,
     alg: &dyn SignatureVerificationAlgorithm,
     name: &str,
@@ -127,34 +127,49 @@ fn keys_load_and_sign_with_their_own_scheme() {
     check::<MlDsa87>(SignatureScheme::ML_DSA_87, &verify::ML_DSA_87, "ML-DSA-87");
 }
 
-/// The `expandedKey` form alone is refused, whatever its contents, without
-/// reaching `ml-dsa`'s unchecked decoder (which panics on out-of-range
-/// coefficients); the same key as `seed` or `both` loads.
-fn expanded_form_refused<P: MlDsaParams>(alg: AlgorithmIdentifier) {
+/// The `expandedKey` form alone loads only after the provider's own checks
+/// (`expanded`), which `ml-dsa`'s decoder does not make: a key that fails
+/// them is refused without reaching that decoder, which panics on
+/// out-of-range coefficients.
+fn expanded_form_checked<P: ParameterSet>(alg: AlgorithmIdentifier) {
     let seed = [3; 32];
     let sk = expanded_bytes::<P>(&seed);
-    let load = |sk: &[u8]| {
+    let der = |sk: &[u8]| {
         let body = [
             &[0x02, 0x01, 0x00][..],
             &tlv(0x30, alg.as_ref()),
             &tlv(0x04, &tlv(0x04, sk)),
         ]
         .concat();
-        any_ml_dsa_type(&PrivatePkcs8KeyDer::from(tlv(0x30, &body)))
+        tlv(0x30, &body)
     };
-    assert!(load(&sk).is_err());
-    assert!(load(&vec![0xff; sk.len()]).is_err());
-    assert!(load(&sk[1..]).is_err());
-    // As the key provider sees it: the ML-DSA error, not the ECDSA one.
-    let der = pkcs8::<P>(alg, &seed, Form::Expanded);
-    let err = KEY_PROVIDER_WITH_ML_DSA
-        .load_private_key(PrivateKeyDer::Pkcs8(der.into()))
-        .unwrap_err();
-    assert_eq!(err, ml_dsa_error());
-    for form in FORMS {
-        let der = pkcs8::<P>(alg, &seed, form);
-        any_ml_dsa_type(&PrivatePkcs8KeyDer::from(der)).unwrap();
+    let load = |sk: &[u8]| any_ml_dsa_type(&PrivatePkcs8KeyDer::from(der(sk)));
+    let spki = |key: Arc<dyn SigningKey>| key.public_key().unwrap().as_ref().to_vec();
+    let genuine = spki(load(&sk).unwrap());
+
+    // `K` (bytes 32 to 63) cannot be checked; the key is the same one.
+    let mut other_k = sk.clone();
+    other_k[40] ^= 0x10;
+    assert_eq!(spki(load(&other_k).unwrap()), genuine);
+
+    // `rho`, `tr`, the first of `s1`, and the first and the last of `t0`.
+    let t0 = sk.len() - (genuine.len() - 54) / 320 * 416;
+    for at in [0, 64, 127, 128, t0, sk.len() - 1] {
+        let mut changed = sk.clone();
+        changed[at] ^= 1;
+        assert!(load(&changed).is_err(), "{at}");
+        // As the key provider sees it: the ML-DSA error, not the ECDSA one.
+        let err = KEY_PROVIDER_WITH_ML_DSA
+            .load_private_key(PrivateKeyDer::Pkcs8(der(&changed).into()))
+            .unwrap_err();
+        assert_eq!(err, ml_dsa_error());
     }
+    assert!(load(&vec![0xff; sk.len()]).is_err());
+    assert!(load(&vec![0; sk.len()]).is_err());
+    assert!(load(&sk[1..]).is_err());
+    assert!(load(&[&sk[..], &[0]].concat()).is_err());
+    assert!(load(&seed).is_err());
+    assert!(load(&[]).is_err());
 }
 
 fn ml_dsa_error() -> Error {
@@ -162,10 +177,10 @@ fn ml_dsa_error() -> Error {
 }
 
 #[test]
-fn the_expanded_form_alone_is_refused() {
-    expanded_form_refused::<MlDsa44>(alg_id::ML_DSA_44);
-    expanded_form_refused::<MlDsa65>(alg_id::ML_DSA_65);
-    expanded_form_refused::<MlDsa87>(alg_id::ML_DSA_87);
+fn the_expanded_form_alone_is_checked() {
+    expanded_form_checked::<MlDsa44>(alg_id::ML_DSA_44);
+    expanded_form_checked::<MlDsa65>(alg_id::ML_DSA_65);
+    expanded_form_checked::<MlDsa87>(alg_id::ML_DSA_87);
 }
 
 #[test]
@@ -198,7 +213,7 @@ fn both_must_be_consistent_and_public_key_must_match() {
     let mut wrong = pk.to_vec();
     wrong[100] ^= 1;
     let attributes = tlv(0xa0, &[]);
-    for choice in [tlv(0x80, &seed), both(&seed, &sk)] {
+    for choice in [tlv(0x80, &seed), tlv(0x04, &sk), both(&seed, &sk)] {
         any_ml_dsa_type(&build(1, &choice, &field(&pk))).unwrap();
         any_ml_dsa_type(&build(1, &choice, &[])).unwrap();
         any_ml_dsa_type(&build(0, &choice, &attributes)).unwrap();
@@ -256,8 +271,10 @@ fn garbage_fails_with_the_default_loader_error() {
     }
     // A key of one set under another set's identifier.
     for alg in [alg_id::ML_DSA_65, alg_id::ML_DSA_87] {
-        let der = pkcs8::<MlDsa44>(alg, &[1; 32], Form::Both);
-        assert!(any_ml_dsa_type(&PrivatePkcs8KeyDer::from(der)).is_err());
+        for form in [Form::Expanded, Form::Both] {
+            let der = pkcs8::<MlDsa44>(alg, &[1; 32], form);
+            assert!(any_ml_dsa_type(&PrivatePkcs8KeyDer::from(der)).is_err());
+        }
     }
 }
 

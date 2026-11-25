@@ -242,32 +242,11 @@ const ML_DSA_SCHEMES: [SignatureScheme; 3] = [
     SignatureScheme::ML_DSA_87,
 ];
 
-/// The tag of the RFC 9881 §6 private key CHOICE (`seed` 0x80,
-/// `expandedKey` 0x04, `both` 0x30) in a PKCS #8 key in strict DER without
-/// algorithm parameters, which is what an ML-DSA loader accepts.
-fn ml_dsa_key_form(der: &[u8]) -> Option<u8> {
-    // The length of a tag and length field at `at`.
-    let header = |at: usize| {
-        let first = *der.get(at + 1)?;
-        Some(
-            2 + if first < 0x80 {
-                0
-            } else {
-                usize::from(first & 0x7f)
-            },
-        )
-    };
-    // SEQUENCE { version INTEGER (3 octets), AlgorithmIdentifier
-    // { OID (9 content octets) } (13 octets), privateKey OCTET STRING.
-    let private_key = header(0)? + 3 + 13;
-    der.get(private_key + header(private_key)?).copied()
-}
-
 /// The RustCrypto loaders on the key `native_key` is the native ML-DSA
 /// loader's result for: the two ML-DSA loaders agree, with one
-/// `SubjectPublicKeyInfo`, except on the `expandedKey` form alone, which
-/// the RustCrypto one refuses (the `ml-dsa` crate has no checked decoding
-/// of it); the RustCrypto opt-in loader loads what either of its two
+/// `SubjectPublicKeyInfo` (on the `expandedKey` form alone too, which the
+/// RustCrypto provider checks itself because the `ml-dsa` crate decodes it
+/// unchecked); the RustCrypto opt-in loader loads what either of its two
 /// loaders does, and the default one never an ML-DSA key.
 fn rustcrypto_ml_dsa_key(pkcs8: &PrivatePkcs8KeyDer<'_>, native_key: Option<&dyn SigningKey>) {
     let der = PrivateKeyDer::Pkcs8(pkcs8.clone_key());
@@ -298,11 +277,7 @@ fn rustcrypto_ml_dsa_key(pkcs8: &PrivatePkcs8KeyDer<'_>, native_key: Option<&dyn
             assert!(key.choose_scheme(KNOWN_SCHEMES).is_none());
         }
         (Ok(_), None) => panic!("only the RustCrypto loader loads the key"),
-        (Err(_), Some(_)) => assert_eq!(
-            ml_dsa_key_form(pkcs8.secret_der()),
-            Some(0x04),
-            "the RustCrypto loader refuses a seed or both key the native one loads"
-        ),
+        (Err(_), Some(_)) => panic!("only the native loader loads the key"),
         (Err(_), None) => {}
     }
 }
@@ -342,10 +317,9 @@ fn fuzzed_ml_dsa_key(pkcs8: &PrivatePkcs8KeyDer<'_>) {
 /// The ML-DSA fixtures load only through the opt-in loaders and sign with
 /// their own scheme only; the signatures verify under the TLS 1.3 rules
 /// with the opt-in table, and neither under the TLS 1.2 rules nor with the
-/// default table. The RustCrypto provider loads the `seed` and `both`
-/// fixtures and not the `expandedKey` one, and its signatures verify with
-/// either provider's opt-in table. Once per process: ML-DSA signing is slow
-/// next to the other operations.
+/// default table. The RustCrypto provider loads them too, and its
+/// signatures verify with either provider's opt-in table. Once per
+/// process: ML-DSA signing is slow next to the other operations.
 fn ml_dsa_fixtures() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -364,12 +338,7 @@ fn ml_dsa_fixtures() {
             assert!(verify_tls13_signature_with_raw_key(msg, &spki, &dss, &opt_in).is_ok());
             assert!(verify_tls13_signature_with_raw_key(msg, &spki, &dss, &algs(0)).is_err());
             assert!(verify_tls12_signature_with_raw_key(msg, &spki, &dss, &opt_in).is_err());
-            let rustcrypto_key = rustcrypto::sign::any_ml_dsa_type(&pkcs8);
-            let expanded_only = ml_dsa_key_form(pkcs8.secret_der()) == Some(0x04);
-            assert_eq!(rustcrypto_key.is_ok(), !expanded_only);
-            let Ok(rustcrypto_key) = rustcrypto_key else {
-                continue;
-            };
+            let rustcrypto_key = rustcrypto::sign::any_ml_dsa_type(&pkcs8).expect("an ML-DSA key");
             let signer = rustcrypto_key
                 .choose_scheme(&ML_DSA_SCHEMES)
                 .expect("its scheme");

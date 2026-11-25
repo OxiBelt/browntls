@@ -1,9 +1,10 @@
 //! The RustCrypto provider's ML-DSA key loader
 //! (`rustcrypto::sign::any_ml_dsa_type`, the `draft-ietf-tls-mldsa-06`
 //! opt-in) against the native provider's, on valid RFC 9881 PKCS #8 keys,
-//! their mutations and arbitrary bytes. The loaders agree except on the
-//! `expandedKey` form alone, which only the native one loads (the `ml-dsa`
-//! crate has no checked decoding of an expanded key). Library tests only.
+//! their mutations and arbitrary bytes. The loaders agree, on the
+//! `expandedKey` form alone too (which the RustCrypto provider checks
+//! itself: the `ml-dsa` crate decodes an expanded key unchecked). Library
+//! tests only.
 
 #![cfg(test)]
 
@@ -15,8 +16,12 @@ use browntls_crypto::mldsa::{
     MlDsa44, MlDsa65, MlDsa87, ParameterSet, PrivateKeyFormat, SigningKey as NativeKey,
 };
 
-/// The forms both providers load.
-const FORMATS: [PrivateKeyFormat; 2] = [PrivateKeyFormat::Seed, PrivateKeyFormat::Both];
+/// The forms of RFC 9881 §6, which both providers load.
+const FORMATS: [PrivateKeyFormat; 3] = [
+    PrivateKeyFormat::Seed,
+    PrivateKeyFormat::Expanded,
+    PrivateKeyFormat::Both,
+];
 
 fn encode<P: ParameterSet>(seed: u8, format: PrivateKeyFormat) -> Vec<u8> {
     let key = NativeKey::<P>::from_seed(&[seed; 32]);
@@ -72,24 +77,8 @@ fn agree(der: &[u8]) -> bool {
     rc.is_ok()
 }
 
-/// The RustCrypto loader refuses `der` (an `expandedKey`-only key or a
-/// change of one) without panicking; returns whether the native one loads
-/// it.
-fn native_only(der: &[u8]) -> bool {
-    let der = PrivatePkcs8KeyDer::from(der.to_vec());
-    assert!(
-        rustcrypto::sign::any_ml_dsa_type(&der).is_err(),
-        "{:02x?}",
-        der.secret_der()
-    );
-    native::sign::any_ml_dsa_type(&der).is_ok()
-}
-
 #[test]
 fn valid_keys_load_and_sign_like_native() {
-    for (der, _, _) in valid_keys(&[PrivateKeyFormat::Expanded]) {
-        assert!(native_only(&der));
-    }
     for (der, scheme, alg) in valid_keys(&FORMATS) {
         assert!(agree(&der));
         let key = rustcrypto::sign::any_ml_dsa_type(&PrivatePkcs8KeyDer::from(der)).unwrap();
@@ -130,28 +119,21 @@ fn mutated_and_arbitrary_inputs_agree_with_native() {
         assert!(!agree(&bytes(&mut state, len)));
     }
     // Truncations, and single-bit changes spread over the encoding (the
-    // header, the private key and, for the `both` form, its parts). Those
-    // of an `expandedKey`-only key the RustCrypto loader refuses (for the
-    // form, or as malformed).
-    let keys = valid_keys(&FORMATS).into_iter().map(|k| (k.0, false));
-    let expanded = valid_keys(&[PrivateKeyFormat::Expanded]);
-    for (der, expanded) in keys.chain(expanded.into_iter().map(|k| (k.0, true))) {
-        let check = |der: &[u8]| match expanded {
-            true => native_only(der),
-            false => agree(der),
-        };
+    // header, the private key and, for the `both` form, its parts; an
+    // `expandedKey` with a changed `K` still loads, in both).
+    for (der, _, _) in valid_keys(&FORMATS) {
         for n in [0, 1, der.len() / 2, der.len() - 1] {
-            assert!(!check(&der[..n]));
+            assert!(!agree(&der[..n]));
         }
         let step = (der.len() / 37).max(1);
         for i in (0..der.len()).step_by(step) {
             let mut changed = der.clone();
             changed[i] ^= 1 << (i % 8);
-            check(&changed);
+            agree(&changed);
             // Arbitrary bytes in place of the tail.
             let mut tail = der[..i].to_vec();
             tail.extend(bytes(&mut state, der.len() - i));
-            check(&tail);
+            agree(&tail);
         }
     }
 }

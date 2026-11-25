@@ -6,7 +6,7 @@
 //! of the native provider
 //! (`browntls_crypto::mldsa::SigningKey::from_pkcs8_der`): the parse here
 //! establishes it, and the caller checks the algorithm, the lengths, the
-//! key and the public key, and refuses the `expandedKey` form.
+//! key and the public key.
 
 /// The universal tags used here.
 const INTEGER: u8 = 0x02;
@@ -26,12 +26,8 @@ const SEED: u8 = 0x80;
 #[derive(Clone, Copy)]
 pub(super) enum PrivateKey<'a> {
     Seed(&'a [u8]),
-    /// The `expandedKey` form, which the caller refuses.
-    Expanded,
-    Both {
-        seed: &'a [u8],
-        expanded: &'a [u8],
-    },
+    Expanded(&'a [u8]),
+    Both { seed: &'a [u8], expanded: &'a [u8] },
 }
 
 /// A structurally valid `OneAsymmetricKey`.
@@ -165,7 +161,7 @@ pub(super) fn parse(der: &[u8]) -> Option<OneAsymmetricKey<'_>> {
     choice.finish()?;
     let private_key = match tag {
         SEED => PrivateKey::Seed(value),
-        OCTET_STRING => PrivateKey::Expanded,
+        OCTET_STRING => PrivateKey::Expanded(value),
         SEQUENCE => {
             let mut both = Reader::new(value);
             let seed = both.read(OCTET_STRING)?;

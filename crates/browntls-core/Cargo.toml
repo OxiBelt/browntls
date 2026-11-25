@@ -43,6 +43,7 @@ rustcrypto = [
   "dep:ed25519-dalek",
   "dep:ml-kem",
   "dep:ml-dsa",
+  "dep:shake",
   "dep:rsa",
   "dep:getrandom",
   "dep:signature",
@@ -82,9 +83,12 @@ ml-kem = { version = "0.3", default-features = false, features = ["zeroize", "al
 # `rand_core` for hedged signing (randomness from `getrandom` through the
 # provider's own adapter), `zeroize` to wipe private keys on drop. Not
 # `pkcs8`, which reads the `seed` form only: the provider parses RFC 9881
-# private keys itself (and refuses the `expandedKey` form, which the crate
-# cannot decode with checks).
+# private keys itself.
 ml-dsa = { version = "0.1", default-features = false, features = ["alloc", "rand_core", "zeroize"], optional = true }
+# SHAKE128 and SHAKE256 (FIPS 202) for the provider's own checks of an
+# ML-DSA `expandedKey` private key, which `ml-dsa` decodes unchecked. The
+# crate is the one `ml-dsa` and `ml-kem` hash with.
+shake = { version = "0.1", default-features = false, optional = true }
 # Verification only: the RustCrypto provider never signs with `rsa` (releases
 # before 0.10.0 are affected by RUSTSEC-2023-0071, Marvin, in private-key operations).
 rsa = { version = "0.10.0", default-features = false, features = ["encoding", "pkcs1v15"], optional = true }

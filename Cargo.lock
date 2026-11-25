@@ -271,6 +271,7 @@ dependencies = [
  "ruzstd",
  "sha1",
  "sha2",
+ "shake",
  "signature",
  "twox-hash",
  "x25519-dalek",

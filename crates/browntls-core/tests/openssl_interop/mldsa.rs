@@ -525,6 +525,22 @@ fn openssl_client_with_browntls_server_ml_dsa_key_forms() {
         );
         let key = PrivateKeyDer::from_pem_file(pki.path(&out)).unwrap();
         assert_eq!(private_key_form(key.secret_der()), expected, "{format}");
+        // The RustCrypto provider loads each form as the same key (it
+        // checks the `expandedKey` form itself, which `ml-dsa` does not).
+        #[cfg(feature = "rustcrypto")]
+        {
+            use browntls_core::crypto::rustcrypto;
+            let PrivateKeyDer::Pkcs8(pkcs8) = &key else {
+                panic!("{format}: not a PKCS #8 key");
+            };
+            let native = native::sign::any_ml_dsa_type(pkcs8).unwrap();
+            let rc = rustcrypto::sign::any_ml_dsa_type(pkcs8).unwrap();
+            assert_eq!(
+                rc.public_key().unwrap().as_ref(),
+                native.public_key().unwrap().as_ref(),
+                "{format}"
+            );
+        }
         keys.push((format!("{format} ({expected})"), key));
     }
     let pki = &pki;

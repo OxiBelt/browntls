@@ -67,14 +67,14 @@
 //!   keys (RFC 9881 PKCS #8), so that a certified key can sign with its
 //!   scheme when the peer offers it ([`sign::MlDsaSigningKey`], backed by
 //!   the `ml-dsa` crate; signing is hedged with the operating system's
-//!   random source). It takes the RFC 9881 `seed` and `both` forms; unlike
-//!   the native provider it refuses the `expandedKey` form alone, because
-//!   the `ml-dsa` crate offers no checked decoding of an expanded key (see
-//!   [`sign::any_ml_dsa_type`]). Loading a key needs far more stack than
-//!   in the native provider (for ML-DSA-87, up to about 430 KiB in an
-//!   optimised build and 1.25 MiB in an unoptimised one, as measured on
-//!   x86-64), and the crate does not wipe its signing temporaries: see
-//!   [`sign::MlDsaSigningKey`].
+//!   random source). It takes the RFC 9881 `seed`, `expandedKey` and
+//!   `both` forms, as the native provider does; an `expandedKey`, which
+//!   the `ml-dsa` crate decodes unchecked, is first checked by the
+//!   provider (see [`sign::any_ml_dsa_type`]). Loading a key needs far
+//!   more stack than in the native provider (for ML-DSA-87, up to about
+//!   430 KiB in an optimised build and 1.25 MiB in an unoptimised one, as
+//!   measured on x86-64), and the crate does not wipe its signing
+//!   temporaries: see [`sign::MlDsaSigningKey`].
 //!
 //! The schemes are used in TLS 1.3 (and with it QUIC and DTLS 1.3) only:
 //! TLS 1.2 handshake signatures never use them, whichever side holds the

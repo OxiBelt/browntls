@@ -18,9 +18,9 @@
 //! [`verify::ML_DSA_65`] and [`verify::ML_DSA_87`] (backed by the RustCrypto
 //! `ml-dsa` crate) to the certificate path algorithms and leaves the TLS
 //! signature scheme mapping as it is. This does not enable TLS
-//! authentication with ML-DSA keys, which is not implemented;
-//! [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists exactly which signatures the
-//! opt-in covers. The native provider has the same opt-in
+//! authentication with ML-DSA keys, which is a separate opt-in (below);
+//! [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] lists exactly which signatures
+//! this one covers. The native provider has the same opt-in
 //! (`crypto::native::SUPPORTED_SIG_ALGS_WITH_ML_DSA`).
 //!
 //! ```
@@ -40,6 +40,67 @@
 //!     .with_no_client_auth();
 //! # let _ = config;
 //! # Ok::<(), browntls_core::Error>(())
+//! ```
+//!
+//! # ML-DSA in TLS 1.3 (opt-in, experimental)
+//!
+//! TLS 1.3 authentication with ML-DSA keys follows
+//! `draft-ietf-tls-mldsa-06` ("Use of ML-DSA in TLS 1.3"), an
+//! Internet-Draft and not a published RFC: the schemes `mldsa44`,
+//! `mldsa65` and `mldsa87` (0x0904 to 0x0906, registered with
+//! "Recommended: N") sign `CertificateVerify` with pure ML-DSA and the
+//! empty context string, under an end-entity key of the same parameter
+//! set. [`default_provider`] neither offers nor accepts these schemes and
+//! loads no ML-DSA private key. Two independent provider fields opt in, as
+//! in the native provider (`crypto::native`), whose items of the same names
+//! behave the same way on the wire; the key loader differs in one key form,
+//! in its stack use and in what it zeroises (below):
+//!
+//! * [`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`] as
+//!   `signature_verification_algorithms` verifies a peer's ML-DSA
+//!   `CertificateVerify` (and ML-DSA certificate paths, as above). The
+//!   schemes are then listed, after the default ones, in the
+//!   `signature_algorithms` of every ClientHello that offers TLS 1.3 and
+//!   every TLS 1.3 CertificateRequest the configuration sends: the opt-in
+//!   is visible on the wire.
+//! * [`KEY_PROVIDER_WITH_ML_DSA`] as `key_provider` loads ML-DSA private
+//!   keys (RFC 9881 PKCS #8), so that a certified key can sign with its
+//!   scheme when the peer offers it ([`sign::MlDsaSigningKey`], backed by
+//!   the `ml-dsa` crate; signing is hedged with the operating system's
+//!   random source). It takes the RFC 9881 `seed` and `both` forms; unlike
+//!   the native provider it refuses the `expandedKey` form alone, because
+//!   the `ml-dsa` crate offers no checked decoding of an expanded key (see
+//!   [`sign::any_ml_dsa_type`]). Loading a key needs far more stack than
+//!   in the native provider (for ML-DSA-87, up to about 430 KiB in an
+//!   optimised build and 1.25 MiB in an unoptimised one, as measured on
+//!   x86-64), and the crate does not wipe its signing temporaries: see
+//!   [`sign::MlDsaSigningKey`].
+//!
+//! The schemes are used in TLS 1.3 (and with it QUIC and DTLS 1.3) only:
+//! TLS 1.2 handshake signatures never use them, whichever side holds the
+//! key, while ML-DSA-signed certificate paths validate in every protocol
+//! version (as above). Delegated credentials (RFC 9345) and exported
+//! authenticators (RFC 9261), for which no specification defines them,
+//! never use them. A peer without
+//! the opt-in fails the handshake with an ML-DSA-only peer as it would
+//! with any unsupported key type; nothing falls back to another algorithm
+//! unless the application configures another certified key.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use browntls_core::crypto::rustcrypto;
+//!
+//! let mut provider = rustcrypto::default_provider();
+//! // Verify peers that authenticate with ML-DSA, and say so in
+//! // `signature_algorithms`.
+//! provider.signature_verification_algorithms =
+//!     rustcrypto::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13;
+//! // Load our own ML-DSA private keys (`with_single_cert`,
+//! // `with_client_auth_cert`, `CertifiedKey::from_der`).
+//! provider.key_provider = rustcrypto::KEY_PROVIDER_WITH_ML_DSA;
+//! let provider = Arc::new(provider);
+//! # let _ = provider;
 //! ```
 
 use browntls_pki::PrivateKeyDer;
@@ -67,6 +128,11 @@ pub(crate) mod tls13;
 pub mod verify;
 mod verify_mldsa;
 
+mod sign_mldsa;
+pub use sign_mldsa::{
+    KEY_PROVIDER_WITH_ML_DSA, ML_DSA_VERIFICATION_ALG_MAPPING, RustCryptoWithMlDsa,
+    SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13, VERIFICATION_ALG_MAPPING_WITH_ML_DSA,
+};
 pub use verify_mldsa::{
     ALL_VERIFICATION_ALGS_WITH_ML_DSA, ML_DSA_VERIFICATION_ALGS, SUPPORTED_SIG_ALGS_WITH_ML_DSA,
 };

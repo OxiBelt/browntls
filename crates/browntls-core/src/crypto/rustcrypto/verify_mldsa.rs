@@ -181,12 +181,14 @@ pub static ALL_VERIFICATION_ALGS_WITH_ML_DSA: &[&dyn SignatureVerificationAlgori
 /// mapping is unchanged, the `signature_algorithms` lists this library
 /// sends, in a ClientHello and in a CertificateRequest, do not name
 /// ML-DSA, and a `CertificateVerify` or `ServerKeyExchange` signed with an
-/// ML-DSA scheme is refused as unadvertised. TLS 1.3 authentication with
-/// ML-DSA keys (`draft-ietf-tls-mldsa`) is not implemented: an ML-DSA end
-/// entity certificate validates, but cannot authenticate a TLS handshake,
+/// ML-DSA scheme is refused as unadvertised. With this table an ML-DSA end
+/// entity certificate validates but cannot authenticate a TLS handshake,
 /// and nothing on the wire tells a peer that chains signed with ML-DSA are
-/// accepted. See [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] for every signature
-/// the opt-in applies to.
+/// accepted; TLS 1.3 authentication with ML-DSA keys
+/// (`draft-ietf-tls-mldsa`) is the separate opt-in
+/// [`SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13`](super::SUPPORTED_SIG_ALGS_WITH_ML_DSA_TLS13).
+/// See [`ALL_VERIFICATION_ALGS_WITH_ML_DSA`] for every signature the
+/// opt-in applies to.
 pub static SUPPORTED_SIG_ALGS_WITH_ML_DSA: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
     all: ALL_VERIFICATION_ALGS_WITH_ML_DSA,
     mapping: SUPPORTED_SIG_ALGS.mapping,

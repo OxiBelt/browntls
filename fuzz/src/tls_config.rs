@@ -57,6 +57,7 @@ mod config;
 mod crypto;
 pub(crate) mod fixtures;
 mod misc;
+mod rustcrypto_mldsa;
 pub(crate) mod sign;
 mod trusted_ca;
 pub(crate) mod verifiers;

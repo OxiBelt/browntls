@@ -1110,6 +1110,15 @@ let server = ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
 assert_eq!(conn.protocol_version(), Some(ProtocolVersion::TLSv1_3));
 ```
 
+`with_tls13_only()` on a builder and `ClientConfig::builder_tls13_only()` /
+`ServerConfig::builder_tls13_only()` are that list under a name: they do
+what `&[&version::TLS13]` does and nothing more. `supports_version()` on
+either configuration reports whether its list holds a version, so that code
+which receives a configuration can check it against a policy
+(`!config.supports_version(ProtocolVersion::TLSv1_2)`). It reports the
+list, not what the provider can negotiate: a version of the default list is
+reported even when the provider has no cipher suite for it.
+
 A protocol that keeps TLS 1.2 as its non-default option lists both versions
 (`&[&version::TLS13, &version::TLS12]`, which needs the `tls12` feature):
 TLS 1.3 is then used with every peer that has it.

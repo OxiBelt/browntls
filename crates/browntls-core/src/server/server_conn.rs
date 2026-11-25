@@ -374,6 +374,22 @@ impl ServerConfig {
             .unwrap_or_else(|err| panic!("{err}"))
     }
 
+    /// Starts a builder with the process-default provider and TLS 1.3
+    /// alone: [`Self::builder_with_protocol_versions`] with
+    /// `&[&version::TLS13]`, for an application whose protocol requires
+    /// TLS 1.3 (RFC 9852 §4). See [`ConfigBuilder::with_tls13_only`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if no default provider is available, or if the provider has no
+    /// TLS 1.3 cipher suite or no key exchange groups; use
+    /// [`Self::builder_with_provider`] and
+    /// [`ConfigBuilder::with_tls13_only`] to avoid that.
+    #[cfg(feature = "std")]
+    pub fn builder_tls13_only() -> ConfigBuilder<Self, crate::WantsVerifier> {
+        Self::builder_with_protocol_versions(&[&crate::versions::TLS13])
+    }
+
     /// Starts a builder with `provider`.
     pub fn builder_with_provider(
         provider: Arc<CryptoProvider>,
@@ -408,8 +424,17 @@ impl ServerConfig {
         &self.provider
     }
 
-    pub(super) fn supports_version(&self, v: ProtocolVersion) -> bool {
-        self.versions.contains(v)
+    /// Whether the version list this configuration was built with holds
+    /// `version`: the way to check a configuration received from other
+    /// code against a policy, for instance that TLS 1.2 is not enabled.
+    ///
+    /// The list is what the builder was given, so a version of the default
+    /// list is reported even when the provider has no cipher suite for it
+    /// and it can never be negotiated. Only TLS versions are ever listed:
+    /// the answer for a DTLS version is `false`, and what a DTLS endpoint
+    /// speaks also depends on its [`dtls::Versions`](crate::dtls::Versions).
+    pub fn supports_version(&self, version: ProtocolVersion) -> bool {
+        self.versions.contains(version)
     }
 
     pub(super) fn find_cipher_suite(&self, suite: CipherSuite) -> Option<SupportedCipherSuite> {

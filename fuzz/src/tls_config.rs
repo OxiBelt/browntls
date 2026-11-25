@@ -25,7 +25,10 @@
 //!   provider supporting its scheme (raw key and certificate) and fails once
 //!   tampered; scheme selection is exactly the key's schemes among those
 //!   offered; Ed25519 signatures are identical across providers;
-//! * `with_protocol_versions`, `CertifiedKey::from_der`, the client
+//! * `with_protocol_versions` and the TLS 1.3-only preset succeed exactly
+//!   for consistent inputs, and `supports_version` of the configuration
+//!   answers the list that was asked for;
+//! * `CertifiedKey::from_der`, the client
 //!   authentication and certificate builders succeed exactly for consistent
 //!   inputs; connections refuse exactly the invalid fragment and record
 //!   sizes;
@@ -435,7 +438,8 @@ pub fn seeds() -> Vec<Vec<u8>> {
             } else {
                 &[p, mode]
             };
-            for versions in [(2 * mode + p) % 5, (2 * mode + p + 3) % 5] {
+            // Two of the lists, and the TLS 1.3-only preset (5).
+            for versions in [(2 * mode + p) % 5, (2 * mode + p + 3) % 5, 5] {
                 let verifier = (versions + mode) % 3;
                 add(
                     op::CLIENT_CONFIG,

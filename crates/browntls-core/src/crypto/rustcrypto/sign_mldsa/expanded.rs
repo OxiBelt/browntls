@@ -18,17 +18,18 @@
 //!
 //! The arithmetic on `s1`, `s2` and `t` (secret) has no branch, memory
 //! access or division that depends on their values: the products are
-//! 64-bit multiplications (constant-time on the targets this project
-//! tests, not on every processor), the reductions are shifts,
-//! multiplications by constants and masks, every check runs to completion
-//! and only the final accept or reject depends on the secrets. The masks
-//! and the accumulated result pass through a value barrier
-//! ([`core::hint::black_box`]), as in the native provider, to discourage
-//! the compiler from turning them into branches; that is a best-effort
-//! hint and the generated code has not been inspected. The matrix `A` is
-//! public (rejection sampling from `rho`). The secret temporaries are
-//! wiped. For ML-DSA-87 on an x86-64 host the checks needed under 16 KiB
-//! of stack in an optimised build and about 44 KiB in an unoptimised one.
+//! 64-bit multiplications (constant-time where the processor's multiplier
+//! is, as on common x86-64 and aarch64 processors, and not everywhere),
+//! the reductions are shifts, multiplications by constants and masks,
+//! every check runs to completion and only the final accept or reject
+//! depends on the secrets. The masks and the accumulated result pass
+//! through a value barrier ([`core::hint::black_box`]), as in the native
+//! provider, to discourage the compiler from turning them into branches;
+//! that is a best-effort hint and the generated code has not been
+//! inspected. The matrix `A` is public (rejection sampling from `rho`).
+//! The secret temporaries are wiped. For ML-DSA-87 on an x86-64 host the
+//! checks needed under 16 KiB of stack in an optimised build and about
+//! 44 KiB in an unoptimised one.
 
 use alloc::vec::Vec;
 use core::hint::black_box;

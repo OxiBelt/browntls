@@ -389,9 +389,9 @@ fn load(der: &[u8]) -> Option<MlDsaSigningKey> {
 /// [`MlDsaSigningKey`](MlDsaSigningKey#memory-stack-and-zeroisation), also
 /// for what is and is not zeroised). An `expandedKey`, which is decoded
 /// rather than derived, needed about 335 KiB and 950 KiB in the same
-/// measurements (of which the provider's checks, which wipe their
-/// temporaries, take under 16 KiB and about 44 KiB). Call it on a thread
-/// with that much stack.
+/// measurements; the provider's checks, which run before the crate
+/// decodes the key and wipe their temporaries, need under 16 KiB and
+/// about 44 KiB. Call it on a thread with that much stack.
 ///
 /// Every failure is one generic error.
 pub fn any_ml_dsa_type(der: &PrivatePkcs8KeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {

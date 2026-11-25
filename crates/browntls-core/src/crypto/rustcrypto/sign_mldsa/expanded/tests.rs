@@ -328,14 +328,16 @@ fn agreement<P: MlDsaParams, Native: browntls_crypto::mldsa::ParameterSet>(set: 
     let s_start = RHO_LEN + K_LEN + TR_LEN;
     let t0_start = set.private_key_len() - usize::from(set.k) * T0_LEN;
     let count = (t0_start - s_start) * 8 / bits;
-    let verdict = |sk: &[u8]| {
+    // `round` and the byte changed after resealing, if any, name the key
+    // in a failure.
+    let verdict = |sk: &[u8], round: u8, changed: Option<usize>| {
         let here = public_key(set, sk);
         let native = SigningKey::<Native>::from_expanded_bytes(sk)
             .ok()
             .map(|key| key.verifying_key().as_bytes().to_vec());
-        assert!(here == native);
+        assert!(here == native, "{round} {changed:?}");
         if let Some(here) = &here {
-            assert!(*here == public_key_of::<P>(sk));
+            assert!(*here == public_key_of::<P>(sk), "{round} {changed:?}");
         }
         here.is_some()
     };
@@ -367,13 +369,13 @@ fn agreement<P: MlDsaParams, Native: browntls_crypto::mldsa::ParameterSet>(set: 
             }
         };
         let mut sk = reseal(set, &sk);
-        let loads = verdict(&sk);
+        let loads = verdict(&sk, round, None);
         assert!(expected.is_none_or(|expected| expected == loads), "{round}");
         let at = stream.below(sk.len());
         sk[at] ^= 1 << stream.below(8);
         // Only a bit of `K` leaves the key as valid as it was.
         let in_k = (RHO_LEN..RHO_LEN + K_LEN).contains(&at);
-        assert_eq!(verdict(&sk), loads && in_k, "{round} {at}");
+        assert_eq!(verdict(&sk, round, Some(at)), loads && in_k, "{round} {at}");
         loaded += usize::from(loads);
         refused += usize::from(!loads);
     }

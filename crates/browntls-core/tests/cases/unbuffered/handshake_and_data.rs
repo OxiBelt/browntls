@@ -415,6 +415,43 @@ fn server_waits_for_client_hello() {
     assert!(conn.process_tls_records(&mut []).state.is_err());
 }
 
+/// A version list is a policy of the configuration, so the unbuffered
+/// connections refuse a peer of the other version as the buffered ones do
+/// (RFC 9846 §4.2.1 and Appendix D): the server names the cause and sends
+/// `protocol_version`, the client receives it, and neither falls back.
+#[cfg(feature = "tls12")]
+#[test]
+fn a_peer_of_the_other_version_is_refused_with_protocol_version() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let (tls13, tls12) = (ProtocolVersion::TLSv1_3, ProtocolVersion::TLSv1_2);
+    for (client_version, server_version) in [(tls13, tls12), (tls12, tls13)] {
+        let cc = Arc::new(versioned_client(&chain, client_version));
+        let sc = Arc::new(versioned_server(&chain, server_version));
+        for feed in [Feed::Whole, Feed::ByteByByte] {
+            let mut c = ub_client(&cc, feed);
+            let mut s = ub_server(&sc, feed);
+            pump(&mut c, &mut s);
+            assert_eq!(
+                s.error,
+                Some(Error::PeerIncompatible(
+                    browntls_core::PeerIncompatible::Tls12NotOfferedOrEnabled
+                )),
+                "{client_version:?} to {server_version:?} {feed:?}"
+            );
+            assert_eq!(
+                c.error,
+                Some(Error::AlertReceived(
+                    browntls_core::AlertDescription::ProtocolVersion
+                )),
+                "{client_version:?} to {server_version:?} {feed:?}"
+            );
+            assert_eq!(c.conn.protocol_version(), None);
+            assert_eq!(s.conn.protocol_version(), None);
+        }
+    }
+}
+
 #[test]
 fn export_keying_material_matches_buffered_peer() {
     let chain = server_chain(KeyType::EcdsaP256);

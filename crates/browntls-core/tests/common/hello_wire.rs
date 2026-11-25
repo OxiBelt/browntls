@@ -89,6 +89,99 @@ pub fn add_hello_extension(buf: &mut Vec<u8>, client: bool, typ: u16, body: &[u8
     add_u16(buf, block_at);
 }
 
+/// Adds `by` to the big-endian `u16` at `at`.
+fn grow_u16(buf: &mut [u8], at: usize, by: isize) {
+    let new = u16::try_from(u16_at(buf, at) as isize + by).unwrap();
+    buf[at..at + 2].copy_from_slice(&new.to_be_bytes());
+}
+
+/// Removes every extension of type `typ` from the hello at the start of
+/// `buf` and corrects the three lengths around them; returns whether there
+/// was one.
+pub fn remove_hello_extension(buf: &mut Vec<u8>, client: bool, typ: u16) -> bool {
+    let block_at = extensions_at(buf, client);
+    let end = block_at + 2 + u16_at(buf, block_at);
+    let mut at = block_at + 2;
+    let mut removed = 0;
+    while at < end - removed {
+        let len = 4 + u16_at(buf, at + 2);
+        if u16_at(buf, at) == usize::from(typ) {
+            buf.drain(at..at + len);
+            removed += len;
+        } else {
+            at += len;
+        }
+    }
+    let by = -(removed as isize);
+    grow_u16(buf, 3, by);
+    grow_u16(buf, 7, by);
+    grow_u16(buf, block_at, by);
+    removed != 0
+}
+
+/// The `legacy_version` of the hello at the start of `buf`.
+pub fn hello_legacy_version(buf: &[u8]) -> u16 {
+    assert_eq!(buf[0], 22, "not a handshake record");
+    u16_at(buf, 9) as u16
+}
+
+/// Sets the `legacy_version` of the hello at the start of `buf`.
+pub fn set_hello_legacy_version(buf: &mut [u8], version: u16) {
+    assert_eq!(buf[0], 22, "not a handshake record");
+    buf[9..11].copy_from_slice(&version.to_be_bytes());
+}
+
+/// The session ID of the hello at the start of `buf` (the echo, in a
+/// ServerHello).
+pub fn hello_session_id(buf: &[u8]) -> &[u8] {
+    assert_eq!(buf[0], 22, "not a handshake record");
+    let at = 5 + 4 + 2 + 32;
+    &buf[at + 1..at + 1 + usize::from(buf[at])]
+}
+
+/// Where the cipher suite list of the ClientHello at the start of `buf`
+/// begins (at its length prefix).
+fn cipher_suites_at(buf: &[u8]) -> usize {
+    assert_eq!(buf[0], 22, "not a handshake record");
+    assert_eq!(buf[5], 1, "not a ClientHello");
+    let at = 5 + 4 + 2 + 32;
+    at + 1 + usize::from(buf[at])
+}
+
+/// The cipher suites the ClientHello at the start of `buf` offers, in
+/// order, signalling values included.
+pub fn client_hello_cipher_suites(buf: &[u8]) -> Vec<u16> {
+    let at = cipher_suites_at(buf);
+    let (suites, _) = buf[at + 2..at + 2 + u16_at(buf, at)].as_chunks::<2>();
+    suites
+        .iter()
+        .map(|suite| u16::from_be_bytes(*suite))
+        .collect()
+}
+
+/// Appends a cipher suite (or a signalling value) to the ClientHello at the
+/// start of `buf` and corrects the three lengths around it.
+pub fn add_client_hello_cipher_suite(buf: &mut Vec<u8>, suite: u16) {
+    let at = cipher_suites_at(buf);
+    let end = at + 2 + u16_at(buf, at);
+    buf.splice(end..end, suite.to_be_bytes());
+    grow_u16(buf, 3, 2);
+    grow_u16(buf, 7, 2);
+    grow_u16(buf, at, 2);
+}
+
+/// The first handshake message of the record at the start of `buf`, in a
+/// record of its own: the hello without what the sender put after it.
+pub fn first_handshake_message(buf: &[u8]) -> Vec<u8> {
+    assert_eq!(buf[0], 22, "not a handshake record");
+    let len = 4 + ((usize::from(buf[6]) << 16) | u16_at(buf, 7));
+    assert!(len <= u16_at(buf, 3), "the message does not fit its record");
+    let mut out = vec![22, buf[1], buf[2]];
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    out.extend_from_slice(&buf[5..5 + len]);
+    out
+}
+
 /// Everything `conn` has queued to send.
 pub fn take_flight<D: SideData>(conn: &mut ConnectionCommon<D>) -> Vec<u8> {
     let mut buf = Vec::new();

@@ -20,12 +20,17 @@
 //!   fuzzed `enc`. Sealed ciphertexts and exported secrets must equal the
 //!   oracle's byte for byte, both contexts must agree, rejected ciphertexts
 //!   must not advance the sequence number, and the oracle must accept and
-//!   reject the same `enc` values.
+//!   reject the same `enc` values. The KEM shared secret that the `key-log`
+//!   entry points hand out (for RFC 9850's `ECH_SECRET`) must be the same on
+//!   both sides and equal the oracle's `Decap`, for the genuine and for
+//!   every fuzzed `enc`, and a failed setup must leave the caller's buffer
+//!   empty.
 //! - provider: one of the native provider's suites through the `Hpke`,
 //!   `HpkeSealer` and `HpkeOpener` traits with fuzzed info, aad, plaintext,
 //!   public keys, private keys and `enc`; results must agree with the crate
 //!   API underneath.
 
+mod kem_secret;
 mod keys;
 mod provider;
 mod session;

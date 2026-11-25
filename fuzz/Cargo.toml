@@ -17,7 +17,9 @@ cargo-fuzz = true
 
 [dependencies]
 browntls-core = { path = "../crates/browntls-core", features = ["fuzzing", "zlib", "brotli", "zstd", "rustcrypto"] }
-browntls-crypto = { path = "../crates/browntls-crypto" }
+# `key-log` exposes the HPKE KEM shared secret to `crypto_hpke`, which checks
+# it against the oracle. It does not turn on key logging in `browntls-core`.
+browntls-crypto = { path = "../crates/browntls-crypto", features = ["key-log"] }
 browntls-pki = { path = "../crates/browntls-pki" }
 browntls-tokio = { path = "../crates/browntls-tokio", default-features = false, features = ["native", "rustcrypto", "tls12", "ocsp", "dtls"] }
 # Revocation uses in-memory I/O and a paused timer; DTLS networking and

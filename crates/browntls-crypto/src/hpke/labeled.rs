@@ -31,6 +31,20 @@ impl Secret {
     pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8] {
         &mut self.bytes[..self.len]
     }
+
+    /// Empties the buffer, zeroising what it held.
+    #[cfg(any(feature = "key-log", all(test, feature = "alloc")))]
+    pub(crate) fn clear(&mut self) {
+        zeroize_bytes(&mut self.bytes);
+        self.len = 0;
+    }
+
+    /// Replaces the content with a copy of `other`'s.
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        zeroize_bytes(&mut self.bytes);
+        self.len = other.len;
+        self.bytes[..other.len].copy_from_slice(other.as_bytes());
+    }
 }
 
 impl Drop for Secret {

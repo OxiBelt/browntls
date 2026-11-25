@@ -14,6 +14,9 @@ use std::vec::Vec;
 
 use serde::Deserialize;
 
+#[cfg(feature = "key-log")]
+use super::KemSharedSecret;
+use super::labeled::Secret;
 use super::{Aead, Kem, PrivateKey, PublicKey, Suite};
 use crate::Error;
 
@@ -53,6 +56,7 @@ struct Vector {
     #[serde(rename = "pkEm")]
     pk_em: String,
     enc: String,
+    shared_secret: String,
     encryptions: Vec<Encryption>,
     exports: Vec<Export>,
 }
@@ -111,11 +115,32 @@ fn rfc9180_base_mode_vectors() {
 
         let info = h(&v.info);
         let pk_r = PublicKey::from_bytes(kem, &h(&v.pk_rm)).unwrap();
+        let mut kem_secret = Secret::zeroed(0);
         let (enc, mut sender) = suite
-            .setup_sender_derandomized(&pk_r, &info, &h(&v.ikm_e))
+            .setup_sender_derandomized(&pk_r, &info, &h(&v.ikm_e), &mut kem_secret)
             .unwrap();
         assert_eq!(enc.as_bytes(), h(&v.enc), "{name} enc");
+        let shared_secret = h(&v.shared_secret);
+        assert_eq!(shared_secret.len(), kem.shared_secret_len(), "{name}");
+        assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} sender");
+        kem_secret.clear();
+        assert!(kem_secret.as_bytes().is_empty());
         let mut recipient = suite.setup_recipient(&h(&v.enc), &sk_r2, &info).unwrap();
+        // The logging entry point hands out the vector's `shared_secret`
+        // and a context that agrees with the ordinary one.
+        #[cfg(feature = "key-log")]
+        {
+            let mut kem_secret = KemSharedSecret::new();
+            let logged = suite
+                .setup_recipient_with_kem_secret(&h(&v.enc), &sk_r2, &info, &mut kem_secret)
+                .unwrap();
+            assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} recipient");
+            let mut a = [0u8; 32];
+            let mut b = [0u8; 32];
+            recipient.export(b"key-log", &mut a).unwrap();
+            logged.export(b"key-log", &mut b).unwrap();
+            assert_eq!(a, b, "{name} contexts");
+        }
 
         for e in &v.encryptions {
             // Advance both contexts to the vector's sequence number.
@@ -144,5 +169,72 @@ fn rfc9180_base_mode_vectors() {
             assert_eq!(a, h(&x.exported_value), "{name} export");
             assert_eq!(b, a, "{name} export");
         }
+    }
+}
+
+/// The public logging entry points agree with each other and with the
+/// ordinary ones, for every KEM: the sender's secret is the recipient's, it
+/// has the KEM's `Nsecret` length, it is not what the context exports, and
+/// a failed setup leaves the caller's buffer empty.
+#[cfg(feature = "key-log")]
+#[test]
+fn kem_secret_entry_points_agree() {
+    use super::Kdf;
+    use crate::rand::OsRng;
+
+    for kem in Kem::ALL {
+        let suite = Suite::new(kem, Kdf::HkdfSha256, Aead::Aes128Gcm);
+        let sk_r = kem.generate_key_pair(&OsRng).unwrap();
+        let pk_r = sk_r.public_key();
+        let info = b"key-log test";
+        let mut sent = KemSharedSecret::new();
+        assert!(sent.as_bytes().is_empty());
+        let (enc, mut sender) = suite
+            .setup_sender_with_kem_secret(pk_r, info, &OsRng, &mut sent)
+            .unwrap();
+        let mut received = KemSharedSecret::default();
+        let mut recipient = suite
+            .setup_recipient_with_kem_secret(enc.as_bytes(), &sk_r, info, &mut received)
+            .unwrap();
+        assert_eq!(sent.as_bytes(), received.as_bytes(), "{kem:?}");
+        assert_eq!(sent.as_bytes().len(), kem.shared_secret_len(), "{kem:?}");
+        assert_ne!(sent.as_bytes(), vec![0u8; kem.shared_secret_len()]);
+
+        let ct = sender.seal(b"aad", b"plaintext").unwrap();
+        assert_eq!(recipient.open(b"aad", &ct).unwrap(), b"plaintext");
+        // An ordinary recipient reaches the same context from `enc`.
+        let mut plain = suite.setup_recipient(enc.as_bytes(), &sk_r, info).unwrap();
+        assert_eq!(plain.open(b"aad", &ct).unwrap(), b"plaintext");
+
+        let mut exported = vec![0u8; kem.shared_secret_len()];
+        sender.export(b"", &mut exported).unwrap();
+        assert_ne!(sent.as_bytes(), exported, "{kem:?} exporter output");
+
+        assert_eq!(format!("{sent:?}"), "KemSharedSecret(..)");
+
+        // A second setup to the same key replaces the secret with another.
+        let first = sent.as_bytes().to_vec();
+        suite
+            .setup_sender_with_kem_secret(pk_r, info, &OsRng, &mut sent)
+            .unwrap();
+        assert_ne!(sent.as_bytes(), first, "{kem:?}");
+
+        // A setup that fails leaves no earlier secret behind: a key of
+        // another KEM for the sender, a malformed `enc` for the recipient.
+        let other = Kem::ALL.into_iter().find(|k| *k != kem).unwrap();
+        let foreign = other.generate_key_pair(&OsRng).unwrap();
+        assert_eq!(
+            suite
+                .setup_sender_with_kem_secret(foreign.public_key(), info, &OsRng, &mut sent)
+                .err(),
+            Some(Error::InvalidKey)
+        );
+        assert!(sent.as_bytes().is_empty(), "{kem:?}");
+        assert!(
+            suite
+                .setup_recipient_with_kem_secret(&[0u8; 3], &sk_r, info, &mut received)
+                .is_err()
+        );
+        assert!(received.as_bytes().is_empty(), "{kem:?}");
     }
 }

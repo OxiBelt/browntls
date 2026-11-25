@@ -17,10 +17,11 @@ use crate::webpki::WebPkiSupportedAlgorithms;
 /// `rsa_pkcs1_sha512_legacy`, `rsa_pkcs1_sha384_legacy` and
 /// `rsa_pkcs1_sha256_legacy` (0x0620, 0x0520, 0x0420), larger hashes first
 /// as in the default mapping. Each maps to RSASSA-PKCS1-v1_5 with its hash
-/// and an `rsaEncryption` key of 2048 to 8192 bits, which the `rsa` crate
-/// verifies by comparing the whole encoded message (RFC 8017 §8.2.2): a
-/// `DigestInfo` without the NULL parameters, or in any other encoding,
-/// does not verify (RFC 9963 §3).
+/// and an `rsaEncryption` key whose modulus takes 256 to 1024 bytes (the
+/// provider's RSA algorithms check the length in bytes), which the `rsa`
+/// crate verifies by comparing the whole encoded message (RFC 8017
+/// §8.2.2): a `DigestInfo` without the NULL parameters, or in any other
+/// encoding, does not verify (RFC 9963 §3).
 #[allow(clippy::type_complexity)]
 pub static RSA_PKCS1_LEGACY_VERIFICATION_ALG_MAPPING: &[(
     SignatureScheme,

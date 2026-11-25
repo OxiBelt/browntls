@@ -286,8 +286,10 @@ impl SignatureScheme {
     ///   authenticators (RFC 9261) never use them.
     ///
     /// The code point decides, so that `Unknown(0x0420)`, which an
-    /// application can construct, is treated like
-    /// `RSA_PKCS1_SHA256_LEGACY`.
+    /// application can construct, is refused wherever
+    /// `RSA_PKCS1_SHA256_LEGACY` is. It is not accepted where the named
+    /// scheme is: offers and signers are compared by value, so a verifier
+    /// or a key has to name the schemes by their constants.
     pub(crate) fn is_rsa_pkcs1_legacy(&self) -> bool {
         matches!(u16::from(*self), 0x0420 | 0x0520 | 0x0620)
     }

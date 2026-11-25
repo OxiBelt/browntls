@@ -198,6 +198,52 @@ fn authenticators_never_offer_legacy_to_a_key() {
     }
 }
 
+/// A key that returns a legacy signer whatever it is offered (its signer
+/// panics if used) signs no authenticator: a spontaneous one fails, and
+/// the answer to a request, from either side, is the empty authenticator.
+/// The request each key saw listed no legacy scheme.
+#[test]
+fn authenticators_do_not_sign_with_an_unoffered_legacy_scheme() {
+    let mut s = setup();
+    for claims in [LEGACY[0], LEGACY_AS_UNKNOWN[1]] {
+        let key = ClaimingKey::ignoring_offer(claims, SignatureAlgorithm::Unknown(0xff));
+        let claimed = CertifiedKey::new(s.server_chain.cert_chain(), key.clone());
+        assert_eq!(
+            s.server.authenticator(None, Some(&claimed)),
+            Err(Error::General(
+                "a spontaneous authenticator needs a certificate whose key can sign with a \
+                 scheme the client offered"
+                    .into()
+            )),
+            "{claims:?}"
+        );
+        assert!(!has_any_legacy(&key.offered()[0]));
+    }
+
+    // A server's request (type 13) answered by the client, and a client's
+    // (type 17) answered by the server: a lone Finished (type 20).
+    let key = ClaimingKey::ignoring_offer(LEGACY[2], SignatureAlgorithm::Unknown(0xff));
+    let claimed = CertifiedKey::new(s.client_chain.cert_chain(), key.clone());
+    let request = raw_request(
+        13,
+        b"unoffered 1",
+        &[&LEGACY[..], &[SignatureScheme::ED25519]].concat(),
+    );
+    let auth = s.client.authenticator(&request, Some(&claimed)).unwrap();
+    assert_eq!(auth[0], 20, "declined");
+    assert_eq!(key.offered(), [vec![SignatureScheme::ED25519]]);
+
+    let key = ClaimingKey::ignoring_offer(LEGACY[0], SignatureAlgorithm::Unknown(0xff));
+    let claimed = CertifiedKey::new(s.server_chain.cert_chain(), key.clone());
+    let request = raw_request(17, b"unoffered 2", &[SignatureScheme::ED25519]);
+    let auth = s
+        .server
+        .authenticator(Some(&request), Some(&claimed))
+        .unwrap();
+    assert_eq!(auth[0], 20, "declined");
+    assert_eq!(key.offered(), [vec![SignatureScheme::ED25519]]);
+}
+
 /// The client's `delegated_credential` extension (RFC 9345 §4.1.1) lists
 /// none of the legacy schemes its verifier advertises, nor does the
 /// `signature_algorithms` of the same hello; and no legacy scheme, named

@@ -208,9 +208,14 @@ impl Connection<'_> {
         state.check_make(&context)?;
         let keys = self.keys(self.side)?;
 
+        // A signer that names a scheme its key was not offered is not
+        // used: the peer did not ask for that scheme, and it may be one
+        // that never signs an authenticator (ML-DSA, or a legacy scheme
+        // of RFC 9963).
         let signing = certified_key
             .filter(|ck| !ck.cert.is_empty())
-            .and_then(|ck| Some((ck, ck.key.choose_scheme(&schemes)?)));
+            .and_then(|ck| Some((ck, ck.key.choose_scheme(&schemes)?)))
+            .filter(|(_, signer)| schemes.contains(&signer.scheme()));
         let Some((certified_key, signer)) = signing else {
             if request.is_none() {
                 return Err(Error::General(

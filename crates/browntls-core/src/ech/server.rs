@@ -14,6 +14,7 @@ use crate::common_state::CommonState;
 use crate::crypto::hpke::{EncapsulatedSecret, HpkeOpener, HpkeSymmetricCipherSuite};
 use crate::enums::{AlertDescription, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
+use crate::key_log::KeyLog;
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Reader;
 use crate::msgs::handshake::{
@@ -112,12 +113,16 @@ pub(crate) fn client_hello<'a>(m: &'a Message<'_>) -> Option<(&'a ClientHelloPay
 ///
 /// After a HelloRetryRequest (`done_retry`), only an accepted offer is
 /// processed again, with the same HPKE context (§7.1.1).
+///
+/// `key_log` receives the ECH records of an offer accepted in shared mode
+/// ([`open_first`]); no other role writes any.
 pub(crate) fn process_client_hello(
     role: Role<'_>,
     state: &mut ServerEch,
     common: &mut CommonState,
     m: &Message<'_>,
     done_retry: bool,
+    key_log: &dyn KeyLog,
 ) -> Result<Option<Message<'static>>, Error> {
     let Some((ch, body)) = client_hello(m) else {
         return Ok(None);
@@ -125,7 +130,7 @@ pub(crate) fn process_client_hello(
     let result = match role {
         Role::Off => check_outer_extensions(ch).map(|()| None),
         Role::Backend => backend(state, ch, done_retry).map(|()| None),
-        Role::Shared(config) => shared(config, state, ch, body, m.version, done_retry),
+        Role::Shared(config) => shared(config, state, ch, body, m.version, done_retry, key_log),
     };
     result.map_err(|fatal| fatal.send(common))
 }
@@ -145,6 +150,7 @@ fn shared(
     body: &[u8],
     version: ProtocolVersion,
     done_retry: bool,
+    key_log: &dyn KeyLog,
 ) -> Result<Option<Message<'static>>, Fatal> {
     check_outer_extensions(ch)?;
     if done_retry {
@@ -155,7 +161,7 @@ fn shared(
         };
         return open_retry(accepted, ch, body, version).map(Some);
     }
-    match open_first(config, ch, body, version)? {
+    match open_first(config, ch, body, version, key_log)? {
         Opened::NotOffered => Ok(None),
         Opened::Rejected => {
             *state = ServerEch::Rejected;
@@ -237,12 +243,26 @@ pub(crate) enum Opened {
 
 /// Decrypts the ECH extension of a first ClientHello (`ch`, encoded as
 /// `body`) with `config`'s keys (§7.1).
+///
+/// With the `key-log` feature this is the only place a server writes
+/// `ECH_SECRET` and `ECH_CONFIG` (RFC 9850 §2.3), and it does so only for
+/// an offer it accepts: after the context opened the payload, the public
+/// name matched where that is checked, and the inner ClientHello decoded.
+/// The records name the outer ClientHello's random and the configuration
+/// of the key that decrypted. The KEM secret of each candidate is a local
+/// of one loop iteration: a candidate that fails drops (and zeroises) it,
+/// and neither [`Accepted`] nor anything else kept for the connection
+/// holds it. A second ClientHello ([`open_retry`]) reuses the context and
+/// writes nothing.
 pub(crate) fn open_first(
     config: &EchServerConfig,
     ch: &ClientHelloPayload,
     body: &[u8],
     version: ProtocolVersion,
+    key_log: &dyn KeyLog,
 ) -> Result<Opened, Fatal> {
+    #[cfg(not(feature = "key-log"))]
+    let _ = key_log;
     let outer = match &ch.extensions.encrypted_client_hello {
         None => return Ok(Opened::NotOffered),
         Some(EchClientHello::Outer(outer)) => outer,
@@ -266,7 +286,20 @@ pub(crate) fn open_first(
             .iter()
             .filter(|s| s.suite().sym == outer.cipher_suite)
         {
-            let Ok(mut opener) = hpke.setup_opener(&enc, &info, &key.private_key) else {
+            #[cfg(feature = "key-log")]
+            let mut kem_secret = crate::crypto::hpke::KemSecret::empty();
+            #[cfg(feature = "key-log")]
+            let opener = super::key_log::setup_opener(
+                *hpke,
+                key_log,
+                &enc,
+                &info,
+                &key.private_key,
+                &mut kem_secret,
+            );
+            #[cfg(not(feature = "key-log"))]
+            let opener = hpke.setup_opener(&enc, &info, &key.private_key);
+            let Ok(mut opener) = opener else {
                 continue;
             };
             let Ok(inner) = opener.open(&aad, &outer.payload.0) else {
@@ -284,6 +317,8 @@ pub(crate) fn open_first(
                 return Err(Fatal::illegal(PeerMisbehaved::EchPublicNameMismatch));
             }
             let message = decode_inner(version, body, &ch.session_id, &inner)?;
+            #[cfg(feature = "key-log")]
+            super::key_log::emit(key_log, &ch.random.0, &kem_secret, &key.encoded);
             let accepted = Box::new(Accepted {
                 opener,
                 config_id: outer.config_id,

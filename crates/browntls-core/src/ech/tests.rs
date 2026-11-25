@@ -1,6 +1,8 @@
 //! Tests of the inner ClientHello encoding (RFC 9849 §5.1) and of the
 //! server's checks on what it decrypts.
 
+#[cfg(feature = "native")]
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -262,13 +264,39 @@ fn candidate_selection_and_public_name_check() {
         outer.extensions.encrypted_client_hello = Some(EchClientHello::Outer(ech));
         outer
     };
+    // Every decryption below runs with a key log that takes everything.
+    // With the `key-log` feature, `expect_records` then checks what the
+    // call wrote: one `ECH_SECRET` and one `ECH_CONFIG` under the outer
+    // random for an accepted offer, naming the configuration of the key
+    // that decrypted, and nothing otherwise.
+    let sink = Records::default();
     let open = |config: &EchServerConfig, outer: &ClientHelloPayload| {
+        sink.0.lock().unwrap().clear();
         open_first(
             config,
             outer,
             &outer.get_encoding(),
             ProtocolVersion::TLSv1_0,
+            &sink,
         )
+    };
+    let expect_records = |config: Option<&EchServerKey>| {
+        let records = core::mem::take(&mut *sink.0.lock().unwrap());
+        let (Some(key), true) = (config, cfg!(feature = "key-log")) else {
+            assert!(records.is_empty(), "{records:?}");
+            return;
+        };
+        let [secret, logged_config] = &records[..] else {
+            panic!("{records:?}");
+        };
+        assert_eq!(secret.0, "ECH_SECRET");
+        assert_eq!(secret.1, [4; 32]);
+        // X25519: `Nsecret` is 32 bytes.
+        assert_eq!(secret.2.len(), 32);
+        assert_eq!(
+            *logged_config,
+            (String::from("ECH_CONFIG"), vec![4; 32], key.encoded.clone())
+        );
     };
     let accepted = |r: &Result<Opened, _>| matches!(r, Ok(Opened::Accepted(..)));
     let rejected = |r: &Result<Opened, _>| matches!(r, Ok(Opened::Rejected));
@@ -284,18 +312,29 @@ fn candidate_selection_and_public_name_check() {
     // The configuration's identifier.
     let good = seal("public.example", 7);
     assert!(accepted(&open(&by_id, &good)));
+    expect_records(Some(&key));
     assert!(accepted(&open(&trial, &good)));
+    // Trial decryption tried `other` first: its failed context left no
+    // record, and the configuration logged is the second key's.
+    expect_records(Some(&key));
     assert!(accepted(&open(&checked, &good)));
+    expect_records(Some(&key));
     // Another identifier: only trial decryption finds the key.
     for id in [8, 9] {
         let moved = seal("public.example", id);
+        // Identifier 8 selects `other`, which sets a context up from the
+        // client's `enc` but cannot open the payload.
         assert!(rejected(&open(&by_id, &moved)), "{id}");
+        expect_records(None);
         assert!(accepted(&open(&trial, &moved)), "{id}");
+        expect_records(Some(&key));
     }
     // The outer name differs from the public name: refused only when
-    // checked, ignoring ASCII case.
+    // checked, ignoring ASCII case. The refusal comes after the payload
+    // opened, and still writes nothing.
     let renamed = seal("other.example", 7);
     assert!(accepted(&open(&by_id, &renamed)));
+    expect_records(Some(&key));
     assert!(matches!(
         open(&checked, &renamed),
         Err(super::server::Fatal(
@@ -303,5 +342,35 @@ fn candidate_selection_and_public_name_check() {
             Error::PeerMisbehaved(PeerMisbehaved::EchPublicNameMismatch)
         ))
     ));
+    expect_records(None);
     assert!(accepted(&open(&checked, &seal("Public.EXAMPLE", 7))));
+    expect_records(Some(&key));
+
+    // No ECH extension, and one of type `inner`: nothing to log.
+    let mut plain = good.clone();
+    plain.extensions.encrypted_client_hello = None;
+    assert!(matches!(open(&by_id, &plain), Ok(Opened::NotOffered)));
+    expect_records(None);
+    plain.extensions.encrypted_client_hello = Some(EchClientHello::Inner);
+    assert!(open(&by_id, &plain).is_err());
+    expect_records(None);
+}
+
+/// A key log that takes every label and keeps what it is given.
+#[cfg(feature = "native")]
+#[derive(Debug, Default)]
+struct Records(std::sync::Mutex<Vec<Record>>);
+
+/// A label, the random that identifies the connection, and the value.
+#[cfg(feature = "native")]
+type Record = (String, Vec<u8>, Vec<u8>);
+
+#[cfg(feature = "native")]
+impl crate::KeyLog for Records {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((label.into(), client_random.to_vec(), secret.to_vec()));
+    }
 }

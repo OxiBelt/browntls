@@ -22,6 +22,12 @@
 //!
 //! The module is allocation-free: encapsulated keys, public keys and secrets
 //! live in fixed-size buffers, and the AEAD operates in place.
+//!
+//! The KEM shared secret stays inside a setup function. The one exception is
+//! the non-default `key-log` feature, a diagnostic that production builds
+//! must leave out: it adds `KemSharedSecret` and two setup functions that
+//! copy the secret into it, for the `ECH_SECRET` label of an SSLKEYLOGFILE
+//! (RFC 9850).
 
 mod ber;
 mod context;

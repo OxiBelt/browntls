@@ -2447,10 +2447,54 @@ available as an inactive sink on other platforms. Custom callbacks do not
 require `std`.
 
 The log contains TLS 1.2 master secrets and TLS 1.3 traffic and exporter
-secrets. Access can defeat confidentiality and integrity for recorded and
-active sessions, including applications relying on exporters. Use synthetic
-test traffic and enforce access control and retention for any sink. This
-feature is independent of the ordinary telemetry controlled by `logging`.
+secrets, and for Encrypted Client Hello the records below. Access can defeat
+confidentiality and integrity for recorded and active sessions, including
+applications relying on exporters. Use synthetic test traffic and enforce
+access control and retention for any sink. This feature is independent of
+the ordinary telemetry controlled by `logging`.
+
+#### ECH records (RFC 9850 §2.3)
+
+With `key-log`, a connection that uses Encrypted Client Hello also hands its
+sink `ECH_SECRET`, the KEM shared secret of the HPKE context that seals the
+inner ClientHello, and `ECH_CONFIG`, the serialized `ECHConfig` that context
+is bound to. Both are identified by the random of the outer ClientHello. The
+TLS labels keep their identifier: the inner ClientHello's random when ECH is
+accepted, the outer one otherwise. Whoever reads `ECH_SECRET` can decrypt the
+inner ClientHello of a capture, and so learns the server name that ECH
+hides.
+
+| Party | Writes the two records |
+|---|---|
+| Client | Once, when the ClientHello carrying a real offer is on its way, whatever the server answers. Never for a handshake that fails before that, never for GREASE, and not again for a second ClientHello. |
+| Server, shared mode | Once, for an offer it accepts: the payload opened, the outer name matched the public name where that is checked, and the inner ClientHello decoded. The configuration is that of the key that decrypted. Nothing for a candidate that fails (another key, trial decryption, GREASE) or for a second ClientHello. |
+| Client-facing server, split mode | Only after `ech::split::ClientFacing::with_key_log`, and only for a connection it forwards. It has no configuration and reads no environment variable, so without that call it logs nothing. It never holds a TLS secret of the connection. |
+| Back-end server, split mode | Never. Its TLS secrets are identified by the inner ClientHello's random. |
+
+The secret leaves the HPKE implementation only when three things hold: the
+feature is compiled in (`browntls-core`'s `key-log` enables the feature of
+the same name in `browntls-crypto`, without which that crate has no
+interface that returns it), the sink answers `will_log("ECH_SECRET")`, and
+the suite is the built-in provider's. The hook on `crypto::hpke::Hpke` is
+hidden and its trait cannot be named outside the crate, so an HPKE suite of
+another library cannot supply a value: such a connection logs `ECH_CONFIG`
+alone. Inside the crate the capturing setup takes a `KeyLogAuthorisation`,
+which only the sink's answer makes, so no code path reaches it without
+asking. The value is the output of the KEM's `Encap` or `Decap`
+(`shared_secret` in RFC 9180 §5.1.1), never a key, nonce or exporter secret
+of the context. It is a local of the function that writes the record, in a
+buffer zeroised on drop; the state kept for the connection does not hold it.
+
+`KeyLogFile` writes `ECH_SECRET` values of 32, 48 or 64 bytes (the `Nsecret`
+of the KEMs of RFC 9180) and `ECH_CONFIG` values that are one well-formed
+`ECHConfig`. The integration tests read such a file back together with the
+captured outer ClientHello and decrypt the inner ClientHello with an HPKE
+key schedule written over independent primitives
+(`crates/browntls-core/tests/ech_native/key_log_fixture.rs`), for a buffered
+connection and one HPKE suite (X25519, HKDF-SHA256, AES-128-GCM). The tests
+of the unbuffered, Tokio and facade entry points check the labels and the
+identifier, not the values. No Wireshark run and no other implementation's
+log has been compared yet.
 
 ### Linux kernel TLS (`browntls-ktls`)
 
@@ -3364,7 +3408,7 @@ of peer support for those scenarios.
 | `rustcrypto` | no | Provider backed by RustCrypto crates (RSA verification only) |
 | `tls12` | yes | TLS 1.2 support |
 | `logging` | yes | `log` crate diagnostics |
-| `key-log` | no | RFC 9850 key-log callbacks and, on Linux, the explicit-path file sink |
+| `key-log` | no | RFC 9850 key-log callbacks, including the ECH records, and, on Linux, the explicit-path file sink; enables `browntls-crypto`'s `key-log` |
 | `prefer-post-quantum` | yes | X25519MLKEM768 first in the default group list |
 | `zlib` | no | zlib certificate compression (RFC 8879), `miniz_oxide` |
 | `brotli` | no | Brotli certificate compression (RFC 8879), `brotli`; enables `std` |

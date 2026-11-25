@@ -13,8 +13,8 @@ fn native_legacy_key(chain: &Chain) -> Arc<dyn SigningKey> {
 }
 
 /// The native legacy key authenticates a TLS 1.3 client to an opted-in
-/// server with `rsa_pkcs1_sha512_legacy`, the first legacy scheme it is
-/// offered (the request lists them larger hashes first), and to a default
+/// server with `rsa_pkcs1_sha512_legacy`, its first choice of the legacy
+/// schemes (the request lists all three), and to a default
 /// server not at all: the client then sends an empty Certificate, and
 /// mandatory client authentication fails with `certificate_required`.
 #[test]

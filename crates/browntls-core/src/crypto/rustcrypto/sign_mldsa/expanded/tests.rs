@@ -235,7 +235,8 @@ fn checks<P: MlDsaParams>(set: &ParameterSet) {
             assert!(public_key(set, &changed).is_none(), "{at} {bit}");
         }
     }
-    // Every `t0` byte and every `tr` byte counts.
+    // Every `tr` byte counts, and so does each `t0` byte tried (one in
+    // seven).
     for at in (RHO_LEN + K_LEN..s_start).chain((t0_start..sk.len()).step_by(7)) {
         let mut changed = sk.clone();
         changed[at] ^= 0x10;
@@ -287,4 +288,104 @@ fn expanded_keys_are_checked() {
     checks::<MlDsa44>(&ML_DSA_44);
     checks::<MlDsa65>(&ML_DSA_65);
     checks::<MlDsa87>(&ML_DSA_87);
+}
+
+/// A fixed stream of test bytes.
+#[cfg(feature = "native")]
+struct Stream(<Shake256 as ExtendableOutput>::Reader);
+
+#[cfg(feature = "native")]
+impl Stream {
+    fn new(label: u8) -> Self {
+        let mut xof = Shake256::default();
+        xof.update(b"browntls expanded key agreement");
+        xof.update(&[label]);
+        Self(xof.finalize_xof())
+    }
+
+    fn fill(&mut self, out: &mut [u8]) {
+        self.0.read(out);
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        let mut bytes = [0; 8];
+        self.fill(&mut bytes);
+        (u64::from_le_bytes(bytes) % bound as u64) as usize
+    }
+}
+
+/// Keys that no seed yields, with `t0` and `tr` to match their `rho`, `s1`
+/// and `s2`: the checks here and the native provider's
+/// (`browntls_crypto::mldsa::SigningKey::from_expanded_bytes`) give the
+/// same verdict on each, and on each with one more bit changed, and the
+/// same public key (which is also the one `ml-dsa` derives).
+#[cfg(feature = "native")]
+fn agreement<P: MlDsaParams, Native: browntls_crypto::mldsa::ParameterSet>(set: &ParameterSet) {
+    use browntls_crypto::mldsa::SigningKey;
+
+    let mut stream = Stream::new(set.k);
+    let bits = set.eta_bits() as usize;
+    let s_start = RHO_LEN + K_LEN + TR_LEN;
+    let t0_start = set.private_key_len() - usize::from(set.k) * T0_LEN;
+    let count = (t0_start - s_start) * 8 / bits;
+    let verdict = |sk: &[u8]| {
+        let here = public_key(set, sk);
+        let native = SigningKey::<Native>::from_expanded_bytes(sk)
+            .ok()
+            .map(|key| key.verifying_key().as_bytes().to_vec());
+        assert!(here == native);
+        if let Some(here) = &here {
+            assert!(*here == public_key_of::<P>(sk));
+        }
+        here.is_some()
+    };
+    let (mut loaded, mut refused) = (0, 0);
+    for round in 0..90 {
+        let (mut sk, _) = genuine::<P>(round);
+        let expected = match round % 3 {
+            // A few coefficients, in range or not.
+            0 => {
+                for _ in 0..1 + stream.below(3) {
+                    let (index, v) = (stream.below(count), stream.below(1 << bits));
+                    set_coefficient(&mut sk[s_start..t0_start], bits, index, v as u8);
+                }
+                None
+            }
+            // Another `rho` and `K`, and every coefficient in range.
+            1 => {
+                stream.fill(&mut sk[..RHO_LEN + K_LEN]);
+                for index in 0..count {
+                    let v = stream.below(2 * set.eta as usize + 1);
+                    set_coefficient(&mut sk[s_start..t0_start], bits, index, v as u8);
+                }
+                Some(true)
+            }
+            // Any `s1` and `s2` bytes: some coefficient is out of range.
+            _ => {
+                stream.fill(&mut sk[s_start..t0_start]);
+                Some(false)
+            }
+        };
+        let mut sk = reseal(set, &sk);
+        let loads = verdict(&sk);
+        assert!(expected.is_none_or(|expected| expected == loads), "{round}");
+        let at = stream.below(sk.len());
+        sk[at] ^= 1 << stream.below(8);
+        // Only a bit of `K` leaves the key as valid as it was.
+        let in_k = (RHO_LEN..RHO_LEN + K_LEN).contains(&at);
+        assert_eq!(verdict(&sk), loads && in_k, "{round} {at}");
+        loaded += usize::from(loads);
+        refused += usize::from(!loads);
+    }
+    assert!(loaded >= 30 && refused >= 30, "{loaded} {refused}");
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn resealed_keys_agree_with_the_native_provider() {
+    use browntls_crypto::mldsa as native;
+
+    agreement::<MlDsa44, native::MlDsa44>(&ML_DSA_44);
+    agreement::<MlDsa65, native::MlDsa65>(&ML_DSA_65);
+    agreement::<MlDsa87, native::MlDsa87>(&ML_DSA_87);
 }

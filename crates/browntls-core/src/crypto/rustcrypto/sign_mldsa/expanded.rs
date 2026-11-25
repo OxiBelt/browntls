@@ -16,14 +16,22 @@
 //! The signing seed `K` is independent of the rest of the key and cannot
 //! be checked.
 //!
-//! The arithmetic on `s1`, `s2` and `t` (secret) takes the same time
-//! whatever their values: the reductions are shifts, multiplications by
-//! constants and masks, every check runs to completion and only the final
-//! accept or reject depends on them. The matrix `A` is public (rejection
-//! sampling from `rho`). The secret temporaries are wiped; the checks
-//! use under 16 KiB of stack.
+//! The arithmetic on `s1`, `s2` and `t` (secret) has no branch, memory
+//! access or division that depends on their values: the products are
+//! 64-bit multiplications (constant-time on the targets this project
+//! tests, not on every processor), the reductions are shifts,
+//! multiplications by constants and masks, every check runs to completion
+//! and only the final accept or reject depends on the secrets. The masks
+//! and the accumulated result pass through a value barrier
+//! ([`core::hint::black_box`]), as in the native provider, to discourage
+//! the compiler from turning them into branches; that is a best-effort
+//! hint and the generated code has not been inspected. The matrix `A` is
+//! public (rejection sampling from `rho`). The secret temporaries are
+//! wiped. For ML-DSA-87 on an x86-64 host the checks needed under 16 KiB
+//! of stack in an optimised build and about 44 KiB in an unoptimised one.
 
 use alloc::vec::Vec;
+use core::hint::black_box;
 
 use shake::{ExtendableOutput, Shake128, Shake256, Update, XofReader};
 use zeroize::Zeroizing;
@@ -89,8 +97,9 @@ impl ParameterSet {
 /// `a - q` if `a >= q`, else `a`, for `a < 2 q`.
 const fn reduce_once(a: u32) -> u32 {
     let t = a.wrapping_sub(Q);
-    // The top bit of `t` is set exactly when `a < q`.
-    t.wrapping_add(Q & (t >> 31).wrapping_neg())
+    // The top bit of `t` is set exactly when `a < q`. The barrier keeps
+    // the mask from becoming a select, which may compile to a branch.
+    t.wrapping_add(Q & black_box((t >> 31).wrapping_neg()))
 }
 
 /// `a mod q` for `a < 2^46`: each fold replaces the bits from 2^23 up by
@@ -221,7 +230,7 @@ fn unpack_eta(bytes: &[u8], set: &ParameterSet, out: &mut Poly) -> u32 {
     unpack(bytes, set.eta_bits(), out);
     let mut bad = 0;
     for c in out {
-        bad |= (2 * set.eta).wrapping_sub(*c) >> 31;
+        bad |= black_box((2 * set.eta).wrapping_sub(*c) >> 31);
         *c = reduce_once(Q + set.eta - *c);
     }
     bad
@@ -339,7 +348,7 @@ pub(super) fn public_key(set: &ParameterSet, sk: &[u8]) -> Option<Vec<u8>> {
     for (stored, tr) in key.tr.iter().zip(hash_public_key(&public_key)) {
         differs |= u32::from(stored ^ tr);
     }
-    ((bad | differs) == 0).then_some(public_key)
+    (black_box(bad | differs) == 0).then_some(public_key)
 }
 
 #[cfg(test)]

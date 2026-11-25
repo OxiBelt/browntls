@@ -125,15 +125,19 @@ calls that decoder (`crypto/rustcrypto/sign_mldsa/expanded.rs`): the range
 of the `s1` and `s2` coefficients, and `t0` and `tr` against the values
 recomputed from `rho`, `s1` and `s2`. That is about 300 lines of ML-DSA
 arithmetic of the provider's own (the NTT, `ExpandA`, `Power2Round` and
-the bit packing of FIPS 204), written to take the same time whatever the
-secret values, and a second user of the deprecated decoder's contract:
-re-review both when the `ml-dsa` version changes (a release with a checked
-decoder would replace them). Three things hold it to the other
-implementations. A key loads only if the public key the crate derives
-from it equals the one the provider computed. The provider's unit tests
-recompute the `t0` and `tr` of keys the crate generated. And the
-cross-provider tests and the `tls_config` fuzz target require the native
-and the RustCrypto loaders to accept the same keys.
+the bit packing of FIPS 204), written without branches, memory accesses
+or divisions that depend on the secret values (its masks pass through a
+best-effort value barrier; the generated code has not been inspected), and
+a second user of the deprecated decoder's contract: re-review both when
+the `ml-dsa` version changes (a release with a checked decoder would
+replace them). Three things hold it to the other implementations. A key
+loads only if the public key the crate derives from it equals the one the
+provider computed. The provider's unit tests recompute the `t0` and `tr`
+of keys the crate generated and, with the native provider enabled, compare
+the two loaders on keys that no seed yields (other coefficients, in range
+or not, with `t0` and `tr` to match). And the cross-provider tests and the
+`tls_config` fuzz target compare the two loaders on generated keys, the
+RFC 9881 examples and damaged copies of them.
 
 The checks hash with `shake` (SHAKE128 for the matrix, SHAKE256 for `tr`;
 `MIT OR Apache-2.0`, from the RustCrypto XOFs repository, locked at
@@ -169,9 +173,11 @@ the signing features added no crate). As the provider's other RustCrypto
 crates, it is a runtime dependency of that feature only (`safe-to-deploy`)
 and has no `cargo vet` audit yet.
 
-Owner: the project owner, who approved the addition. Track in
+Owner: the project owner, who approved the addition and asked for the
+`expandedKey` checks. Track both in
 [issue #236](https://github.com/OxiBelt/browntls/issues/236), which lists
-the open review items (`cargo vet`, re-review on version changes).
+the open review items (`cargo vet`, re-review of the crate and of the
+provider's checks on version changes).
 
 ### Tokio dependency
 

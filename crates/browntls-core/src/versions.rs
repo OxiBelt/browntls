@@ -36,7 +36,13 @@ pub static ALL_VERSIONS: &[&SupportedProtocolVersion] = &[
     &TLS12,
 ];
 
-/// The versions enabled by default.
+/// The versions enabled by default: every version of the build, so that
+/// TLS 1.3 is preferred and TLS 1.2 stays available for peers without it.
+///
+/// The `tls12` feature decides whether TLS 1.2 is here, and Cargo turns a
+/// feature on for the whole application when any of its crates asks for
+/// it. An application whose protocol requires TLS 1.3 (RFC 9852 §4) passes
+/// `&[&TLS13]` to the builders and does not use this list.
 pub static DEFAULT_VERSIONS: &[&SupportedProtocolVersion] = ALL_VERSIONS;
 
 /// The versions a configuration enables.

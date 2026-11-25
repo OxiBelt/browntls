@@ -32,6 +32,45 @@ The items are the ones those crates define, not copies:
 library written against `browntls-core` or `browntls-tokio` works with an
 application that depends on `browntls`.
 
+## TLS 1.3 only
+
+RFC 9852 requires a new protocol that uses TLS to make TLS 1.3 its default.
+The default version list of browntls prefers TLS 1.3 and also enables
+TLS 1.2, for the deployed protocols that still meet peers without TLS 1.3.
+An application of a new protocol lists the version itself:
+
+```rust,no_run
+use browntls::pki_types::{CertificateDer, PrivateKeyDer};
+use browntls::{ClientConfig, RootCertStore, ServerConfig, version};
+
+# fn configure(
+#     roots: RootCertStore,
+#     chain: Vec<CertificateDer<'static>>,
+#     key: PrivateKeyDer<'static>,
+# ) -> Result<(ClientConfig, ServerConfig), browntls::Error> {
+let client = ClientConfig::builder_with_protocol_versions(&[&version::TLS13])
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+let server = ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
+    .with_no_client_auth()
+    .with_single_cert(chain, key)?;
+# Ok((client, server))
+# }
+```
+
+A handshake with a peer that has TLS 1.2 alone then fails, and nothing
+falls back: a browntls server answers with a `protocol_version` alert, and
+a client reports the alert of the server that refused it. After a
+handshake, `protocol_version()` on the connection is
+`Some(ProtocolVersion::TLSv1_3)`. The list is the policy: turning the
+`tls12` feature off is not, because another dependency can turn it on
+again through Cargo feature unification. The same configurations serve the
+Tokio streams and the handshake before a kTLS handoff. See
+[Protocol version policy][version-policy] for what a TLS 1.3-only hello
+holds, the errors of each refusal, and what stays the same for TLS 1.2.
+
+[version-policy]: ../../docs/Architecture.md#protocol-version-policy-rfc-9852-rfc-9851
+
 ## Key logging
 
 Configurations discard key-log events by default. For test traffic, enable

@@ -826,16 +826,23 @@ The RustCrypto provider has the same opt-in under the same names
 and `MlDsaSigningKey`), backed by the RustCrypto `ml-dsa` crate (see
 [Maintenance](Maintenance.md#rustcrypto-ml-dsa-dependency)), with the same
 table order, scheme binding, hedged signing from the operating system's
-random source and TLS 1.2 behaviour. It differs in three ways. It loads
-the `seed` and `both` forms of an RFC 9881 private key (the `both` form
-only when its expanded key is the one its seed derives) but refuses the
-`expandedKey` form alone, because the crate has no checked decoding of an
-expanded key; the provider parses the PKCS #8 structure itself, in strict
-DER, to the same rules as `browntls_crypto::mldsa`. It needs more stack,
-above all to load a key: for ML-DSA-87 on x86-64, about 100 to 145 KiB to
-sign and 260 to 430 KiB to load a key in optimised builds, and up to
-about 512 KiB and 1.25 MiB in an unoptimised one (the native provider:
-about 102 KiB and 20 KiB, optimised). And the crate wipes the stored key
+random source and TLS 1.2 behaviour. It loads the same RFC 9881 private
+keys: the `seed`, `expandedKey` and `both` forms (the `both` form only
+when its expanded key is the one its seed derives), from a PKCS #8
+structure the provider parses itself, in strict DER, to the same rules as
+`browntls_crypto::mldsa`. The crate has no checked decoding of an expanded
+key, so the provider checks an `expandedKey` before the crate decodes it
+(`crypto/rustcrypto/sign_mldsa/expanded.rs`): the `s1` and `s2`
+coefficients are in range, and `t0` and `tr` are the values that `rho`,
+`s1` and `s2` determine, recomputed with the provider's own constant-time
+arithmetic and the `shake` crate; a key loads only if the crate then
+derives the same public key. These are the native provider's checks, and
+the loaders are tested and fuzzed for agreement. It differs in two ways.
+It needs more stack, above all to load a key: for ML-DSA-87 on x86-64,
+about 100 to 145 KiB to sign and 260 to 430 KiB to load a key in
+optimised builds, and up to about 512 KiB and 1.25 MiB in an unoptimised
+one (the native provider: about 102 KiB and 20 KiB, optimised). And the
+crate wipes the stored key
 on drop but not the temporaries of key derivation and signing, which the
 native implementation wipes (the native one, in turn, does not wipe its
 SHAKE states, which the crate does).

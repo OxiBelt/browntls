@@ -114,11 +114,34 @@ the operating system (`getrandom`) through an adapter in the provider and
 fails without them. `pkcs8` and
 `getrandom` stay off: the crate's PKCS #8 support reads only the `seed`
 form of RFC 9881 private keys, so the provider parses the RFC 9881 encoding
-itself. It loads the `seed` and `both` forms (the `both` key only when its
-expanded key is the one its seed derives) and, unlike the native provider,
-refuses the `expandedKey` form alone: the crate offers no checked decoding
-of an expanded key (its deprecated `from_expanded` accepts any `t0` and
-`tr` and panics on out-of-range coefficients).
+itself. It loads the `seed`, `expandedKey` and `both` forms (the `both`
+key only when its expanded key is the one its seed derives), as the native
+provider does.
+
+The crate offers no checked decoding of an expanded key: its deprecated
+`from_expanded` accepts any `t0` and `tr` and panics on out-of-range
+coefficients. The provider therefore checks an `expandedKey` before it
+calls that decoder (`crypto/rustcrypto/sign_mldsa/expanded.rs`): the range
+of the `s1` and `s2` coefficients, and `t0` and `tr` against the values
+recomputed from `rho`, `s1` and `s2`. That is about 300 lines of ML-DSA
+arithmetic of the provider's own (the NTT, `ExpandA`, `Power2Round` and
+the bit packing of FIPS 204), written to take the same time whatever the
+secret values, and a second user of the deprecated decoder's contract:
+re-review both when the `ml-dsa` version changes (a release with a checked
+decoder would replace them). Three things hold it to the other
+implementations. A key loads only if the public key the crate derives
+from it equals the one the provider computed. The provider's unit tests
+recompute the `t0` and `tr` of keys the crate generated. And the
+cross-provider tests and the `tls_config` fuzz target require the native
+and the RustCrypto loaders to accept the same keys.
+
+The checks hash with `shake` (SHAKE128 for the matrix, SHAKE256 for `tr`;
+`MIT OR Apache-2.0`, from the RustCrypto XOFs repository, locked at
+0.1.0), which is now a direct optional dependency of the `rustcrypto`
+feature, with default features off. It was already in that feature's
+runtime tree as the hash of `ml-dsa` and `ml-kem`, so the direct
+dependency adds no crate and changes no version (`Cargo.lock` gains one
+edge).
 
 Two properties of the crate are weaker than those of
 `browntls_crypto::mldsa` and are documented on

@@ -3,9 +3,9 @@
 //! `native::sign::any_ml_dsa_type` load the same RFC 9881 PKCS #8
 //! encodings into keys with the same `SubjectPublicKeyInfo`, refuse the
 //! same malformed ones, and sign what the other provider's algorithm of the
-//! same parameter set verifies. The one difference: the RustCrypto
-//! provider refuses the `expandedKey` form alone (the `ml-dsa` crate has
-//! no checked decoding of an expanded key), which the native one loads.
+//! same parameter set verifies. That includes the `expandedKey` form
+//! alone, which the `ml-dsa` crate decodes unchecked: the RustCrypto
+//! provider makes the native provider's checks itself.
 
 use std::sync::Arc;
 
@@ -19,30 +19,17 @@ use sha2::Digest as _;
 use crate::ml_dsa::{SETS, Set};
 use crate::{native_alg, rc_alg};
 
-/// The forms both providers load.
-const FORMATS: [PrivateKeyFormat; 2] = [PrivateKeyFormat::Seed, PrivateKeyFormat::Both];
+/// The forms of RFC 9881 §6, which both providers load.
+const FORMATS: [PrivateKeyFormat; 3] = [
+    PrivateKeyFormat::Seed,
+    PrivateKeyFormat::Expanded,
+    PrivateKeyFormat::Both,
+];
 
 /// The RustCrypto loader's error (the same for every ML-DSA key it
 /// refuses).
 fn rc_error() -> Error {
     rustcrypto::sign::any_ml_dsa_type(&PrivatePkcs8KeyDer::from(Vec::new())).unwrap_err()
-}
-
-/// `der` is an `expandedKey`-only key: the native provider loads it, the
-/// RustCrypto provider refuses it (loader and opt-in key provider, with
-/// the ML-DSA error). Returns the native key's SPKI.
-fn expanded_only(der: &[u8], what: &str) -> Vec<u8> {
-    let (native, rc) = load_both(der);
-    assert_eq!(rc.err(), Some(rc_error()), "{what}");
-    let key = browntls_core::pki_types::PrivateKeyDer::Pkcs8(der.to_vec().into());
-    assert_eq!(
-        rustcrypto::KEY_PROVIDER_WITH_ML_DSA
-            .load_private_key(key)
-            .err(),
-        Some(rc_error()),
-        "{what}"
-    );
-    spki(&native).unwrap_or_else(|| panic!("{what}"))
 }
 
 /// A fixed seed for `(set, label)` (test data, derived at run time).
@@ -133,9 +120,6 @@ fn every_form_loads_in_both_providers_with_the_same_spki() {
             assert!(rustcrypto::RustCrypto.load_private_key(key()).is_err());
         }
         assert!(spkis.iter().all(|s| *s == spkis[0]), "{set:?}");
-        // The `expandedKey` form: native only, the same key.
-        let der = pkcs8(set, &seed, PrivateKeyFormat::Expanded);
-        assert_eq!(expanded_only(&der, &format!("{set:?}")), spkis[0]);
     }
 }
 
@@ -232,18 +216,16 @@ fn rfc9881_examples_load_and_inconsistent_keys_are_refused() {
             rfc_data!("ml-dsa-87-public-key.der"),
         ),
     ];
-    for (set, [seed_der, expanded_der, both_der], public_key) in examples {
-        for der in [seed_der, both_der] {
+    for (set, forms, public_key) in examples {
+        for der in forms {
             let (native, rc) = load_both(der);
             assert_eq!(spki(&rc).unwrap(), public_key, "{set:?}");
             assert_eq!(spki(&native).unwrap(), public_key, "{set:?}");
         }
-        assert_eq!(expanded_only(expanded_der, "C.1"), public_key, "{set:?}");
     }
-    // Appendix C.4: a `both` whose parts disagree (refused by both for
-    // the RFC 9881 §8.2 check), and `expandedKey`-only keys one byte away
-    // from the C.1 key in `tr` and in `t0` (refused by the native provider
-    // for that, by the RustCrypto provider already for the form).
+    // Appendix C.4: a `both` whose parts disagree (the RFC 9881 §8.2
+    // check), and `expandedKey`-only keys one byte away from the C.1 key
+    // in `tr` and in `t0`: refused by both.
     for der in [
         &rfc_data!("ml-dsa-44-inconsistent-1.der")[..],
         rfc_data!("ml-dsa-44-inconsistent-2.der"),
@@ -306,21 +288,16 @@ fn negative_matrix(set: Set, other: Set) {
         .concat(),
     );
 
-    // Accepted by both (the `expandedKey` form by the native provider
-    // only): the forms, with version 1, attributes and the right public
-    // key.
-    for (i, choice) in choices.iter().enumerate() {
+    // Accepted by both: the forms, with version 1, attributes and the
+    // right public key.
+    for choice in &choices {
         for der in [
             assemble(0, &a, choice, &[]),
             assemble(1, &a, choice, &[]),
             assemble(1, &a, choice, &[&tlv(0xa0, &attribute), &public_key(&pk)]),
             assemble(0, &a, choice, &[&tlv(0xa0, &[])]),
         ] {
-            if i == 1 {
-                expanded_only(&der, "valid expandedKey");
-            } else {
-                assert!(same_outcome(&der, "valid"), "{set:?}");
-            }
+            assert!(same_outcome(&der, "valid"), "{set:?}");
         }
     }
 
@@ -491,9 +468,9 @@ fn negative_matrix(set: Set, other: Set) {
     }
 
     // Every proper prefix, and single-bit changes: the seed form's header,
-    // and the parts of an `expandedKey`-only key (the native provider
-    // loads one with a changed `K`, which it cannot detect; the RustCrypto
-    // provider refuses the form).
+    // and the parts of an `expandedKey`-only key (both providers load one
+    // with a changed `K`, which nothing in the key determines, as the same
+    // key, and refuse any other change).
     let seed_der = assemble(0, &a, &choices[0], &[]);
     for der in [&seed_der, &expanded_der] {
         for n in 0..der.len() {
@@ -506,11 +483,13 @@ fn negative_matrix(set: Set, other: Set) {
         }
     }
     let offset = expanded_der.len() - sk.len();
-    for i in (0..sk.len()).step_by(41).chain([32, 63, sk.len() - 1]) {
+    for i in (0..sk.len())
+        .step_by(41)
+        .chain([31, 32, 63, 64, sk.len() - 1])
+    {
         let changed = flip(&expanded_der, offset + i, (i % 8) as u8);
-        let (native, rc) = load_both(&changed);
-        assert_eq!(native.is_ok(), (32..64).contains(&i), "{set:?} byte {i}");
-        assert!(rc.is_err(), "{set:?} byte {i}");
+        let loaded = same_outcome(&changed, "expandedKey bit");
+        assert_eq!(loaded, (32..64).contains(&i), "{set:?} byte {i}");
     }
 }
 

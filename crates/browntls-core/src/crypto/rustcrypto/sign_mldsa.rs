@@ -16,7 +16,9 @@ use browntls_pki::{
     alg_id,
 };
 use ml_dsa::signature::rand_core::{TryCryptoRng, TryRng};
-use ml_dsa::{B32, ExpandedSigningKey, MlDsa44, MlDsa65, MlDsa87, MlDsaParams};
+use ml_dsa::{
+    B32, ExpandedSigningKey, ExpandedSigningKeyBytes, MlDsa44, MlDsa65, MlDsa87, MlDsaParams,
+};
 use zeroize::Zeroizing;
 
 use super::verify_mldsa::ALL_VERIFICATION_ALGS_WITH_ML_DSA;
@@ -29,9 +31,27 @@ use crate::error::Error;
 use crate::sync::Arc;
 use crate::webpki::WebPkiSupportedAlgorithms;
 
+mod expanded;
 mod pkcs8;
 
 use pkcs8::PrivateKey;
+
+/// A parameter set of `ml-dsa` with what [`expanded`] needs of it.
+trait ParameterSet: MlDsaParams {
+    const EXPANDED: expanded::ParameterSet;
+}
+
+impl ParameterSet for MlDsa44 {
+    const EXPANDED: expanded::ParameterSet = expanded::ML_DSA_44;
+}
+
+impl ParameterSet for MlDsa65 {
+    const EXPANDED: expanded::ParameterSet = expanded::ML_DSA_65;
+}
+
+impl ParameterSet for MlDsa87 {
+    const EXPANDED: expanded::ParameterSet = expanded::ML_DSA_87;
+}
 
 /// A key of one parameter set.
 #[derive(Clone)]
@@ -188,9 +208,9 @@ fn sign_with<P: MlDsaParams>(
 ///
 /// # Loading
 ///
-/// Loaded from the RFC 9881 `seed` or `both` form only: see
-/// [`any_ml_dsa_type`] for why the `expandedKey` form alone is refused,
-/// unlike in the native provider.
+/// Loaded from the RFC 9881 `seed`, `expandedKey` or `both` form, as in
+/// the native provider: see [`any_ml_dsa_type`] for the checks, of which
+/// the provider makes those of an `expandedKey` itself.
 ///
 /// Load one with [`any_ml_dsa_type`]; [`RustCrypto`](super::RustCrypto)
 /// does not load ML-DSA keys,
@@ -259,16 +279,24 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
 
 /// The key of parameter set `P` in `key`, and its public key (`pkEncode`),
 /// or `None` if any check fails.
-fn load_set<P: MlDsaParams>(
+fn load_set<P: ParameterSet>(
     key: &pkcs8::OneAsymmetricKey<'_>,
 ) -> Option<(ExpandedSigningKey<P>, Vec<u8>)> {
     let seed = |bytes: &[u8]| B32::try_from(bytes).ok().map(Zeroizing::new);
+    // The public key that the checks of an `expandedKey` established.
+    let mut checked = None;
     let signing_key = match key.private_key {
         PrivateKey::Seed(bytes) => ExpandedSigningKey::<P>::from_seed(&*seed(bytes)?),
-        // `ml-dsa` decodes an expanded key without checking it (its
-        // deprecated `from_expanded` keeps any `t0` and `tr` and panics on
-        // an out-of-range `s1` or `s2` coefficient), so the form is refused.
-        PrivateKey::Expanded => return None,
+        PrivateKey::Expanded(bytes) => {
+            // `ml-dsa` decodes an expanded key without checking it (its
+            // deprecated `from_expanded` keeps any `t0` and `tr` and
+            // panics on an out-of-range `s1` or `s2` coefficient), so the
+            // provider checks it first.
+            checked = Some(expanded::public_key(&P::EXPANDED, bytes)?);
+            let bytes = Zeroizing::new(ExpandedSigningKeyBytes::<P>::try_from(bytes).ok()?);
+            #[allow(deprecated)] // Decoding what `expanded` has checked.
+            ExpandedSigningKey::<P>::from_expanded(&bytes)
+        }
         PrivateKey::Both {
             seed: bytes,
             expanded,
@@ -285,6 +313,11 @@ fn load_set<P: MlDsaParams>(
         }
     };
     let public_key = signing_key.verifying_key().encode().to_vec();
+    // `ml-dsa` recomputes the public key from `rho`, `s1` and `s2`: an
+    // `expandedKey` loads only if the provider's arithmetic agrees with it.
+    if checked.is_some_and(|checked| checked != public_key) {
+        return None;
+    }
     match key.public_key {
         Some(stated) if stated != public_key.as_slice() => None,
         _ => Some((signing_key, public_key)),
@@ -320,24 +353,31 @@ fn load(der: &[u8]) -> Option<MlDsaSigningKey> {
 }
 
 /// Loads an ML-DSA-44, ML-DSA-65 or ML-DSA-87 private key from an RFC 9881
-/// §6 PKCS #8 `OneAsymmetricKey` in strict DER, in the `seed` or `both`
-/// form:
+/// §6 PKCS #8 `OneAsymmetricKey` in strict DER, in the `seed`,
+/// `expandedKey` or `both` form:
 ///
 /// * `version` 0 or 1; `privateKeyAlgorithm` `id-ml-dsa-*` with absent
 ///   parameters; attributes with the DER `Attribute` structure (otherwise
 ///   ignored); in version 1, an optional `publicKey` that must equal the
 ///   key's public key; nothing else, at any level.
 /// * `seed`: 32 bytes, from which `ml-dsa` derives the key.
+/// * `expandedKey`: the FIPS 204 private key encoding, of the parameter
+///   set's length. Every `s1` and `s2` coefficient must be in range, and
+///   `t0` and `tr` must be the values that `rho`, `s1` and `s2` determine;
+///   the signing seed `K`, which nothing else in the key determines, is
+///   taken as it is.
 /// * `both`: the expanded key must equal the one derived from the seed
 ///   (RFC 9881 §8.2), and the seed's key is used.
 ///
-/// Unlike the native provider's loader
-/// (`crypto::native::sign::any_ml_dsa_type`), which accepts the same `seed`
-/// and `both` keys, this one refuses the `expandedKey` form alone: the
-/// `ml-dsa` crate offers no checked decoding of an expanded key (its
-/// deprecated decoder neither validates `t0` and `tr` nor rejects an
-/// out-of-range coefficient without panicking). RFC 9881 recommends the
-/// `seed` form.
+/// These are the keys the native provider's loader
+/// (`crypto::native::sign::any_ml_dsa_type`) accepts. The `ml-dsa` crate
+/// offers no checked decoding of an expanded key (its deprecated decoder
+/// keeps any `t0` and `tr` and panics on an out-of-range coefficient), so
+/// the provider checks an `expandedKey` itself before the crate decodes
+/// it: it recomputes `t = A s1 + s2` with its own arithmetic (SHAKE from
+/// the `shake` crate), in time independent of the secret values, and
+/// loads the key only if the crate then derives the same public key.
+/// RFC 9881 recommends the `seed` form.
 ///
 /// The key signs TLS 1.3 handshakes as [`MlDsaSigningKey`] describes
 /// (`draft-ietf-tls-mldsa-06`, experimental).
@@ -347,8 +387,10 @@ fn load(der: &[u8]) -> Option<MlDsaSigningKey> {
 /// up to about 430 KiB in optimised builds and about 1.25 MiB in an
 /// unoptimised one, as measured on x86-64 (see
 /// [`MlDsaSigningKey`](MlDsaSigningKey#memory-stack-and-zeroisation), also
-/// for what is and is not zeroised). Call it on a thread with that much
-/// stack.
+/// for what is and is not zeroised). An `expandedKey`, which is decoded
+/// rather than derived, needed somewhat less there (the provider's checks
+/// take under 16 KiB and wipe their temporaries). Call it on a thread with
+/// that much stack.
 ///
 /// Every failure is one generic error.
 pub fn any_ml_dsa_type(der: &PrivatePkcs8KeyDer<'_>) -> Result<Arc<dyn SigningKey>, Error> {
@@ -377,8 +419,8 @@ pub struct RustCryptoWithMlDsa;
 /// as ML-DSA ([`any_ml_dsa_type`]). When both fail, a key whose
 /// `privateKeyAlgorithm` names an ML-DSA parameter set gets the ML-DSA
 /// loader's error (so that, for instance, an inconsistent `both` key or an
-/// `expandedKey`-only key is not reported as a malformed ECDSA key), and
-/// any other key the first error.
+/// `expandedKey` that fails its checks is not reported as a malformed
+/// ECDSA key), and any other key the first error.
 ///
 /// Loading an ML-DSA key needs a large stack on the calling thread (the
 /// one that calls `with_single_cert`, `with_client_auth_cert` or

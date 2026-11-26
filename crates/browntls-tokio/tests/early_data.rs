@@ -262,9 +262,11 @@ async fn check_rejection(initial: &[&[u8]], next: Option<&[u8]>) {
             },
         );
         assert!(client.write_all(b"must wait").await.is_err());
+        assert!(client.write(b"").await.is_err(), "nor writes of nothing");
         assert!(client.shutdown().await.is_err());
         assert_eq!(client.acknowledge_rejected_early_data(), Some(13));
         assert_eq!(client.acknowledge_rejected_early_data(), None);
+        assert_eq!(client.write(b"").await.unwrap(), 0);
         client.write_all(b"chosen again").await.unwrap();
         client.shutdown().await.unwrap();
         client
@@ -438,6 +440,18 @@ async fn a_failed_early_phase_fails_every_later_operation() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     for _ in 0..2 {
         let err = timeout(LIMIT, client.write(b"more"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
+        // A write of nothing too, plain or vectored.
+        let err = timeout(LIMIT, client.write(&[]))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(tls_error(&err).is_some(), "{err:?}");
+        let empty = [std::io::IoSlice::new(b"")];
+        let err = timeout(LIMIT, client.write_vectored(&empty))
             .await
             .unwrap()
             .unwrap_err();

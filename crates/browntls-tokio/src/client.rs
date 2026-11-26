@@ -574,6 +574,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         )
     }
 
+    /// A write of nothing: moves nothing, and fails as a write would after
+    /// the early phase (a kept handshake failure or an unacknowledged
+    /// rejection) or after `shutdown`.
+    fn empty_write(&self) -> io::Result<usize> {
+        self.early_result.check_write()?;
+        common::empty_write(&self.st)
+    }
+
     pub(crate) fn poll_finish_early_for_write(
         &mut self,
         cx: &mut Context<'_>,
@@ -683,7 +691,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         if buf.is_empty() {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(this.empty_write());
         }
         coop::budgeted(cx, |cx| {
             match ready!(this.poll_write_early(cx, &[io::IoSlice::new(buf)]))? {
@@ -701,7 +709,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         let this = self.get_mut();
         this.st.begin_poll();
         if bufs.iter().all(|buf| buf.is_empty()) {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(this.empty_write());
         }
         coop::budgeted(cx, |cx| match ready!(this.poll_write_early(cx, bufs))? {
             0 => {

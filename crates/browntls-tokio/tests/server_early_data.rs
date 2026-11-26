@@ -607,6 +607,18 @@ async fn a_failed_handshake_ends_the_early_data_and_every_later_operation() {
                 .unwrap()
                 .unwrap_err();
             expect(&err);
+            // A write of nothing too, plain or vectored.
+            let err = timeout(LIMIT, server.write(&[]))
+                .await
+                .unwrap()
+                .unwrap_err();
+            expect(&err);
+            let empty = [io::IoSlice::new(b"")];
+            let err = timeout(LIMIT, server.write_vectored(&empty))
+                .await
+                .unwrap()
+                .unwrap_err();
+            expect(&err);
             let err = timeout(LIMIT, server.flush()).await.unwrap().unwrap_err();
             expect(&err);
         }

@@ -14,8 +14,10 @@
 //! server's stream returned before its end, writes and flushes every
 //! queued record, reads exactly up to the next record boundary (the kernel
 //! must start at one), answers what the records read on the way call for
-//! (a certificate status query of the connection included), and takes the
-//! plaintext received so far out of the connection. The
+//! (a certificate status query of the connection included), waits for a
+//! client's answer to a server's post-handshake CertificateRequest when
+//! client certificates are checked for revocation, and takes the plaintext
+//! received so far out of the connection. The
 //! [`KernelHandoff`] it resolves to holds the transport, the connection
 //! (for `dangerous_into_kernel_connection`) and that plaintext, which the
 //! application reads before anything the kernel delivers.
@@ -145,7 +147,9 @@ impl<S> fmt::Debug for KernelHandoff<S> {
 pub struct KernelHandoffError<S> {
     /// The stream. It is still usable when `error` has kind
     /// [`io::ErrorKind::Unsupported`] (the connection cannot be offloaded:
-    /// a [`KernelHandoffBlocker`] that driving the stream does not clear)
+    /// a [`KernelHandoffBlocker`] that driving the stream does not clear,
+    /// or more application data than the handoff holds arriving before a
+    /// client's answer to a post-handshake CertificateRequest)
     /// or wraps [`EarlyDataNotResent`](crate::client::EarlyDataNotResent)
     /// (acknowledge the rejection before trying again),
     /// and it can still write and shut down when the error says that data
@@ -412,6 +416,20 @@ where
                     return Poll::Ready(Err(unsupported(blocker)));
                 }
             }
+            KernelHandoffBlocker::RevocationPending => {
+                // A server that asked for a client certificate after the
+                // handshake waits for the answer: checking it for
+                // revocation is not the kernel's to do. A status query the
+                // answer leads to was taken care of above.
+                ready!(poll_awaited_answer(
+                    io,
+                    session,
+                    st,
+                    cx,
+                    taken,
+                    take_early_data
+                ))?;
+            }
             other => {
                 // A connection that has failed says so (it reports an
                 // incomplete handshake); any other blocker here is one
@@ -501,6 +519,77 @@ where
         Err(err) => Poll::Ready(Err(err)),
     }
 }
+
+/// One step towards the client's answer to a post-handshake
+/// CertificateRequest, record by record: what the server has queued (the
+/// request itself, maybe) goes out first, the plaintext received on the way
+/// is taken (up to [`MAX_TAKEN_BEFORE_ANSWER`]), and the next record is read
+/// up to its end and no further. A stream shut down for writing, or a peer
+/// that closes first, fails it.
+fn poll_awaited_answer<IO, C, SD>(
+    io: &mut IO,
+    session: &mut C,
+    st: &mut StreamState,
+    cx: &mut Context<'_>,
+    taken: &mut sealed::Taken,
+    take_early_data: fn(&mut C, &mut Vec<u8>) -> io::Result<()>,
+) -> Poll<io::Result<()>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+    C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
+    SD: SideData,
+{
+    if !st.state.writeable() {
+        // Our close_notify went out: nothing the client sends is processed
+        // into a usable connection any more.
+        return Poll::Ready(Err(unsupported(KernelHandoffBlocker::Closed)));
+    }
+    ready!(common::poll_flush(io, session, st, cx))?;
+    take_plaintext(session, taken, take_early_data)?;
+    let state = process(io, session, cx)?;
+    if session.kernel_handoff_blocker() != Some(KernelHandoffBlocker::RevocationPending)
+        || session.pending_revocation().is_some()
+    {
+        // The answer is complete, or waits on a status query.
+        return Poll::Ready(Ok(()));
+    }
+    if taken.data.len() - taken.early_len >= MAX_TAKEN_BEFORE_ANSWER {
+        // The client may send data for as long as it likes before it
+        // answers; what the handoff holds for the application is bounded.
+        return Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "more application data than the handoff holds arrived before the \
+             client's answer to the CertificateRequest",
+        )));
+    }
+    if state.peer_has_closed() {
+        return Poll::Ready(Err(unsupported(KernelHandoffBlocker::RevocationPending)));
+    }
+    let missing = match session.bytes_to_record_boundary() {
+        0 => RECORD_HEADER_LEN,
+        missing => missing,
+    };
+    let mut limited = SyncReadAdapter { io, cx }.take(missing as u64);
+    match session.read_tls(&mut limited) {
+        Ok(0) => Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "peer closed the connection before answering the CertificateRequest",
+        ))),
+        // The next round processes what was read.
+        Ok(_) => Poll::Ready(Ok(())),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+        Err(err) => Poll::Ready(Err(err)),
+    }
+}
+
+/// How much application data (0-RTT data aside) the handoff takes while
+/// it waits for a client's answer to a CertificateRequest. Past it the
+/// handoff fails and the stream comes back with what was taken.
+const MAX_TAKEN_BEFORE_ANSWER: usize = 64 * 1024;
+
+/// The length of a TLS record header: what is read when no record is
+/// partly received, so that nothing past the next boundary is taken.
+const RECORD_HEADER_LEN: usize = 5;
 
 /// Processes the buffered records. On failure the alert goes out if the
 /// transport takes it now, as after a failed read.

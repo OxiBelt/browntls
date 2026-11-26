@@ -2222,9 +2222,13 @@ the transport for its duration (`common::Stream`) and drives `read_tls` and
   operation would (so `EarlyDataNotResent` is reported and the stream stays
   usable), completes a handshake still in progress, writes and flushes the
   queued records, reads exactly `bytes_to_record_boundary` bytes while a record
-  is incomplete and processes them (answering a KeyUpdate received on the way),
-  and moves the received plaintext, accepted 0-RTT data first, into a buffer of
-  its own. That 0-RTT data can be replayed and is never returned by reads of the
+  is incomplete and processes them (answering a KeyUpdate received on the way);
+  on a server that asked for a client certificate after the handshake and
+  checks client certificates for revocation, it reads record by record until
+  the client's answer is complete (the kernel cannot check it; at most 64 KiB
+  of application data is taken meanwhile, past which it fails); and it moves the
+  received plaintext, accepted 0-RTT data first, into a buffer of its own.
+  That 0-RTT data can be replayed and is never returned by reads of the
   stream, so `early_data_len` tells where it ends. Every round clears the
   blocker it met, moves bytes or returns, so it cannot spin; bytes after
   the peer's `close_notify`, a whole record or part of one, fail it at once

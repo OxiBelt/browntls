@@ -92,10 +92,11 @@
 //!
 //! [`shutdown`] sends `close_notify` and then shuts the transport's write
 //! side. Nothing may be written afterwards (RFC 9846 §6.1): writes then fail
-//! with `BrokenPipe`. Reads go on until the peer's `close_notify`, which
-//! reads as end of file. A transport that ends without one is a truncation
-//! and fails the read with `UnexpectedEof`; protocols that delimit their own
-//! messages may choose to treat that as end of file.
+//! with `BrokenPipe`, writes of nothing included. Reads go on until the
+//! peer's `close_notify`, which reads as end of file. A transport that ends
+//! without one is a truncation and fails the read with `UnexpectedEof`;
+//! protocols that delimit their own messages may choose to treat that as end
+//! of file.
 //!
 //! # Splitting
 //!

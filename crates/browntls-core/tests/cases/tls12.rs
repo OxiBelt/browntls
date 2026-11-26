@@ -291,6 +291,58 @@ fn ticket_resumption() {
 }
 
 #[test]
+fn a_tls12_only_client_leaves_the_tls13_tickets_of_a_shared_store_alone() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let store = Arc::new(browntls_core::client::ClientSessionMemoryCache::new(8));
+    let mut tls12 = tls12_only_client(&chain, None, None);
+    tls12.resumption = Resumption::store(store.clone());
+    let tls12 = Arc::new(tls12);
+    let mut both = client_config(&chain);
+    both.resumption = Resumption::store(store);
+    let both = Arc::new(both);
+    let mut server_config = server_config(&chain);
+    server_config.session_storage = browntls_core::server::ServerSessionMemoryCache::new(16);
+    let server_config = Arc::new(server_config);
+    let connect = |config: &Arc<ClientConfig>| {
+        let mut client = ClientConnection::new(config.clone(), server_name()).unwrap();
+        let mut server = ServerConnection::new(server_config.clone()).unwrap();
+        do_handshake(&mut client, &mut server).unwrap();
+        // The TLS 1.3 tickets follow the handshake.
+        transfer(&mut server, &mut client);
+        client.process_new_packets().unwrap();
+        (
+            client.protocol_version().unwrap(),
+            client.handshake_kind().unwrap(),
+        )
+    };
+
+    // The store holds TLS 1.3 tickets and a TLS 1.2 session for one name.
+    assert_eq!(
+        connect(&both),
+        (ProtocolVersion::TLSv1_3, HandshakeKind::Full)
+    );
+    assert_eq!(
+        connect(&tls12),
+        (ProtocolVersion::TLSv1_2, HandshakeKind::Full)
+    );
+
+    // The TLS 1.2-only client resumes its session: the tickets, which it
+    // cannot use, do not come before it...
+    for _ in 0..3 {
+        assert_eq!(
+            connect(&tls12),
+            (ProtocolVersion::TLSv1_2, HandshakeKind::Resumed)
+        );
+    }
+    // ...and it has not taken them from the client they belong to.
+    assert_eq!(
+        connect(&both),
+        (ProtocolVersion::TLSv1_3, HandshakeKind::Resumed)
+    );
+}
+
+#[test]
 fn resumption_disabled_on_client() {
     init_logging();
     let chain = server_chain(KeyType::Ed25519);

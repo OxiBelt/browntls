@@ -1077,6 +1077,131 @@ list. The HelloRetryRequest selects the group, and the second ClientHello
 can carry the share across fragments after the cookie in its first
 fragment. This keeps the stateless acceptor's address-validation policy.
 
+### Protocol version policy (RFC 9852, RFC 9851)
+
+A configuration enables a list of protocol versions, fixed when it is built.
+`ClientConfig::builder()`, `ServerConfig::builder()` and
+`with_safe_default_protocol_versions()` take `DEFAULT_VERSIONS`: every
+version of the build, which is TLS 1.3 and, with the `tls12` feature,
+TLS 1.2. `builder_with_protocol_versions(&[..])` and
+`with_protocol_versions(&[..])` take exactly the versions they are given.
+The order of a list means nothing: two peers that both have TLS 1.3
+negotiate it.
+
+RFC 9852 §4 requires a new protocol that uses TLS to specify TLS 1.3 as its
+default, and lets it name TLS 1.2 as an additional, non-default option. That
+is a requirement on the protocol and on the application that implements it.
+browntls is a general-purpose library and keeps its default list for the
+deployed protocols that still meet TLS 1.2 peers: TLS 1.3 is preferred and
+TLS 1.2 stays enabled where it is built. An application of a new protocol
+lists TLS 1.3 itself and does not rely on the default:
+
+```rust
+use browntls::{ClientConfig, ProtocolVersion, ServerConfig, version};
+
+let client = ClientConfig::builder_with_protocol_versions(&[&version::TLS13])
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+let server = ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
+    .with_no_client_auth()
+    .with_single_cert(chain, key)?;
+
+// After the handshake, on either side:
+assert_eq!(conn.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+```
+
+`with_tls13_only()` on a builder and `ClientConfig::builder_tls13_only()` /
+`ServerConfig::builder_tls13_only()` are that list under a name: they do
+what `&[&version::TLS13]` does and nothing more. `supports_version()` on
+either configuration reports whether its list holds a version, so that code
+which receives a configuration can check it against a policy
+(`!config.supports_version(ProtocolVersion::TLSv1_2)`). It reports the
+list, not what the provider can negotiate: a version of the default list is
+reported even when the provider has no cipher suite for it.
+
+A protocol that keeps TLS 1.2 as its non-default option lists both versions
+(`&[&version::TLS13, &version::TLS12]`, which needs the `tls12` feature):
+TLS 1.3 is then used with every peer that has it.
+
+The list is the policy; the `tls12` Cargo feature is not. It is a default
+feature, and Cargo builds one `browntls-core` with every feature that any
+crate of the application asked for, so a dependency can bring TLS 1.2 back
+into the `DEFAULT_VERSIONS` of an application that turned the feature off.
+Turning it off removes the TLS 1.2 code from a build that nothing else
+needs it in. What a connection may negotiate is decided by the list in
+either build.
+
+With TLS 1.3 alone in the list:
+
+- A client names `0x0304` alone in `supported_versions`, offers the
+  provider's TLS 1.3 suites and no TLS 1.2 suite (the signalling value of
+  RFC 5746 §3.3 is left out too; a GREASE value still leads the list when
+  `enable_grease` is set), sends none of the extensions that only TLS 1.2
+  reads, and does not offer a TLS 1.2 session of its resumption store.
+- A client that is answered with TLS 1.2 fails with
+  `PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig` and a
+  `protocol_version` alert.
+- A server refuses a ClientHello that does not offer TLS 1.3 with a
+  `protocol_version` alert: `PeerIncompatible::Tls12NotOfferedOrEnabled`
+  when `supported_versions` lists older versions only,
+  `SupportedVersionsExtensionRequired` when the extension is absent and
+  `legacy_version` is TLS 1.2 or higher, and `Tls12NotOffered` when it is
+  absent and `legacy_version` is lower. The version is checked before
+  `TLS_FALLBACK_SCSV`, so a fallback probe gets the same answer, which
+  RFC 7507 §3 allows in place of `inappropriate_fallback`.
+- Neither side tries again with another version. The refusal is the
+  application's error to report, and a retry over TLS 1.2 could only come
+  from the application building a second configuration.
+- The configuration fields that concern TLS 1.2 alone
+  (`allow_mac_then_encrypt`, `require_ems`, `require_secure_renegotiation`,
+  `trusted_ca_keys`, client certificate URLs) have no effect on the
+  handshake. `require_ems` still enters `fips()`, whatever the list.
+- A provider without a TLS 1.3 suite is refused when the configuration is
+  built (`no usable cipher suites configured`).
+
+A configuration with both versions keeps the downgrade protection of
+RFC 9846 §4.1.3: a client that offered TLS 1.3 and is answered with
+TLS 1.2 by a server whose random carries the sentinel fails with
+`PeerMisbehaved::AttemptedDowngradeToTls12WhenTls13IsSupported` and an
+`illegal_parameter` alert, and a server answers `TLS_FALLBACK_SCSV` in a
+hello below its highest version with `inappropriate_fallback`.
+
+The policy belongs to the configuration, wherever it is handed over.
+`server::Acceptor` and `browntls_tokio::LazyConfigAcceptor` read a
+ClientHello before any configuration exists, so they apply no version
+policy themselves: the configuration passed to `into_connection` or
+`into_stream` accepts or refuses the hello. The buffered and unbuffered
+connections, the Tokio streams and the kernel TLS handoff all run the
+handshake of `browntls-core` over the same configuration types. A QUIC
+connection offers and accepts TLS 1.3 alone whatever the list holds, and a
+configuration without TLS 1.3 cannot be used for one (RFC 9001 §4.2).
+
+Neither RFC covers DTLS. A DTLS endpoint speaks a DTLS version only when
+its own `dtls::Versions` policy and the configuration's list both have the
+matching TLS version, so a configuration that lists TLS 1.3 alone never
+speaks DTLS 1.2 (see [DTLS 1.3](#dtls-13-rfc-9147)).
+
+#### TLS 1.2 compatibility
+
+Nothing changes for an application that uses TLS 1.2 today: the default
+list still enables it wherever the `tls12` feature is built, `tls12`
+remains a default feature, and a list of `&[&version::TLS12]` still makes a
+TLS 1.2-only configuration. With both versions enabled, TLS 1.2 is used
+only with a peer that does not have TLS 1.3.
+
+RFC 9851 freezes TLS 1.2 in the IETF: apart from urgent security fixes,
+new exporter labels and new ALPN protocol IDs, new work is specified and
+registered for TLS 1.3 or later. That binds the specifications, not a
+library, and browntls takes the same position for its own work: TLS 1.2
+support is kept for compatibility and receives security fixes, and new
+protocol features are added for TLS 1.3. Of the features here, the hybrid
+post-quantum groups (RFC 10024), ML-DSA authentication, Encrypted Client
+Hello, delegated credentials and certificate compression are TLS 1.3 only
+by their specifications, and external PSKs are implemented for TLS 1.3
+alone. An application that needs one of them, or post-quantum key
+agreement at all, needs TLS 1.3 with every peer, which is what a
+TLS 1.3-only list states.
+
 ### TLS 1.2 record protection
 
 TLS 1.2 suites are either `GenericAEADCipher` or `GenericBlockCipher`

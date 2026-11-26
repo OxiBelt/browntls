@@ -418,3 +418,83 @@ fn configurations_quic_cannot_use_are_refused() {
         ));
     }
 }
+
+/// The ClientHello message `hello` in a record, as `common::hello_wire`
+/// reads it.
+fn hello_record(hello: &[u8]) -> Vec<u8> {
+    let mut record = vec![0x16, 0x03, 0x01];
+    record.extend_from_slice(&u16::try_from(hello.len()).unwrap().to_be_bytes());
+    record.extend_from_slice(hello);
+    record
+}
+
+#[test]
+fn a_quic_client_offers_tls13_alone_whatever_versions_its_configuration_lists() {
+    use common::hello_wire::{client_hello_cipher_suites, hello_extensions};
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    // The default list: TLS 1.2 too, where it is compiled in.
+    let mut config = client_config(&chain);
+    config.alpn_protocols = vec![ALPN.to_vec()];
+    let config = Arc::new(config);
+    let hello = hello_record(&quic_client_hello(&config));
+
+    // RFC 9001 §4.2: a QUIC client offers no version before TLS 1.3.
+    let supported_versions = hello_extensions(&hello, true)
+        .into_iter()
+        .find(|(typ, _)| *typ == 43)
+        .map(|(_, body)| body);
+    assert_eq!(supported_versions.unwrap(), [2, 0x03, 0x04]);
+    let suites = client_hello_cipher_suites(&hello);
+    assert!(
+        suites.iter().all(|suite| suite >> 8 == 0x13),
+        "{suites:04x?}"
+    );
+
+    // The same configuration over TLS offers what it lists.
+    let mut tls = browntls_core::ClientConnection::new(config, server_name()).unwrap();
+    let mut hello = Vec::new();
+    tls.write_tls(&mut hello).unwrap();
+    let offered = hello_extensions(&hello, true)
+        .into_iter()
+        .find(|(typ, _)| *typ == 43)
+        .map(|(_, body)| (body.len() - 1) / 2);
+    assert_eq!(offered, Some(browntls_core::DEFAULT_VERSIONS.len()));
+}
+
+#[cfg(feature = "tls12")]
+#[test]
+fn a_configuration_without_tls13_cannot_be_used_over_quic() {
+    let chain = server_chain(KeyType::EcdsaP256);
+    let refused = Error::General("TLS 1.3 support is required for QUIC".into());
+
+    let mut client = browntls_core::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    client.alpn_protocols = vec![ALPN.to_vec()];
+    assert_eq!(
+        bq::ClientConnection::new(
+            Arc::new(client),
+            bq::Version::V1,
+            server_name(),
+            CLIENT_PARAMS.to_vec(),
+        )
+        .err(),
+        Some(refused.clone())
+    );
+
+    let mut server = browntls_core::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&version::TLS12])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    server.alpn_protocols = vec![ALPN.to_vec()];
+    assert_eq!(
+        bq::ServerConnection::new(Arc::new(server), bq::Version::V1, SERVER_PARAMS.to_vec()).err(),
+        Some(refused)
+    );
+}

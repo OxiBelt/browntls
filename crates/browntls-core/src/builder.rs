@@ -48,13 +48,39 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
     /// Enables every protocol version this build supports (TLS 1.3, and
     /// TLS 1.2 with the `tls12` feature), even one the provider has no
     /// suites for; fails only when no enabled version has a suite.
+    ///
+    /// Two peers that both have TLS 1.3 negotiate it. Whether TLS 1.2 is
+    /// in this list depends on the `tls12` feature, which any crate of the
+    /// application can turn on: an application that must not negotiate
+    /// TLS 1.2 uses [`Self::with_protocol_versions`].
     pub fn with_safe_default_protocol_versions(
         self,
     ) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {
         self.with_protocol_versions(versions::DEFAULT_VERSIONS)
     }
 
-    /// Enables exactly `versions`.
+    /// Enables TLS 1.3 alone: [`Self::with_protocol_versions`] with
+    /// `&[&version::TLS13]`, whatever the `tls12` feature of the build.
+    ///
+    /// This is the policy of an application whose protocol requires
+    /// TLS 1.3 (RFC 9852 §4 makes it the default of every new protocol).
+    /// The configuration never offers, accepts or resumes TLS 1.2; see
+    /// [`Self::with_protocol_versions`] for what a peer without TLS 1.3
+    /// is answered. Fails if the provider has no TLS 1.3 suite or no key
+    /// exchange groups.
+    pub fn with_tls13_only(self) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {
+        self.with_protocol_versions(&[&versions::TLS13])
+    }
+
+    /// Enables exactly `versions`; their order means nothing.
+    ///
+    /// The list is the version policy of the configuration. With
+    /// `&[&version::TLS13]`, for a protocol that requires TLS 1.3 (RFC 9852
+    /// §4 makes it the default of every new protocol), a client offers
+    /// nothing of TLS 1.2, a server refuses a ClientHello that does not
+    /// offer TLS 1.3 with a `protocol_version` alert, and a handshake with
+    /// a peer that has TLS 1.2 alone fails on either side.
+    /// `protocol_version()` on a connection reports what was negotiated.
     ///
     /// Fails if the provider has no suite for any enabled version, no key
     /// exchange groups, or a suite of an enabled version whose key exchange

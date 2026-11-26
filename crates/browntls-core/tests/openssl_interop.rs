@@ -28,6 +28,8 @@ mod psk;
 mod server_grease;
 #[path = "openssl_interop/tls13_optional.rs"]
 mod tls13_optional;
+#[path = "openssl_interop/version_policy.rs"]
+mod version_policy;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

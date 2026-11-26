@@ -272,6 +272,140 @@ fn certificate_url_is_nameable() {
 #[test]
 fn tls12_is_absent() {
     assert_eq!(browntls::ALL_VERSIONS, &[&browntls::version::TLS13]);
+    // A build without the feature has TLS 1.3 alone as its default too.
+    assert_eq!(browntls::DEFAULT_VERSIONS, &[&browntls::version::TLS13]);
+}
+
+/// The two ends of an in-memory connection, until neither is handshaking
+/// or one of them refuses the other.
+fn handshake(
+    client: &mut ClientConnection,
+    server: &mut ServerConnection,
+) -> (Result<(), browntls::Error>, Result<(), browntls::Error>) {
+    let mut buf = Vec::new();
+    while client.is_handshaking() || server.is_handshaking() {
+        buf.clear();
+        client.write_tls(&mut buf).unwrap();
+        server.read_tls(&mut &buf[..]).unwrap();
+        let served = server.process_new_packets().map(drop);
+        // What the server answers, which is an alert when it refused.
+        buf.clear();
+        server.write_tls(&mut buf).unwrap();
+        client.read_tls(&mut &buf[..]).unwrap();
+        let answered = client.process_new_packets().map(drop);
+        if served.is_err() || answered.is_err() {
+            return (answered, served);
+        }
+    }
+    (Ok(()), Ok(()))
+}
+
+/// A TLS 1.3-only policy (RFC 9852 §4), named through `browntls` only: the
+/// application lists the one version when it builds the configuration and
+/// reads the negotiated version from the connection. It does not rely on
+/// the default list, which holds TLS 1.2 whenever any crate of the build
+/// turned the `tls12` feature on.
+#[test]
+fn a_tls13_only_policy_through_the_root() {
+    use browntls::{ProtocolVersion, version};
+
+    let pki = Pki::new();
+    let policy = &[&version::TLS13];
+    // Against a peer of the same policy, and against one with the defaults.
+    let pairs = [
+        (
+            pki.client_config_with_versions(policy),
+            pki.server_config_with_versions(policy),
+        ),
+        (pki.client_config_with_versions(policy), pki.server_config()),
+        (pki.client_config(), pki.server_config_with_versions(policy)),
+    ];
+    for (client_config, server_config) in pairs {
+        let mut client = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+        assert_eq!(handshake(&mut client, &mut server), (Ok(()), Ok(())));
+        assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+        assert_eq!(server.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+    }
+}
+
+/// The presets (`builder_tls13_only`, `with_tls13_only`) through the root.
+/// The first uses the process-default provider, which only exists when one
+/// provider feature is built.
+#[test]
+fn the_tls13_only_presets_through_the_root() {
+    use browntls::{ClientConfig, ProtocolVersion, ServerConfig};
+
+    let pki = Pki::new();
+    let listed = pki.client_config_with_versions(&[&browntls::version::TLS13]);
+    let preset = ClientConfig::builder_with_provider(provider())
+        .with_tls13_only()
+        .unwrap()
+        .with_root_certificates(pki.roots())
+        .with_no_client_auth();
+    for config in [&listed, &preset] {
+        assert!(config.supports_version(ProtocolVersion::TLSv1_3));
+        assert!(!config.supports_version(ProtocolVersion::TLSv1_2));
+    }
+    assert_eq!(
+        pki.client_config()
+            .supports_version(ProtocolVersion::TLSv1_2),
+        cfg!(feature = "tls12")
+    );
+
+    #[cfg(not(feature = "rustcrypto"))]
+    {
+        let client = ClientConfig::builder_tls13_only()
+            .with_root_certificates(pki.roots())
+            .with_no_client_auth();
+        let server = pki.server_config_from(ServerConfig::builder_tls13_only());
+        assert!(!client.supports_version(ProtocolVersion::TLSv1_2));
+        assert!(!server.supports_version(ProtocolVersion::TLSv1_2));
+        let mut client = ClientConnection::new(Arc::new(client), localhost()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server)).unwrap();
+        assert_eq!(handshake(&mut client, &mut server), (Ok(()), Ok(())));
+        assert_eq!(client.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+    }
+    #[cfg(feature = "rustcrypto")]
+    let _ = ServerConfig::builder_tls13_only;
+}
+
+/// A peer that has TLS 1.2 alone is refused by either end of the policy
+/// with a `protocol_version` alert (RFC 9846 §4.2.1 and Appendix D), and
+/// neither end falls back.
+#[cfg(feature = "tls12")]
+#[test]
+fn a_tls13_only_policy_refuses_a_tls12_peer_through_the_root() {
+    use browntls::{AlertDescription, Error, PeerIncompatible, version};
+
+    let pki = Pki::new();
+    let (policy, legacy) = (&[&version::TLS13], &[&version::TLS12]);
+    let pairs = [
+        (
+            pki.client_config_with_versions(legacy),
+            pki.server_config_with_versions(policy),
+        ),
+        (
+            pki.client_config_with_versions(policy),
+            pki.server_config_with_versions(legacy),
+        ),
+    ];
+    for (client_config, server_config) in pairs {
+        let mut client = ClientConnection::new(Arc::new(client_config), localhost()).unwrap();
+        let mut server = ServerConnection::new(Arc::new(server_config)).unwrap();
+        let (answered, served) = handshake(&mut client, &mut server);
+        assert_eq!(
+            served,
+            Err(Error::PeerIncompatible(
+                PeerIncompatible::Tls12NotOfferedOrEnabled
+            ))
+        );
+        assert_eq!(
+            answered,
+            Err(Error::AlertReceived(AlertDescription::ProtocolVersion))
+        );
+        assert_eq!(client.protocol_version(), None);
+    }
 }
 
 /// `zlib`, `brotli`, `zstd`: each enabled algorithm joins the default

@@ -232,6 +232,8 @@ impl Knobs {
                     .with_protocol_versions(versions)
                     .ok()?
             }
+            // The preset names the list it stands for.
+            2 if versions == [&version::TLS13] => ClientConfig::builder_tls13_only(),
             2 => ClientConfig::builder_with_protocol_versions(versions),
             _ => ClientConfig::builder(),
         };
@@ -295,6 +297,8 @@ impl Knobs {
                     .with_protocol_versions(versions)
                     .ok()?
             }
+            // The preset names the list it stands for.
+            2 if versions == [&version::TLS13] => ServerConfig::builder_tls13_only(),
             2 => ServerConfig::builder_with_protocol_versions(versions),
             _ => ServerConfig::builder(),
         };

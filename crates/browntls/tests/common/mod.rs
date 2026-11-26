@@ -231,6 +231,45 @@ impl Pki {
             .unwrap()
     }
 
+    /// A server configuration for exactly `versions`.
+    pub fn server_config_with_versions(
+        &self,
+        versions: &[&'static browntls::SupportedProtocolVersion],
+    ) -> ServerConfig {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
+        ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(versions)
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(self.server_chain.clone(), key)
+            .unwrap()
+    }
+
+    /// The server configuration `builder` leads to: no client
+    /// authentication and the server certificate.
+    pub fn server_config_from(
+        &self,
+        builder: browntls::ConfigBuilder<ServerConfig, browntls::WantsVerifier>,
+    ) -> ServerConfig {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.server_key.clone()));
+        builder
+            .with_no_client_auth()
+            .with_single_cert(self.server_chain.clone(), key)
+            .unwrap()
+    }
+
+    /// A client configuration for exactly `versions` that trusts the CA.
+    pub fn client_config_with_versions(
+        &self,
+        versions: &[&'static browntls::SupportedProtocolVersion],
+    ) -> ClientConfig {
+        ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(versions)
+            .unwrap()
+            .with_root_certificates(self.roots())
+            .with_no_client_auth()
+    }
+
     /// The CA certificate.
     pub fn ca(&self) -> &CertificateDer<'static> {
         &self.ca

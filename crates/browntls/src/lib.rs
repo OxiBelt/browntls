@@ -69,6 +69,54 @@
 //! # }
 //! ```
 //!
+//! # A TLS 1.3-only policy
+//!
+//! RFC 9852 requires a new protocol that uses TLS to make TLS 1.3 its
+//! default. The default version list ([`DEFAULT_VERSIONS`]) prefers TLS 1.3
+//! and also enables TLS 1.2 where the `tls12` feature is built, for the
+//! deployed protocols that still meet peers without TLS 1.3. An application
+//! of a new protocol lists the version itself, and can check what a
+//! connection negotiated:
+//!
+#![cfg_attr(all(feature = "std", feature = "native"), doc = "```no_run")]
+#![cfg_attr(not(all(feature = "std", feature = "native")), doc = "```ignore")]
+//! use browntls::pki_types::{CertificateDer, PrivateKeyDer};
+//! use browntls::{
+//!     ClientConfig, ClientConnection, ProtocolVersion, RootCertStore, ServerConfig, version,
+//! };
+//!
+//! # fn configure(
+//! #     roots: RootCertStore,
+//! #     chain: Vec<CertificateDer<'static>>,
+//! #     key: PrivateKeyDer<'static>,
+//! # ) -> Result<(ClientConfig, ServerConfig), browntls::Error> {
+//! let client = ClientConfig::builder_with_protocol_versions(&[&version::TLS13])
+//!     .with_root_certificates(roots)
+//!     .with_no_client_auth();
+//! let server = ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
+//!     .with_no_client_auth()
+//!     .with_single_cert(chain, key)?;
+//! # Ok((client, server))
+//! # }
+//!
+//! # fn check(conn: &ClientConnection) {
+//! // After the handshake, on either side:
+//! assert_eq!(conn.protocol_version(), Some(ProtocolVersion::TLSv1_3));
+//! # }
+//! ```
+//!
+//! [`ClientConfig::builder_tls13_only`], [`ServerConfig::builder_tls13_only`]
+//! and [`ConfigBuilder::with_tls13_only`] are the same list under a name,
+//! and [`ClientConfig::supports_version`] tells whether a configuration
+//! built elsewhere still enables TLS 1.2.
+//!
+//! A handshake with a peer that has TLS 1.2 alone then fails, and nothing
+//! falls back: a browntls server answers with a `protocol_version` alert,
+//! and a client reports the alert of the server that refused it. The list is
+//! the policy: turning the `tls12` feature off is not one, because another
+//! crate of the application can turn it on again (Cargo builds one
+//! `browntls-core` with the features of every crate that depends on it).
+//!
 //! # A client on Tokio (`tokio` feature)
 //!
 //! The module `browntls::tokio` has the name of the Tokio crate. Name its

@@ -575,3 +575,5 @@ fn tls13_only_needs_a_tls13_suite() {
         .with_protocol_versions(&[&version::TLS12])
         .unwrap();
 }
+
+include!("tls13_only_policy/preset.rs");

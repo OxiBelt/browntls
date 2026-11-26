@@ -59,6 +59,19 @@ impl<S: ConfigSide> ConfigBuilder<S, WantsVersions> {
         self.with_protocol_versions(versions::DEFAULT_VERSIONS)
     }
 
+    /// Enables TLS 1.3 alone: [`Self::with_protocol_versions`] with
+    /// `&[&version::TLS13]`, whatever the `tls12` feature of the build.
+    ///
+    /// This is the policy of an application whose protocol requires
+    /// TLS 1.3 (RFC 9852 §4 makes it the default of every new protocol).
+    /// The configuration never offers, accepts or resumes TLS 1.2; see
+    /// [`Self::with_protocol_versions`] for what a peer without TLS 1.3
+    /// is answered. Fails if the provider has no TLS 1.3 suite or no key
+    /// exchange groups.
+    pub fn with_tls13_only(self) -> Result<ConfigBuilder<S, WantsVerifier>, Error> {
+        self.with_protocol_versions(&[&versions::TLS13])
+    }
+
     /// Enables exactly `versions`; their order means nothing.
     ///
     /// The list is the version policy of the configuration. With

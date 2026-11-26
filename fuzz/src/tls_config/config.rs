@@ -21,7 +21,7 @@ use browntls_core::sign::{CertifiedKey, SingleCertAndKey};
 use browntls_core::ticketer::TicketRotator;
 use browntls_core::{
     ClientConfig, ClientConnection, ConfigBuilder, DigitallySignedStruct, DistinguishedName, Error,
-    KeyLogFile, RootCertStore, ServerConfig, ServerConnection, SignatureScheme,
+    KeyLogFile, ProtocolVersion, RootCertStore, ServerConfig, ServerConnection, SignatureScheme,
     SupportedCipherSuite, SupportedProtocolVersion, WantsVersions, version,
 };
 
@@ -173,17 +173,58 @@ fn custom_provider(input: &mut Input<'_>) -> (usize, Arc<CryptoProvider>) {
     (p, Arc::new(provider))
 }
 
-/// The protocol versions to ask for: `None` for the safe defaults.
-fn versions(input: &mut Input<'_>) -> Option<&'static [&'static SupportedProtocolVersion]> {
+/// The protocol versions to ask a builder for.
+#[derive(Clone, Copy, Debug)]
+enum Versions {
+    /// `with_safe_default_protocol_versions`.
+    Default,
+    /// `with_protocol_versions` with this list.
+    List(&'static [&'static SupportedProtocolVersion]),
+    /// `with_tls13_only`.
+    Tls13Only,
+}
+
+impl Versions {
+    /// The list the choice stands for.
+    fn list(self) -> &'static [&'static SupportedProtocolVersion] {
+        const TLS13: &[&SupportedProtocolVersion] = &[&version::TLS13];
+        match self {
+            Self::Default => browntls_core::DEFAULT_VERSIONS,
+            Self::List(list) => list,
+            Self::Tls13Only => TLS13,
+        }
+    }
+
+    /// What `supports_version` of a configuration built with the choice
+    /// must answer: the TLS versions of the list and nothing else.
+    fn check(self, supports_version: impl Fn(ProtocolVersion) -> bool) {
+        for version in [
+            ProtocolVersion::TLSv1_3,
+            ProtocolVersion::TLSv1_2,
+            ProtocolVersion::TLSv1_1,
+            ProtocolVersion::DTLSv1_3,
+            ProtocolVersion::DTLSv1_2,
+        ] {
+            assert_eq!(
+                supports_version(version),
+                self.list().iter().any(|v| v.version == version),
+                "{version:?} of {self:?}"
+            );
+        }
+    }
+}
+
+fn versions(input: &mut Input<'_>) -> Versions {
     const BOTH: &[&SupportedProtocolVersion] = &[&version::TLS13, &version::TLS12];
     const TLS13: &[&SupportedProtocolVersion] = &[&version::TLS13];
     const TLS12: &[&SupportedProtocolVersion] = &[&version::TLS12];
-    match input.choose(5) {
-        0 => None,
-        1 => Some(BOTH),
-        2 => Some(TLS13),
-        3 => Some(TLS12),
-        _ => Some(&[]),
+    match input.choose(6) {
+        0 => Versions::Default,
+        1 => Versions::List(BOTH),
+        2 => Versions::List(TLS13),
+        3 => Versions::List(TLS12),
+        4 => Versions::List(&[]),
+        _ => Versions::Tls13Only,
     }
 }
 
@@ -212,16 +253,14 @@ fn versions_ok(provider: &CryptoProvider, versions: &[&SupportedProtocolVersion]
 fn with_versions<S: browntls_core::ConfigSide>(
     builder: ConfigBuilder<S, WantsVersions>,
     provider: &Arc<CryptoProvider>,
-    versions: Option<&'static [&'static SupportedProtocolVersion]>,
+    versions: Versions,
 ) -> Option<ConfigBuilder<S, browntls_core::WantsVerifier>> {
     assert!(Arc::ptr_eq(builder.crypto_provider(), provider));
-    let expected = versions_ok(
-        provider,
-        versions.unwrap_or(browntls_core::DEFAULT_VERSIONS),
-    );
+    let expected = versions_ok(provider, versions.list());
     let result = match versions {
-        None => builder.with_safe_default_protocol_versions(),
-        Some(v) => builder.with_protocol_versions(v),
+        Versions::Default => builder.with_safe_default_protocol_versions(),
+        Versions::List(v) => builder.with_protocol_versions(v),
+        Versions::Tls13Only => builder.with_tls13_only(),
     };
     assert_eq!(
         result.is_ok(),
@@ -367,7 +406,8 @@ pub(super) fn client_config_op(input: &mut Input<'_>) {
         });
     // `with_protocol_versions` accepts TLS 1.2 with only TLS 1.3 groups
     // (FFDHE, ML-KEM, hybrids); the ClientHello then cannot be built.
-    let enabled = versions.unwrap_or(browntls_core::DEFAULT_VERSIONS);
+    let enabled = versions.list();
+    versions.check(|version| config.supports_version(version));
     let groups_ok = provider
         .kx_groups
         .iter()
@@ -496,6 +536,7 @@ pub(super) fn server_config_op(input: &mut Input<'_>) {
     if input.bool() {
         config.ticketer = browntls_core::crypto::rustcrypto::Ticketer::new().expect("ticketer");
     }
+    versions.check(|version| config.supports_version(version));
     match ServerConnection::new(Arc::new(config)) {
         Ok(conn) => {
             assert!(sizes_ok, "fragment {fragment:?} record {record:?} accepted");

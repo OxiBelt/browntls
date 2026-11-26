@@ -123,8 +123,10 @@ pub fn seeds() -> Vec<Vec<u8>> {
     let mut seeds = Vec::new();
 
     // Each version, provider pair and builder entry point.
-    let flags = [0x00u8, 0x01, 0x02, 0x05, 0x0a, 0x1d, 0x2e, 0x33];
-    let auth = [0x40u8, 0x41, 0x80, 0x0e, 0x13, 0x22, 0xc0, 0x00];
+    // 0x1d and 0x21 take the TLS 1.3-only preset on the server and on the
+    // client (the process-default provider with the TLS 1.3 list).
+    let flags = [0x00u8, 0x01, 0x02, 0x05, 0x0a, 0x1d, 0x2e, 0x33, 0x21];
+    let auth = [0x40u8, 0x41, 0x80, 0x0e, 0x13, 0x22, 0xc0, 0x00, 0x40];
     for (flags, auth) in flags.into_iter().zip(auth) {
         seeds.push(Seed::new([flags, auth, 0, 0, 0], &plain).conversation().0);
     }

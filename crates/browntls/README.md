@@ -58,6 +58,11 @@ let server = ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
 # }
 ```
 
+`ClientConfig::builder_tls13_only()`, `ServerConfig::builder_tls13_only()`
+and `with_tls13_only()` after `builder_with_provider(..)` are the same list
+under a name, and `config.supports_version(ProtocolVersion::TLSv1_2)` tells
+whether a configuration built elsewhere still enables TLS 1.2.
+
 A handshake with a peer that has TLS 1.2 alone then fails, and nothing
 falls back: a browntls server answers with a `protocol_version` alert, and
 a client reports the alert of the server that refused it. After a

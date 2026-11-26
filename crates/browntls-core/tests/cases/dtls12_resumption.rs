@@ -335,6 +335,54 @@ mod resumption_cases {
         }
     }
 
+    /// A client whose configuration has no TLS 1.3 never speaks DTLS 1.3,
+    /// whatever its endpoint policy allows. It leaves the DTLS 1.3 tickets
+    /// of a store it shares alone and resumes its own DTLS 1.2 session.
+    #[test]
+    fn a_client_without_tls13_leaves_the_dtls13_tickets_of_a_shared_store_alone() {
+        use dtls::Versions::V1_2And1_3;
+
+        let chain = server_chain(KeyType::EcdsaP256);
+        let verifier = PinnedServerVerifier::new(&chain);
+        let store = Arc::new(ClientSessionMemoryCache::new(32));
+        let client_with = |versions: &[&'static browntls_core::SupportedProtocolVersion]| {
+            let mut client = ClientConfig::builder_with_provider(provider())
+                .with_protocol_versions(versions)
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier.clone())
+                .with_no_client_auth();
+            client.resumption = Resumption::store(store.clone());
+            Arc::new(client)
+        };
+        let both = client_with(browntls_core::ALL_VERSIONS);
+        let tls12 = client_with(&[&version::TLS12]);
+        let mut server = dtls_server_config(&chain);
+        server.dtls12_ticketer = prov::Ticketer::new().unwrap();
+        server.session_storage = ServerSessionMemoryCache::new(64);
+        server.enable_dtls12_resumption().unwrap();
+        let server = Arc::new(server);
+        let connect = |client: &Arc<ClientConfig>| {
+            let mut pair = make_pair(client, &server, V1_2And1_3, V1_2And1_3);
+            pair.handshake(&mut Sim::perfect()).unwrap();
+            (
+                pair.client.protocol_version().unwrap(),
+                pair.client.handshake_kind() == Some(HandshakeKind::Resumed),
+            )
+        };
+
+        // The store holds DTLS 1.3 tickets and a DTLS 1.2 session.
+        assert_eq!(connect(&both), (ProtocolVersion::DTLSv1_3, false));
+        assert_eq!(connect(&tls12), (ProtocolVersion::DTLSv1_2, false));
+        // The client without TLS 1.3 resumes its session: the tickets,
+        // which it cannot use, do not come before it...
+        for _ in 0..3 {
+            assert_eq!(connect(&tls12), (ProtocolVersion::DTLSv1_2, true));
+        }
+        // ...and it has not taken them from the client they belong to.
+        assert_eq!(connect(&both), (ProtocolVersion::DTLSv1_3, true));
+    }
+
     #[test]
     fn stateless_cookie_validation_precedes_session_lookup() {
         let (client, server, _) = configs(false);

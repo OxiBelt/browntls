@@ -65,11 +65,13 @@ fn find_session(
     #[cfg(feature = "tls12")]
     let ech_offer = matches!(config.ech_mode, Some(crate::ech::EchMode::Enable(_)));
 
-    let found = (if cx
-        .common
-        .dtls
-        .as_ref()
-        .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
+    // Taking a ticket removes it from the store, which other clients may share.
+    let found = (if config.supports_version(ProtocolVersion::TLSv1_3)
+        && cx
+            .common
+            .dtls
+            .as_ref()
+            .is_none_or(|d| d.allows(ProtocolVersion::TLSv1_3))
     {
         take_tls13_ticket(
             &*config.resumption.store,
@@ -756,8 +758,8 @@ pub(super) fn emit_client_hello_for_retry(
         input.check_cert_with_extern_psk_retry(cx.common, cert_with_extern_psk)?;
     }
     // RFC 5746 §3.3: signal secure renegotiation support (we never
-    // renegotiate); a TLS 1.3-only hello has nothing to signal.
-    if supports_tls12 || !ech_tls13_only {
+    // renegotiate); a hello that offers no TLS 1.2 has nothing to signal.
+    if supports_tls12 {
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 

@@ -171,6 +171,32 @@ fn a_configuration_that_cannot_serve_the_client_hello_is_refused() {
     }
 }
 
+/// The acceptor reads a ClientHello of either version: the version policy
+/// is the configuration's, and a TLS 1.3-only one refuses a TLS 1.2 hello.
+#[cfg(feature = "tls12")]
+#[test]
+fn a_tls13_only_configuration_refuses_the_hello_of_a_tls12_client() {
+    init_logging();
+    let chain = server_chain(KeyType::EcdsaP256);
+    let hello = client_hello_of(&Arc::new(versioned_client(
+        &chain,
+        ProtocolVersion::TLSv1_2,
+    )));
+    let server = Arc::new(versioned_server(&chain, ProtocolVersion::TLSv1_3));
+    for feed in [Feed::Whole, Feed::ByteByByte] {
+        let (err, alert, _) = unbuffered_refusal(&hello, feed, Some(server.clone()));
+        assert_eq!(
+            err,
+            Error::PeerIncompatible(browntls_core::PeerIncompatible::Tls12NotOfferedOrEnabled)
+        );
+        assert_eq!(
+            fatal_alert(&alert),
+            u8::from(AlertDescription::ProtocolVersion)
+        );
+        assert_eq!((err, alert), buffered_refusal(&hello, Some(server.clone())));
+    }
+}
+
 /// `flight`, one TLS 1.3 ClientHello record, with `tail` appended to that
 /// record as handshake bytes following the ClientHello.
 fn with_handshake_tail(flight: &[u8], tail: &[u8]) -> Vec<u8> {

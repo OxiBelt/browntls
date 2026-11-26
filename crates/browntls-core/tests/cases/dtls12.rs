@@ -406,5 +406,64 @@ mod dtls12_cases {
         assert!(pair.handshake(&mut sim).is_err());
         assert_eq!(pair.client.protocol_version(), None);
     }
+
+    #[test]
+    fn the_version_list_of_a_configuration_bounds_the_endpoint_policy() {
+        use dtls::Versions::{V1_2, V1_2And1_3, V1_3};
+        // RFC 9852 and RFC 9851 leave DTLS alone. This is the library's own
+        // rule: an endpoint speaks a DTLS version only when its policy and
+        // the configuration's list both have the matching TLS version, so
+        // a configuration with TLS 1.3 only never speaks DTLS 1.2.
+        let chain = server_chain(KeyType::EcdsaP256);
+        let tls13_only: &[&'static browntls_core::SupportedProtocolVersion] = &[&version::TLS13];
+        let client = Arc::new(
+            ClientConfig::builder_with_provider(provider())
+                .with_protocol_versions(tls13_only)
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+                .with_no_client_auth(),
+        );
+        let mut server = ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(tls13_only)
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(chain.cert_chain(), chain.private_key())
+            .unwrap();
+        server.hello_retry_cookies = Some(prov::Ticketer::new().unwrap());
+        server.ticketer = prov::Ticketer::new().unwrap();
+        let server = Arc::new(server);
+
+        // A DTLS 1.2-only endpoint cannot be made from it.
+        let refused =
+            Error::General("no configured version matches the DTLS endpoint policy".into());
+        assert_eq!(
+            dtls::ClientConnection::new_with_versions(client.clone(), server_name(), V1_2).err(),
+            Some(refused.clone())
+        );
+        assert_eq!(
+            dtls::ServerConnection::new_with_versions(server.clone(), PEER, V1_2).err(),
+            Some(refused)
+        );
+
+        // An endpoint whose policy has both versions speaks DTLS 1.3...
+        let mut pair = make_pair(&client, &server, V1_2And1_3, V1_2And1_3);
+        pair.handshake(&mut Sim::perfect()).unwrap();
+        assert_dtls13(&pair);
+        let mut pair = make_pair(&client, &server, V1_3, V1_2And1_3);
+        pair.handshake(&mut Sim::perfect()).unwrap();
+        assert_dtls13(&pair);
+
+        // ...and has no DTLS 1.2 for a peer that speaks nothing else, in
+        // either role.
+        let both = Arc::new(client_config(&chain));
+        let mut pair = make_pair(&both, &server, V1_2, V1_2And1_3);
+        assert!(pair.handshake(&mut Sim::perfect()).is_err());
+        assert_eq!(pair.server.protocol_version(), None);
+        let dtls12_server = Arc::new(dtls_server_config(&chain));
+        let mut pair = make_pair(&client, &dtls12_server, V1_2And1_3, V1_2);
+        assert!(pair.handshake(&mut Sim::perfect()).is_err());
+        assert_eq!(pair.client.protocol_version(), None);
+    }
     include!("dtls12_resumption.rs");
 }

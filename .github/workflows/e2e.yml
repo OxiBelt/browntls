@@ -127,7 +127,23 @@ jobs:
         run: |
           uname -m
           grep -m1 -E '^(model name|flags|Features|isa|uarch)' /proc/cpuinfo || true
-          docker version --format 'Docker {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})'
+
+      # Jobs on the RISE riscv64 runners have started while the Docker daemon
+      # did not answer on its socket, and failed before any scenario ran. Give
+      # the daemon two minutes, and show the state of the service when it is
+      # still unreachable, so that such a failure names its cause.
+      - name: Wait for the Docker daemon
+        run: |
+          for _ in $(seq 60); do
+            if timeout 10 docker version --format '{{.Server.Version}}' > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          if ! timeout 10 docker version --format 'Docker {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})'; then
+            systemctl --no-pager --lines=30 status docker.service docker.socket containerd.service || true
+            exit 1
+          fi
 
       - name: Set up QEMU user-mode emulation
         if: matrix.emulated

@@ -1,16 +1,31 @@
-//! Hybrid Public Key Encryption (RFC 9180) for Encrypted Client Hello.
+//! Hybrid Public Key Encryption (RFC 9180) for Encrypted Client Hello and
+//! for applications.
 //!
 //! ECH (RFC 9849) seals the inner ClientHello with HPKE in base mode. An
-//! [`Hpke`] implementation provides one suite: a KEM, a KDF and an AEAD.
-//! The native provider supplies every suite of `browntls_crypto::hpke` in
-//! `native::hpke::ALL_SUPPORTED_SUITES` (feature `native`);
-//! other libraries can implement the traits here.
+//! [`Hpke`] implementation provides one suite: a KEM, a KDF and an AEAD, in
+//! base mode, and ECH uses nothing else. [`HpkeModes`] adds the other modes
+//! of RFC 9180 §5.1 for applications: PSK, Auth and AuthPSK, chosen with
+//! [`HpkeSealMode`] and [`HpkeOpenMode`]. [`HpkeSealer::export`] and
+//! [`HpkeOpener::export`] derive secrets from a context (§5.3).
+//!
+//! The native provider (feature `native`) supplies every suite of
+//! `browntls_crypto::hpke`: `native::hpke::ALL_SUPPORTED_SUITES` lists
+//! those that can seal, as [`Hpke`] for ECH, and
+//! `native::hpke::ALL_SUPPORTED_SUITES_WITH_MODES` lists all of them, the
+//! export-only suites included, as [`HpkeModes`]. The RustCrypto provider
+//! (feature `rustcrypto`) has no HPKE. Other libraries can implement the
+//! traits here.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
+use crate::crypto::cipher::UnsupportedOperationError;
 use crate::error::Error;
+
+mod modes;
+
+pub use modes::{HpkeModes, HpkeOpenMode, HpkePsk, HpkeSealMode};
 
 /// An HPKE KEM identifier (RFC 9180 §7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -343,6 +358,20 @@ pub trait HpkeSealer: Debug + Send + Sync {
     ///
     /// Fails when the message limit is reached.
     fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error>;
+
+    /// `Export(exporter_context, L)` (RFC 9180 §5.3): fills `out` with
+    /// `out.len()` bytes derived from the context's exporter secret and
+    /// `exporter_context`. The recipient's context derives the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// The default implementation fails with the error of
+    /// [`UnsupportedOperationError`]; an implementation fails if `out` is
+    /// longer than `255 * Nh`.
+    fn export(&self, exporter_context: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        let _ = (exporter_context, out);
+        Err(UnsupportedOperationError.into())
+    }
 }
 
 /// A recipient context (`ContextR`).
@@ -353,4 +382,18 @@ pub trait HpkeOpener: Debug + Send + Sync {
     ///
     /// Fails when authentication fails; the sequence number then stays put.
     fn open(&mut self, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error>;
+
+    /// `Export(exporter_context, L)` (RFC 9180 §5.3), as
+    /// [`HpkeSealer::export`].
+    ///
+    /// A recipient set up with the wrong key, PSK, sender key or mode does
+    /// not fail here: it derives other bytes than the sender.
+    ///
+    /// # Errors
+    ///
+    /// As [`HpkeSealer::export`].
+    fn export(&self, exporter_context: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        let _ = (exporter_context, out);
+        Err(UnsupportedOperationError.into())
+    }
 }

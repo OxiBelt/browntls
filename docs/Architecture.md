@@ -3744,6 +3744,20 @@ all three); no protocol inside browntls uses them. The contracts:
   RFC 9180 variants and states that it does not deprecate them, so browntls
   follows RFC 9180 for those two.
 
+In `browntls-core` (and so the `browntls` facade), `crypto::hpke::HpkeModes`
+extends the ECH-facing `Hpke` trait with `setup_sealer_with_mode` and
+`setup_opener_with_mode`, which take an `HpkeSealMode` or `HpkeOpenMode`
+(base, PSK with an `HpkePsk`, Auth with the sender's private or public key,
+AuthPSK with both). `HpkeSealer` and `HpkeOpener` gain a provided `export`
+(RFC 9180 §5.3) that fails unless the implementation overrides it, as the
+native one does. `native::hpke::ALL_SUPPORTED_SUITES_WITH_MODES` lists the
+45 suites of `ALL_SUPPORTED_SUITES`, in the same order, and then the 15
+export-only suites that ECH cannot use. ECH keeps taking `&dyn Hpke` and
+calls only the base-mode setups; a test opens a real ClientHelloOuter
+payload with a base-mode recipient and checks that PSK, Auth and AuthPSK
+recipients with the same server key cannot. The RustCrypto provider still
+has no HPKE.
+
 The tests are the RFC 9180 Appendix A vectors of all four modes for the
 supported suites (32 per mode, X448 included; the CFRG file at commit
 `5f503c56`), differential runs against the `hpke` crate in both directions

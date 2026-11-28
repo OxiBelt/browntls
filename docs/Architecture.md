@@ -3370,7 +3370,19 @@ record and handshake details describe DTLS 1.3.
   cookie with a HelloRetryRequest whose cookie is bound to the
   caller-provided address of the client (opaque bytes, §5.1), so that a
   spoofed address costs the server one small datagram and one connection
-  object; `dtls::Acceptor` (below) keeps no state at all. It needs
+  object; `dtls::Acceptor` (below) keeps no state at all. The blocking UDP
+  server and Tokio `UdpServer` encode a socket peer using its address family,
+  IP octets, IPv6 scope ID, and port, so IPv6 peers with the same IP and port
+  but different scopes have distinct cookies. Callers of the low-level
+  `ServerConnection` and `Acceptor` APIs provide opaque address bytes and must
+  include the scope ID when it is part of the peer identity; an IP-only value
+  does not distinguish scoped IPv6 peers. The blocking adapter's former
+  IPv6 encoding omitted four scope bytes, so old and new instances reject
+  each other's in-flight cookies even when they share sealing keys. Keep a
+  retry on an instance with the same encoding during a rolling upgrade, or
+  restart the handshake. Numeric scope IDs are local to each host; shared
+  keys do not make link-local retries portable across differing interface
+  indices. The cookie mechanism needs
   `ServerConfig::hello_retry_cookies`; the exchange is on by default and
   `new_without_cookie_exchange` turns it off for paths whose address is
   already verified. `dtls::Acceptor` answers first ClientHellos without
@@ -3506,13 +3518,17 @@ on both providers (`crates/browntls-core/tests/cases/dtls.rs`), unit tests
 of the record, reassembly, replay and hello codecs, and the `tls_dtls` fuzz
 target ([`fuzz/`](../fuzz/README.md)). The blocking API has tests over IPv4
 and IPv6 loopback sockets on both providers
-(`crates/browntls-core/tests/cases/dtls_udp.rs`). The `tls_dtls_udp` fuzz
+(`crates/browntls-core/tests/cases/dtls_udp.rs`). Shared DTLS 1.3 and 1.2
+cookie cases distinguish IPv6 peers with the same address and port but
+different scope IDs; Tokio has a matching serializer regression. These are
+deterministic identity and cookie tests, not a multi-interface socket test.
+The `tls_dtls_udp` fuzz
 target drives a server and several clients over loopback through fuzz-chosen
 calls and junk datagrams. Targeted blocking regressions
 cover combined Finished/data/close events, explicit peer removal and a
 retained overdue retransmission after client rewrapping; the IPv6 test
-asserts the cookie contains the source address and port. Scoped IPv6
-addresses are not covered. Loopback neither loses nor reorders datagrams;
+asserts the cookie contains the source address, scope ID and port.
+Loopback neither loses nor reorders datagrams;
 broader loss recovery is exercised by the simulated network of the
 sans-I/O tests. The
 [Docker DTLS suite](../tests/e2e/README.md#dtls-13-interoperability)

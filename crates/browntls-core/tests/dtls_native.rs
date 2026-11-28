@@ -13,6 +13,7 @@ mod prov;
 mod common;
 
 include!("cases/dtls.rs");
+include!("cases/dtls_scope.rs");
 
 include!("cases/dtls_attacks.rs");
 

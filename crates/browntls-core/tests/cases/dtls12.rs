@@ -348,6 +348,64 @@ mod dtls12_cases {
     }
 
     #[test]
+    fn stateless_acceptor_cookie_binds_scoped_ipv6_peer_identity() {
+        let chain = server_chain(KeyType::EcdsaP256);
+        let config = Arc::new(dtls_server_config(&chain));
+        let acceptor = dtls::Acceptor::new_with_versions(config, dtls::Versions::V1_2).unwrap();
+        let mut client = dtls::ClientConnection::new_with_versions(
+            Arc::new(client_config(&chain)),
+            server_name(),
+            dtls::Versions::V1_2,
+        )
+        .unwrap();
+        let now = Duration::from_secs(1000);
+        let mut first = Vec::new();
+        assert!(client.write_datagram(&mut first, now).unwrap());
+
+        let scope_two = scoped_ipv6_peer(2);
+        let scope_three = scoped_ipv6_peer(3);
+        let mut retry = Vec::new();
+        assert!(matches!(
+            acceptor
+                .accept(&mut first, &scope_two, &mut retry, now)
+                .unwrap(),
+            dtls::Accepted::Retry
+        ));
+        client.read_datagram(&mut retry, now).unwrap();
+
+        let mut second = Vec::new();
+        assert!(client.write_datagram(&mut second, now).unwrap());
+        let mut wrong_scope_output = Vec::new();
+        assert!(matches!(
+            acceptor
+                .accept(
+                    &mut second.clone(),
+                    &scope_three,
+                    &mut wrong_scope_output,
+                    now
+                )
+                .unwrap(),
+            dtls::Accepted::Ignored
+        ));
+        assert!(wrong_scope_output.is_empty());
+
+        let dtls::Accepted::Connection(server) = acceptor
+            .accept(&mut second, &scope_two, &mut Vec::new(), now)
+            .unwrap()
+        else {
+            panic!("the cookie must admit the original scoped IPv6 peer");
+        };
+        let mut pair = Pair {
+            client,
+            server: *server,
+        };
+        let mut sim = Sim::perfect();
+        sim.now = now;
+        pair.handshake(&mut sim).unwrap();
+        assert_v12(&pair);
+    }
+
+    #[test]
     fn required_client_certificate_and_server_verification_are_preserved() {
         let chain = server_chain(KeyType::EcdsaP256);
         let expected_client = client_chain(KeyType::EcdsaP256);

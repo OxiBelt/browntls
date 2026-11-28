@@ -1,12 +1,12 @@
-//! Identifier and key operations of the `crypto_hpke` target: KEM, KDF and
-//! AEAD lookups, and key derivation, (de)serialization and generation
-//! against the `hpke` oracle.
+//! Identifier and key operations of the `crypto_hpke` target: KEM, KDF,
+//! AEAD and mode lookups, and key derivation, (de)serialization and
+//! generation against the `hpke` oracle.
 
 use browntls_core::crypto::hpke::{HpkeAead, HpkeKdf, HpkeKem};
 use browntls_crypto::Error;
 use browntls_crypto::hpke::{
     Aead, Kdf, Kem, MAX_ENC_LEN, MAX_PKCS8_DER_LEN, MAX_PRIVATE_KEY_LEN, MAX_PUBLIC_KEY_LEN,
-    NONCE_LEN, PrivateKey, PublicKey, Suite, TAG_LEN,
+    MIN_PSK_LEN, Mode, NONCE_LEN, PrivateKey, PublicKey, Suite, TAG_LEN,
 };
 use browntls_crypto::rand::{FixedRng, OsRng};
 use browntls_crypto::zeroize::Zeroizing;
@@ -40,6 +40,18 @@ pub(super) fn ids(input: &mut Input<'_>) {
         }
         _ => assert_eq!(suite, None),
     }
+    // A mode identifier (RFC 9180 Table 1): base and PSK only.
+    let m = input.byte();
+    let mode = Mode::from_id(m);
+    assert_eq!(mode, Mode::ALL.into_iter().find(|x| x.id() == m));
+    assert_eq!(mode.map(Mode::id), (m <= 1).then_some(m));
+    assert_eq!(mode.map(Mode::uses_psk), (m <= 1).then_some(m == 1));
+    for (mode, id) in Mode::ALL.into_iter().zip(0u8..) {
+        assert_eq!(mode.id(), id);
+        assert_eq!(Mode::from_id(id), Some(mode));
+        assert_eq!(mode.uses_psk(), mode == Mode::Psk);
+    }
+    assert_eq!(MIN_PSK_LEN, 32);
     // The TLS-side identifier types.
     let tag_len = HpkeAead(a).tag_len();
     assert_eq!(

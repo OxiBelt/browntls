@@ -1,10 +1,12 @@
-//! RFC 9180 Appendix A base-mode known-answer tests.
+//! RFC 9180 Appendix A known-answer tests.
 //!
-//! `tests/data/hpke/rfc9180_base.json` is the base-mode subset of
-//! `test-vectors.json` from the CFRG HPKE draft repository (commit
-//! `5f503c564da00b0687b3de75f1dfbdfc4079ad31`, the vectors of RFC 9180
-//! Appendix A) for the suites this crate supports, keeping encryptions 0, 1, 2
-//! and the last one (sequence number 256) of each.
+//! `tests/data/hpke/rfc9180_base.json` and `rfc9180_psk.json` are the
+//! base-mode and PSK-mode subsets of `test-vectors.json` from the CFRG HPKE
+//! draft repository (commit `5f503c564da00b0687b3de75f1dfbdfc4079ad31`, the
+//! vectors of RFC 9180 Appendix A; SHA-256 of the file `61fc662f01996cd0
+//! 6d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6`) for the suites this
+//! crate supports, keeping encryptions 0, 1, 2 and the last one (sequence
+//! number 256) of each.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use std::format;
@@ -17,7 +19,7 @@ use serde::Deserialize;
 #[cfg(feature = "key-log")]
 use super::KemSharedSecret;
 use super::labeled::Secret;
-use super::{Aead, Kem, PrivateKey, PublicKey, Suite};
+use super::{Aead, Kem, Mode, PrivateKey, Psk, PublicKey, RecipientContext, Suite};
 use crate::Error;
 
 #[derive(Deserialize)]
@@ -55,6 +57,10 @@ struct Vector {
     pk_rm: String,
     #[serde(rename = "pkEm")]
     pk_em: String,
+    #[serde(default)]
+    psk: Option<String>,
+    #[serde(default)]
+    psk_id: Option<String>,
     enc: String,
     shared_secret: String,
     encryptions: Vec<Encryption>,
@@ -95,80 +101,126 @@ fn rfc9180_base_mode_vectors() {
     let vectors: Vec<Vector> =
         serde_json::from_str(include_str!("../../tests/data/hpke/rfc9180_base.json")).unwrap();
     assert_eq!(vectors.len(), 32);
-    for v in vectors {
+    for v in &vectors {
         assert_eq!(v.mode, 0);
-        let suite = Suite::from_ids(v.kem_id, v.kdf_id, v.aead_id).unwrap();
-        let name = format!("{suite:?}");
-        let kem = suite.kem;
+        check_vector(v);
+    }
+}
 
-        // DeriveKeyPair for both key pairs.
-        let sk_r = kem.derive_key_pair(&h(&v.ikm_r)).unwrap();
-        assert_eq!(sk_r.public_key().as_bytes(), h(&v.pk_rm), "{name} pkR");
-        assert_eq!(serialized(&sk_r), clamp(kem, h(&v.sk_rm)), "{name} skR");
-        let sk_e = kem.derive_key_pair(&h(&v.ikm_e)).unwrap();
-        assert_eq!(sk_e.public_key().as_bytes(), h(&v.pk_em), "{name} pkE");
-        assert_eq!(serialized(&sk_e), clamp(kem, h(&v.sk_em)), "{name} skE");
+#[test]
+fn rfc9180_psk_mode_vectors() {
+    let vectors: Vec<Vector> =
+        serde_json::from_str(include_str!("../../tests/data/hpke/rfc9180_psk.json")).unwrap();
+    assert_eq!(vectors.len(), 32);
+    for v in &vectors {
+        assert_eq!(v.mode, 1);
+        check_vector(v);
+    }
+}
 
-        // DeserializePrivateKey agrees with DeriveKeyPair.
-        let sk_r2 = PrivateKey::from_bytes(kem, &h(&v.sk_rm)).unwrap();
-        assert_eq!(sk_r2.public_key().as_bytes(), h(&v.pk_rm), "{name}");
+/// Checks one vector: key derivation, the sender's `enc` and KEM shared
+/// secret, every listed encryption in both directions, and the exports.
+fn check_vector(v: &Vector) {
+    let suite = Suite::from_ids(v.kem_id, v.kdf_id, v.aead_id).unwrap();
+    let mode = Mode::from_id(v.mode).unwrap();
+    let name = format!("{suite:?} {mode:?}");
+    let kem = suite.kem;
 
-        let info = h(&v.info);
-        let pk_r = PublicKey::from_bytes(kem, &h(&v.pk_rm)).unwrap();
-        let mut kem_secret = Secret::zeroed(0);
-        let (enc, mut sender) = suite
-            .setup_sender_derandomized(&pk_r, &info, &h(&v.ikm_e), &mut kem_secret)
+    // DeriveKeyPair for both key pairs.
+    let sk_r = kem.derive_key_pair(&h(&v.ikm_r)).unwrap();
+    assert_eq!(sk_r.public_key().as_bytes(), h(&v.pk_rm), "{name} pkR");
+    assert_eq!(serialized(&sk_r), clamp(kem, h(&v.sk_rm)), "{name} skR");
+    let sk_e = kem.derive_key_pair(&h(&v.ikm_e)).unwrap();
+    assert_eq!(sk_e.public_key().as_bytes(), h(&v.pk_em), "{name} pkE");
+    assert_eq!(serialized(&sk_e), clamp(kem, h(&v.sk_em)), "{name} skE");
+
+    // DeserializePrivateKey agrees with DeriveKeyPair.
+    let sk_r2 = PrivateKey::from_bytes(kem, &h(&v.sk_rm)).unwrap();
+    assert_eq!(sk_r2.public_key().as_bytes(), h(&v.pk_rm), "{name}");
+
+    let info = h(&v.info);
+    let psk_bytes = v.psk.as_deref().map(h);
+    let psk_id = v.psk_id.as_deref().map(h);
+    let psk = match (&psk_bytes, &psk_id) {
+        (Some(k), Some(id)) => Some(Psk::new(k, id).unwrap()),
+        (None, None) => None,
+        _ => panic!("{name}: psk without psk_id"),
+    };
+    assert_eq!(psk.is_some(), mode.uses_psk(), "{name}");
+
+    let pk_r = PublicKey::from_bytes(kem, &h(&v.pk_rm)).unwrap();
+    let mut kem_secret = Secret::zeroed(0);
+    let (enc, mut sender) = suite
+        .setup_sender_derandomized(&pk_r, &info, &h(&v.ikm_e), psk.as_ref(), &mut kem_secret)
+        .unwrap();
+    assert_eq!(sender.mode(), mode, "{name}");
+    assert_eq!(enc.as_bytes(), h(&v.enc), "{name} enc");
+    let shared_secret = h(&v.shared_secret);
+    assert_eq!(shared_secret.len(), kem.shared_secret_len(), "{name}");
+    assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} sender");
+    kem_secret.clear();
+    assert!(kem_secret.as_bytes().is_empty());
+    let mut recipient = recipient_for(suite, mode, &h(&v.enc), &sk_r2, &info, psk.as_ref());
+    assert_eq!(recipient.mode(), mode, "{name}");
+    // The logging entry point hands out the vector's `shared_secret` and a
+    // context that agrees with the ordinary one (base mode only: the key
+    // log is for ECH, which uses no other mode).
+    #[cfg(feature = "key-log")]
+    if mode == Mode::Base {
+        let mut kem_secret = KemSharedSecret::new();
+        let logged = suite
+            .setup_recipient_with_kem_secret(&h(&v.enc), &sk_r2, &info, &mut kem_secret)
             .unwrap();
-        assert_eq!(enc.as_bytes(), h(&v.enc), "{name} enc");
-        let shared_secret = h(&v.shared_secret);
-        assert_eq!(shared_secret.len(), kem.shared_secret_len(), "{name}");
-        assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} sender");
-        kem_secret.clear();
-        assert!(kem_secret.as_bytes().is_empty());
-        let mut recipient = suite.setup_recipient(&h(&v.enc), &sk_r2, &info).unwrap();
-        // The logging entry point hands out the vector's `shared_secret`
-        // and a context that agrees with the ordinary one.
-        #[cfg(feature = "key-log")]
-        {
-            let mut kem_secret = KemSharedSecret::new();
-            let logged = suite
-                .setup_recipient_with_kem_secret(&h(&v.enc), &sk_r2, &info, &mut kem_secret)
-                .unwrap();
-            assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} recipient");
-            let mut a = [0u8; 32];
-            let mut b = [0u8; 32];
-            recipient.export(b"key-log", &mut a).unwrap();
-            logged.export(b"key-log", &mut b).unwrap();
-            assert_eq!(a, b, "{name} contexts");
-        }
+        assert_eq!(kem_secret.as_bytes(), shared_secret, "{name} recipient");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        recipient.export(b"key-log", &mut a).unwrap();
+        logged.export(b"key-log", &mut b).unwrap();
+        assert_eq!(a, b, "{name} contexts");
+    }
 
-        for e in &v.encryptions {
-            // Advance both contexts to the vector's sequence number.
-            while sender.sequence_number() < e.seq {
-                let filler = sender.seal(b"", b"").unwrap();
-                recipient.open(b"", &filler).unwrap();
-            }
-            let ct = sender.seal(&h(&e.aad), &h(&e.pt)).unwrap();
-            assert_eq!(ct, h(&e.ct), "{name} seq {}", e.seq);
-            let pt = recipient.open(&h(&e.aad), &ct).unwrap();
-            assert_eq!(pt, h(&e.pt), "{name} seq {}", e.seq);
+    for e in &v.encryptions {
+        // Advance both contexts to the vector's sequence number.
+        while sender.sequence_number() < e.seq {
+            let filler = sender.seal(b"", b"").unwrap();
+            recipient.open(b"", &filler).unwrap();
         }
-        if suite.aead == Aead::ExportOnly {
-            assert_eq!(sender.seal(b"", b"x").err(), Some(Error::Unsupported));
-            assert_eq!(
-                recipient.open(b"", &[0; 16]).err(),
-                Some(Error::Unsupported)
-            );
-        }
+        let ct = sender.seal(&h(&e.aad), &h(&e.pt)).unwrap();
+        assert_eq!(ct, h(&e.ct), "{name} seq {}", e.seq);
+        let pt = recipient.open(&h(&e.aad), &ct).unwrap();
+        assert_eq!(pt, h(&e.pt), "{name} seq {}", e.seq);
+    }
+    if suite.aead == Aead::ExportOnly {
+        assert_eq!(sender.seal(b"", b"x").err(), Some(Error::Unsupported));
+        assert_eq!(
+            recipient.open(b"", &[0; 16]).err(),
+            Some(Error::Unsupported)
+        );
+    }
 
-        for x in &v.exports {
-            let mut a = vec![0u8; x.len];
-            let mut b = vec![0u8; x.len];
-            sender.export(&h(&x.exporter_context), &mut a).unwrap();
-            recipient.export(&h(&x.exporter_context), &mut b).unwrap();
-            assert_eq!(a, h(&x.exported_value), "{name} export");
-            assert_eq!(b, a, "{name} export");
-        }
+    for x in &v.exports {
+        let mut a = vec![0u8; x.len];
+        let mut b = vec![0u8; x.len];
+        sender.export(&h(&x.exporter_context), &mut a).unwrap();
+        recipient.export(&h(&x.exporter_context), &mut b).unwrap();
+        assert_eq!(a, h(&x.exported_value), "{name} export");
+        assert_eq!(b, a, "{name} export");
+    }
+}
+
+/// The public recipient setup of `mode`.
+fn recipient_for(
+    suite: Suite,
+    mode: Mode,
+    enc: &[u8],
+    sk_r: &PrivateKey,
+    info: &[u8],
+    psk: Option<&Psk<'_>>,
+) -> RecipientContext {
+    match (mode, psk) {
+        (Mode::Base, None) => suite.setup_recipient(enc, sk_r, info).unwrap(),
+        (Mode::Psk, Some(psk)) => suite.setup_recipient_psk(enc, sk_r, info, psk).unwrap(),
+        _ => panic!("{mode:?} with the wrong inputs"),
     }
 }
 

@@ -1,15 +1,13 @@
 //! The key schedule and encryption contexts (RFC 9180 §5.1, §5.2, §5.3).
 
 use super::labeled::{Secret, labeled_expand, labeled_extract};
+use super::modes::{Mode, Psk};
 use super::{Aead, MAX_SECRET_LEN, NONCE_LEN, Suite, TAG_LEN};
 use crate::Error;
 use crate::aead::Aead as _;
 use crate::chacha::ChaCha20Poly1305;
 use crate::gcm::{Aes128Gcm, Aes256Gcm};
 use crate::zeroize::{Zeroizing, zeroize_bytes};
-
-/// `mode_base`.
-const MODE_BASE: u8 = 0x00;
 
 enum AeadKey {
     Aes128Gcm(Aes128Gcm),
@@ -20,6 +18,7 @@ enum AeadKey {
 
 pub(super) struct Context {
     suite: Suite,
+    mode: Mode,
     aead: AeadKey,
     base_nonce: [u8; NONCE_LEN],
     seq: u64,
@@ -32,25 +31,39 @@ impl Drop for Context {
     }
 }
 
-/// `KeySchedule<ROLE>(mode_base, shared_secret, info, "", "")`.
+/// `KeySchedule<ROLE>(mode, shared_secret, info, psk, psk_id)`, where an
+/// absent `psk` stands for `default_psk` and `default_psk_id` (both "").
+///
+/// `VerifyPSKInputs` holds by construction: a [`Psk`] always carries a
+/// non-empty key and identifier, so the inputs are either both present or
+/// both absent, and this function checks that they are present exactly for
+/// the modes that take a PSK.
 pub(super) fn key_schedule(
     suite: Suite,
+    mode: Mode,
     shared_secret: &Secret,
     info: &[u8],
+    psk: Option<&Psk<'_>>,
 ) -> Result<Context, Error> {
+    // The callers derive `mode` from the same inputs, so this cannot fail
+    // today; it guards a future caller against a PSK that is silently left
+    // out of, or added to, the key schedule.
+    if mode.uses_psk() != psk.is_some() {
+        return Err(Error::Unsupported);
+    }
+    let (psk, psk_id) = psk.map_or((&b""[..], &b""[..]), |p| (p.key(), p.id()));
     let kdf = suite.kdf;
     let sid = suite.suite_id();
-    // Base mode: psk = psk_id = "".
-    let psk_id_hash = labeled_extract(kdf, &sid, b"", b"psk_id_hash", b"");
+    let psk_id_hash = labeled_extract(kdf, &sid, b"", b"psk_id_hash", psk_id);
     let info_hash = labeled_extract(kdf, &sid, b"", b"info_hash", info);
     let mut ks_context = [0u8; 1 + 2 * MAX_SECRET_LEN];
     let nh = kdf.output_len();
-    ks_context[0] = MODE_BASE;
+    ks_context[0] = mode.id();
     ks_context[1..=nh].copy_from_slice(psk_id_hash.as_bytes());
     ks_context[1 + nh..=2 * nh].copy_from_slice(info_hash.as_bytes());
     let ks_context = &ks_context[..=2 * nh];
 
-    let secret = labeled_extract(kdf, &sid, shared_secret.as_bytes(), b"secret", b"");
+    let secret = labeled_extract(kdf, &sid, shared_secret.as_bytes(), b"secret", psk);
     let prk = secret.as_bytes();
 
     let mut key = Zeroizing([0u8; 32]);
@@ -87,6 +100,7 @@ pub(super) fn key_schedule(
 
     Ok(Context {
         suite,
+        mode,
         aead,
         base_nonce,
         seq: 0,
@@ -163,6 +177,12 @@ macro_rules! common_methods {
             self.0.suite
         }
 
+        /// The mode this context was set up in.
+        #[must_use]
+        pub fn mode(&self) -> Mode {
+            self.0.mode
+        }
+
         /// The number of messages processed so far (the next sequence number).
         #[must_use]
         pub fn sequence_number(&self) -> u64 {
@@ -218,6 +238,7 @@ impl core::fmt::Debug for SenderContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SenderContext")
             .field("suite", &self.0.suite)
+            .field("mode", &self.0.mode)
             .field("seq", &self.0.seq)
             .finish_non_exhaustive()
     }
@@ -272,6 +293,7 @@ impl core::fmt::Debug for RecipientContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RecipientContext")
             .field("suite", &self.0.suite)
+            .field("mode", &self.0.mode)
             .field("seq", &self.0.seq)
             .finish_non_exhaustive()
     }

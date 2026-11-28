@@ -1,4 +1,4 @@
-//! Hybrid Public Key Encryption (RFC 9180), base mode.
+//! Hybrid Public Key Encryption (RFC 9180), base and PSK modes.
 //!
 //! A [`Suite`] names a KEM, a KDF and an AEAD by their IANA identifiers.
 //! [`Suite::setup_sender`] encapsulates to a recipient public key and returns
@@ -16,9 +16,18 @@
 //! | KDF | HKDF-SHA256, HKDF-SHA384, HKDF-SHA512 |
 //! | AEAD | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, export-only |
 //!
-//! Only `mode_base` (RFC 9180 §5.1.1) is implemented. The PSK and
-//! authenticated modes are not: Encrypted Client Hello (RFC 9849), the user
-//! of this module in browntls, needs base mode only.
+//! The modes ([`Mode`]):
+//!
+//! | Mode | Sender setup | Recipient setup |
+//! |---|---|---|
+//! | `mode_base` (§5.1.1) | [`Suite::setup_sender`] | [`Suite::setup_recipient`] |
+//! | `mode_psk` (§5.1.2) | [`Suite::setup_sender_psk`] | [`Suite::setup_recipient_psk`] |
+//!
+//! The PSK mode mixes a pre-shared key ([`Psk`]) into the key schedule, so
+//! the recipient learns that the sender held it. The authenticated modes
+//! (`mode_auth`, `mode_auth_psk`) are not implemented. Encrypted Client
+//! Hello (RFC 9849), the user of this module inside browntls, uses base mode
+//! only; the other modes are for applications.
 //!
 //! The module is allocation-free: encapsulated keys, public keys and secrets
 //! live in fixed-size buffers, and the AEAD operates in place.
@@ -33,12 +42,14 @@ mod ber;
 mod context;
 mod kem;
 mod labeled;
+mod modes;
 mod pkcs8;
 #[cfg(all(test, feature = "alloc"))]
 mod tests;
 
 pub use context::{RecipientContext, SenderContext};
 pub use kem::{EncapsulatedKey, PrivateKey, PublicKey};
+pub use modes::{MIN_PSK_LEN, Mode, Psk};
 pub use pkcs8::MAX_PKCS8_DER_LEN;
 
 use crate::Error;
@@ -341,7 +352,7 @@ impl Suite {
         rng: &dyn SecureRandom,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         let ephemeral = self.kem.generate_key_pair(rng)?;
-        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, None)
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, None, None)
     }
 
     /// [`Suite::setup_sender`] that also copies the KEM shared secret into
@@ -365,43 +376,48 @@ impl Suite {
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         kem_secret.0.clear();
         let ephemeral = self.kem.generate_key_pair(rng)?;
-        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, Some(&mut kem_secret.0))
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, None, Some(&mut kem_secret.0))
     }
 
-    /// `SetupBaseS` with the ephemeral key derived from `ikm_e` through
-    /// `DeriveKeyPair` (as RFC 9180's test vectors do). Test-only: a reused
-    /// `ikm_e` would reuse the ephemeral key. The KEM shared secret is
-    /// copied into `kem_secret`, so that the vectors' `shared_secret` checks
-    /// what the logging entry points hand out.
+    /// A sender setup with the ephemeral key derived from `ikm_e` through
+    /// `DeriveKeyPair` (as RFC 9180's test vectors do): `SetupBaseS`, or
+    /// `SetupPSKS` with `psk`. Test-only: a reused `ikm_e` would reuse the
+    /// ephemeral key. The KEM shared secret is copied into `kem_secret`, so
+    /// that the vectors' `shared_secret` checks what the logging entry points
+    /// hand out.
     #[cfg(all(test, feature = "alloc"))]
     pub(crate) fn setup_sender_derandomized(
         self,
         pk_r: &PublicKey,
         info: &[u8],
         ikm_e: &[u8],
+        psk: Option<&Psk<'_>>,
         kem_secret: &mut labeled::Secret,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         let ephemeral = self.kem.derive_key_pair(ikm_e)?;
-        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, Some(kem_secret))
+        self.setup_sender_with_ephemeral(pk_r, info, &ephemeral, psk, Some(kem_secret))
     }
 
-    /// The common part of every sender setup. `capture`, when present,
-    /// receives a copy of the KEM shared secret: the output of the KEM's
-    /// `Encap`, which is the key schedule's input and none of its outputs.
-    /// Only [`Suite::setup_sender_with_kem_secret`] passes one outside
-    /// tests.
+    /// The common part of every sender setup: base mode without `psk`, PSK
+    /// mode with it. `capture`, when present, receives a copy of the KEM
+    /// shared secret: the output of the KEM's `Encap`, which is the key
+    /// schedule's input and none of its outputs. Only
+    /// [`Suite::setup_sender_with_kem_secret`] passes one outside tests, and
+    /// always in base mode.
     fn setup_sender_with_ephemeral(
         self,
         pk_r: &PublicKey,
         info: &[u8],
         ephemeral: &PrivateKey,
+        psk: Option<&Psk<'_>>,
         capture: Option<&mut labeled::Secret>,
     ) -> Result<(EncapsulatedKey, SenderContext), Error> {
         if pk_r.kem() != self.kem || ephemeral.kem() != self.kem {
             return Err(Error::InvalidKey);
         }
+        let mode = if psk.is_some() { Mode::Psk } else { Mode::Base };
         let (enc, shared_secret) = kem::encap(ephemeral, pk_r)?;
-        let ctx = context::key_schedule(self, &shared_secret, info)?;
+        let ctx = context::key_schedule(self, mode, &shared_secret, info, psk)?;
         if let Some(capture) = capture {
             capture.copy_from(&shared_secret);
         }
@@ -422,7 +438,7 @@ impl Suite {
         sk_r: &PrivateKey,
         info: &[u8],
     ) -> Result<RecipientContext, Error> {
-        self.setup_recipient_capturing(enc, sk_r, info, None)
+        self.setup_recipient_capturing(enc, sk_r, info, None, None)
     }
 
     /// [`Suite::setup_recipient`] that also copies the KEM shared secret
@@ -448,23 +464,25 @@ impl Suite {
         kem_secret: &mut KemSharedSecret,
     ) -> Result<RecipientContext, Error> {
         kem_secret.0.clear();
-        self.setup_recipient_capturing(enc, sk_r, info, Some(&mut kem_secret.0))
+        self.setup_recipient_capturing(enc, sk_r, info, None, Some(&mut kem_secret.0))
     }
 
-    /// The common part of every recipient setup; `capture` is as in
-    /// [`Suite::setup_sender_with_ephemeral`], with `Decap` for `Encap`.
+    /// The common part of every recipient setup; `psk` and `capture` are as
+    /// in [`Suite::setup_sender_with_ephemeral`], with `Decap` for `Encap`.
     fn setup_recipient_capturing(
         self,
         enc: &[u8],
         sk_r: &PrivateKey,
         info: &[u8],
+        psk: Option<&Psk<'_>>,
         capture: Option<&mut labeled::Secret>,
     ) -> Result<RecipientContext, Error> {
         if sk_r.kem() != self.kem {
             return Err(Error::InvalidKey);
         }
+        let mode = if psk.is_some() { Mode::Psk } else { Mode::Base };
         let shared_secret = kem::decap(enc, sk_r)?;
-        let ctx = context::key_schedule(self, &shared_secret, info)?;
+        let ctx = context::key_schedule(self, mode, &shared_secret, info, psk)?;
         if let Some(capture) = capture {
             capture.copy_from(&shared_secret);
         }

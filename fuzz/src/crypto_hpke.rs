@@ -38,10 +38,12 @@
 //!   values and sender public keys. A recipient with another mode, PSK or
 //!   sender key must fail to open the first message and export other
 //!   secrets, as the oracle's does, and one with the session's must
-//!   succeed. The KEM shared secret that the `key-log` entry points (base
-//!   mode) hand out (for RFC 9850's `ECH_SECRET`) must be the same on both
-//!   sides and equal the oracle's `Decap`, for the genuine and for every
-//!   fuzzed `enc`, and a failed setup must leave the caller's buffer empty.
+//!   succeed. X448 sessions (the oracle has no X448) and foreign-KEM sender
+//!   keys are checked for consistency within the library only. The KEM
+//!   shared secret that the `key-log` entry points (base mode) hand out (for
+//!   RFC 9850's `ECH_SECRET`) must be the same on both sides and equal the
+//!   oracle's `Decap`, for the genuine and for every fuzzed `enc`, and a
+//!   failed setup must leave the caller's buffer empty.
 //! - provider: one of the native provider's suites through the `Hpke`,
 //!   `HpkeSealer` and `HpkeOpener` traits with fuzzed info, aad, plaintext,
 //!   public keys, private keys and `enc`; results must agree with the crate

@@ -392,8 +392,15 @@ pub(super) fn provider_modes(input: &mut Input<'_>) {
                 let ours = export(len, |o| opener.export(ctx, o).is_ok());
                 let theirs = export(len, |o| crate_opener.export(ctx, o).is_ok());
                 assert_eq!(ours, theirs, "{tls:?}: opener export differs");
-                if (1..=limit).contains(&len) {
-                    assert_eq!(ours == sent, genuine, "{tls:?}: exports");
+                // A genuine opener exports the sender's bytes. Another one
+                // exports an unrelated PRF output, which a short export can
+                // match by chance (1 in 256 at one byte), so the converse is
+                // checked from 16 bytes up.
+                if genuine && len <= limit {
+                    assert_eq!(ours, sent, "{tls:?}: genuine export differs");
+                }
+                if !genuine && (16..=limit).contains(&len) {
+                    assert_ne!(ours, sent, "{tls:?}: forged export matches");
                 }
             }
             continue;

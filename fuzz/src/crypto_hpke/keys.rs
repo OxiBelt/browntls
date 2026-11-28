@@ -40,17 +40,27 @@ pub(super) fn ids(input: &mut Input<'_>) {
         }
         _ => assert_eq!(suite, None),
     }
-    // A mode identifier (RFC 9180 Table 1): base and PSK only.
+    // A mode identifier (RFC 9180 Table 1): bit 0 is the PSK, bit 1 the
+    // sender key.
     let m = input.byte();
     let mode = Mode::from_id(m);
     assert_eq!(mode, Mode::ALL.into_iter().find(|x| x.id() == m));
-    assert_eq!(mode.map(Mode::id), (m <= 1).then_some(m));
-    assert_eq!(mode.map(Mode::uses_psk), (m <= 1).then_some(m == 1));
+    assert_eq!(mode.map(Mode::id), (m <= 3).then_some(m));
+    assert_eq!(mode.map(Mode::uses_psk), (m <= 3).then_some(m & 1 != 0));
+    assert_eq!(
+        mode.map(Mode::uses_sender_key),
+        (m <= 3).then_some(m & 2 != 0)
+    );
     for (mode, id) in Mode::ALL.into_iter().zip(0u8..) {
         assert_eq!(mode.id(), id);
         assert_eq!(Mode::from_id(id), Some(mode));
-        assert_eq!(mode.uses_psk(), mode == Mode::Psk);
+        assert_eq!(mode.uses_psk(), matches!(mode, Mode::Psk | Mode::AuthPsk));
+        assert_eq!(
+            mode.uses_sender_key(),
+            matches!(mode, Mode::Auth | Mode::AuthPsk)
+        );
     }
+    assert_eq!(Mode::ALL.len(), 4);
     assert_eq!(MIN_PSK_LEN, 32);
     // The TLS-side identifier types.
     let tag_len = HpkeAead(a).tag_len();

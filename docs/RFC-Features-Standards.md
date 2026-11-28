@@ -92,7 +92,12 @@ erratum 9272 on header protection, held 9231 and rejected 7785.
   proposes to obsolete RFC 9180 and specifies Base and PSK only. It
   reserves Auth and AuthPSK IDs for the RFC 9180 variants. Resolve the
   target specification and real application use before implementing
-  any mode.
+  any mode. Resolved on 2026-11-28: the target is RFC 9180 with the
+  verified errata, for all three modes, and `draft-ietf-hpke-hpke-06`
+  agrees on PSK. The users are applications of the HPKE primitive and
+  of the core provider API; no browntls protocol uses the new modes,
+  and ECH stays on base mode. See
+  [Architecture](Architecture.md#primitive-backends).
 - **Phase 7.** RFC 9147 §5.6 omits EndOfEarlyData, including in the
   transcript. Section 6.1 assigns early data to epoch 1. The TLS
   `early_data` extension uses ID 42. Add cross-connection replay

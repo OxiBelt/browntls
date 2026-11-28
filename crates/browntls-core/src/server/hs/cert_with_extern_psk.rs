@@ -1,11 +1,10 @@
-use alloc::collections::BTreeSet;
-
 use crate::common_state::CommonState;
 use crate::enums::{AlertDescription, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
 use crate::msgs::enums::PskKeyExchangeMode;
 use crate::msgs::handshake::ClientExtensions;
 use crate::msgs::persist::ServerSessionValue;
+use crate::psk::MAX_PSK_IDENTITIES_CONSIDERED;
 use crate::server::ServerConfig;
 
 /// RFC 9973 §§4–5.1, on the effective (inner if ECH was accepted) hello.
@@ -56,8 +55,9 @@ pub(super) fn check_client_hello(
 }
 
 /// RFC 9973 §5.1 excludes every resumption identity, even one we would
-/// never select. Check the entire wire-bounded list without consuming
-/// stateful tickets or invoking the external PSK resolver.
+/// never select. Bound the distinct identities before any ticket work, then
+/// check them all without consuming stateful tickets or resolving external
+/// PSKs.
 pub(super) fn reject_tickets(
     common: &mut CommonState,
     config: &ServerConfig,
@@ -70,16 +70,31 @@ pub(super) fn reject_tickets(
     else {
         return Ok(());
     };
-    let stateless = config.ticketer.enabled();
-    let mut checked = BTreeSet::new();
+    // A later ticket check must not be skipped: RFC 9973 requires rejecting
+    // any offered resumption PSK, including one past the selection limit.
+    // Preserve first-seen order and repeated-identity behavior while keeping
+    // both the scratch space and subsequent backend calls bounded.
+    let mut distinct: [&[u8]; MAX_PSK_IDENTITIES_CONSIDERED] = [&[]; MAX_PSK_IDENTITIES_CONSIDERED];
+    let mut count = 0;
     for identity in offer
         .identities
         .iter()
         .map(|candidate| candidate.identity.0.as_slice())
     {
-        if !checked.insert(identity) {
+        if distinct[..count].contains(&identity) {
             continue;
         }
+        if count == MAX_PSK_IDENTITIES_CONSIDERED {
+            return Err(common.send_fatal_alert(
+                AlertDescription::IllegalParameter,
+                PeerMisbehaved::TooManyCertWithExternPskIdentities,
+            ));
+        }
+        distinct[count] = identity;
+        count += 1;
+    }
+    let stateless = config.ticketer.enabled();
+    for &identity in &distinct[..count] {
         if is_tls13_version(config.session_storage.session_version(identity))
             || (stateless && is_tls13_version(stateless_ticket_version(config, identity)))
         {

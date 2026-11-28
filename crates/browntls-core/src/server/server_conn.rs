@@ -48,9 +48,10 @@ pub trait StoresServerSessions: fmt::Debug + Send + Sync {
 
     /// Reads the protocol version without consuming the stored session.
     ///
-    /// RFC 9973 can call this once per distinct PSK identity. The default
-    /// fetches the value using [`Self::get`]. Stores can override this method
-    /// to read version metadata without fetching the full value.
+    /// RFC 9973 can call this once per distinct offered PSK identity, up to
+    /// the server's limit of 16 per ClientHello. The default fetches the value
+    /// using [`Self::get`]. Stores can override this method to read version
+    /// metadata without fetching the full value.
     fn session_version(&self, key: &[u8]) -> Option<ProtocolVersion> {
         let mut value = self.get(key)?;
         let version = crate::msgs::persist::ServerSessionValue::encoded_version(&value);

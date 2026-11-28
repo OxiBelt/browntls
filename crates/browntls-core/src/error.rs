@@ -420,6 +420,8 @@ pub enum PeerMisbehaved {
     CertWithExternPskChangedOnRetry,
     /// An RFC 9973 ClientHello offered a recognizable resumption ticket.
     ResumptionPskOfferedWithCertWithExternPsk,
+    /// An RFC 9973 offer exceeded the server's distinct-identity work limit.
+    TooManyCertWithExternPskIdentities,
     /// A DTLS 1.3 ClientHello whose `legacy_cookie` is not empty (RFC 9147
     /// §5.3).
     IllegalDtlsLegacyCookie,

@@ -9,11 +9,15 @@ mod prov;
 
 mod common;
 
+#[path = "ech_native/hpke_modes.rs"]
+mod hpke_modes;
 #[path = "ech_native/key_log.rs"]
 mod key_log;
 #[cfg(all(feature = "key-log", feature = "rustcrypto", target_os = "linux"))]
 #[path = "ech_native/key_log_fixture.rs"]
 mod key_log_fixture;
+#[path = "ech_native/outer_wire.rs"]
+mod outer_wire;
 #[path = "ech_native/pem_config.rs"]
 mod pem_config;
 #[path = "ech_native/shared_mode.rs"]

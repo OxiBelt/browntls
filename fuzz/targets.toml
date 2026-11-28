@@ -285,6 +285,8 @@ topic = "crypto-asymmetric"
 sources = [
   "crates/browntls-crypto/src/hpke/**",
   "crates/browntls-core/src/crypto/hpke.rs",
+  "crates/browntls-core/src/crypto/hpke/**",
+  "crates/browntls-core/src/crypto/native/hpke.rs",
   "crates/browntls-crypto/src/curve25519/**",
   "crates/browntls-crypto/src/nist/**",
   "crates/browntls-crypto/src/aes/**",

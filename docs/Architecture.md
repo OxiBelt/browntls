@@ -3705,15 +3705,64 @@ MAC-then-encrypt, the padding check and the record MAC are constant time with
 respect to the padding (the Lucky Thirteen countermeasure): the number of hash
 compressions depends only on the record length.
 
-`browntls_crypto::hpke` implements RFC 9180 Hybrid Public Key Encryption in
-base mode for Encrypted Client Hello: DHKEM over X25519, X448, P-256, P-384
-and P-521, HKDF-SHA256/384/512, and AES-128-GCM, AES-256-GCM,
-ChaCha20-Poly1305 or export-only. It composes the crate's own primitives (and
-therefore their accelerated backends), adds no `unsafe`, and stays
-allocation-free: `seal`/`open` returning vectors exist only with `alloc`.
-NIST public keys must be uncompressed points on the curve, X25519/X448
-all-zero shared secrets are rejected, and a failed `open` leaves the sequence
-number unchanged. The PSK and authenticated modes are not implemented.
+`browntls_crypto::hpke` implements RFC 9180 Hybrid Public Key Encryption:
+DHKEM over X25519, X448, P-256, P-384 and P-521, HKDF-SHA256/384/512, and
+AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 or export-only. It composes the
+crate's own primitives (and therefore their accelerated backends), adds no
+`unsafe`, and stays allocation-free: `seal`/`open` returning vectors exist
+only with `alloc`. NIST public keys must be uncompressed points on the
+curve, X25519/X448 all-zero shared secrets are rejected, and a failed `open`
+leaves the sequence number unchanged.
+
+All four modes of RFC 9180 §5.1 are implemented, each with its own pair of
+setup functions on `Suite`: base (`setup_sender`, `setup_recipient`), PSK
+(`setup_sender_psk`, `setup_recipient_psk`), Auth (`setup_sender_auth`,
+`setup_recipient_auth`) and AuthPSK (`setup_sender_auth_psk`,
+`setup_recipient_auth_psk`). Encrypted Client Hello uses base mode only, and
+so does the `key-log` feature's KEM-secret capture. The other three modes
+are offered to applications as independent primitives (Phase 6 of the
+[RFC features plan](RFC-Features-Delivery.md), where the maintainer chose
+all three); no protocol inside browntls uses them. The contracts:
+
+- A `Psk` borrows a key of at least 32 bytes and a non-empty identifier, so
+  RFC 9180's `VerifyPSKInputs` holds by construction and the key is never
+  copied out of the caller's buffer. The length is a floor, not an entropy
+  check: §9.5 rules out passwords, since HKDF does not slow a dictionary
+  attack.
+- The authenticated modes use the DHKEM's `AuthEncap`/`AuthDecap` (§4.1):
+  `DH(skE, pkR) || DH(skS, pkR)` over the KEM context `enc || pkRm || pkSm`,
+  in a zeroised buffer. A sender key of another KEM is refused and an
+  all-zero result of either exchange fails the setup. They authenticate the
+  sender's key pair only; an identity belongs in `info` (§5.1.3). Holding
+  the recipient's private key suffices to forge Auth-mode messages, and the
+  PSK as well in AuthPSK mode (key-compromise impersonation, §9.1.1).
+- A wrong PSK, sender key or mode is never reported at setup: the setup
+  succeeds, the first `open` fails without advancing the sequence number,
+  and exports differ.
+- The proposed successor of RFC 9180, `draft-ietf-hpke-hpke-06`, specifies
+  base and PSK only. It reserves the identifiers of Auth and AuthPSK for the
+  RFC 9180 variants and states that it does not deprecate them, so browntls
+  follows RFC 9180 for those two.
+
+In `browntls-core` (and so the `browntls` facade), `crypto::hpke::HpkeModes`
+extends the ECH-facing `Hpke` trait with `setup_sealer_with_mode` and
+`setup_opener_with_mode`, which take an `HpkeSealMode` or `HpkeOpenMode`
+(base, PSK with an `HpkePsk`, Auth with the sender's private or public key,
+AuthPSK with both). `HpkeSealer` and `HpkeOpener` gain a provided `export`
+(RFC 9180 §5.3) that fails unless the implementation overrides it, as the
+native one does. `native::hpke::ALL_SUPPORTED_SUITES_WITH_MODES` lists the
+45 suites of `ALL_SUPPORTED_SUITES`, in the same order, and then the 15
+export-only suites that ECH cannot use. ECH keeps taking `&dyn Hpke` and
+calls only the base-mode setups; a test opens a real ClientHelloOuter
+payload with a base-mode recipient and checks that PSK, Auth and AuthPSK
+recipients with the same server key cannot. The RustCrypto provider still
+has no HPKE.
+
+The tests are the RFC 9180 Appendix A vectors of all four modes for the
+supported suites (32 per mode, X448 included; the CFRG file at commit
+`5f503c56`), differential runs against the `hpke` crate in both directions
+for every mode and every X25519 and NIST suite (the crate has no X448), and
+mismatch, foreign-key and all-zero cases.
 
 `browntls_crypto::nist::{p256, p384, p521}` expose, besides keys, ECDH and
 ECDSA, the curves' arithmetic for other protocols, named after the RustCrypto

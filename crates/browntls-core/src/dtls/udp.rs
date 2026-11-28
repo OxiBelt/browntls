@@ -554,10 +554,10 @@ fn io_error(err: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
-/// The bytes a cookie binds a client to: its address family, address and
-/// port.
+/// The bytes a cookie binds a client to: its address family, address,
+/// IPv6 scope identifier (when present), and port.
 fn address_bytes(addr: &SocketAddr) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(19);
+    let mut bytes = Vec::with_capacity(23);
     match addr {
         SocketAddr::V4(v4) => {
             bytes.push(4);
@@ -566,6 +566,7 @@ fn address_bytes(addr: &SocketAddr) -> Vec<u8> {
         SocketAddr::V6(v6) => {
             bytes.push(6);
             bytes.extend_from_slice(&v6.ip().octets());
+            bytes.extend_from_slice(&v6.scope_id().to_be_bytes());
         }
     }
     bytes.extend_from_slice(&addr.port().to_be_bytes());
@@ -575,6 +576,7 @@ fn address_bytes(addr: &SocketAddr) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv6Addr, SocketAddrV6};
 
     #[test]
     fn waits_for_the_earliest_deadline() {
@@ -604,6 +606,23 @@ mod tests {
         let v6: SocketAddr = "[::ffff:1.2.3.4]:5".parse().unwrap();
         assert_eq!(address_bytes(&v4), [4, 1, 2, 3, 4, 0, 5]);
         assert_ne!(address_bytes(&v4), address_bytes(&v6));
-        assert_eq!(address_bytes(&v6).len(), 19);
+        assert_eq!(address_bytes(&v6).len(), 23);
+    }
+
+    #[test]
+    fn address_bytes_bind_ipv6_scope() {
+        let ip: Ipv6Addr = "fe80::1234".parse().unwrap();
+        let scoped = |scope_id| SocketAddr::V6(SocketAddrV6::new(ip, 5000, 0, scope_id));
+        let scope_zero = address_bytes(&scoped(0));
+        let scope_two = address_bytes(&scoped(2));
+        let scope_three = address_bytes(&scoped(3));
+
+        assert_ne!(scoped(2), scoped(3));
+        assert_ne!(scope_zero, scope_two);
+        assert_ne!(scope_two, scope_three);
+        assert_eq!(scope_two[0], 6);
+        assert_eq!(&scope_two[1..17], &ip.octets());
+        assert_eq!(&scope_two[17..21], &2_u32.to_be_bytes());
+        assert_eq!(&scope_two[21..], &5000_u16.to_be_bytes());
     }
 }

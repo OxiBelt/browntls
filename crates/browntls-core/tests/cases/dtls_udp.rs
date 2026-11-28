@@ -619,8 +619,9 @@ fn ipv6_loopback_exchanges_data_with_a_source_bound_cookie() {
     let SocketAddr::V6(peer) = socket.local_addr().unwrap() else {
         panic!("expected an IPv6 source");
     };
-    let mut address = vec![0, 19, 6];
+    let mut address = vec![0, 23, 6];
     address.extend_from_slice(&peer.ip().octets());
+    address.extend_from_slice(&peer.scope_id().to_be_bytes());
     address.extend_from_slice(&peer.port().to_be_bytes());
     let cookies = Arc::new(SourceBoundCookies {
         inner: prov::Ticketer::new().unwrap(),

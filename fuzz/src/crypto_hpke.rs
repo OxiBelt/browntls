@@ -1,5 +1,5 @@
-//! `browntls-crypto` HPKE (RFC 9180, base mode) and the TLS-side HPKE
-//! provider API (`browntls_core::crypto::hpke`, implemented by
+//! `browntls-crypto` HPKE (RFC 9180, base and PSK modes) and the TLS-side
+//! HPKE provider API (`browntls_core::crypto::hpke`, implemented by
 //! `browntls_core::crypto::native::hpke`).
 //!
 //! The input is a program of up to [`MAX_OPS`] operations, each an op byte
@@ -7,24 +7,35 @@
 //!
 //! - identifiers: fuzzed KEM, KDF and AEAD identifiers look up exactly the
 //!   listed algorithms, `Suite::from_ids` agrees, every length accessor is
-//!   consistent, and the TLS-side `HpkeAead::tag_len` agrees with the crate.
+//!   consistent, and the TLS-side `HpkeAead::tag_len` agrees with the crate;
+//!   a fuzzed mode identifier looks up exactly the listed modes (`Mode`), and
+//!   only the PSK mode takes a PSK.
 //! - keys: `DeriveKeyPair` on fuzzed key material, private and public key
 //!   deserialization of fuzzed bytes, serialization, `GenerateKeyPair` from a
 //!   fixed random source, and setups with a key of another KEM; checked
 //!   against the RustCrypto `hpke` oracle (no oracle for X448).
 //! - session: a suite, recipient key material, the sender's ephemeral key
 //!   material (a fixed random source, so the encapsulation is deterministic)
-//!   and `info`, then a sub-program of seals (in place or not) with fuzzed
-//!   aad and plaintext, in-order and out-of-order opens, tampered and fuzzed
-//!   ciphertexts, exports of fuzzed lengths and a recipient setup with a
-//!   fuzzed `enc`. Sealed ciphertexts and exported secrets must equal the
-//!   oracle's byte for byte, both contexts must agree, rejected ciphertexts
-//!   must not advance the sequence number, and the oracle must accept and
-//!   reject the same `enc` values. The KEM shared secret that the `key-log`
-//!   entry points hand out (for RFC 9850's `ECH_SECRET`) must be the same on
-//!   both sides and equal the oracle's `Decap`, for the genuine and for
-//!   every fuzzed `enc`, and a failed setup must leave the caller's buffer
-//!   empty.
+//!   and `info`; a bit of the random-source byte ([`SETUP_PSK`]) selects the
+//!   PSK mode, with a fuzzed PSK and identifier. `Psk::new` must refuse
+//!   exactly a key shorter than `MIN_PSK_LEN` or an empty identifier (the
+//!   session then runs in base mode), and accept only what the oracle's
+//!   `PskBundle::new` accepts; the oracle, which takes shorter keys, is
+//!   compared only on PSKs we accept. Then a sub-program of seals (in place
+//!   or not) with fuzzed aad and plaintext, in-order and out-of-order opens,
+//!   tampered and fuzzed ciphertexts, exports of fuzzed lengths, a recipient
+//!   setup with a fuzzed `enc`, and recipients of the genuine `enc` in base
+//!   mode or with another PSK (a mutated key or identifier, or a fuzzed
+//!   one). Sealed ciphertexts and exported secrets must equal the oracle's
+//!   byte for byte, in either mode, both contexts must agree and report the
+//!   session's mode, rejected ciphertexts must not advance the sequence
+//!   number, and the oracle must accept and reject the same `enc` values. A
+//!   recipient with another mode or PSK must fail to open the first message
+//!   and export other secrets, as the oracle's does, and one with the
+//!   session's must succeed. The KEM shared secret that the `key-log` entry
+//!   points hand out (for RFC 9850's `ECH_SECRET`) must be the same on both
+//!   sides and equal the oracle's `Decap`, for the genuine and for every
+//!   fuzzed `enc`, and a failed setup must leave the caller's buffer empty.
 //! - provider: one of the native provider's suites through the `Hpke`,
 //!   `HpkeSealer` and `HpkeOpener` traits with fuzzed info, aad, plaintext,
 //!   public keys, private keys and `enc`; results must agree with the crate
@@ -60,7 +71,12 @@ const STEP_OPEN_FUZZED: u8 = 3;
 const STEP_EXPORT: u8 = 4;
 const STEP_OUT_OF_ORDER: u8 = 5;
 const STEP_RECIPIENT: u8 = 6;
-const STEPS: usize = 7;
+const STEP_OTHER_PSK: u8 = 7;
+const STEPS: usize = 8;
+
+/// The bit of a session's random-source byte that selects the PSK mode
+/// (the byte's value modulo 8 still selects a short random source when 0).
+const SETUP_PSK: u8 = 0x08;
 
 /// The `crypto_hpke` fuzz target.
 pub fn run(data: &[u8]) {
@@ -152,6 +168,35 @@ fn session_steps(enc_len: usize) -> Vec<u8> {
     steps
 }
 
+/// The steps of a PSK session seed (at most [`MAX_STEPS`]): two messages,
+/// an export, recipients of the genuine and a mutated `enc` with the
+/// session's PSK, then recipients of the genuine `enc` in base mode, with
+/// a flipped key bit, a shorter identifier, a key one byte shorter, a
+/// fuzzed PSK and the session's PSK unchanged, and the two opens.
+fn psk_steps() -> Vec<u8> {
+    let mut steps = vec![STEP_SEAL];
+    put_short_field(&mut steps, b"aad");
+    put_field(&mut steps, b"hello");
+    steps.extend_from_slice(&[STEP_SEAL_IN_PLACE, 0, 0, 2, b'h', b'i']);
+    steps.extend_from_slice(&[STEP_EXPORT, 3, b'c', b't', b'x', 0, 42]);
+    steps.extend_from_slice(&[STEP_RECIPIENT, 1, 0, 0, 1, b'x']);
+    steps.extend_from_slice(&[STEP_RECIPIENT, 1, 1, 0, 9, 0, 1, b'x']);
+    // `mutate` arguments: flips (count, then position and mask each), then
+    // a length change (1 drops the last byte).
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 0, 1, b'x']);
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 1, 1, 0, 1, 0, 1, b'x']);
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 2, 0, 1, 1, b'x']);
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 1, 0, 1, 1, b'x']);
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 3]);
+    put_short_field(&mut steps, &[0x5c; 40]);
+    put_short_field(&mut steps, b"other");
+    put_short_field(&mut steps, b"x");
+    steps.extend_from_slice(&[STEP_OTHER_PSK, 1, 0, 0, 1, b'x']);
+    steps.extend_from_slice(&[STEP_OPEN, 0, 0]);
+    steps.extend_from_slice(&[STEP_OPEN, 1, 0]);
+    steps
+}
+
 /// Starting inputs for `crypto_hpke`.
 #[must_use]
 pub fn seeds() -> Vec<Vec<u8>> {
@@ -162,6 +207,11 @@ pub fn seeds() -> Vec<Vec<u8>> {
     }
     seeds.push(vec![OP_IDS, 1, 0xff, 2, 1, 1, 0xff]);
     seeds.push(vec![OP_IDS, 0, 0x00, 0x20, 0, 0x00, 0x01, 1, 0xfe]);
+    // mode identifiers (the seeds above end before theirs, which reads 0):
+    // PSK, not implemented (mode_auth), out of range
+    for mode in [1u8, 2, 0xff] {
+        seeds.push(vec![OP_IDS, 2, 0x20, 2, 1, 2, 1, mode]);
+    }
 
     let ikm: Vec<u8> = (0..66u8).map(|i| i.wrapping_mul(47) ^ 0x2d).collect();
     for (k, kem) in (0u8..).zip(Kem::ALL) {
@@ -228,6 +278,50 @@ pub fn seeds() -> Vec<Vec<u8>> {
         seed.extend_from_slice(&ikm[..7]);
         seeds.push(seed);
     }
+
+    // PSK sessions: a PSK of the minimum length (X25519 with every AEAD; a
+    // key one byte shorter is refused) and a longer one (P-256), then PSKs
+    // `Psk::new` refuses (a key one byte short, an empty identifier, both
+    // empty; the session runs in base mode) and the PSK mode with a short
+    // random source.
+    let psk: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(29) ^ 0x5a).collect();
+    let psk_session = |k: u8, kdf: u8, aead: u8, setup: u8, key: &[u8], id: &[u8]| {
+        let kem = Kem::ALL[usize::from(k)];
+        let mut seed = vec![OP_SESSION, k, kdf, aead];
+        put_short_field(&mut seed, &ikm);
+        seed.push(setup);
+        seed.extend_from_slice(&ikm[..kem.private_key_len()]);
+        put_short_field(&mut seed, b"info");
+        put_short_field(&mut seed, key);
+        put_short_field(&mut seed, id);
+        seed
+    };
+    let x25519 = 3u8;
+    assert_eq!(Kem::ALL[usize::from(x25519)], Kem::DhX25519HkdfSha256);
+    for aead in 0u8..4 {
+        let mut seed = psk_session(x25519, aead % 3, aead, SETUP_PSK | 1, &psk[..32], b"psk-id");
+        seed.extend_from_slice(&psk_steps());
+        seeds.push(seed);
+    }
+    let mut seed = psk_session(0, 1, 0, SETUP_PSK | 1, &psk, b"client psk");
+    seed.extend_from_slice(&psk_steps());
+    seeds.push(seed);
+    for (key, id) in [(&psk[..31], &b"psk-id"[..]), (&psk[..32], b""), (b"", b"")] {
+        let mut seed = psk_session(x25519, 0, 2, SETUP_PSK | 1, key, id);
+        seed.push(STEP_SEAL);
+        put_short_field(&mut seed, b"aad");
+        put_field(&mut seed, b"base");
+        seed.extend_from_slice(&[STEP_OTHER_PSK, 0, 1, b'x', STEP_OPEN, 0, 0]);
+        seeds.push(seed);
+    }
+    let mut seed = vec![OP_SESSION, x25519, 0, 0];
+    put_short_field(&mut seed, &ikm);
+    seed.extend_from_slice(&[SETUP_PSK, 7]);
+    seed.extend_from_slice(&ikm[..7]);
+    put_short_field(&mut seed, b"info");
+    put_short_field(&mut seed, &psk[..32]);
+    put_short_field(&mut seed, b"psk-id");
+    seeds.push(seed);
 
     // The provider: derived and generated keys, fuzzed public keys, private
     // keys and enc, seal/open rounds with tampering.

@@ -184,6 +184,44 @@ fn rfc9973_offer_and_identity_are_inner_only() {
     assert_eq!(server.external_psk_identity(), Some(identity.as_slice()));
 }
 
+#[test]
+fn rfc9973_ech_inner_rejects_a_seventeenth_distinct_identity() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+    use hello_wire::{fatal_alert, give, take_flight};
+
+    let certs = Certs::new();
+    let ech = Arc::new(EchServerConfig::new(vec![server_key(23)]).unwrap());
+    let mut client_config = client_config(&certs, enable(ech.ech_config_list()));
+    client_config.cert_with_extern_psk = true;
+    client_config.external_psks = (0..17)
+        .map(|identity| {
+            Arc::new(
+                ExternalPsk::new(
+                    vec![u8::try_from(identity).unwrap()],
+                    vec![42; 32],
+                    HashAlgorithm::SHA256,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let server_config = server_config(&certs, Some(&ech), None);
+    let (mut client, mut server) = connect(client_config, server_config);
+    let outer = take_flight(&mut client);
+
+    give(&mut server, &outer);
+    assert_eq!(
+        server.process_new_packets().unwrap_err(),
+        Error::PeerMisbehaved(browntls_core::PeerMisbehaved::TooManyCertWithExternPskIdentities)
+    );
+    assert_eq!(server.ech_status(), EchStatus::Accepted);
+    assert_eq!(
+        fatal_alert(&take_flight(&mut server)),
+        Some(u8::from(AlertDescription::IllegalParameter))
+    );
+}
+
 /// Runs a handshake the server rejects ECH in; returns the client's error.
 fn expect_rejected(client: &mut ClientConnection, server: &mut ServerConnection) -> Error {
     let (client_res, server_res) = do_handshake_until_error(client, server);

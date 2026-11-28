@@ -46,6 +46,18 @@
 //!   `HpkeSealer` and `HpkeOpener` traits with fuzzed info, aad, plaintext,
 //!   public keys, private keys and `enc`; results must agree with the crate
 //!   API underneath.
+//! - provider modes: one of `ALL_SUPPORTED_SUITES_WITH_MODES` (which must
+//!   list `ALL_SUPPORTED_SUITES`, then every export-only suite) through
+//!   `HpkeModes` in a mode chosen by flags, with a fuzzed `HpkePsk` (refused
+//!   exactly when `Psk::new` refuses it; its accessors, clone and `Debug`)
+//!   and sender key (also fuzzed bytes, accepted exactly when the crate
+//!   accepts them). A provider sealer must agree with a crate recipient,
+//!   and a crate sender with a provider opener in the same or another mode,
+//!   with a mutated sender public key or PSK, exactly as a crate recipient
+//!   set up the same way: opens and `export` of fuzzed lengths succeed and
+//!   match the sender exactly when the opener's inputs are the sender's.
+//!   Export-only suites seal and open nothing. The provided `export` of a
+//!   sealer and an opener that do not override it fails.
 
 mod kem_secret;
 mod keys;
@@ -55,7 +67,7 @@ mod session;
 use browntls_crypto::hpke::{Aead, Kdf, Kem, Suite};
 
 use self::keys::{ids, keys, private_bytes};
-use self::provider::provider;
+use self::provider::{provider, provider_modes};
 use self::session::session;
 use crate::input::{Input, put_field, put_short_field};
 
@@ -68,7 +80,8 @@ const OP_IDS: u8 = 0;
 const OP_KEYS: u8 = 1;
 const OP_SESSION: u8 = 2;
 const OP_PROVIDER: u8 = 3;
-const OPS: usize = 4;
+const OP_PROVIDER_MODES: u8 = 4;
+const OPS: usize = 5;
 
 const STEP_SEAL: u8 = 0;
 const STEP_SEAL_IN_PLACE: u8 = 1;
@@ -98,7 +111,8 @@ pub fn run(data: &[u8]) {
             OP_IDS => ids(&mut input),
             OP_KEYS => keys(&mut input),
             OP_SESSION => session(&mut input),
-            _ => provider(&mut input),
+            OP_PROVIDER => provider(&mut input),
+            _ => provider_modes(&mut input),
         }
     }
 }
@@ -446,6 +460,76 @@ pub fn seeds() -> Vec<Vec<u8>> {
         seeds.push([&derived[..], &[0, 0, 1, 0, 0x80, 0]].concat());
         seeds.push([&derived[..], &[0, 1, 0, 0, 0]].concat());
         seeds.push([&derived[..], &[0, 1, 0, 0, 1]].concat());
+    }
+
+    // The provider's modes: every mode on X25519, an opener in another mode,
+    // with a mutated sender public key, a mutated PSK key and one a byte
+    // short (refused), fuzzed sender private keys (a flipped bit, a short
+    // key), a refused sender PSK (base mode), export-only suites, and
+    // AuthPSK on the other KEMs.
+    let mut steps = Vec::new();
+    for (aad, pt) in [(&b"aad"[..], &b"hello"[..]), (b"", b"")] {
+        steps.push(0);
+        put_short_field(&mut steps, aad);
+        put_field(&mut steps, pt);
+    }
+    // exports: short, at the limit, past it
+    steps.extend_from_slice(&[1, 3, b'c', b't', b'x', 0, 42]);
+    steps.extend_from_slice(&[1, 0, 1, 4, 1, 0, 1, 5]);
+    steps.push(0);
+    put_short_field(&mut steps, b"aad");
+    put_field(&mut steps, b"again");
+    let with_modes = browntls_core::crypto::native::hpke::ALL_SUPPORTED_SUITES_WITH_MODES;
+    let modes_seed = |index: u8, flags: u8, key: &[u8], sender: &[u8], opener: &[u8]| {
+        let tls = with_modes[usize::from(index)].suite();
+        let nsk = Kem::from_id(tls.kem.0)
+            .expect("crate KEM")
+            .private_key_len();
+        let mut seed = vec![OP_PROVIDER_MODES, index];
+        seed.extend_from_slice(&ikm[..nsk]);
+        put_short_field(&mut seed, b"info");
+        seed.push(flags);
+        if flags & 1 != 0 {
+            put_short_field(&mut seed, key);
+            put_short_field(&mut seed, b"psk-id");
+        }
+        if flags & 2 != 0 {
+            seed.extend(ikm[..nsk].iter().map(|b| b ^ 0x3c));
+        }
+        seed.extend_from_slice(sender);
+        seed.extend(ikm[..nsk].iter().rev());
+        seed.extend_from_slice(opener);
+        seed.extend_from_slice(&steps);
+        seed
+    };
+    let key = &psk[..32];
+    for flags in 0..4 {
+        seeds.push(modes_seed(0, flags, key, &[], &[0]));
+    }
+    for opener in [
+        &[1u8, 0][..],
+        &[1, 1],
+        &[1, 2],
+        &[2, 1, 0, 1, 0],
+        &[3, 1, 0, 1, 0],
+        &[3, 0, 1],
+    ] {
+        seeds.push(modes_seed(2, 3, key, &[], opener));
+    }
+    seeds.push(modes_seed(0, 2, key, &[], &[2, 0, 0]));
+    // a base sender: openers with the fixed PSK and the recipient's own key,
+    // and a mutated fixed PSK; a P-256 sender key cut short (no opener)
+    seeds.push(modes_seed(0, 0, key, &[], &[1, 3]));
+    seeds.push(modes_seed(0, 0, key, &[], &[3, 1, 0, 1, 0]));
+    seeds.push(modes_seed(9, 2, key, &[], &[2, 0, 1]));
+    seeds.push(modes_seed(0, 7, key, &[1, 0, 1, 0], &[]));
+    seeds.push(modes_seed(9, 6, key, &[0, 1], &[]));
+    seeds.push(modes_seed(0, 1, &psk[..31], &[], &[0]));
+    seeds.push(modes_seed(45, 3, key, &[], &[0]));
+    seeds.push(modes_seed(46, 3, key, &[], &[1, 0]));
+    seeds.push(modes_seed(49, 1, key, &[], &[0]));
+    for index in [10u8, 19, 28, 37] {
+        seeds.push(modes_seed(index, 3, &psk, &[], &[0]));
     }
     seeds
 }

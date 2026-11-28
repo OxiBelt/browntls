@@ -125,7 +125,7 @@ fn op_mode_r<'a, K: hpke::Kem>(psk: Pair<'a>, pk_s: Option<&[u8]>) -> Option<hpk
 }
 
 /// Our sender setup in the mode `psk` and `sk_s` select.
-fn setup_sender(
+pub(super) fn setup_sender(
     suite: Suite,
     pk_r: &PublicKey,
     info: &[u8],
@@ -145,7 +145,7 @@ fn setup_sender(
 }
 
 /// Our recipient setup in the mode `psk` and `pk_s` select.
-fn setup_recipient(
+pub(super) fn setup_recipient(
     suite: Suite,
     enc: &[u8],
     sk: &PrivateKey,

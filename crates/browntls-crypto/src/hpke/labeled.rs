@@ -83,24 +83,35 @@ pub(crate) fn labeled_extract(
     }
 }
 
+/// Most pieces the `info` of [`labeled_expand`] is given in: the KEM context
+/// of `AuthEncap` is `enc || pkRm || pkSm`.
+const MAX_INFO_PARTS: usize = 3;
+
 /// `LabeledExpand(prk, label, info, L)` =
 /// `Expand(prk, I2OSP(L, 2) || "HPKE-v1" || suite_id || label || info, L)`
-/// with `L = out.len()` and `info = info_a || info_b`.
+/// with `L = out.len()` and `info` the concatenation of `info`'s at most
+/// three pieces.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidLength`] if `L` exceeds `255 * Nh` (or `2^16 - 1`).
+/// [`Error::InvalidLength`] if `L` exceeds `255 * Nh` (or `2^16 - 1`), or
+/// `info` has more than three pieces.
 pub(crate) fn labeled_expand(
     kdf: Kdf,
     suite_id: &[u8],
     prk: &[u8],
     label: &[u8],
-    info: (&[u8], &[u8]),
+    info: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
     let len = u16::try_from(out.len()).map_err(|_| Error::InvalidLength)?;
     let len = len.to_be_bytes();
-    let parts: [&[u8]; 6] = [&len, VERSION_LABEL, suite_id, label, info.0, info.1];
+    let mut parts: [&[u8]; 4 + MAX_INFO_PARTS] =
+        [&len, VERSION_LABEL, suite_id, label, &[], &[], &[]];
+    let slots = parts
+        .get_mut(4..4 + info.len())
+        .ok_or(Error::InvalidLength)?;
+    slots.copy_from_slice(info);
     match kdf {
         Kdf::HkdfSha256 => Hkdf::<Sha256>::from_prk(prk).expand(&parts, out),
         Kdf::HkdfSha384 => Hkdf::<Sha384>::from_prk(prk).expand(&parts, out),

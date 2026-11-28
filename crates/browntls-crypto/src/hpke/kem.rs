@@ -324,7 +324,7 @@ pub(super) fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Result<PrivateKey, Error>
     let sk = &mut sk[..nsk];
     match kem {
         Kem::DhX25519HkdfSha256 | Kem::DhX448HkdfSha512 => {
-            labeled_expand(kdf, &sid, dkp_prk.as_bytes(), b"sk", (b"", b""), sk)?;
+            labeled_expand(kdf, &sid, dkp_prk.as_bytes(), b"sk", &[], sk)?;
             PrivateKey::from_bytes(kem, sk)
         }
         Kem::DhP256HkdfSha256 | Kem::DhP384HkdfSha384 | Kem::DhP521HkdfSha512 => {
@@ -342,7 +342,7 @@ pub(super) fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Result<PrivateKey, Error>
                     &sid,
                     dkp_prk.as_bytes(),
                     b"candidate",
-                    (&[counter], b""),
+                    &[&[counter]],
                     sk,
                 )?;
                 sk[0] &= bitmask;
@@ -355,8 +355,9 @@ pub(super) fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Result<PrivateKey, Error>
     }
 }
 
-/// `ExtractAndExpand(dh, kem_context)`.
-fn extract_and_expand(kem: Kem, dh: &[u8], enc: &[u8], pk_rm: &[u8]) -> Result<Secret, Error> {
+/// `ExtractAndExpand(dh, kem_context)`, with `kem_context` in pieces:
+/// `enc || pkRm`, and `|| pkSm` in the authenticated modes.
+fn extract_and_expand(kem: Kem, dh: &[u8], kem_context: &[&[u8]]) -> Result<Secret, Error> {
     let kdf = kem.kdf();
     let sid = kem_suite_id(kem);
     let eae_prk = labeled_extract(kdf, &sid, b"", b"eae_prk", dh);
@@ -366,7 +367,7 @@ fn extract_and_expand(kem: Kem, dh: &[u8], enc: &[u8], pk_rm: &[u8]) -> Result<S
         &sid,
         eae_prk.as_bytes(),
         b"shared_secret",
-        (enc, pk_rm),
+        kem_context,
         shared.as_mut_bytes(),
     )?;
     Ok(shared)
@@ -384,7 +385,7 @@ pub(super) fn encap(
         len: pk_e.len(),
     };
     enc.bytes[..pk_e.len()].copy_from_slice(pk_e);
-    let shared = extract_and_expand(ephemeral.kem, &dh[..dh_len], pk_e, pk_r.as_bytes())?;
+    let shared = extract_and_expand(ephemeral.kem, &dh[..dh_len], &[pk_e, pk_r.as_bytes()])?;
     Ok((enc, shared))
 }
 
@@ -392,7 +393,59 @@ pub(super) fn encap(
 pub(super) fn decap(enc: &[u8], sk_r: &PrivateKey) -> Result<Secret, Error> {
     let pk_e = PublicKey::from_bytes(sk_r.kem, enc)?;
     let (dh, dh_len) = sk_r.dh(&pk_e)?;
-    extract_and_expand(sk_r.kem, &dh[..dh_len], enc, sk_r.public_key().as_bytes())
+    extract_and_expand(
+        sk_r.kem,
+        &dh[..dh_len],
+        &[enc, sk_r.public_key().as_bytes()],
+    )
+}
+
+/// `concat(DH(sk1, pk1), DH(sk2, pk2))` into a zeroising buffer; returns the
+/// output length. Either exchange failing (an all-zero X25519 or X448
+/// result, a key of another KEM) fails the whole.
+fn dh_pair(
+    first: (&PrivateKey, &PublicKey),
+    second: (&PrivateKey, &PublicKey),
+) -> Result<(Zeroizing<[u8; 2 * MAX_PRIVATE_KEY_LEN]>, usize), Error> {
+    let (a, a_len) = first.0.dh(first.1)?;
+    let (b, b_len) = second.0.dh(second.1)?;
+    let mut out = Zeroizing([0u8; 2 * MAX_PRIVATE_KEY_LEN]);
+    out[..a_len].copy_from_slice(&a[..a_len]);
+    out[a_len..a_len + b_len].copy_from_slice(&b[..b_len]);
+    Ok((out, a_len + b_len))
+}
+
+/// `AuthEncap(pkR, skS)` (RFC 9180 §4.1) with the given ephemeral key pair:
+/// `dh = DH(skE, pkR) || DH(skS, pkR)` and
+/// `kem_context = enc || pkRm || pkSm`.
+pub(super) fn auth_encap(
+    ephemeral: &PrivateKey,
+    pk_r: &PublicKey,
+    sk_s: &PrivateKey,
+) -> Result<(EncapsulatedKey, Secret), Error> {
+    if sk_s.kem != ephemeral.kem {
+        return Err(Error::InvalidKey);
+    }
+    let (dh, dh_len) = dh_pair((ephemeral, pk_r), (sk_s, pk_r))?;
+    let pk_e = ephemeral.public_key().as_bytes();
+    let mut enc = EncapsulatedKey {
+        bytes: [0; MAX_ENC_LEN],
+        len: pk_e.len(),
+    };
+    enc.bytes[..pk_e.len()].copy_from_slice(pk_e);
+    let kem_context = [pk_e, pk_r.as_bytes(), sk_s.public_key().as_bytes()];
+    let shared = extract_and_expand(ephemeral.kem, &dh[..dh_len], &kem_context)?;
+    Ok((enc, shared))
+}
+
+/// `AuthDecap(enc, skR, pkS)` (RFC 9180 §4.1):
+/// `dh = DH(skR, pkE) || DH(skR, pkS)` and
+/// `kem_context = enc || pkRm || pkSm`.
+pub(super) fn auth_decap(enc: &[u8], sk_r: &PrivateKey, pk_s: &PublicKey) -> Result<Secret, Error> {
+    let pk_e = PublicKey::from_bytes(sk_r.kem, enc)?;
+    let (dh, dh_len) = dh_pair((sk_r, &pk_e), (sk_r, pk_s))?;
+    let kem_context = [enc, sk_r.public_key().as_bytes(), pk_s.as_bytes()];
+    extract_and_expand(sk_r.kem, &dh[..dh_len], &kem_context)
 }
 
 #[cfg(test)]

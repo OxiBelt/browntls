@@ -2,11 +2,27 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::future::poll_fn;
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
 use browntls_core::server::ResolvesServerCertUsingSni;
 
 use super::*;
+
+#[test]
+fn ipv6_cookie_identity_serialization_includes_scope_id() {
+    let ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x1234);
+    let scoped = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+    let other_scope = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 3));
+
+    let mut expected = vec![6];
+    expected.extend_from_slice(&ip.octets());
+    expected.extend_from_slice(&2u32.to_be_bytes());
+    expected.extend_from_slice(&4433u16.to_be_bytes());
+
+    assert_eq!(address_bytes(scoped), expected);
+    assert_ne!(address_bytes(scoped), address_bytes(other_scope));
+}
 
 #[tokio::test]
 async fn a_failed_path_reply_is_reported_to_its_association() {

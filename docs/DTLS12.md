@@ -36,8 +36,11 @@ DTLS 1.2 uses the following protocol boundaries:
 - An address-bound, sealed HelloVerifyRequest cookie uses a distinct domain
   and a bounded lifetime. The configured `hello_retry_cookies` capability
   seals it. The stateless acceptor checks the cookie before retaining a
-  connection. The HelloVerifyRequest version field does not select the
-  negotiated version.
+  connection. Blocking UDP and Tokio socket transports bind the cookie to the
+  peer's IPv6 scope ID as well as its IP and port. Low-level callers supply
+  opaque peer identity bytes and must preserve the scope ID themselves when
+  it distinguishes the peer. The HelloVerifyRequest version field does not
+  select the negotiated version.
 - Finished, EMS and CertificateVerify use canonical twelve-byte DTLS
   handshake headers with the original message sequence. Fragment offsets
   are zero and lengths describe the complete message. The first

@@ -1,24 +1,28 @@
 //! The session operation of the `crypto_hpke` target: a sender and a
-//! recipient context, in base or PSK mode, driven by a sub-program of steps,
-//! byte for byte against the `hpke` oracle.
+//! recipient context, in any of the four modes, driven by a sub-program of
+//! steps, byte for byte against the `hpke` oracle.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use browntls_crypto::Error;
 use browntls_crypto::hpke::{
-    Aead, Kdf, Kem, MIN_PSK_LEN, Mode, PrivateKey, Psk, RecipientContext, SenderContext, Suite,
-    TAG_LEN,
+    Aead, EncapsulatedKey, Kdf, Kem, MIN_PSK_LEN, Mode, PrivateKey, Psk, PublicKey,
+    RecipientContext, SenderContext, Suite, TAG_LEN,
 };
 use browntls_crypto::rand::FixedRng;
+use browntls_crypto::rand::SecureRandom;
 use hpke::{Deserializable as _, Serializable as _};
 
 use super::kem_secret::KemSecrets;
 use super::{
-    MAX_STEPS, SETUP_PSK, STEP_EXPORT, STEP_OPEN, STEP_OPEN_FUZZED, STEP_OTHER_PSK,
-    STEP_OUT_OF_ORDER, STEP_SEAL, STEP_SEAL_IN_PLACE, STEPS, exact, mutate, suite,
+    MAX_STEPS, SETUP_AUTH, SETUP_PSK, STEP_EXPORT, STEP_OPEN, STEP_OPEN_FUZZED,
+    STEP_OTHER_RECIPIENT, STEP_OUT_OF_ORDER, STEP_SEAL, STEP_SEAL_IN_PLACE, STEPS, exact, mutate,
+    suite,
 };
 use crate::input::Input;
+
+mod other;
 
 /// A deterministic `rand_core` source for the oracle: replays bytes, then
 /// zeros.
@@ -77,34 +81,85 @@ fn checked_psk<'a>(key: &'a [u8], id: &'a [u8]) -> Option<Psk<'a>> {
     }
 }
 
-/// The oracle's sender mode: base, or PSK with a key we accepted.
-fn op_mode_s<'a, K: hpke::Kem>(psk: Pair<'a>) -> hpke::OpModeS<'a, K> {
-    psk.map_or(hpke::OpModeS::Base, |(key, id)| {
-        hpke::OpModeS::Psk(hpke::PskBundle::new(key, id).expect("a PSK we accept"))
+/// The mode of a setup with a PSK if `psk` and a sender key if `auth`.
+fn mode_of(psk: bool, auth: bool) -> Mode {
+    let mode = match (psk, auth) {
+        (false, false) => Mode::Base,
+        (true, false) => Mode::Psk,
+        (false, true) => Mode::Auth,
+        (true, true) => Mode::AuthPsk,
+    };
+    assert_eq!((mode.uses_psk(), mode.uses_sender_key()), (psk, auth));
+    mode
+}
+
+/// The oracle's PSK bundle for a PSK we accepted.
+fn bundle<'a>(psk: (&'a [u8], &'a [u8])) -> hpke::PskBundle<'a> {
+    hpke::PskBundle::new(psk.0, psk.1).expect("a PSK we accept")
+}
+
+/// The oracle's sender mode: a PSK we accepted if `psk`, and the sender key
+/// pair derived from `ikm_s` if given.
+fn op_mode_s<'a, K: hpke::Kem>(psk: Pair<'a>, ikm_s: Option<&[u8]>) -> hpke::OpModeS<'a, K> {
+    match (psk, ikm_s.map(K::derive_keypair)) {
+        (None, None) => hpke::OpModeS::Base,
+        (Some(psk), None) => hpke::OpModeS::Psk(bundle(psk)),
+        (None, Some(pair)) => hpke::OpModeS::Auth(pair),
+        (Some(psk), Some(pair)) => hpke::OpModeS::AuthPsk(pair, bundle(psk)),
+    }
+}
+
+/// The oracle's recipient mode, as [`op_mode_s`] with the sender's public
+/// key `pk_s`; `None` if the oracle cannot deserialize it.
+fn op_mode_r<'a, K: hpke::Kem>(psk: Pair<'a>, pk_s: Option<&[u8]>) -> Option<hpke::OpModeR<'a, K>> {
+    let pk_s = match pk_s {
+        Some(pk) => Some(K::PublicKey::from_bytes(pk).ok()?),
+        None => None,
+    };
+    Some(match (psk, pk_s) {
+        (None, None) => hpke::OpModeR::Base,
+        (Some(psk), None) => hpke::OpModeR::Psk(bundle(psk)),
+        (None, Some(pk)) => hpke::OpModeR::Auth(pk),
+        (Some(psk), Some(pk)) => hpke::OpModeR::AuthPsk(pk, bundle(psk)),
     })
 }
 
-/// The oracle's recipient mode, as [`op_mode_s`].
-fn op_mode_r<'a, K: hpke::Kem>(psk: Pair<'a>) -> hpke::OpModeR<'a, K> {
-    psk.map_or(hpke::OpModeR::Base, |(key, id)| {
-        hpke::OpModeR::Psk(hpke::PskBundle::new(key, id).expect("a PSK we accept"))
-    })
+/// Our sender setup in the mode `psk` and `sk_s` select.
+fn setup_sender(
+    suite: Suite,
+    pk_r: &PublicKey,
+    info: &[u8],
+    psk: Option<&Psk<'_>>,
+    sk_s: Option<&PrivateKey>,
+    rng: &dyn SecureRandom,
+) -> Result<(EncapsulatedKey, SenderContext), Error> {
+    let out = match (psk, sk_s) {
+        (None, None) => suite.setup_sender(pk_r, info, rng),
+        (Some(psk), None) => suite.setup_sender_psk(pk_r, info, psk, rng),
+        (None, Some(sk_s)) => suite.setup_sender_auth(pk_r, info, sk_s, rng),
+        (Some(psk), Some(sk_s)) => suite.setup_sender_auth_psk(pk_r, info, psk, sk_s, rng),
+    }?;
+    assert_eq!(out.1.mode(), mode_of(psk.is_some(), sk_s.is_some()));
+    assert_eq!(out.1.sequence_number(), 0);
+    Ok(out)
 }
 
-/// Our recipient setup in base mode, or in PSK mode with `psk`.
+/// Our recipient setup in the mode `psk` and `pk_s` select.
 fn setup_recipient(
     suite: Suite,
     enc: &[u8],
     sk: &PrivateKey,
     info: &[u8],
     psk: Option<&Psk<'_>>,
+    pk_s: Option<&PublicKey>,
 ) -> Result<RecipientContext, Error> {
-    let r = match psk {
-        Some(psk) => suite.setup_recipient_psk(enc, sk, info, psk),
-        None => suite.setup_recipient(enc, sk, info),
+    let r = match (psk, pk_s) {
+        (None, None) => suite.setup_recipient(enc, sk, info),
+        (Some(psk), None) => suite.setup_recipient_psk(enc, sk, info, psk),
+        (None, Some(pk_s)) => suite.setup_recipient_auth(enc, sk, info, pk_s),
+        (Some(psk), Some(pk_s)) => suite.setup_recipient_auth_psk(enc, sk, info, psk, pk_s),
     }?;
-    let mode = if psk.is_some() { Mode::Psk } else { Mode::Base };
-    assert_eq!(r.mode(), mode);
+    assert_eq!(r.mode(), mode_of(psk.is_some(), pk_s.is_some()));
     assert_eq!(r.sequence_number(), 0);
     Ok(r)
 }
@@ -114,13 +169,14 @@ trait SessionOracle {
     fn seal(&mut self, aad: &[u8], pt: &[u8]) -> Vec<u8>;
     fn open(&mut self, aad: &[u8], ct: &[u8]) -> Option<Vec<u8>>;
     fn export(&self, ctx: &[u8], len: usize) -> Option<Vec<u8>>;
-    /// A recipient set up with `enc`, in base mode or with `psk`: its export
-    /// and what it opens of `first` (aad and ciphertext of the first
-    /// message), or `None` if the setup fails.
+    /// A recipient set up with `enc`, with `psk` and the sender's public
+    /// key `pk_s` if given: its export and what it opens of `first` (aad and
+    /// ciphertext of the first message), or `None` if the setup fails.
     fn recipient(
         &self,
         enc: &[u8],
         psk: Pair<'_>,
+        pk_s: Option<&[u8]>,
         ctx: &[u8],
         len: usize,
         first: Pair<'_>,
@@ -156,12 +212,13 @@ impl<A: hpke::aead::Aead, F: hpke::kdf::Kdf, K: hpke::Kem> SessionOracle for Ses
         &self,
         enc: &[u8],
         psk: Pair<'_>,
+        pk_s: Option<&[u8]>,
         ctx: &[u8],
         len: usize,
         first: Pair<'_>,
     ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         let enc = K::EncappedKey::from_bytes(enc).ok()?;
-        let mode = op_mode_r::<K>(psk);
+        let mode = op_mode_r::<K>(psk, pk_s)?;
         let mut r = hpke::setup_receiver::<A, F, K>(&mode, &self.sk, &enc, &self.info).ok()?;
         let mut out = vec![0u8; len];
         r.export(ctx, &mut out).ok()?;
@@ -176,6 +233,7 @@ fn session_oracle<A, F, K>(
     info: &[u8],
     enc: &[u8],
     psk: Pair<'_>,
+    ikm_s: Option<&[u8]>,
 ) -> Box<dyn SessionOracle>
 where
     A: hpke::aead::Aead + 'static,
@@ -184,7 +242,7 @@ where
 {
     let (sk, pk) = K::derive_keypair(ikm_r);
     let (their_enc, sender) = hpke::setup_sender_with_rng::<A, F, K>(
-        &op_mode_s::<K>(psk),
+        &op_mode_s::<K>(psk, ikm_s),
         &pk,
         info,
         &mut ReplayRng(ikm_e.to_vec()),
@@ -195,8 +253,10 @@ where
         enc,
         "enc differs from the oracle"
     );
-    let recipient = hpke::setup_receiver::<A, F, K>(&op_mode_r::<K>(psk), &sk, &their_enc, info)
-        .expect("oracle setup");
+    let pk_s = ikm_s.map(|ikm| K::derive_keypair(ikm).1.to_bytes());
+    let mode = op_mode_r::<K>(psk, pk_s.as_ref().map(|b| &b[..])).expect("own public key");
+    let recipient =
+        hpke::setup_receiver::<A, F, K>(&mode, &sk, &their_enc, info).expect("oracle setup");
     Box::new(SessionO {
         sender,
         recipient,
@@ -205,31 +265,32 @@ where
     })
 }
 
-/// The oracle session for `suite`, if the oracle supports its KEM.
+/// The oracle session for `suite`, if the oracle supports its KEM. `keys`
+/// are `ikm_r`, `ikm_e`, `info` and `enc`; `ikm_s` derives the sender's key
+/// pair of the authenticated modes.
 fn make_session_oracle(
     suite: Suite,
-    ikm_r: &[u8],
-    ikm_e: &[u8],
-    info: &[u8],
-    enc: &[u8],
+    keys: [&[u8]; 4],
     psk: Pair<'_>,
+    ikm_s: Option<&[u8]>,
 ) -> Option<Box<dyn SessionOracle>> {
+    let [ikm_r, ikm_e, info, enc] = keys;
     macro_rules! aeads {
         ($f:ty, $k:ty) => {
             match suite.aead {
                 Aead::Aes128Gcm => Some(session_oracle::<hpke::aead::AesGcm128, $f, $k>(
-                    ikm_r, ikm_e, info, enc, psk,
+                    ikm_r, ikm_e, info, enc, psk, ikm_s,
                 )),
                 Aead::Aes256Gcm => Some(session_oracle::<hpke::aead::AesGcm256, $f, $k>(
-                    ikm_r, ikm_e, info, enc, psk,
+                    ikm_r, ikm_e, info, enc, psk, ikm_s,
                 )),
                 Aead::ChaCha20Poly1305 => {
                     Some(session_oracle::<hpke::aead::ChaCha20Poly1305, $f, $k>(
-                        ikm_r, ikm_e, info, enc, psk,
+                        ikm_r, ikm_e, info, enc, psk, ikm_s,
                     ))
                 }
                 Aead::ExportOnly => Some(session_oracle::<hpke::aead::ExportOnlyAead, $f, $k>(
-                    ikm_r, ikm_e, info, enc, psk,
+                    ikm_r, ikm_e, info, enc, psk, ikm_s,
                 )),
                 _ => None,
             }
@@ -263,12 +324,13 @@ struct Sealed {
 }
 
 /// Both of our contexts and the oracle's, with the expected sequence
-/// numbers, the mode and PSK, the messages not yet opened and the first
-/// message sealed.
+/// numbers, the mode, PSK and sender key, the messages not yet opened and
+/// the first message sealed.
 struct Session {
     suite: Suite,
     mode: Mode,
     psk: Option<(Vec<u8>, Vec<u8>)>,
+    sk_s: Option<PrivateKey>,
     sender: SenderContext,
     recipient: RecipientContext,
     oracle: Option<Box<dyn SessionOracle>>,
@@ -284,7 +346,7 @@ impl Session {
         assert_eq!(self.recipient.suite(), self.suite);
         assert_eq!(self.sender.mode(), self.mode);
         assert_eq!(self.recipient.mode(), self.mode);
-        assert_eq!(self.mode.uses_psk(), self.psk.is_some());
+        assert_eq!(self.mode, mode_of(self.psk.is_some(), self.sk_s.is_some()));
         assert_eq!(self.sender.sequence_number(), self.sent);
         assert_eq!(self.recipient.sequence_number(), self.received);
     }
@@ -336,78 +398,9 @@ impl Session {
         self.psk.as_ref().map(|(k, i)| (k.as_slice(), i.as_slice()))
     }
 
-    /// A recipient of the genuine `enc` in base mode, or with the session's
-    /// PSK with a mutated key or identifier, or with a fuzzed PSK. Its setup
-    /// succeeds (a wrong PSK is not detected there); it must open the first
-    /// message and export the sender's secret exactly when its mode and PSK
-    /// are the session's, and agree with the oracle.
-    fn other_recipient(&self, input: &mut Input<'_>, enc: &[u8], sk: &PrivateKey, info: &[u8]) {
-        let suite = self.suite;
-        let (mut key, mut id) = self.psk.clone().unwrap_or_default();
-        let base = match input.choose(4) {
-            0 => true,
-            1 => {
-                mutate(input, &mut key);
-                false
-            }
-            2 => {
-                mutate(input, &mut id);
-                false
-            }
-            _ => {
-                key = input.short_field().to_vec();
-                id = input.short_field().to_vec();
-                false
-            }
-        };
-        let ctx = input.short_field();
-        let psk = if base {
-            None
-        } else {
-            let Some(psk) = checked_psk(&key, &id) else {
-                return;
-            };
-            Some(psk)
-        };
-        let same = match &self.psk {
-            None => base,
-            Some((k, i)) => !base && *k == key && *i == id,
-        };
-        let mut r = setup_recipient(suite, enc, sk, info, psk.as_ref()).expect("genuine enc");
-        let mut ours = [0u8; 32];
-        r.export(ctx, &mut ours).expect("short export");
-        let mut genuine = [0u8; 32];
-        self.sender.export(ctx, &mut genuine).expect("short export");
-        assert_eq!(
-            ours == genuine,
-            same,
-            "{suite:?}: another PSK or mode gave the same export"
-        );
-        let opened = self.first.as_ref().map(|m| r.open(&m.aad, &m.ct));
-        match &opened {
-            Some(Ok(pt)) => {
-                assert!(same, "{suite:?}: opened under another PSK or mode");
-                assert_eq!(Some(pt), self.first.as_ref().map(|m| &m.pt));
-                assert_eq!(r.sequence_number(), 1);
-            }
-            Some(Err(e)) => {
-                assert_eq!(*e, Error::DecryptFailed);
-                assert!(!same, "{suite:?}: genuine first message rejected");
-                assert_eq!(r.sequence_number(), 0);
-            }
-            None => {}
-        }
-        if let Some(oracle) = &self.oracle {
-            let psk = (!base).then_some((key.as_slice(), id.as_slice()));
-            let first = self.first.as_ref().map(|m| (&m.aad[..], &m.ct[..]));
-            let theirs = oracle.recipient(enc, psk, ctx, 32, first);
-            let ours = (ours.to_vec(), opened.and_then(Result::ok));
-            assert_eq!(
-                theirs,
-                Some(ours),
-                "{suite:?}: another PSK or mode differs from the oracle"
-            );
-        }
+    /// The sender's public key, in the authenticated modes.
+    fn pk_s(&self) -> Option<&PublicKey> {
+        self.sk_s.as_ref().map(PrivateKey::public_key)
     }
 
     /// Opens with our recipient (in place or not) and the oracle; both must
@@ -506,14 +499,28 @@ pub(super) fn session(input: &mut Input<'_>) {
     let ikm_e_len = if short_rng { input.choose(nsk) } else { nsk };
     let ikm_e = exact(input, ikm_e_len);
     let info = input.short_field().to_vec();
-    // A PSK that `Psk::new` refuses leaves the session in base mode.
+    // A PSK that `Psk::new` refuses leaves the session without one, and so
+    // does sender key material too short for `DeriveKeyPair` without a
+    // sender key.
     let psk = if setup & SETUP_PSK == 0 {
         None
     } else {
         let (key, id) = (input.short_field(), input.short_field());
         checked_psk(key, id).map(|_| (key.to_vec(), id.to_vec()))
     };
-    let mode = if psk.is_some() { Mode::Psk } else { Mode::Base };
+    let ikm_s = (setup & SETUP_AUTH != 0).then(|| input.short_field().to_vec());
+    let sk_s = ikm_s
+        .as_ref()
+        .and_then(|ikm| match kem.derive_key_pair(ikm) {
+            Ok(sk_s) => Some(sk_s),
+            Err(e) => {
+                assert_eq!(e, Error::InvalidLength);
+                assert!(ikm.len() < nsk);
+                None
+            }
+        });
+    let ikm_s = ikm_s.filter(|_| sk_s.is_some());
+    let mode = mode_of(psk.is_some(), sk_s.is_some());
     let psk_pair: Pair<'_> = psk.as_ref().map(|(k, i)| (k.as_slice(), i.as_slice()));
     let our_psk = psk_pair.map(|(k, i)| Psk::new(k, i).expect("checked"));
 
@@ -526,10 +533,14 @@ pub(super) fn session(input: &mut Input<'_>) {
         }
     };
     let rng = FixedRng::new(&ikm_e);
-    let sent = match &our_psk {
-        Some(psk) => suite.setup_sender_psk(sk.public_key(), &info, psk, &rng),
-        None => suite.setup_sender(sk.public_key(), &info, &rng),
-    };
+    let sent = setup_sender(
+        suite,
+        sk.public_key(),
+        &info,
+        our_psk.as_ref(),
+        sk_s.as_ref(),
+        &rng,
+    );
     let (enc, sender) = match sent {
         Ok(out) => out,
         Err(e) => {
@@ -542,16 +553,19 @@ pub(super) fn session(input: &mut Input<'_>) {
     assert_eq!(enc.as_bytes(), ephemeral.public_key().as_bytes());
     assert_eq!(enc.as_ref(), enc.as_bytes());
     assert_eq!(enc.as_bytes().len(), kem.enc_len());
-    let recipient =
-        setup_recipient(suite, enc.as_bytes(), &sk, &info, our_psk.as_ref()).expect("genuine enc");
-    let oracle = make_session_oracle(suite, &ikm_r, &ikm_e, &info, enc.as_bytes(), psk_pair);
-    // The KEM shared secret does not depend on the mode: the base-mode
-    // capturing setups give the same `enc` and secret.
+    let pk_s = sk_s.as_ref().map(PrivateKey::public_key);
+    let recipient = setup_recipient(suite, enc.as_bytes(), &sk, &info, our_psk.as_ref(), pk_s)
+        .expect("genuine enc");
+    let keys = [&ikm_r[..], &ikm_e, &info, enc.as_bytes()];
+    let oracle = make_session_oracle(suite, keys, psk_pair, ikm_s.as_deref());
+    // The key-log entry points are base-mode only; with the same ephemeral
+    // key they give the same `enc` in every mode.
     let kem_secrets = KemSecrets::new(suite, &sk, &ikm_r, &ikm_e, &info, enc.as_bytes());
     let mut s = Session {
         suite,
         mode,
         psk,
+        sk_s,
         sender,
         recipient,
         oracle,
@@ -641,7 +655,15 @@ pub(super) fn session(input: &mut Input<'_>) {
                     );
                 }
             }
-            STEP_OTHER_PSK => s.other_recipient(input, enc.as_bytes(), &sk, &info),
+            STEP_OTHER_RECIPIENT => {
+                let keys = other::Keys {
+                    sk: &sk,
+                    enc: enc.as_bytes(),
+                    info: &info,
+                    ikm_e: &ikm_e,
+                };
+                s.other_recipient(input, &keys);
+            }
             _ => {
                 // A recipient for a fuzzed or mutated enc, in the session's
                 // mode.
@@ -652,7 +674,8 @@ pub(super) fn session(input: &mut Input<'_>) {
                 };
                 mutate(input, &mut fuzzed);
                 let ctx = input.short_field();
-                let ours = setup_recipient(suite, &fuzzed, &sk, &info, s.psk().as_ref()).map(|r| {
+                let ours = setup_recipient(suite, &fuzzed, &sk, &info, s.psk().as_ref(), s.pk_s());
+                let ours = ours.map(|r| {
                     let mut out = [0u8; 48];
                     r.export(ctx, &mut out).expect("short export");
                     out
@@ -665,8 +688,9 @@ pub(super) fn session(input: &mut Input<'_>) {
                 }
                 kem_secrets.recipient(&fuzzed, ours.is_ok());
                 if let Some(oracle) = &s.oracle {
+                    let pk_s = s.pk_s().map(PublicKey::as_bytes);
                     let theirs = oracle
-                        .recipient(&fuzzed, s.psk_pair(), ctx, 48, None)
+                        .recipient(&fuzzed, s.psk_pair(), pk_s, ctx, 48, None)
                         .map(|(out, _)| out);
                     assert_eq!(
                         ours.ok().map(|o| o.to_vec()),

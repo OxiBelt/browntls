@@ -68,7 +68,7 @@ pub(super) fn key_schedule(
 
     let mut key = Zeroizing([0u8; 32]);
     let key = &mut key[..suite.aead.key_len()];
-    labeled_expand(kdf, &sid, prk, b"key", (ks_context, b""), key)?;
+    labeled_expand(kdf, &sid, prk, b"key", &[ks_context], key)?;
     let aead = match suite.aead {
         Aead::Aes128Gcm => AeadKey::Aes128Gcm(Aes128Gcm::new(key)?),
         Aead::Aes256Gcm => AeadKey::Aes256Gcm(Aes256Gcm::new(key)?),
@@ -83,7 +83,7 @@ pub(super) fn key_schedule(
             &sid,
             prk,
             b"base_nonce",
-            (ks_context, b""),
+            &[ks_context],
             &mut base_nonce,
         )?;
     }
@@ -94,7 +94,7 @@ pub(super) fn key_schedule(
         &sid,
         prk,
         b"exp",
-        (ks_context, b""),
+        &[ks_context],
         exporter_secret.as_mut_bytes(),
     )?;
 
@@ -163,7 +163,7 @@ impl Context {
             &self.suite.suite_id(),
             self.exporter_secret.as_bytes(),
             b"sec",
-            (exporter_context, b""),
+            &[exporter_context],
             out,
         )
     }

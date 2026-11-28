@@ -1,5 +1,5 @@
 //! HPKE (RFC 9180) tests: behaviour on bad input and differential tests
-//! against the `hpke` crate in base and PSK modes, which also cover
+//! against the `hpke` crate in all four modes, which also cover
 //! DHKEM(P-384) and HKDF-SHA384 (the RFC publishes no vectors for either).
 //! The RFC's known-answer vectors run as unit tests (`src/hpke/tests.rs`),
 //! since they need the derandomised sender that is not public API.
@@ -166,12 +166,132 @@ fn psk_mismatches_fail_to_open() {
     );
 }
 
+/// An authenticated context opens only what the holder of the named
+/// sender key sealed; another sender, a missing PSK or another mode is found
+/// at the first `open`. Keys of another KEM are refused at setup.
+#[test]
+fn auth_mismatches_fail_to_open() {
+    for kem in Kem::ALL {
+        let suite = Suite::new(kem, Kdf::HkdfSha256, Aead::ChaCha20Poly1305);
+        let name = format!("{kem:?}");
+        let sk_r = kem.generate_key_pair(&OsRng).unwrap();
+        let alice = kem.generate_key_pair(&OsRng).unwrap();
+        let mallory = kem.generate_key_pair(&OsRng).unwrap();
+        let key = [0x24u8; 48];
+        let psk = Psk::new(&key, b"shared").unwrap();
+        let pk_r = sk_r.public_key();
+
+        let (enc, mut s) = suite
+            .setup_sender_auth(pk_r, b"info", &alice, &OsRng)
+            .unwrap();
+        assert_eq!(s.mode(), Mode::Auth);
+        let ct = s.seal(b"aad", b"from alice").unwrap();
+        let (enc_p, mut sp) = suite
+            .setup_sender_auth_psk(pk_r, b"info", &psk, &alice, &OsRng)
+            .unwrap();
+        assert_eq!(sp.mode(), Mode::AuthPsk);
+        let ct_p = sp.seal(b"aad", b"from alice").unwrap();
+        let enc = enc.as_bytes();
+        let enc_p = enc_p.as_bytes();
+
+        let wrong = [
+            suite.setup_recipient_auth(enc, &sk_r, b"info", mallory.public_key()),
+            suite.setup_recipient_auth(enc, &sk_r, b"info", pk_r),
+            suite.setup_recipient_auth_psk(enc, &sk_r, b"info", &psk, alice.public_key()),
+            suite.setup_recipient(enc, &sk_r, b"info"),
+        ];
+        for r in wrong {
+            let mut r = r.unwrap();
+            assert_eq!(
+                r.open(b"aad", &ct).err(),
+                Some(Error::DecryptFailed),
+                "{name}"
+            );
+            assert_eq!(r.sequence_number(), 0);
+        }
+        let wrong_p = [
+            suite.setup_recipient_auth_psk(enc_p, &sk_r, b"info", &psk, mallory.public_key()),
+            suite.setup_recipient_auth(enc_p, &sk_r, b"info", alice.public_key()),
+            suite.setup_recipient_psk(enc_p, &sk_r, b"info", &psk),
+        ];
+        for r in wrong_p {
+            let mut r = r.unwrap();
+            assert_eq!(
+                r.open(b"aad", &ct_p).err(),
+                Some(Error::DecryptFailed),
+                "{name}"
+            );
+        }
+        let mut r = suite
+            .setup_recipient_auth(enc, &sk_r, b"info", alice.public_key())
+            .unwrap();
+        assert_eq!(r.mode(), Mode::Auth);
+        assert_eq!(r.open(b"aad", &ct).unwrap(), b"from alice", "{name}");
+        let mut r = suite
+            .setup_recipient_auth_psk(enc_p, &sk_r, b"info", &psk, alice.public_key())
+            .unwrap();
+        assert_eq!(r.open(b"aad", &ct_p).unwrap(), b"from alice", "{name}");
+
+        // Sender keys of another KEM.
+        let other = Kem::ALL.into_iter().find(|k| *k != kem).unwrap();
+        let foreign = other.generate_key_pair(&OsRng).unwrap();
+        assert_eq!(
+            suite.setup_sender_auth(pk_r, b"", &foreign, &OsRng).err(),
+            Some(Error::InvalidKey),
+            "{name}"
+        );
+        assert_eq!(
+            suite
+                .setup_sender_auth_psk(pk_r, b"", &psk, &foreign, &OsRng)
+                .err(),
+            Some(Error::InvalidKey),
+            "{name}"
+        );
+        assert_eq!(
+            suite
+                .setup_recipient_auth(enc, &sk_r, b"", foreign.public_key())
+                .err(),
+            Some(Error::InvalidKey),
+            "{name}"
+        );
+        assert_eq!(
+            suite
+                .setup_recipient_auth_psk(enc, &sk_r, b"", &psk, foreign.public_key())
+                .err(),
+            Some(Error::InvalidKey),
+            "{name}"
+        );
+    }
+}
+
+/// A sender public key that makes `DH(skR, pkS)` all zero is refused, as
+/// RFC 9180 §7.1.4 requires for X25519 and X448.
+#[test]
+fn auth_low_order_sender_key_is_refused() {
+    for (kem, len) in [(Kem::DhX25519HkdfSha256, 32), (Kem::DhX448HkdfSha512, 56)] {
+        let suite = Suite::new(kem, Kdf::HkdfSha256, Aead::Aes128Gcm);
+        let sk_r = kem.generate_key_pair(&OsRng).unwrap();
+        let alice = kem.generate_key_pair(&OsRng).unwrap();
+        let (enc, _) = suite
+            .setup_sender_auth(sk_r.public_key(), b"", &alice, &OsRng)
+            .unwrap();
+        let zero = browntls_crypto::hpke::PublicKey::from_bytes(kem, &vec![0; len]).unwrap();
+        assert_eq!(
+            suite
+                .setup_recipient_auth(enc.as_bytes(), &sk_r, b"", &zero)
+                .err(),
+            Some(Error::KeyAgreementFailed),
+            "{kem:?}"
+        );
+    }
+}
+
 mod differential {
     use super::*;
     use hpke::{Deserializable, OpModeR, OpModeS, Serializable};
 
     /// The modes checked against the oracle.
-    const MODES: [Mode; 2] = [Mode::Base, Mode::Psk];
+    const MODES: [Mode; 4] = [Mode::Base, Mode::Psk, Mode::Auth, Mode::AuthPsk];
 
     /// Our sender to their recipient and back, for one suite, in every mode.
     fn check<A, F, K>(suite: Suite)
@@ -198,9 +318,28 @@ mod differential {
             let psk_id = [b"browntls psk ".as_slice(), &[round]].concat();
             let psk = Psk::new(&psk_key, &psk_id).unwrap();
             let bundle = hpke::PskBundle::new(&psk_key, &psk_id).unwrap();
+            // The sender's key pair for the authenticated modes.
+            let ikm_s: Vec<u8> = (0..suite.kem.private_key_len())
+                .map(|i| (i as u8).wrapping_mul(17) ^ round ^ 0x3c)
+                .collect();
+            let our_s = suite.kem.derive_key_pair(&ikm_s).unwrap();
+            let (their_sk_s, their_pk_s) = K::derive_keypair(&ikm_s);
+            assert_eq!(
+                our_s.public_key().as_bytes(),
+                &their_pk_s.to_bytes()[..],
+                "{name}"
+            );
             let (their_mode_r, their_mode_s) = match mode {
                 Mode::Base => (OpModeR::Base, OpModeS::Base),
                 Mode::Psk => (OpModeR::Psk(bundle), OpModeS::Psk(bundle)),
+                Mode::Auth => (
+                    OpModeR::Auth(their_pk_s.clone()),
+                    OpModeS::Auth((their_sk_s, their_pk_s)),
+                ),
+                Mode::AuthPsk => (
+                    OpModeR::AuthPsk(their_pk_s.clone(), bundle),
+                    OpModeS::AuthPsk((their_sk_s, their_pk_s), bundle),
+                ),
                 _ => unreachable!(),
             };
             let ikm: Vec<u8> = (0..suite.kem.private_key_len())
@@ -220,9 +359,12 @@ mod differential {
             );
 
             // Ours -> theirs.
+            let pk_r = ours.public_key();
             let (enc, mut s) = match mode {
-                Mode::Base => suite.setup_sender(ours.public_key(), &info, &OsRng),
-                _ => suite.setup_sender_psk(ours.public_key(), &info, &psk, &OsRng),
+                Mode::Base => suite.setup_sender(pk_r, &info, &OsRng),
+                Mode::Psk => suite.setup_sender_psk(pk_r, &info, &psk, &OsRng),
+                Mode::Auth => suite.setup_sender_auth(pk_r, &info, &our_s, &OsRng),
+                _ => suite.setup_sender_auth_psk(pk_r, &info, &psk, &our_s, &OsRng),
             }
             .unwrap();
             assert_eq!(s.mode(), mode, "{name}");
@@ -246,9 +388,12 @@ mod differential {
             let (their_enc, mut s) =
                 hpke::setup_sender::<A, F, K>(&their_mode_s, &their_pk, &info).unwrap();
             let their_enc = their_enc.to_bytes();
+            let pk_s = our_s.public_key();
             let mut r = match mode {
                 Mode::Base => suite.setup_recipient(&their_enc, &ours, &info),
-                _ => suite.setup_recipient_psk(&their_enc, &ours, &info, &psk),
+                Mode::Psk => suite.setup_recipient_psk(&their_enc, &ours, &info, &psk),
+                Mode::Auth => suite.setup_recipient_auth(&their_enc, &ours, &info, pk_s),
+                _ => suite.setup_recipient_auth_psk(&their_enc, &ours, &info, &psk, pk_s),
             }
             .unwrap();
             assert_eq!(r.mode(), mode, "{name}");

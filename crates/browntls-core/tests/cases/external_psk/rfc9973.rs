@@ -99,7 +99,7 @@ fn rfc9973_strict_server_refuses_tls12() {
 }
 
 #[test]
-fn rfc9973_rejects_known_ticket_after_the_selection_limit_without_consuming_it() {
+fn rfc9973_rejects_known_ticket_at_the_selection_limit_without_consuming_it() {
     use hello_wire::{fatal_alert, give, hello_extensions, take_flight};
 
     let chain = server_chain(KeyType::EcdsaP256);
@@ -122,7 +122,7 @@ fn rfc9973_rejects_known_ticket_after_the_selection_limit_without_consuming_it()
         let len = usize::from(u16::from_be_bytes([offer[2], offer[3]]));
         let ticket = &offer[4..4 + len];
 
-        let keys = (0..16)
+        let keys = (0..15)
             .map(|index| psk(&[index], HashAlgorithm::SHA256))
             .chain(core::iter::once(psk(ticket, HashAlgorithm::SHA256)))
             .collect();
@@ -214,4 +214,130 @@ fn rfc9973_checks_repeated_identities_once() {
     assert_eq!(cache.0.load(Ordering::Relaxed), 2);
     assert!(client.peer_certificates().is_some());
     assert!(!client.negotiated_cert_with_extern_psk());
+}
+
+#[test]
+fn rfc9973_limits_distinct_ticket_checks_before_backend_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use browntls_core::server::{ProducesTickets, StoresServerSessions};
+    use hello_wire::{fatal_alert, take_flight};
+
+    #[derive(Debug, Default)]
+    struct CountingCache(AtomicUsize);
+
+    impl StoresServerSessions for CountingCache {
+        fn put(&self, _key: Vec<u8>, _value: Vec<u8>) -> bool {
+            false
+        }
+
+        fn get(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+
+        fn take(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            panic!("RFC 9973 cannot select a ticket");
+        }
+
+        fn can_cache(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingTicketer {
+        enabled: bool,
+        decrypts: AtomicUsize,
+    }
+
+    impl ProducesTickets for CountingTicketer {
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+
+        fn lifetime(&self) -> u32 {
+            3600
+        }
+
+        fn encrypt(&self, _plain: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn decrypt(&self, _cipher: &[u8]) -> Option<Vec<u8>> {
+            self.decrypts.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    for distinct in [16, 17, 1000] {
+        for stateless in [false, true] {
+            for server_enabled in [false, true] {
+                let keys = (0..distinct)
+                    .map(|index| {
+                        psk(
+                            &u16::try_from(index).unwrap().to_be_bytes(),
+                            HashAlgorithm::SHA256,
+                        )
+                    })
+                    .collect();
+                let mut client_config = client_with(&chain, keys);
+                client_config.cert_with_extern_psk = true;
+                let cache = Arc::new(CountingCache::default());
+                let ticketer = Arc::new(CountingTicketer {
+                    enabled: stateless,
+                    decrypts: AtomicUsize::new(0),
+                });
+                let mut server_config = cert_and_psk_server(&chain, vec![]);
+                server_config.cert_with_extern_psk = server_enabled;
+                server_config.session_storage = cache.clone();
+                server_config.ticketer = ticketer.clone();
+                server_config.send_tls13_tickets = 0;
+                let (mut client, mut server) = connect(client_config, server_config);
+                let flight = take_flight(&mut client);
+                assert!(flight.len() < 65_535);
+                // The large hello spans records. Process each record before
+                // reading the next so the receive buffer cannot mask the
+                // ticket-check result with its own size limit.
+                let mut input = flight.as_slice();
+                let mut failure = None;
+                while !input.is_empty() {
+                    let len = 5 + usize::from(u16::from_be_bytes([input[3], input[4]]));
+                    let (record, rest) = input.split_at(len);
+                    server.read_tls(&mut &record[..]).unwrap();
+                    match server.process_new_packets() {
+                        Ok(_) => input = rest,
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+
+                if distinct == 16 {
+                    assert!(failure.is_none());
+                    do_handshake(&mut client, &mut server).unwrap();
+                    assert_eq!(cache.0.load(Ordering::Relaxed), 16);
+                    assert_eq!(
+                        ticketer.decrypts.load(Ordering::Relaxed),
+                        if stateless { 16 } else { 0 }
+                    );
+                } else {
+                    assert_eq!(
+                        failure,
+                        Some(Error::PeerMisbehaved(
+                            PeerMisbehaved::TooManyCertWithExternPskIdentities
+                        ))
+                    );
+                    assert_eq!(
+                        fatal_alert(&take_flight(&mut server)),
+                        Some(u8::from(AlertDescription::IllegalParameter))
+                    );
+                    assert_eq!(cache.0.load(Ordering::Relaxed), 0);
+                    assert_eq!(ticketer.decrypts.load(Ordering::Relaxed), 0);
+                }
+            }
+        }
+    }
 }

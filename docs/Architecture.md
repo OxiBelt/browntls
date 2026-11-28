@@ -1691,9 +1691,11 @@ through a `ResolvesExternalPsk` in `ServerConfig::external_psks`
   `tls_cert_with_extern_psk`, 0x0021) is opt-in on both sides
   (`cert_with_extern_psk`). The client prefers a fresh handshake when it has
   an eligible key. Its offer excludes resumption tickets and 0-RTT. The
-  server scans the full wire-bounded list for recognizable tickets, checking
-  each distinct identity once without consuming stateful tickets. A
-  recognizable ticket or a bad binder for the selected external PSK triggers
+  server refuses an offer with more than 16 distinct identities before any
+  session-store lookup or ticket decryption. For an accepted offer it scans
+  every distinct identity for recognizable tickets without consuming stateful
+  tickets; repeated identities count once. An over-limit offer, a recognizable
+  ticket or a bad binder for the selected external PSK triggers
   `illegal_parameter`. External key resolution
   and selection remain limited to the first 16 identities. An opaque identity
   the server cannot recognize is handled as an unknown external identity.

@@ -246,6 +246,86 @@ fn stateful_and_stateless_retry_preserve_the_extension() {
 }
 
 #[test]
+fn retry_rejects_an_over_limit_second_client_hello() {
+    use common::hello_wire::give;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    for stateless in [false, true] {
+        let mut client_provider = prov::default_provider();
+        client_provider.kx_groups = vec![prov::kx_group::X25519, prov::kx_group::SECP256R1];
+        let mut server_provider = prov::default_provider();
+        server_provider.kx_groups = vec![prov::kx_group::SECP256R1];
+        let mut server_config = server_for(&chain, server_provider);
+        if stateless {
+            server_config.hello_retry_cookies = Some(prov::Ticketer::new().unwrap());
+        }
+        let server_config = Arc::new(server_config);
+        let mut client =
+            ClientConnection::new(Arc::new(client_for(&chain, client_provider)), server_name())
+                .unwrap();
+        let mut server = ServerConnection::new(server_config.clone()).unwrap();
+        give(&mut server, &take_flight(&mut client));
+        server.process_new_packets().unwrap();
+        give(&mut client, &take_flight(&mut server));
+        client.process_new_packets().unwrap();
+
+        // Deliberately change the identity list on retry: this is hostile
+        // input, not an example of a conforming second ClientHello.
+        let mut second = take_flight(&mut client);
+        let offset = if second[0] == 20 { 6 } else { 0 };
+        let mut hello = second.split_off(offset);
+        let mut psk = hello_extensions(&hello, true)
+            .into_iter()
+            .find(|(typ, _)| *typ == 0x0029)
+            .unwrap()
+            .1;
+        let ids_len = usize::from(u16::from_be_bytes([psk[0], psk[1]]));
+        let ids_end = 2 + ids_len;
+        let mut new_ids = Vec::new();
+        for identity in 0_u8..16 {
+            new_ids.extend_from_slice(&1_u16.to_be_bytes());
+            new_ids.push(identity);
+            new_ids.extend_from_slice(&0_u32.to_be_bytes());
+        }
+        psk.splice(ids_end..ids_end, new_ids.iter().copied());
+        psk[..2].copy_from_slice(
+            &u16::try_from(ids_len + new_ids.len())
+                .unwrap()
+                .to_be_bytes(),
+        );
+        let binder_len_at = ids_end + new_ids.len();
+        let binder_len = usize::from(u16::from_be_bytes([
+            psk[binder_len_at],
+            psk[binder_len_at + 1],
+        ]));
+        for _ in 0..16 {
+            psk.push(32);
+            psk.extend_from_slice(&[0; 32]);
+        }
+        psk[binder_len_at..binder_len_at + 2]
+            .copy_from_slice(&u16::try_from(binder_len + 16 * 33).unwrap().to_be_bytes());
+        remove_extension(&mut hello, 0x0029);
+        add_hello_extension(&mut hello, true, 0x0029, &psk);
+        second.extend(hello);
+
+        if stateless {
+            server = ServerConnection::new(server_config).unwrap();
+        }
+        give(&mut server, &second);
+        assert_eq!(
+            server.process_new_packets().unwrap_err(),
+            Error::PeerMisbehaved(
+                browntls_core::PeerMisbehaved::TooManyCertWithExternPskIdentities
+            )
+        );
+        assert_eq!(
+            fatal_alert(&take_flight(&mut server)),
+            Some(u8::from(AlertDescription::IllegalParameter))
+        );
+    }
+}
+
+#[test]
 fn a_client_aborts_retry_if_no_external_psk_can_remain() {
     let chain = server_chain(KeyType::EcdsaP256);
     let mut client_provider = prov::default_provider();

@@ -75,3 +75,74 @@ fn rfc9973_direct_and_imported_keys_survive_cookie_retry() {
         pair.exchange(&mut sim, "RFC 9973");
     }
 }
+
+#[test]
+fn rfc9973_dtls_acceptor_drops_an_over_limit_offer_before_cookie_retry() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut provider = prov::default_provider();
+    provider.kx_groups = vec![prov::kx_group::SECP256R1];
+    let provider = Arc::new(provider);
+    let psks: Vec<_> = (0..17)
+        .map(|identity| {
+            Arc::new(
+                ExternalPsk::new(
+                    vec![u8::try_from(identity).unwrap()],
+                    vec![42; 32],
+                    HashAlgorithm::SHA256,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut client_config = ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&browntls_core::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(PinnedServerVerifier::new(&chain))
+        .with_no_client_auth();
+    client_config.cert_with_extern_psk = true;
+    client_config.external_psks = psks.clone();
+    let mut server_config = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&browntls_core::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain.cert_chain(), chain.private_key())
+        .unwrap();
+    server_config.hello_retry_cookies = Some(prov::Ticketer::new().unwrap());
+    server_config.cert_with_extern_psk = true;
+    server_config.external_psks = Some(Arc::new(psks));
+    let config = Arc::new(server_config);
+    let now = Duration::from_secs(5);
+    let mut client = dtls::ClientConnection::new(Arc::new(client_config), server_name()).unwrap();
+
+    let mut first = client_datagrams(&mut client, now);
+    assert_eq!(first.len(), 1);
+    let mut direct_input = first[0].clone();
+    let mut direct = dtls::ServerConnection::new(config.clone(), PEER).unwrap();
+    assert_eq!(
+        direct.read_datagram(&mut direct_input, now).unwrap_err(),
+        Error::PeerMisbehaved(browntls_core::PeerMisbehaved::TooManyCertWithExternPskIdentities)
+    );
+    let mut alert = Vec::new();
+    direct.write_datagram(&mut alert, now).unwrap();
+    assert!(!alert.is_empty());
+    assert_eq!(
+        client.read_datagram(&mut alert, now).unwrap_err(),
+        Error::AlertReceived(browntls_core::AlertDescription::IllegalParameter)
+    );
+
+    let mut retry = Vec::new();
+    let first_result = dtls::Acceptor::new(config.clone())
+        .unwrap()
+        .accept(&mut first[0], PEER, &mut retry, now)
+        .unwrap();
+    assert!(
+        matches!(&first_result, dtls::Accepted::Ignored),
+        "{first_result:?}, retry bytes: {}",
+        retry.len()
+    );
+    assert!(retry.is_empty());
+}

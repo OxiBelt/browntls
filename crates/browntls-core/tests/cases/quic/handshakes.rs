@@ -68,6 +68,49 @@ fn quic_rfc9973_uses_certificate_authentication_with_an_external_psk() {
 }
 
 #[test]
+fn quic_rfc9973_rejects_an_over_limit_offer_without_server_opt_in() {
+    use browntls_core::crypto::hash::HashAlgorithm;
+    use browntls_core::psk::ExternalPsk;
+
+    let chain = server_chain(KeyType::EcdsaP256);
+    let mut client_config = b_client_config(&chain);
+    client_config.cert_with_extern_psk = true;
+    client_config.external_psks = (0..17)
+        .map(|index| {
+            Arc::new(
+                ExternalPsk::new(
+                    vec![u8::try_from(index).unwrap()],
+                    vec![42; 32],
+                    HashAlgorithm::SHA256,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut client = bq::ClientConnection::new(
+        Arc::new(client_config),
+        bq::Version::V1,
+        server_name(),
+        CLIENT_PARAMS.to_vec(),
+    )
+    .unwrap();
+    let mut server = bq::ServerConnection::new(
+        Arc::new(b_server_config(&chain)),
+        bq::Version::V1,
+        SERVER_PARAMS.to_vec(),
+    )
+    .unwrap();
+    let mut hello = Vec::new();
+    assert!(client.write_hs(&mut hello).is_none());
+    assert!(!hello.is_empty());
+    assert_eq!(
+        server.read_hs(&hello).unwrap_err(),
+        Error::PeerMisbehaved(PeerMisbehaved::TooManyCertWithExternPskIdentities)
+    );
+    assert_eq!(server.alert(), Some(AlertDescription::IllegalParameter));
+}
+
+#[test]
 fn quic_v1_negotiates_each_rfc10024_hybrid() {
     let chain = server_chain(KeyType::EcdsaP256);
     for group in [
